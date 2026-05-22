@@ -4,12 +4,13 @@ import json
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydub import AudioSegment
 
 from services.assemblyai.transcriber import TranscriptLine
+from utils.env_flags import env_flag
 
 
 MIN_SEGMENT_DURATION_MS = 5_000
@@ -35,6 +36,7 @@ class _SpeakerCandidate:
     where ``current_clip += clip`` concatenated per-line slices
     directly without including the silence between them."""
     intervals: list[tuple[int, int]]
+    line_indices: list[int | None] = field(default_factory=list)
 
     @property
     def duration_ms(self) -> int:
@@ -96,11 +98,12 @@ class VoiceSampleExtractor:
         # truncating the last one if total would exceed max_duration_ms.
         # Each interval produces one ffmpeg slice file, then we concat.
         extract_plan: list[tuple[int, int]] = []  # [(start_ms, duration_ms), ...]
+        extract_plan_line_ids: list[int | None] = []
         total_ms = 0
         for candidate in candidates:
             if total_ms >= max_duration_ms:
                 break
-            for start_ms, end_ms in candidate.intervals:
+            for interval_index, (start_ms, end_ms) in enumerate(candidate.intervals):
                 interval_ms = max(0, end_ms - start_ms)
                 if interval_ms <= 0:
                     continue
@@ -109,6 +112,10 @@ class VoiceSampleExtractor:
                     break
                 take_ms = min(interval_ms, remaining_ms)
                 extract_plan.append((start_ms, take_ms))
+                line_index: int | None = None
+                if interval_index < len(candidate.line_indices):
+                    line_index = candidate.line_indices[interval_index]
+                extract_plan_line_ids.append(line_index)
                 total_ms += take_ms
 
         if total_ms <= 0 or not extract_plan:
@@ -124,6 +131,8 @@ class VoiceSampleExtractor:
         with tempfile.TemporaryDirectory(prefix="voice_sample_") as temp_root:
             temp_dir = Path(temp_root)
             slice_paths: list[Path] = []
+            emitted_extract_plan: list[tuple[int, int]] = []
+            emitted_line_ids: list[int] = []
             for idx, (start_ms, take_ms) in enumerate(extract_plan):
                 slice_path = temp_dir / f"slice_{idx:04d}.wav"
                 _ffmpeg_extract_slice(
@@ -134,6 +143,11 @@ class VoiceSampleExtractor:
                 )
                 if slice_path.exists() and slice_path.stat().st_size > 0:
                     slice_paths.append(slice_path)
+                    emitted_extract_plan.append((start_ms, take_ms))
+                    if idx < len(extract_plan_line_ids):
+                        line_index = extract_plan_line_ids[idx]
+                        if line_index is not None:
+                            emitted_line_ids.append(line_index)
 
             if not slice_paths:
                 raise SampleExtractionError("样本提取失败，没有可用切片。")
@@ -143,6 +157,19 @@ class VoiceSampleExtractor:
                 _copy_file(slice_paths[0], output_file)
             else:
                 _ffmpeg_concat_wavs(slice_paths, output_file)
+
+        if env_flag("AVT_VOICE_SAMPLE_MANIFEST"):
+            _write_sample_manifest(
+                output_file=output_file,
+                source_path=source_path,
+                speaker_lines=speaker_lines,
+                all_candidates=all_candidates,
+                extract_plan=emitted_extract_plan,
+                selected_line_ids=emitted_line_ids,
+                total_ms=sum(duration_ms for _start_ms, duration_ms in emitted_extract_plan),
+                min_duration_ms=min_duration_ms,
+                max_duration_ms=max_duration_ms,
+            )
 
         return str(output_file)
 
@@ -379,15 +406,22 @@ def _build_candidate_ranges(
     RMS is probed via streaming ffmpeg astats per-line — O(1) memory."""
     candidates: list[_SpeakerCandidate] = []
     current_intervals: list[tuple[int, int]] = []
+    current_line_indices: list[int | None] = []
     previous_end_ms: int | None = None
 
     def flush() -> None:
-        nonlocal current_intervals
+        nonlocal current_intervals, current_line_indices
         if current_intervals:
             total = sum(max(0, e - s) for s, e in current_intervals)
             if total > 0:
-                candidates.append(_SpeakerCandidate(intervals=list(current_intervals)))
+                candidates.append(
+                    _SpeakerCandidate(
+                        intervals=list(current_intervals),
+                        line_indices=list(current_line_indices),
+                    )
+                )
         current_intervals = []
+        current_line_indices = []
 
     for line in sorted(speaker_lines, key=lambda item: (item.start_ms, item.index)):
         duration_ms = max(0, line.end_ms - line.start_ms)
@@ -409,7 +443,58 @@ def _build_candidate_ranges(
         if not should_join_current:
             flush()
         current_intervals.append((line.start_ms, line.end_ms))
+        try:
+            current_line_indices.append(int(line.index))
+        except (TypeError, ValueError):
+            current_line_indices.append(None)
         previous_end_ms = line.end_ms
 
     flush()
     return candidates
+
+
+def _write_sample_manifest(
+    *,
+    output_file: Path,
+    source_path: Path,
+    speaker_lines: list[TranscriptLine],
+    all_candidates: list[_SpeakerCandidate],
+    extract_plan: list[tuple[int, int]],
+    selected_line_ids: list[int],
+    total_ms: int,
+    min_duration_ms: int,
+    max_duration_ms: int,
+) -> None:
+    speaker_id = ""
+    if speaker_lines:
+        speaker_id = str(getattr(speaker_lines[0], "speaker_id", "") or "")
+    unique_selected_line_ids = list(dict.fromkeys(selected_line_ids))
+    payload = {
+        "schema_version": "voice_sample_manifest_v1",
+        "advisory_only": True,
+        "speaker_id": speaker_id or None,
+        "selected_sample_path": output_file.name,
+        "source_audio_name": source_path.name,
+        "total_duration_ms": int(total_ms),
+        "min_duration_ms": int(min_duration_ms),
+        "max_duration_ms": int(max_duration_ms),
+        "candidate_count": len(all_candidates),
+        "selected_interval_count": len(extract_plan),
+        "selected_line_ids": unique_selected_line_ids,
+        "selected_intervals": [
+            {
+                "start_ms": int(start_ms),
+                "duration_ms": int(duration_ms),
+                "end_ms": int(start_ms + duration_ms),
+            }
+            for start_ms, duration_ms in extract_plan
+        ],
+    }
+    manifest_path = output_file.with_suffix(".manifest.json")
+    try:
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        return

@@ -54,6 +54,42 @@ def _interview_speakers() -> dict[str, dict[str, str]]:
     }
 
 
+def _snapshot(line: TranscriptLine) -> dict[str, object]:
+    return {
+        "index": line.index,
+        "start_ms": line.start_ms,
+        "end_ms": line.end_ms,
+        "speaker_id": line.speaker_id,
+        "source_text": line.source_text,
+    }
+
+
+def test_review_debug_artifacts_do_not_write_speaker_evidence_when_flag_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AVT_SPEAKER_EVIDENCE", raising=False)
+    project_dir = tmp_path / "project"
+    output_dir = project_dir / "transcript"
+    original = [_line(1, 0, 1_200, "speaker_a", "Hello")]
+    final = [_line(1, 0, 1_200, "speaker_b", "Hello")]
+
+    debug_artifacts = transcript_reviewer._write_review_debug_artifacts(  # noqa: SLF001
+        output_dir,
+        review_events=[],
+        original_snapshot=[_snapshot(line) for line in original],
+        after_corrections_snapshot=[_snapshot(line) for line in final],
+        after_sanity_snapshot=[_snapshot(line) for line in final],
+        final_snapshot=[_snapshot(line) for line in final],
+        speakers=_interview_speakers(),
+        review_model="fixture-model",
+        has_audio=True,
+    )
+
+    assert "speaker_evidence_path" not in debug_artifacts
+    assert not (project_dir / "reports" / "speaker_evidence.jsonl").exists()
+
+
 def test_short_backchannel_is_reassigned_to_host() -> None:
     lines = [
         _line(1, 0, 1_200, "speaker_a", "What was your worst trade?"),

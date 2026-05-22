@@ -27,6 +27,22 @@ JOB_API_DEFAULT_PORT = 8877
 JOB_API_MAX_LIST_LIMIT = 100
 
 
+_JOB_REPORT_SPECS: dict[str, tuple[str, str]] = {
+    "speaker-evidence": (
+        "speaker_evidence.jsonl",
+        "application/x-ndjson; charset=utf-8",
+    ),
+    "subtitle-width": (
+        "subtitle_width_report.json",
+        "application/json; charset=utf-8",
+    ),
+}
+_JOB_REPORT_ALIASES = {
+    "speaker_evidence": "speaker-evidence",
+    "subtitle_width": "subtitle-width",
+}
+
+
 # Express/Studio 输出分层白名单
 # 真源在 src/services/r2_publisher_lib/downloadable_keys.py（plan 2026-05-07 §4.2 / P2.1）
 # Gateway (job_intercept) 也读这同一份, 防止下载层和 R2 推送层的 key 集合漂移。
@@ -424,6 +440,67 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         )
                         return
                     self._write_json(HTTPStatus.OK, payload)
+                    return
+                # --- Phase 1a observability reports (job-scoped, local only) ---
+                # GET /jobs/{id}/reports returns a small availability catalog.
+                # GET /jobs/{id}/reports/{name} streams a whitelisted file from
+                # <project_dir>/reports/. These files are intentionally not part
+                # of artifact_index, R2 publication, or Jianying zip delivery.
+                if (
+                    len(path_parts) == 3
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "reports"
+                ):
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    self._write_json(
+                        HTTPStatus.OK,
+                        {
+                            "job_id": job_id,
+                            "reports": _build_job_report_catalog(project_dir),
+                        },
+                    )
+                    return
+                if (
+                    len(path_parts) == 4
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "reports"
+                ):
+                    job_id = path_parts[1]
+                    report_name = path_parts[3]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    resolved = _resolve_job_report_path(
+                        project_dir=project_dir,
+                        report_name=report_name,
+                    )
+                    if resolved is None:
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {
+                                "error": "unknown_report",
+                                "job_id": job_id,
+                                "report": report_name,
+                            },
+                        )
+                        return
+                    canonical_name, report_path, content_type = resolved
+                    if not report_path.is_file():
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {
+                                "error": "report_not_written",
+                                "job_id": job_id,
+                                "report": canonical_name,
+                            },
+                        )
+                        return
+                    self._stream_binary_file(
+                        HTTPStatus.OK,
+                        report_path,
+                        content_type=content_type,
+                    )
                     return
                 # --- Phase 1: review-state (job-scoped, strict) ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
@@ -2149,6 +2226,50 @@ def _require_project_dir(record: object) -> Path:
     if not project_dir.exists():
         raise JobNotFoundError(f"Project directory does not exist: {project_dir}")
     return project_dir
+
+
+def _canonical_job_report_name(report_name: str) -> str | None:
+    normalized = str(report_name or "").strip().lower()
+    if not normalized:
+        return None
+    canonical = _JOB_REPORT_ALIASES.get(normalized, normalized)
+    if canonical not in _JOB_REPORT_SPECS:
+        return None
+    return canonical
+
+
+def _resolve_job_report_path(
+    *,
+    project_dir: Path,
+    report_name: str,
+) -> tuple[str, Path, str] | None:
+    canonical = _canonical_job_report_name(report_name)
+    if canonical is None:
+        return None
+    filename, content_type = _JOB_REPORT_SPECS[canonical]
+    return canonical, project_dir / "reports" / filename, content_type
+
+
+def _build_job_report_catalog(project_dir: Path) -> list[dict[str, object]]:
+    reports: list[dict[str, object]] = []
+    for name in sorted(_JOB_REPORT_SPECS):
+        resolved = _resolve_job_report_path(
+            project_dir=project_dir,
+            report_name=name,
+        )
+        if resolved is None:
+            continue
+        _, report_path, content_type = resolved
+        exists = report_path.is_file()
+        entry: dict[str, object] = {
+            "name": name,
+            "filename": report_path.name,
+            "content_type": content_type,
+            "exists": exists,
+            "size_bytes": report_path.stat().st_size if exists else None,
+        }
+        reports.append(entry)
+    return reports
 
 
 def _build_review_state_for_job(

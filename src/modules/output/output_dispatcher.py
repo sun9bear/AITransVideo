@@ -14,6 +14,7 @@ from modules.output.manifest_writer import ManifestWriter
 from modules.output.output_models import OutputBundleResult, OutputRequest
 from modules.output.publish.publish_backend import PublishBackend
 from modules.output.publish.publish_models import PublishRequest, PublishResult
+from utils.env_flags import env_flag
 
 
 class OutputDispatcher:
@@ -66,6 +67,11 @@ class OutputDispatcher:
                     output_dir=output_dir,
                     project_id=localized_project.project_id,
                     cue_result=cue_result,
+                )
+                self._maybe_write_subtitle_width_report(
+                    project_root=project_root,
+                    project_id=localized_project.project_id,
+                    cues=cue_result.cues,
                 )
 
         if OutputTarget.PUBLISH in expanded_targets:
@@ -392,3 +398,25 @@ class OutputDispatcher:
             "block_summaries": serialized_summaries,
         }
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _maybe_write_subtitle_width_report(
+        *,
+        project_root: Path,
+        project_id: str,
+        cues: list,
+    ) -> None:
+        if not env_flag("AVT_SUBTITLE_WIDTH_REPORT"):
+            return
+        try:
+            from modules.subtitles.quality import write_subtitle_width_report
+
+            write_subtitle_width_report(
+                project_root / "reports" / "subtitle_width_report.json",
+                project_id=project_id,
+                cues=cues,
+                max_display_width=32,
+            )
+        except Exception:
+            # Advisory sidecar: never block editor/publish output.
+            return
