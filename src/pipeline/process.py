@@ -3586,6 +3586,17 @@ class ProcessPipeline:
                             default=False,
                         )
                     )
+                    # Phase 5 (2026-05-24 P5 follow-up): auto-reuse the top
+                    # possible candidate instead of pausing. Wins over
+                    # admin_pause_on_possible_match when both are True.
+                    # Default True so the 3 production handoffs observed in
+                    # 90-day analytics stop reoccurring.
+                    _smart_admin_auto_reuse_on_possible = bool(
+                        read_admin_setting(
+                            "smart_auto_reuse_on_possible_user_voice_match",
+                            default=True,
+                        )
+                    )
                     _smart_existing_voice_matches: dict[str, VoiceReviewExistingMatch] = {}
                     # Phase 4 (plan 2026-05-17 §Phase 4): possible (non-strong)
                     # candidates per speaker, used by evaluate_voice_review
@@ -3615,8 +3626,13 @@ class ProcessPipeline:
                         # When pause is off, stay on the legacy /match
                         # endpoint to keep the wire shape minimal — we'd
                         # ignore the possible list anyway.
+                        # Phase 5 (2026-05-24): also trigger candidates
+                        # endpoint when admin enables auto_reuse — the
+                        # auto-reuse decision needs the possible list
+                        # populated to pick a top candidate.
                         _smart_use_candidates_endpoint = (
                             _smart_admin_pause_on_possible
+                            or _smart_admin_auto_reuse_on_possible
                         )
                         for _sp in (vs_payload.get("speakers") or []):
                             if not isinstance(_sp, dict):
@@ -4051,6 +4067,7 @@ class ProcessPipeline:
                         possible_voice_matches_by_speaker_id=_smart_possible_voice_matches,
                         admin_clone_enabled=_smart_admin_clone_enabled,
                         admin_pause_on_possible_match=_smart_admin_pause_on_possible,
+                        admin_auto_reuse_on_possible_match=_smart_admin_auto_reuse_on_possible,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:

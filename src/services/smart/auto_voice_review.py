@@ -203,6 +203,7 @@ def evaluate_voice_review(
     max_clone_attempts_per_speaker: int = DEFAULT_MAX_CLONE_ATTEMPTS,
     admin_clone_enabled: bool = True,
     admin_pause_on_possible_match: bool = False,
+    admin_auto_reuse_on_possible_match: bool = False,
 ) -> VoiceReviewResult:
     """Orchestrate the per-main-speaker auto voice decision.
 
@@ -327,6 +328,36 @@ def evaluate_voice_review(
             ))
             continue
 
+        # Phase 5 (2026-05-24, P5 data analysis follow-up) — auto-reuse
+        # the top-scoring possible candidate INSTEAD of pausing. Runs
+        # BEFORE the legacy pause branch so when admin opts into both,
+        # auto-reuse wins (the whole point of the P5 fix is to stop
+        # the pause from happening).
+        #
+        # Trigger: admin_auto_reuse_on_possible_match=True AND this
+        # speaker has any non-strong candidate. The top candidate (rank
+        # 0 in the list) is promoted to a REUSED decision — same code
+        # path as a strong match, no paid API call (the candidate is
+        # already in the user's personal library).
+        #
+        # reason_code distinguishes this from a normal strong-match
+        # reuse so audit can attribute decisions correctly:
+        #   "possible_user_voice_match_auto_reused"  (this branch)
+        #   "reused_user_voice"                       (strong match)
+        #
+        # Defaults False so the 4 Phase 4 pause tests above stay green.
+        if admin_auto_reuse_on_possible_match:
+            speaker_possible = possible_voice_matches.get(speaker.speaker_id)
+            if speaker_possible:
+                top_candidate = speaker_possible[0] or {}
+                decisions.append(_auto_reused_from_possible_decision(
+                    speaker,
+                    top_candidate,
+                    possible_match_count=len(speaker_possible),
+                    smart_decision_id=smart_decision_id_factory(),
+                ))
+                continue
+
         # Phase 4 (plan 2026-05-17 §推荐决策顺序 step 3) — possible-match
         # pause runs AFTER strong-match REUSED but BEFORE the new-clone
         # gates and any provider call. When admin enables
@@ -339,6 +370,9 @@ def evaluate_voice_review(
         # Critical invariants:
         #   - Strong REUSED still wins (the ``existing_match`` block
         #     above ``continue``s before we reach here).
+        #   - Phase 5 auto-reuse-on-possible (above) wins over this
+        #     when admin opts into both. This block only fires when
+        #     auto_reuse is off.
         #   - Provider is NEVER called on this path — pause means the
         #     user decides. CLAUDE.md §付费 API 不能自动调用 satisfied
         #     by skipping the clone attempt entirely.
@@ -603,6 +637,42 @@ def _reused_decision(
             "match_confidence": match.confidence,
             "match_reason": match.reason,
             "matched_user_voice_id": match.user_voice_id,
+        },
+    )
+
+
+def _auto_reused_from_possible_decision(
+    speaker: VoiceReviewSpeakerInput,
+    top_candidate: Mapping[str, Any],
+    *,
+    possible_match_count: int,
+    smart_decision_id: str,
+) -> VoiceReviewDecision:
+    """Phase 5 (P5 follow-up, 2026-05-24) — promote the top possible
+    candidate to a REUSED decision instead of pausing the pipeline.
+
+    Same effect on TTS as a strong-match REUSED (uses the user's existing
+    personal voice, no paid API call), but uses a distinct reason_code so
+    audit can attribute the decision to the auto-promotion path. The
+    ``auto_reused_from_possible_match`` metric flag lets the shadow
+    verifier (future PR) join decisions to its ground-truth.
+    """
+    return VoiceReviewDecision(
+        speaker_id=speaker.speaker_id,
+        speaker_name=speaker.speaker_name,
+        choice=VoiceReviewChoice.REUSED,
+        cloned_voice_id=str(top_candidate.get("voice_id") or "").strip(),
+        cloned_provider_name=top_candidate.get("provider_name"),
+        cloned_model_name=top_candidate.get("model_name"),
+        reason_code="possible_user_voice_match_auto_reused",
+        smart_decision_id=smart_decision_id,
+        metrics={
+            "auto_reused_from_possible_match": True,
+            "possible_match_count": possible_match_count,
+            "top_candidate_voice_id": top_candidate.get("voice_id"),
+            "top_candidate_label": top_candidate.get("label"),
+            "top_candidate_match_scope": top_candidate.get("match_scope"),
+            "top_candidate_confidence": top_candidate.get("confidence"),
         },
     )
 

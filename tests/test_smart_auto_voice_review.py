@@ -1110,6 +1110,259 @@ class TestAutoVoiceReviewOrchestration:
         assert len(fake.calls) == 1
         assert result.decisions[0].choice is VoiceReviewChoice.CLONED
 
+    # -----------------------------------------------------------------
+    # Phase 5 (2026-05-24 P5 data analysis follow-up):
+    # auto-reuse-on-possible-match — replaces handoff with auto promote.
+    #
+    # Context: 90-day analytics showed 3 occurrences of
+    # ``possible_user_voice_match_requires_confirmation`` handoff in
+    # production. These violated the "smart = fully automatic" promise.
+    # The fix: when admin opts in, the top-scoring possible candidate
+    # is auto-promoted to a REUSED decision (no paid API call) instead
+    # of pausing the pipeline.
+    #
+    # Critical invariants:
+    #   - Strong REUSED still wins over auto-reuse-on-possible.
+    #   - Auto-reuse wins over pause-on-possible when both are enabled
+    #     (the new "auto" path is the safer default).
+    #   - Provider is NEVER called on this path — promotion uses an
+    #     already-existing user_voice from the personal library.
+    #   - Default kwarg ``admin_auto_reuse_on_possible_match=False`` so
+    #     the 4 Phase 4 tests above all stay green.
+    # -----------------------------------------------------------------
+
+    def test_possible_match_auto_reuses_when_auto_reuse_enabled(self):
+        """admin_auto_reuse_on_possible_match=True + speaker has possible
+        candidate → top candidate promoted to REUSED. NO pause, NO provider."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_possible_top",
+                        "label": "Matt Abrahams (其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                        "provider_name": "minimax_voice_clone",
+                        "model_name": "minimax_tts",
+                        "user_voice_id": "42",
+                    },
+                    {
+                        "voice_id": "vt_possible_second",
+                        "label": "Another candidate",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            admin_auto_reuse_on_possible_match=True,
+        )
+
+        assert fake.calls == [], (
+            "Auto-reuse promotes an EXISTING user voice — provider must NOT "
+            "be called. Calling provider here would burn paid API budget on "
+            "a clone the pipeline didn't need."
+        )
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.cloned_voice_id == "vt_possible_top"
+        assert decision.cloned_provider_name == "minimax_voice_clone"
+        assert decision.cloned_model_name == "minimax_tts"
+        assert decision.reason_code == "possible_user_voice_match_auto_reused"
+
+    def test_auto_reuse_wins_over_pause_when_both_enabled(self):
+        """If admin opted into BOTH new auto_reuse and legacy pause, the
+        new auto_reuse path takes precedence — the whole point of P5 is
+        to stop the pause from happening."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_top_candidate",
+                        "label": "查理·芒格(其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            admin_auto_reuse_on_possible_match=True,
+            admin_pause_on_possible_match=True,  # legacy switch also on
+        )
+
+        # Auto-reuse wins — no pause, no provider call.
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        assert fake.calls == []
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.reason_code == "possible_user_voice_match_auto_reused"
+
+    def test_auto_reuse_records_promoted_candidate_metrics(self):
+        """Audit trail: REUSED decision metrics should expose enough
+        info that a reviewer can later tell `possible_match auto_reuse`
+        apart from a normal strong-match reuse, and inspect what was
+        promoted (count + top candidate scope/confidence)."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_top",
+                        "label": "Matt Abrahams (其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "strong_named",
+                    },
+                    {
+                        "voice_id": "vt_second",
+                        "label": "alt",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                    {
+                        "voice_id": "vt_third",
+                        "label": "alt2",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            admin_auto_reuse_on_possible_match=True,
+        )
+
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.metrics["auto_reused_from_possible_match"] is True
+        assert decision.metrics["possible_match_count"] == 3
+        assert decision.metrics["top_candidate_voice_id"] == "vt_top"
+        assert decision.metrics["top_candidate_label"] == "Matt Abrahams (其他视频)"
+        assert decision.metrics["top_candidate_match_scope"] == "cross_source_named"
+        assert decision.metrics["top_candidate_confidence"] == "strong_named"
+
+    def test_auto_reuse_default_kwarg_preserves_phase4_behavior(self):
+        """Backward compat: callers that don't pass the new kwarg get
+        the Phase 4 flow (pause if pause-on-possible-match enabled). This
+        protects the 4 Phase 4 tests above from being broken by the
+        new kwarg's introduction."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        # Pass everything EXCEPT admin_auto_reuse_on_possible_match (new kwarg).
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_x",
+                        "label": "查理·芒格(其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            admin_pause_on_possible_match=True,
+        )
+
+        # No new kwarg → Phase 4 pause flow unchanged.
+        assert result.outcome is VoiceReviewOutcome.PAUSED
+        assert result.decisions[0].reason_code == (
+            "possible_user_voice_match_requires_confirmation"
+        )
+        assert fake.calls == []
+
+    def test_auto_reuse_yields_to_strong_match_reuse(self):
+        """Strong-match REUSED (same content + speaker) MUST take
+        precedence over auto-reuse from possible-match. The existing
+        ``existing_voice_matches_by_speaker_id`` block runs first."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewExistingMatch,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            existing_voice_matches_by_speaker_id={
+                "a": VoiceReviewExistingMatch(
+                    voice_id="vt_strong",
+                    provider_name="minimax_voice_clone",
+                    model_name="minimax_tts",
+                    confidence="strong",
+                    reason="same_source_content_hash_and_speaker_id",
+                    user_voice_id="7",
+                ),
+            },
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_possible_top",
+                        "label": "weak alt",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            admin_auto_reuse_on_possible_match=True,
+        )
+
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.cloned_voice_id == "vt_strong"  # strong wins
+        assert decision.reason_code == "reused_user_voice"
+        assert fake.calls == []
+
 
 # ===================================================================
 # _MiniMaxCloneAdapter call-mapping — Codex 第八轮 末段

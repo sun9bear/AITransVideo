@@ -145,12 +145,20 @@ class AdminSettings(BaseModel):
     #     matches do NOT pause smart pipeline (Phase 4 enforces this;
     #     Phase 3 only reserves the field). Default off so existing
     #     Smart users don't get surprise pauses.
+    #   smart_auto_reuse_on_possible_user_voice_match=True — Phase 5
+    #     (2026-05-24 P5 data analysis follow-up): when speaker has
+    #     non-strong personal voice candidates, auto-promote the top
+    #     candidate to REUSED instead of pausing. NO paid API call
+    #     (uses existing user_voice). Wins over pause flag when both
+    #     are True. Default True so the 3 production handoffs observed
+    #     in 90-day analytics stop reoccurring.
     #
     # Plan §核心不变量: smart_auto_clone_enabled=False only blocks new
     # clones; strong-match reuse still fires when reuse is enabled.
     smart_auto_clone_enabled: bool = True
     smart_reuse_user_voice_enabled: bool = True
     smart_pause_on_possible_user_voice_match: bool = False
+    smart_auto_reuse_on_possible_user_voice_match: bool = True
     # --- Phase 1b report-driven rollout flags (2026-05-24) ---
     # These fields are written by /api/admin/smart-analytics/phase1b-flags.
     # Missing keys fall back to env vars in app-side runtime_flags.py; explicit
