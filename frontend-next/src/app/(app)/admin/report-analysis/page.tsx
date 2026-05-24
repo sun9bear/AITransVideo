@@ -325,18 +325,34 @@ function FlagPanel({
                 {flag.env} · 当前来源 {flag.effective_source} · 风险 {flag.risk}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => onToggle(flag)}
-              disabled={savingFlag === flag.key}
-              className={`h-8 min-w-[72px] rounded-full px-3 text-sm font-medium transition ${
-                flag.effective
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground"
-              } disabled:opacity-60`}
-            >
-              {savingFlag === flag.key ? "保存中" : flag.effective ? "开启" : "关闭"}
-            </button>
+            <div className="flex items-center gap-3">
+              <span
+                className={`text-sm font-medium ${
+                  flag.effective ? "text-primary" : "text-muted-foreground"
+                }`}
+              >
+                {savingFlag === flag.key ? "保存中" : flag.effective ? "已开启" : "已关闭"}
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={flag.effective}
+                aria-label={`${flagLabel(flag.key)}${flag.effective ? "已开启" : "已关闭"}`}
+                onClick={() => onToggle(flag)}
+                disabled={savingFlag === flag.key}
+                className={`relative inline-flex h-8 w-14 shrink-0 items-center rounded-full border transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-wait disabled:opacity-60 ${
+                  flag.effective
+                    ? "border-primary bg-primary"
+                    : "border-border bg-muted"
+                }`}
+              >
+                <span
+                  className={`inline-block h-6 w-6 rounded-full bg-background shadow-sm transition-transform duration-200 ${
+                    flag.effective ? "translate-x-7" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
           </div>
         ))}
       </div>
