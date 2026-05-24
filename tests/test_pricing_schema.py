@@ -36,7 +36,9 @@ def test_default_payload_matches_current_frozen_values():
     assert plus.price_cny_fen.annual == 99900
     assert plus.max_duration_minutes == 45
     assert plus.max_concurrent_jobs == 3
-    assert plus.allowed_service_modes == ["express", "studio"]
+    # Task #24 (2026-05-24): smart added to Plus/Pro to mirror
+    # plan_catalog.py PLANS — clean-local must match production.
+    assert plus.allowed_service_modes == ["express", "studio", "smart"]
     assert plus.self_serve is True
     assert plus.monthly_grant_credits == 3500
 
@@ -48,7 +50,7 @@ def test_default_payload_matches_current_frozen_values():
     assert pro.price_cny_fen.annual == 299900
     assert pro.max_duration_minutes == 180
     assert pro.max_concurrent_jobs == 5
-    assert pro.allowed_service_modes == ["express", "studio"]
+    assert pro.allowed_service_modes == ["express", "studio", "smart"]
     assert pro.self_serve is True
     assert pro.monthly_grant_credits == 12000
 
@@ -64,15 +66,20 @@ def test_default_payload_matches_current_frozen_values():
 
     # --- credits ---
     assert p.credits.free_grant_credits == 500
+    # Task #24 (2026-05-24): smart.standard=100 added per spec
+    # 2026-05-13-smart-mvp-p2-implementation-plan §5.3.
     assert p.credits.debit_rates == {
         "express.standard": 10,
         "studio.standard": 15,
         "studio.high": 30,
         "studio.flagship": 50,
+        "smart.standard": 100,
     }
     assert p.credits.bucket_priority == {
         "express": ["free", "subscription", "topup", "trial"],
         "studio": ["trial", "subscription", "topup", "free"],
+        # Smart is a paid feature like studio — paid-first consumption.
+        "smart": ["trial", "subscription", "topup", "free"],
     }
     assert p.credits.voice_clone_cost_credits == 500
 

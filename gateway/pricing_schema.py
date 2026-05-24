@@ -137,7 +137,10 @@ def build_default_pricing_payload() -> PricingPayload:
                 ),
                 max_duration_minutes=45,
                 max_concurrent_jobs=3,
-                allowed_service_modes=["express", "studio"],
+                # Task #24 (P2 launch blocker #2): smart added to mirror
+                # plan_catalog.py PLANS — clean-local and production must
+                # agree on Plus tier entitlement.
+                allowed_service_modes=["express", "studio", "smart"],
                 self_serve=True,
                 monthly_grant_credits=3500,
             ),
@@ -150,7 +153,9 @@ def build_default_pricing_payload() -> PricingPayload:
                 ),
                 max_duration_minutes=180,
                 max_concurrent_jobs=5,
-                allowed_service_modes=["express", "studio"],
+                # Task #24 (P2 launch blocker #2): same as Plus — smart
+                # is a Plus/Pro feature in the canonical plan_catalog.
+                allowed_service_modes=["express", "studio", "smart"],
                 self_serve=True,
                 monthly_grant_credits=12000,
             ),
@@ -172,10 +177,19 @@ def build_default_pricing_payload() -> PricingPayload:
                 "studio.standard": 15,
                 "studio.high": 30,
                 "studio.flagship": 50,
+                # Task #24 (P2 launch blocker #2): smart fixed rate per
+                # docs/plans/2026-05-13-smart-mvp-p2-implementation-plan.md §5.3.
+                # Without this entry, _get_runtime_debit_rates() falls back to
+                # DEFAULT_DEBIT_RATE=10 for smart — 10× under-reservation.
+                "smart.standard": 100,
             },
             bucket_priority={
                 "express": ["free", "subscription", "topup", "trial"],
                 "studio": ["trial", "subscription", "topup", "free"],
+                # Task #24: smart is a paid feature like studio — consume
+                # paid buckets (trial/subscription/topup) before free, so
+                # paid Plus/Pro grants don't subsidize free quota usage.
+                "smart": ["trial", "subscription", "topup", "free"],
             },
             voice_clone_cost_credits=500,
         ),

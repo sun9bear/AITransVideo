@@ -39,19 +39,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Points per source minute by (service_mode, quality_tier)
+# Task #24 (P2 launch blocker #2, 2026-05-24): smart.standard=100 added
+# so that any path falling back to these frozen constants (e.g. when
+# pricing_runtime is missing/corrupt) correctly charges smart at the
+# spec rate. Without it, smart silently fell back to DEFAULT_DEBIT_RATE
+# = 10, under-reserving 10×.
 DEBIT_RATES: dict[tuple[str, str], int] = {
     ("express", "standard"): 10,
     ("studio", "standard"): 15,
     ("studio", "high"): 30,
     ("studio", "flagship"): 50,
+    ("smart", "standard"): 100,
 }
 
 DEFAULT_DEBIT_RATE = 10  # fallback
 
 # Bucket consumption priority per service mode
+# Task #24: smart added (paid-first, same as studio) — without it,
+# _pick_buckets_by_priority's fallback ``bp.get(service_mode, bp.get("express"))``
+# made smart consume free quota first.
 BUCKET_PRIORITY: dict[str, list[str]] = {
     "express": ["free", "subscription", "topup", "trial"],
     "studio": ["trial", "subscription", "topup", "free"],
+    "smart": ["trial", "subscription", "topup", "free"],
 }
 
 # Bucket types that are valid
