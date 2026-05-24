@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import {
   createSupportConversation,
@@ -275,7 +275,11 @@ export function SupportConversationPanel({
     }
     if (state.status === "closed") return
 
+    let inFlight = false
     const tick = async () => {
+      if (typeof document !== "undefined" && document.hidden) return
+      if (inFlight) return
+      inFlight = true
       try {
         const detail = await getSupportConversation(state.id!)
         // Append any new messages we don't have yet.
@@ -307,10 +311,18 @@ export function SupportConversationPanel({
         }
       } catch {
         // silent
+      } finally {
+        inFlight = false
       }
     }
     void tick()
     handoffPollRef.current = setInterval(tick, 5_000)
+    const onVisibilityChange = () => {
+      if (typeof document !== "undefined" && !document.hidden) void tick()
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange)
+    }
 
     // Schedule the offline-fallback timer. If no human message arrives
     // within fallback_minutes, fetch online-status to get the QR URL
@@ -347,6 +359,9 @@ export function SupportConversationPanel({
       if (handoffTimeoutRef.current) {
         clearTimeout(handoffTimeoutRef.current)
         handoffTimeoutRef.current = null
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange)
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

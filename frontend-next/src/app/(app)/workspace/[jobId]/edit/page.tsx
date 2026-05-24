@@ -51,6 +51,7 @@ import {
   usePlayerSegmentSync,
   type PlayerSyncSegment,
 } from "@/lib/react/usePlayerSegmentSync"
+import { usePollingTask } from "@/lib/react/usePollingTask"
 import { SegmentRow } from "@/components/workspace/edit/SegmentRow"
 import { CurrentSegmentOpsPanel } from "@/components/workspace/edit/CurrentSegmentOpsPanel"
 import { SplitSegmentDialog } from "./SplitSegmentDialog"
@@ -267,19 +268,17 @@ export default function VideoEditPage() {
 
   useEffect(() => {
     void refetchEditingSpeakers()
-    // Poll every 3s while any speaker is still inferring. Reading from
-    // ref avoids re-running the effect on every speakers update (which
-    // would clear/recreate the interval and could miss ticks).
-    const interval = window.setInterval(() => {
-      const hasInferring = editingSpeakersRef.current.some(
-        (sp) => sp.profile_status === "inferring",
-      )
-      if (hasInferring) {
-        void refetchEditingSpeakers()
-      }
-    }, 3000)
-    return () => window.clearInterval(interval)
   }, [refetchEditingSpeakers])
+
+  const hasInferringSpeaker = useMemo(
+    () => editingSpeakers.some((sp) => sp.profile_status === "inferring"),
+    [editingSpeakers],
+  )
+  usePollingTask(refetchEditingSpeakers, {
+    enabled: hasInferringSpeaker,
+    immediate: false,
+    intervalMs: 3000,
+  })
 
   const handleSpeakerCreated = useCallback(
     (sp: EditingSpeaker) => {
@@ -728,6 +727,9 @@ export default function VideoEditPage() {
 
       while (polls < MAX_POLLS) {
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        if (typeof document !== "undefined" && document.hidden) {
+          continue
+        }
         polls += 1
         const status = await getRegenerateAllStatus(jobId, taskId)
 

@@ -1,7 +1,7 @@
 "use client"
 
 import { usePathname } from "next/navigation"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
 import { useSession } from "@/components/providers/session-provider"
 import {
@@ -10,6 +10,7 @@ import {
   type OnlineStatus,
   type SupportConfig,
 } from "@/lib/api/support"
+import { usePollingTask } from "@/lib/react/usePollingTask"
 
 import { SupportConversationPanel } from "./SupportConversationPanel"
 import { SupportLauncher } from "./SupportLauncher"
@@ -54,26 +55,21 @@ export function SupportWidget() {
     }
   }, [])
 
+  const refreshOnlineStatus = useCallback(async () => {
+    try {
+      const s = await getOnlineStatus()
+      setOnlineStatus(s)
+    } catch {
+      // silent - keep last known status
+    }
+  }, [])
+
   // Poll online status when widget is open. Drives the green/gray dot
   // in the header and the offline branch routing decision.
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const s = await getOnlineStatus()
-        if (!cancelled) setOnlineStatus(s)
-      } catch {
-        // silent — keep last known status
-      }
-    }
-    void tick()
-    const t = setInterval(tick, 30_000)
-    return () => {
-      cancelled = true
-      clearInterval(t)
-    }
-  }, [open])
+  usePollingTask(refreshOnlineStatus, {
+    enabled: open,
+    intervalMs: 30_000,
+  })
 
   if (!config || !config.enabled) return null
   // Wait for the session check before deciding visibility — flashing the

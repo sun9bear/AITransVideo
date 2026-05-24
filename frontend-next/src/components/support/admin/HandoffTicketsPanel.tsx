@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 
 import {
   adminCloseHandoff,
@@ -9,6 +9,7 @@ import {
   adminReplyToConversation,
   type AdminConversationDetail,
 } from "@/lib/api/support"
+import { usePollingTask } from "@/lib/react/usePollingTask"
 
 /**
  * Admin "人工工单" management panel.
@@ -58,7 +59,6 @@ export function HandoffTicketsPanel() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -75,14 +75,10 @@ export function HandoffTicketsPanel() {
     void refresh()
   }, [refresh])
 
-  // 30s polling.
-  useEffect(() => {
-    if (timerRef.current) clearInterval(timerRef.current)
-    timerRef.current = setInterval(() => void refresh(), 30_000)
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
-  }, [refresh])
+  usePollingTask(refresh, {
+    immediate: false,
+    intervalMs: 30_000,
+  })
 
   return (
     <section className="space-y-4 rounded-xl border border-border bg-card p-4">
@@ -193,9 +189,9 @@ function HandoffDetail({
   const [draft, setDraft] = useState("")
   const [posting, setPosting] = useState(false)
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (silent = false) => {
     try {
-      setLoading(true)
+      if (!silent) setLoading(true)
       setDetail(await adminGetConversation(conversationId))
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载会话失败")
@@ -208,11 +204,10 @@ function HandoffDetail({
     void reload()
   }, [reload])
 
-  // 30s polling for new user messages while drawer is open.
-  useEffect(() => {
-    const t = setInterval(() => void reload(), 30_000)
-    return () => clearInterval(t)
-  }, [reload])
+  usePollingTask(() => reload(true), {
+    immediate: false,
+    intervalMs: 30_000,
+  })
 
   const submitReply = async (markHandled: boolean) => {
     if (!draft.trim()) return

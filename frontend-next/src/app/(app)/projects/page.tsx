@@ -46,6 +46,7 @@ import { computeExpiryInfo, expiryColorClass, expiryLabel } from "@/features/job
 import { getEntitlements } from "@/lib/api/entitlements"
 import { listJobsPage, renameJob } from "@/lib/api/jobs"
 import { cancelJob, deleteJob } from "@/lib/api/reviews"
+import { usePollingTask } from "@/lib/react/usePollingTask"
 import { ACTIVE_JOB_STATUSES, type JobSummary, type JobStatus } from "@/types/jobs"
 
 // Feature flag gating the post-edit workflow UI (plan D29). Both the frontend
@@ -276,13 +277,15 @@ function ProjectsContent() {
     }
   }, [])
 
-  // Polling
-  useEffect(() => {
-    const needsPoll = jobs.some((j) => POLL_STATUSES.includes(j.status))
-    if (!needsPoll) return
-    const timer = setInterval(() => void loadJobs(), POLL_INTERVAL)
-    return () => clearInterval(timer)
-  }, [jobs, loadJobs])
+  const needsProjectPoll = useMemo(
+    () => jobs.some((j) => POLL_STATUSES.includes(j.status)),
+    [jobs],
+  )
+  usePollingTask(loadJobs, {
+    enabled: needsProjectPoll,
+    immediate: false,
+    intervalMs: POLL_INTERVAL,
+  })
 
   useEffect(() => {
     const node = loadMoreSentinelRef.current

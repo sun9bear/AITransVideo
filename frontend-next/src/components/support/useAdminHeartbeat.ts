@@ -35,6 +35,7 @@ export function useAdminHeartbeat({
   const [loaded, setLoaded] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastVisibleRef = useRef<number | null>(null)
+  const heartbeatInFlightRef = useRef(false)
 
   // Initial: fetch existing status (so a page reload doesn't reset
   // a paused admin back to online).
@@ -76,10 +77,14 @@ export function useAdminHeartbeat({
       if (typeof document !== "undefined" && document.hidden && hiddenFor > 60_000) {
         return
       }
+      if (heartbeatInFlightRef.current) return
+      heartbeatInFlightRef.current = true
       try {
         await adminHeartbeat()
       } catch {
         // Silent — heartbeat failure is non-critical (next tick retries).
+      } finally {
+        heartbeatInFlightRef.current = false
       }
     }
 

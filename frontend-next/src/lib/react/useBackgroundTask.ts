@@ -53,6 +53,10 @@ const DEFAULT_POLL_MS = 3000
 const DEFAULT_STALL_MS = 30 * 60 * 1000
 const POLL_BACKOFF_MAX = 3
 
+function isPageHidden(): boolean {
+  return typeof document !== "undefined" && document.hidden
+}
+
 type ApiTask = {
   task_id: string
   job_id?: string
@@ -139,6 +143,8 @@ export function useBackgroundTask(
   const pollTimer = useRef<number | null>(null)
   const backoff = useRef(0)
   const runningSince = useRef<number | null>(null)
+  const activeTaskId = useRef<string | null>(null)
+  const pollInFlight = useRef(false)
 
   const clearTimer = useCallback(() => {
     if (pollTimer.current !== null) {
@@ -149,8 +155,14 @@ export function useBackgroundTask(
 
   const applyTask = useCallback((task: ApiTask | null) => {
     if (!task) {
+      activeTaskId.current = null
       setState((prev) => ({ ...prev, status: "idle" }))
       return
+    }
+    if (task.status === "pending" || task.status === "running") {
+      activeTaskId.current = task.task_id
+    } else if (activeTaskId.current === task.task_id) {
+      activeTaskId.current = null
     }
     const now = Date.now()
     if (task.status === "running" && runningSince.current === null) {
@@ -175,6 +187,7 @@ export function useBackgroundTask(
   const scheduleNext = useCallback(
     (callback: () => void) => {
       clearTimer()
+      if (isPageHidden()) return
       const delay = pollIntervalMs * Math.pow(2, Math.min(backoff.current, POLL_BACKOFF_MAX))
       pollTimer.current = window.setTimeout(callback, delay)
     },
@@ -183,6 +196,13 @@ export function useBackgroundTask(
 
   const poll = useCallback(
     async (taskId: string) => {
+      activeTaskId.current = taskId
+      if (isPageHidden()) {
+        clearTimer()
+        return
+      }
+      if (pollInFlight.current) return
+      pollInFlight.current = true
       try {
         const task = await fetchTask(jobId, taskId)
         backoff.current = 0
@@ -190,11 +210,13 @@ export function useBackgroundTask(
         if (task.status === "pending" || task.status === "running") {
           scheduleNext(() => void poll(taskId))
         } else {
+          activeTaskId.current = null
           clearTimer()
         }
       } catch (err) {
         backoff.current += 1
         if (backoff.current > POLL_BACKOFF_MAX) {
+          activeTaskId.current = null
           clearTimer()
           setState((prev) => ({
             ...prev,
@@ -204,10 +226,23 @@ export function useBackgroundTask(
           return
         }
         scheduleNext(() => void poll(taskId))
+      } finally {
+        pollInFlight.current = false
       }
     },
     [jobId, applyTask, scheduleNext, clearTimer],
   )
+
+  useEffect(() => {
+    if (typeof document === "undefined") return
+    const onVisibilityChange = () => {
+      if (!document.hidden && activeTaskId.current) {
+        void poll(activeTaskId.current)
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange)
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange)
+  }, [poll])
 
   // Mount: restore state from the latest task for this (jobId, taskType,
   // fingerprint). The server returns the most recent task regardless of
@@ -226,6 +261,7 @@ export function useBackgroundTask(
         const latest = await fetchLatest(jobId, taskType, paramsFingerprint)
         if (cancelled || !latest) return
         if (latest.status === "pending" || latest.status === "running") {
+          activeTaskId.current = latest.task_id
           applyTask(latest)
           scheduleNext(() => void poll(latest.task_id))
         } else if (latest.status === "completed") {
@@ -248,6 +284,7 @@ export function useBackgroundTask(
       clearTimer()
       backoff.current = 0
       runningSince.current = null
+      activeTaskId.current = null
       setState({
         taskId: null,
         status: "pending",
@@ -260,6 +297,7 @@ export function useBackgroundTask(
         const task = await createTask(jobId, taskType, params)
         applyTask(task)
         if (task.status === "pending" || task.status === "running") {
+          activeTaskId.current = task.task_id
           scheduleNext(() => void poll(task.task_id))
         }
         return task.task_id
@@ -282,6 +320,7 @@ export function useBackgroundTask(
     clearTimer()
     backoff.current = 0
     runningSince.current = null
+    activeTaskId.current = null
     setState({
       taskId: null,
       status: "idle",

@@ -2,9 +2,10 @@
 
 import Link from "next/link"
 import { Bell } from "lucide-react"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { getUnreadCount } from "@/lib/api/notifications"
+import { usePollingTask } from "@/lib/react/usePollingTask"
 
 /**
  * Header bell with live unread count.
@@ -43,42 +44,19 @@ export function NotificationBell({ isAuthenticated }: { isAuthenticated: boolean
     }
   }, [])
 
-  // Poll unread count.
-  useEffect(() => {
-    if (!isAuthenticated) {
-      return
+  const refreshUnreadCount = useCallback(async () => {
+    try {
+      const r = await getUnreadCount()
+      setCount(r.unread_count || 0)
+    } catch {
+      // 401 for anonymous (shouldn't happen since we gate on isAuthenticated)
     }
-    let cancelled = false
-    const tick = async () => {
-      if (typeof document !== "undefined" && document.hidden) {
-        // Tab hidden — skip the request to save bandwidth. We'll catch
-        // up on the next visibility change.
-        return
-      }
-      try {
-        const r = await getUnreadCount()
-        if (!cancelled) setCount(r.unread_count || 0)
-      } catch {
-        // 401 for anonymous (shouldn't happen since we gate on isAuthenticated)
-      }
-    }
-    void tick()
-    const t = setInterval(tick, 30_000)
-    // Refresh on visibility regain — user comes back to tab, show fresh count.
-    const onVis = () => {
-      if (!document.hidden) void tick()
-    }
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVis)
-    }
-    return () => {
-      cancelled = true
-      clearInterval(t)
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVis)
-      }
-    }
-  }, [isAuthenticated])
+  }, [])
+
+  usePollingTask(refreshUnreadCount, {
+    enabled: isAuthenticated,
+    intervalMs: 30_000,
+  })
 
   // Flash document.title when count crosses 0 → N or N → N+1 while
   // tab is hidden. Stop flashing on visibility regain.
@@ -157,36 +135,19 @@ export function NotificationBell({ isAuthenticated }: { isAuthenticated: boolean
 export function useNotificationUnreadCount(isAuthenticated: boolean) {
   const [count, setCount] = useState(0)
 
-  useEffect(() => {
-    if (!isAuthenticated) {
-      return
+  const refreshUnreadCount = useCallback(async () => {
+    try {
+      const r = await getUnreadCount()
+      setCount(r.unread_count || 0)
+    } catch {
+      // silent
     }
-    let cancelled = false
-    const tick = async () => {
-      if (typeof document !== "undefined" && document.hidden) return
-      try {
-        const r = await getUnreadCount()
-        if (!cancelled) setCount(r.unread_count || 0)
-      } catch {
-        // silent
-      }
-    }
-    void tick()
-    const t = setInterval(tick, 30_000)
-    const onVis = () => {
-      if (typeof document !== "undefined" && !document.hidden) void tick()
-    }
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", onVis)
-    }
-    return () => {
-      cancelled = true
-      clearInterval(t)
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", onVis)
-      }
-    }
-  }, [isAuthenticated])
+  }, [])
+
+  usePollingTask(refreshUnreadCount, {
+    enabled: isAuthenticated,
+    intervalMs: 30_000,
+  })
 
   return isAuthenticated ? count : 0
 }
