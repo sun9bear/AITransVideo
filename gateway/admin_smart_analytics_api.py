@@ -221,6 +221,283 @@ def _count_edit_events(path: Path) -> dict[str, int]:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Voice auto-reuse quality (Task #26)
+# Spec: docs/plans/2026-05-24-smart-analytics-voice-reuse-quality-design.md (v2)
+# ─────────────────────────────────────────────────────────────────────
+
+
+_VOICE_REUSE_BUCKETS = (
+    "strong",
+    "strong_named",
+    "possible_auto",
+    "strong_or_legacy_null",
+)
+
+
+def _classify_voice_decision(record: dict) -> str | None:
+    """Bucket a smart_decisions.jsonl record into one of 4 voice
+    auto-reuse tiers, or ``None`` if it's not a REUSED decision.
+
+    Discrimination rules (design §2.1):
+      - Phase 5 (Task #27 post-fix):
+        reason_code="possible_user_voice_match_auto_reused" AND
+        evidence.auto_reused_from_possible_match=True → "possible_auto"
+      - Strong same-source: evidence.match_confidence="strong" → "strong"
+      - Strong cross-source named: evidence.match_confidence="strong_named"
+        → "strong_named"
+      - Legacy/null (pre-Task-#27 or missing confidence) → "strong_or_legacy_null"
+        (separate bucket so analytics doesn't silently merge into strong)
+      - Anything else (CLONED, PRESET, handoff, etc.) → None
+
+    evidence.* is the canonical path (on-disk JSONL); metrics.* is a
+    fallback for legacy test fixtures that mirror the dataclass shape
+    (codex 第二轮 review #1 + #4).
+    """
+    reason_code = record.get("reason_code")
+    if not reason_code:
+        return None
+
+    evidence = record.get("evidence") or {}
+    metrics = record.get("metrics") or {}
+
+    if reason_code == "possible_user_voice_match_auto_reused":
+        if evidence.get("auto_reused_from_possible_match") is True:
+            return "possible_auto"
+        # Phase 5 reason without the flag is malformed — fall through
+        # to legacy bucket so it's surfaced rather than miscounted.
+        return "strong_or_legacy_null"
+
+    if reason_code != "reused_user_voice":
+        return None
+
+    confidence = evidence.get("match_confidence")
+    if confidence is None and "match_confidence" not in evidence:
+        # evidence didn't even have the key — try metrics fallback
+        # for test fixtures / very old records.
+        confidence = metrics.get("match_confidence")
+
+    if confidence == "strong":
+        return "strong"
+    if confidence == "strong_named":
+        return "strong_named"
+    # Includes confidence=None, missing key, or any unrecognized
+    # legacy value — separate bucket per codex #4.
+    return "strong_or_legacy_null"
+
+
+def _load_segment_to_speaker_mapping(project_dir: Path) -> dict[str, str]:
+    """Build segment_id → speaker_id mapping from segments.json files.
+
+    Multi-source fallback (design §2.3):
+      1. editor/baseline/segments.json (most stable post-edit anchor)
+      2. editor/editing/segments.json (current draft)
+      3. transcript/segments.json (earliest)
+
+    Earlier sources win — baseline beats editing beats transcript.
+    Segments without speaker_id are silently skipped (keep_original /
+    overlap suspected).
+
+    Returns {} when project_dir is None / missing or no sources exist.
+    """
+    if project_dir is None:
+        return {}
+
+    sources = (
+        project_dir / "editor" / "baseline" / "segments.json",
+        project_dir / "editor" / "editing" / "segments.json",
+        project_dir / "transcript" / "segments.json",
+    )
+
+    mapping: dict[str, str] = {}
+    for path in sources:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(
+                "segments.json parse failed at %s: %s", path, exc,
+            )
+            continue
+        segments = data.get("segments") if isinstance(data, dict) else None
+        if not isinstance(segments, list):
+            continue
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            seg_id = seg.get("segment_id")
+            speaker_id = seg.get("speaker_id")
+            if seg_id is None or not speaker_id:
+                continue
+            seg_id_str = str(seg_id)
+            if seg_id_str in mapping:
+                # Earlier source already populated; skip (baseline wins).
+                continue
+            mapping[seg_id_str] = str(speaker_id)
+    return mapping
+
+
+def _count_voice_overrides_per_speaker(
+    events_path: Path, segment_to_speaker: dict[str, str]
+) -> tuple[set[str], int]:
+    """Count distinct speakers with at least one
+    ``post_edit_voice_override_changed`` event (design §3.1 main numerator).
+
+    Returns (set_of_changed_speakers, unmapped_segment_count).
+
+    ``voice_selection_speaker_reassigned`` and
+    ``voice_selection_dubbing_mode_changed`` are intentionally excluded
+    from the main numerator (codex 第二轮 review #3 + design §2.2).
+    """
+    changed: set[str] = set()
+    unmapped = 0
+    for record in _iter_jsonl_records(events_path):
+        if record.get("event_type") != "post_edit_voice_override_changed":
+            continue
+        segment = record.get("segment") or {}
+        if not isinstance(segment, dict):
+            continue
+        seg_id = segment.get("segment_id")
+        if seg_id is None:
+            unmapped += 1
+            continue
+        speaker_id = segment_to_speaker.get(str(seg_id))
+        if not speaker_id:
+            unmapped += 1
+            continue
+        changed.add(speaker_id)
+    return changed, unmapped
+
+
+def _count_speaker_reassigned_per_job(
+    events_path: Path, segment_to_speaker: dict[str, str]
+) -> set[str]:
+    """Auxiliary indicator (design §3.4): distinct speakers that had
+    a ``voice_selection_speaker_reassigned`` event. Tracked separately
+    from the main numerator so speaker-segmentation churn doesn't
+    pollute auto-reuse change rates."""
+    out: set[str] = set()
+    for record in _iter_jsonl_records(events_path):
+        if record.get("event_type") != "voice_selection_speaker_reassigned":
+            continue
+        seg_id = record.get("segment_id") or (
+            (record.get("segment") or {}).get("segment_id")
+            if isinstance(record.get("segment"), dict) else None
+        )
+        if seg_id is None:
+            continue
+        speaker_id = segment_to_speaker.get(str(seg_id))
+        if speaker_id:
+            out.add(speaker_id)
+    return out
+
+
+def _empty_voice_reuse_hits() -> dict[str, set[str]]:
+    return {bucket: set() for bucket in _VOICE_REUSE_BUCKETS}
+
+
+def _collect_voice_reuse_hits(decisions_path: Path) -> dict[str, set[str]]:
+    """Walk smart_decisions.jsonl, classify each record, and return
+    per-bucket {speaker_id} sets."""
+    hits = _empty_voice_reuse_hits()
+    for record in _iter_jsonl_records(decisions_path):
+        bucket = _classify_voice_decision(record)
+        if bucket is None:
+            continue
+        speaker_id = record.get("speaker_id")
+        if speaker_id is None:
+            # Some early records may put speaker_id only in evidence
+            evidence = record.get("evidence") or {}
+            speaker_id = evidence.get("speaker_id")
+        if not speaker_id:
+            continue
+        hits[bucket].add(str(speaker_id))
+    return hits
+
+
+def _aggregate_voice_reuse_quality(
+    metrics_list,
+) -> dict[str, Any]:
+    """Cross-job aggregation of voice auto-reuse hit/change tallies.
+
+    Input: iterable of objects exposing:
+      - voice_reuse_hits: dict[bucket -> set[speaker_id]]
+      - voice_changed_speakers: set[speaker_id]
+      - unmapped_segment_count: int
+      - entered_editing: bool
+
+    Output (design §3.1 + §3.4):
+      {
+        "strong": {hits, changes, change_rate, threshold_warn, threshold_crit},
+        "strong_named": {...},
+        "possible_auto": {...},
+        "strong_or_legacy_null": {...},
+        "overall": {...},
+        "speaker_reassigned_count": int,  # auxiliary
+        "unmapped_segment_count": int,
+        "jobs_with_voice_change_rate": float | None,
+      }
+    """
+    THRESHOLD_WARN = 0.30  # rebaseline §6.3
+    THRESHOLD_CRIT = 0.50  # cinnabar / "强烈建议收紧"
+
+    per_bucket_hits = {b: 0 for b in _VOICE_REUSE_BUCKETS}
+    per_bucket_changes = {b: 0 for b in _VOICE_REUSE_BUCKETS}
+    jobs_with_hits = 0
+    jobs_with_hits_and_change = 0
+    unmapped_total = 0
+
+    for m in metrics_list:
+        unmapped_total += int(getattr(m, "unmapped_segment_count", 0) or 0)
+        job_has_hit = False
+        for bucket in _VOICE_REUSE_BUCKETS:
+            speakers = (m.voice_reuse_hits or {}).get(bucket) or set()
+            per_bucket_hits[bucket] += len(speakers)
+            changed = speakers & (m.voice_changed_speakers or set())
+            per_bucket_changes[bucket] += len(changed)
+            if speakers:
+                job_has_hit = True
+        if job_has_hit:
+            jobs_with_hits += 1
+            if m.voice_changed_speakers:
+                jobs_with_hits_and_change += 1
+
+    def _bucket_payload(hits: int, changes: int) -> dict[str, Any]:
+        rate = (changes / hits) if hits > 0 else None
+        return {
+            "hits": hits,
+            "changes": changes,
+            "change_rate": rate,
+            "threshold_warn": THRESHOLD_WARN,
+            "threshold_crit": THRESHOLD_CRIT,
+        }
+
+    overall_hits = sum(per_bucket_hits.values())
+    overall_changes = sum(per_bucket_changes.values())
+
+    return {
+        "strong": _bucket_payload(per_bucket_hits["strong"], per_bucket_changes["strong"]),
+        "strong_named": _bucket_payload(
+            per_bucket_hits["strong_named"], per_bucket_changes["strong_named"],
+        ),
+        "possible_auto": _bucket_payload(
+            per_bucket_hits["possible_auto"], per_bucket_changes["possible_auto"],
+        ),
+        "strong_or_legacy_null": _bucket_payload(
+            per_bucket_hits["strong_or_legacy_null"],
+            per_bucket_changes["strong_or_legacy_null"],
+        ),
+        "overall": _bucket_payload(overall_hits, overall_changes),
+        "unmapped_segment_count": unmapped_total,
+        "jobs_with_voice_change_rate": (
+            (jobs_with_hits_and_change / jobs_with_hits)
+            if jobs_with_hits > 0
+            else None
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Outcome classification
 # ─────────────────────────────────────────────────────────────────────
 
@@ -285,6 +562,17 @@ class JobAggregatedMetrics:
     edit_event_count: int
     edit_events_by_type: dict[str, int] = field(default_factory=dict)
     created_at: str | None = None
+    # Task #26 — voice auto-reuse quality (design §3.1 + §3.4)
+    # Per-bucket sets of speaker_ids that hit each tier.
+    voice_reuse_hits: dict[str, set[str]] = field(
+        default_factory=_empty_voice_reuse_hits
+    )
+    # Speakers that the user changed via post_edit_voice_override_changed.
+    voice_changed_speakers: set[str] = field(default_factory=set)
+    # post_edit_voice_override_changed events whose segment_id couldn't
+    # be mapped to a speaker — surfaced at the top of the dashboard as
+    # a data-contract drift signal.
+    unmapped_segment_count: int = 0
 
 
 def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
@@ -320,6 +608,18 @@ def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
 
         events_path = project_dir / "audit" / "user_edit_events.jsonl"
         edit_events_by_type = _count_edit_events(events_path)
+
+        # Task #26: voice auto-reuse quality enrichment (design §3.1)
+        decisions_path = project_dir / "audit" / "smart_decisions.jsonl"
+        voice_reuse_hits = _collect_voice_reuse_hits(decisions_path)
+        segment_to_speaker = _load_segment_to_speaker_mapping(project_dir)
+        voice_changed_speakers, unmapped_segment_count = (
+            _count_voice_overrides_per_speaker(events_path, segment_to_speaker)
+        )
+    else:
+        voice_reuse_hits = _empty_voice_reuse_hits()
+        voice_changed_speakers = set()
+        unmapped_segment_count = 0
 
     edit_event_count = sum(edit_events_by_type.values())
     edit_generation = int(getattr(job, "edit_generation", 0) or 0)
@@ -378,6 +678,9 @@ def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
         edit_event_count=edit_event_count,
         edit_events_by_type=dict(edit_events_by_type),
         created_at=created_at_iso,
+        voice_reuse_hits=voice_reuse_hits,
+        voice_changed_speakers=voice_changed_speakers,
+        unmapped_segment_count=unmapped_segment_count,
     )
 
 
@@ -571,6 +874,8 @@ def _build_summary_payload(
         "rework_by_user": rework_by_user,
         "edit_event_distribution": edit_event_distribution,
         "task_table": task_table,
+        # Task #26 — voice auto-reuse quality block (design §3 + Tab 4)
+        "voice_reuse_quality": _aggregate_voice_reuse_quality(metrics),
     }
 
 
@@ -595,6 +900,18 @@ _CSV_COLUMNS: list[str] = [
     "entered_editing",
     "edit_event_count",
     "created_at",
+    # Task #26 — voice auto-reuse quality, per-job COUNTS (codex review #5).
+    # We emit hit/change counts per job, NOT global rates: a per-job row
+    # carrying the global rate would be misleading (the value is identical
+    # for every row of the same export). Admin can compute rates by
+    # summing column groups in Excel if needed; the dashboard already
+    # surfaces the rates.
+    "strong_hits",
+    "strong_named_hits",
+    "possible_auto_hits",
+    "strong_or_legacy_null_hits",
+    "voice_changed_speakers",
+    "unmapped_segment_count",
 ]
 
 
@@ -616,6 +933,20 @@ def _build_csv(metrics: list[JobAggregatedMetrics]) -> bytes:
     for m in sorted_metrics:
         row = []
         for col in _CSV_COLUMNS:
+            # Task #26 special columns — derive count from set fields.
+            if col in (
+                "strong_hits", "strong_named_hits",
+                "possible_auto_hits", "strong_or_legacy_null_hits",
+            ):
+                bucket = col[:-len("_hits")]
+                row.append(str(len((m.voice_reuse_hits or {}).get(bucket, set()))))
+                continue
+            if col == "voice_changed_speakers":
+                row.append(str(len(m.voice_changed_speakers or set())))
+                continue
+            if col == "unmapped_segment_count":
+                row.append(str(int(m.unmapped_segment_count or 0)))
+                continue
             value = getattr(m, col, None)
             if value is None:
                 row.append("")
