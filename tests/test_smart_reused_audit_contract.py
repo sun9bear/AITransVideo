@@ -351,3 +351,217 @@ class TestExtraCarriesReasonCode:
         )
         rec = _read_smart_decisions(tmp_path)[0]
         assert rec.get("voice_reuse_reason_code") == "reused_user_voice"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. quality_report.voice_decisions builder contract (codex 三轮 follow-up)
+# ─────────────────────────────────────────────────────────────────────
+# Symmetric to the smart_decisions.jsonl tests above — pins that
+# smart_quality_report.json's voice_decisions list also carries
+# reason_code + Phase 5 fields, so the two audit files don't diverge.
+# Tests target the extracted helper _build_quality_report_voice_decisions.
+
+
+def _make_cloned_decision(*, speaker_id="speaker_a", voice_id="vt_new"):
+    from services.smart.auto_voice_review import (
+        VoiceReviewDecision, VoiceReviewChoice,
+    )
+    return VoiceReviewDecision(
+        speaker_id=speaker_id,
+        speaker_name=speaker_id,
+        choice=VoiceReviewChoice.CLONED,
+        cloned_voice_id=voice_id,
+        cloned_provider_name="minimax_voice_clone",
+        cloned_model_name="minimax_tts",
+        reason_code="clone_succeeded",
+        smart_decision_id=f"dec_{uuid.uuid4().hex[:8]}",
+        metrics={},
+    )
+
+
+def _make_preset_decision(*, speaker_id="speaker_a", reason="sample_too_short"):
+    from services.smart.auto_voice_review import (
+        VoiceReviewDecision, VoiceReviewChoice,
+    )
+    return VoiceReviewDecision(
+        speaker_id=speaker_id,
+        speaker_name=speaker_id,
+        choice=VoiceReviewChoice.PRESET,
+        cloned_voice_id=None,
+        cloned_provider_name=None,
+        cloned_model_name=None,
+        reason_code=reason,
+        smart_decision_id=f"dec_{uuid.uuid4().hex[:8]}",
+        metrics={},
+    )
+
+
+class TestQualityReportVoiceDecisionsBuilder:
+    """Pin _build_quality_report_voice_decisions output schema —
+    smart_quality_report.json voice_decisions must carry reason_code
+    + Phase 5 fields so analytics doesn't have to read 2 audit files
+    with different shapes (the bug Task #27 fixes)."""
+
+    def test_strong_entry_has_reason_code_and_no_phase5_fields(self):
+        from pipeline.process import _build_quality_report_voice_decisions
+
+        decisions = [_make_reused_decision(
+            reason_code="reused_user_voice",
+            metrics={
+                "match_confidence": "strong",
+                "match_reason": "same_source_content_hash_and_speaker_id",
+                "matched_user_voice_id": "7",
+            },
+        )]
+        out = _build_quality_report_voice_decisions(decisions, {"speaker_a": 25.0})
+
+        assert len(out) == 1
+        entry = out[0]
+        assert entry["choice"] == "reused_user_voice"
+        assert entry["reason_code"] == "reused_user_voice", (
+            "REUSED entry MUST carry reason_code so smart_quality_report.json "
+            "and smart_decisions.jsonl agree on the tier signal."
+        )
+        assert entry["match_confidence"] == "strong"
+        assert entry["sample_seconds"] == 25.0
+        # Phase 5 fields MUST be absent (not present-but-None) on strong path.
+        assert "auto_reused_from_possible_match" not in entry, (
+            f"strong-path entry must NOT carry Phase 5 fields; "
+            f"keys: {sorted(entry.keys())}"
+        )
+        assert "possible_match_count" not in entry
+        assert "top_candidate_confidence" not in entry
+
+    def test_strong_named_entry_keeps_distinct_confidence(self):
+        from pipeline.process import _build_quality_report_voice_decisions
+
+        decisions = [_make_reused_decision(
+            reason_code="reused_user_voice",
+            metrics={
+                "match_confidence": "strong_named",
+                "match_reason": "cross_source_unique_specific_name",
+                "matched_user_voice_id": "42",
+            },
+        )]
+        out = _build_quality_report_voice_decisions(decisions, None)
+
+        entry = out[0]
+        assert entry["reason_code"] == "reused_user_voice"
+        assert entry["match_confidence"] == "strong_named", (
+            "strong_named is distinguished from strong via match_confidence. "
+            "Task #26 analytics buckets depend on this field."
+        )
+        assert "auto_reused_from_possible_match" not in entry
+
+    def test_possible_auto_entry_carries_phase5_fields(self):
+        """THE codex ask: post_edit/Phase 5 audit must include enough
+        signal that Task #26 can build a possible_auto bucket."""
+        from pipeline.process import _build_quality_report_voice_decisions
+
+        decisions = [_make_reused_decision(
+            reason_code="possible_user_voice_match_auto_reused",
+            metrics={
+                "auto_reused_from_possible_match": True,
+                "possible_match_count": 3,
+                "top_candidate_voice_id": "vt_top",
+                "top_candidate_label": "Matt Abrahams (其他视频)",
+                "top_candidate_match_scope": "cross_source_named",
+                "top_candidate_confidence": "weak",
+            },
+        )]
+        out = _build_quality_report_voice_decisions(decisions, None)
+
+        entry = out[0]
+        assert entry["reason_code"] == "possible_user_voice_match_auto_reused", (
+            "Phase 5 entries MUST keep their distinct reason_code so "
+            "smart_quality_report.json doesn't lose the signal that "
+            "smart_decisions.jsonl already preserves."
+        )
+        assert entry["auto_reused_from_possible_match"] is True
+        assert entry["possible_match_count"] == 3
+        assert entry["top_candidate_confidence"] == "weak"
+        assert entry["top_candidate_match_scope"] == "cross_source_named"
+
+    def test_cloned_entry_has_no_reason_code_field(self):
+        """CLONED (new clone) entries don't go through the REUSED
+        branch — they don't need reason_code in voice_decisions
+        because CLONED choice IS the signal."""
+        from pipeline.process import _build_quality_report_voice_decisions
+
+        decisions = [_make_cloned_decision()]
+        out = _build_quality_report_voice_decisions(decisions, None)
+
+        entry = out[0]
+        assert entry["choice"] == "cloned"
+        # CLONED branch doesn't inject reason_code (back-compat with
+        # pre-Task-#27 callers; analytics treats CLONED as its own
+        # bucket and doesn't need a reason_code disambiguator).
+        assert "reason_code" not in entry
+        assert "auto_reused_from_possible_match" not in entry
+
+    def test_preset_entry_carries_fallback_reason(self):
+        """PRESET entries (clone refused / sample insufficient) carry
+        the WHY in fallback_reason — pre-existing contract; pin so it
+        doesn't regress alongside the Task #27 reason_code work."""
+        from pipeline.process import _build_quality_report_voice_decisions
+
+        decisions = [_make_preset_decision(reason="insufficient_sample_seconds_lt_10")]
+        out = _build_quality_report_voice_decisions(decisions, None)
+
+        entry = out[0]
+        assert entry["choice"] == "preset"
+        assert entry["fallback_reason"] == "insufficient_sample_seconds_lt_10"
+        # PRESET doesn't go through REUSED branch.
+        assert "reason_code" not in entry
+        assert "auto_reused_from_possible_match" not in entry
+
+    def test_mixed_decisions_each_get_correct_shape(self):
+        """End-to-end: a multi-speaker job mixing all three REUSED
+        tiers + CLONED + PRESET produces a list with the correct
+        per-entry shape."""
+        from pipeline.process import _build_quality_report_voice_decisions
+
+        decisions = [
+            _make_reused_decision(
+                speaker_id="speaker_a",
+                reason_code="reused_user_voice",
+                metrics={"match_confidence": "strong"},
+            ),
+            _make_reused_decision(
+                speaker_id="speaker_b",
+                reason_code="reused_user_voice",
+                metrics={"match_confidence": "strong_named"},
+            ),
+            _make_reused_decision(
+                speaker_id="speaker_c",
+                reason_code="possible_user_voice_match_auto_reused",
+                metrics={
+                    "auto_reused_from_possible_match": True,
+                    "possible_match_count": 2,
+                    "top_candidate_confidence": "weak",
+                },
+            ),
+            _make_cloned_decision(speaker_id="speaker_d"),
+            _make_preset_decision(speaker_id="speaker_e", reason="quota_exhausted"),
+        ]
+        out = _build_quality_report_voice_decisions(decisions, None)
+
+        assert len(out) == 5
+        by_speaker = {e["speaker_id"]: e for e in out}
+
+        # All REUSED entries have reason_code; only Phase 5 has the flag.
+        assert by_speaker["speaker_a"]["match_confidence"] == "strong"
+        assert "auto_reused_from_possible_match" not in by_speaker["speaker_a"]
+
+        assert by_speaker["speaker_b"]["match_confidence"] == "strong_named"
+        assert "auto_reused_from_possible_match" not in by_speaker["speaker_b"]
+
+        assert by_speaker["speaker_c"]["auto_reused_from_possible_match"] is True
+        assert by_speaker["speaker_c"]["possible_match_count"] == 2
+
+        # CLONED + PRESET don't carry REUSED-branch fields.
+        assert by_speaker["speaker_d"]["choice"] == "cloned"
+        assert "reason_code" not in by_speaker["speaker_d"]
+
+        assert by_speaker["speaker_e"]["choice"] == "preset"
+        assert by_speaker["speaker_e"]["fallback_reason"] == "quota_exhausted"

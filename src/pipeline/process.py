@@ -726,6 +726,80 @@ def _apply_smart_reused_voice_decision(
     )
 
 
+def _build_quality_report_voice_decisions(
+    decisions, per_speaker_seconds: dict[str, float] | None
+) -> list[dict]:
+    """Build the ``voice_decisions`` list for smart_quality_report.json.
+
+    Task #27 (2026-05-24): extracted from inline builder so the
+    reason_code passthrough + Phase 5 field preservation can be unit-
+    tested. Symmetric to ``_apply_smart_reused_voice_decision``'s
+    smart_decisions.jsonl emit — both audit files must surface the
+    same distinguishing fields so Task #26 analytics can tell the
+    three REUSED tiers (strong / strong_named / Phase 5
+    possible_user_voice_match_auto_reused) apart.
+
+    Schema:
+      [{
+        "speaker_id": str,
+        "choice": "cloned" | "reused_user_voice" | "preset",
+        "voice_id": str | None,
+        "clone_provider": str | None,
+        "sample_seconds": float | None,
+        "smart_decision_id": str | None,
+        # REUSED branch:
+        "reason_code": str,         # passthrough from decision
+        "match_confidence": str | None,
+        "match_reason": str | None,
+        "matched_user_voice_id": str | None,
+        # Phase 5 REUSED only (auto_reused_from_possible_match=True):
+        "auto_reused_from_possible_match": True,
+        "possible_match_count": int | None,
+        "top_candidate_confidence": str | None,
+        "top_candidate_match_scope": str | None,
+        # PRESET branch:
+        "fallback_reason": str,     # decision.reason_code
+      }]
+    """
+    from services.smart.auto_voice_review import VoiceReviewChoice
+
+    per_speaker_seconds = per_speaker_seconds or {}
+    out: list[dict] = []
+    for dec in decisions:
+        if dec.choice == VoiceReviewChoice.CLONED:
+            choice = "cloned"
+        elif dec.choice == VoiceReviewChoice.REUSED:
+            choice = "reused_user_voice"
+        else:
+            choice = "preset"
+        entry: dict[str, Any] = {
+            "speaker_id": dec.speaker_id,
+            "choice": choice,
+            "voice_id": dec.cloned_voice_id,
+            "clone_provider": dec.cloned_provider_name,
+            "sample_seconds": per_speaker_seconds.get(dec.speaker_id),
+            "smart_decision_id": dec.smart_decision_id,
+        }
+        if dec.choice not in (VoiceReviewChoice.CLONED, VoiceReviewChoice.REUSED):
+            entry["fallback_reason"] = dec.reason_code
+        if dec.choice == VoiceReviewChoice.REUSED:
+            # Task #27: reason_code passthrough so strong / strong_named
+            # / possible_auto can be told apart on disk.
+            entry["reason_code"] = dec.reason_code
+            entry["match_confidence"] = dec.metrics.get("match_confidence")
+            entry["match_reason"] = dec.metrics.get("match_reason")
+            entry["matched_user_voice_id"] = dec.metrics.get("matched_user_voice_id")
+            if dec.metrics.get("auto_reused_from_possible_match"):
+                # Phase 5 only: preserve metrics that let analytics
+                # distinguish auto_reuse from strong.
+                entry["auto_reused_from_possible_match"] = True
+                entry["possible_match_count"] = dec.metrics.get("possible_match_count")
+                entry["top_candidate_confidence"] = dec.metrics.get("top_candidate_confidence")
+                entry["top_candidate_match_scope"] = dec.metrics.get("top_candidate_match_scope")
+        out.append(entry)
+    return out
+
+
 def _emit_smart_quality_report(
     project_dir: Path,
     *,
@@ -6066,52 +6140,18 @@ class ProcessPipeline:
                     "excluded_speakers": [],
                 }
 
-            # Build voice_decisions from voice review (when available)
-            _qr_voice_decisions: list[dict] = []
-            if _local_vr is not None:
-                from services.smart.auto_voice_review import (
-                    VoiceReviewChoice,
+            # Build voice_decisions from voice review (when available).
+            # Task #27 (2026-05-24): extracted to module-level helper
+            # ``_build_quality_report_voice_decisions`` so the
+            # reason_code passthrough + Phase 5 field preservation is
+            # unit-testable. Symmetric to _apply_smart_reused_voice_decision.
+            _qr_voice_decisions: list[dict] = (
+                _build_quality_report_voice_decisions(
+                    _local_vr.decisions, _local_per_speaker_seconds,
                 )
-                for _dec in _local_vr.decisions:
-                    if _dec.choice == VoiceReviewChoice.CLONED:
-                        _choice = "cloned"
-                    elif _dec.choice == VoiceReviewChoice.REUSED:
-                        _choice = "reused_user_voice"
-                    else:
-                        _choice = "preset"
-                    _entry = {
-                        "speaker_id": _dec.speaker_id,
-                        "choice": _choice,
-                        "voice_id": _dec.cloned_voice_id,
-                        "clone_provider": _dec.cloned_provider_name,
-                        "sample_seconds": (
-                            _local_per_speaker_seconds.get(
-                                _dec.speaker_id
-                            )
-                        ),
-                        "smart_decision_id": _dec.smart_decision_id,
-                    }
-                    if _dec.choice not in (VoiceReviewChoice.CLONED, VoiceReviewChoice.REUSED):
-                        _entry["fallback_reason"] = _dec.reason_code
-                    if _dec.choice == VoiceReviewChoice.REUSED:
-                        # Task #27 (prereq for Task #26) — keep quality_report
-                        # voice_decisions symmetric with smart_decisions.jsonl
-                        # so the two audit files don't diverge. The REUSED
-                        # branch covers strong / strong_named / Phase 5
-                        # possible_user_voice_match_auto_reused; downstream
-                        # needs reason_code to distinguish them.
-                        _entry["reason_code"] = _dec.reason_code
-                        _entry["match_confidence"] = _dec.metrics.get("match_confidence")
-                        _entry["match_reason"] = _dec.metrics.get("match_reason")
-                        _entry["matched_user_voice_id"] = _dec.metrics.get("matched_user_voice_id")
-                        if _dec.metrics.get("auto_reused_from_possible_match"):
-                            # Phase 5 only: preserve the metrics that let
-                            # analytics tell auto_reuse apart from strong.
-                            _entry["auto_reused_from_possible_match"] = True
-                            _entry["possible_match_count"] = _dec.metrics.get("possible_match_count")
-                            _entry["top_candidate_confidence"] = _dec.metrics.get("top_candidate_confidence")
-                            _entry["top_candidate_match_scope"] = _dec.metrics.get("top_candidate_match_scope")
-                    _qr_voice_decisions.append(_entry)
+                if _local_vr is not None
+                else []
+            )
 
             # Build translation_review from decision (when available)
             _qr_translation_review = None

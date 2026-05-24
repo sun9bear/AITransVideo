@@ -386,6 +386,14 @@ class TestQualityReportTerminalWiring:
         The terminal-marker emission DOES happen on resume (it
         re-flips status → completed for the editing/jianying gates),
         but that's state, not audit.
+
+        Note (Task #27, 2026-05-24): the per-site window is bounded by
+        the NEXT marker site (or end-of-file), not a fixed char count.
+        Earlier the test used a hardcoded 9000-char lookahead, which
+        broke when Task #27 added ~600 chars of comments + Phase 5
+        evidence fields to _apply_smart_reused_voice_decision (which
+        lives between the markers). The marker-bounded window scales
+        naturally with code growth between markers.
         """
         source = self._source()
         marker_call = "self._emit_smart_terminal_completion_marker("
@@ -408,31 +416,40 @@ class TestQualityReportTerminalWiring:
             f"resume-publish call sites.)"
         )
 
-        # Site 1 = main run (first occurrence) — MUST be paired with
-        # quality_report emit within next ~150 lines (5000 chars).
-        # The payload-building logic between marker call and
-        # quality_report call is intentionally inline (collects from
-        # locals().get for safe access on requires_review=False
-        # smart jobs), so the lookahead has to span it.
+        # Build per-site windows bounded by the NEXT marker site.
+        # Each window naturally scopes to "everything between marker N
+        # and marker N+1", so adding new code between markers doesn't
+        # break this test — only changes to the marker pairing do.
+        def _window(site_idx: int) -> str:
+            i = marker_sites.index(site_idx)
+            end = (
+                marker_sites[i + 1]
+                if i + 1 < len(marker_sites)
+                else len(source)
+            )
+            return source[site_idx:end]
+
+        # Site 0 = main run — MUST be paired with quality_report emit
+        # somewhere between this marker and the next one.
         first_site = marker_sites[0]
-        first_lookahead = source[first_site : first_site + 9000]
-        assert qr_call in first_lookahead, (
+        first_window = _window(first_site)
+        assert qr_call in first_window, (
             "Main-run terminal-marker call site is NOT paired with a "
-            "_emit_smart_quality_report call within 150 lines. "
+            "_emit_smart_quality_report call in its window. "
             "PR#3C-P3-a contract: every successful smart job's main "
             "run must emit the quality report.\n"
-            f"Main-run site lookahead (first 5000 chars):\n"
-            f"{first_lookahead}"
+            f"Main-run window (first 5000 chars):\n"
+            f"{first_window[:5000]}"
         )
 
         # Subsequent sites = resume publish-only — MUST NOT emit
-        # quality_report (would clobber original audit). Pin the
-        # absence so a future PR doesn't accidentally add it.
+        # quality_report. Pin the absence so a future PR doesn't
+        # accidentally add it.
         for site in marker_sites[1:]:
-            lookahead = source[site : site + 9000]
-            assert qr_call not in lookahead, (
+            window = _window(site)
+            assert qr_call not in window, (
                 "Resume-publish-only terminal-marker site has a "
-                "_emit_smart_quality_report call within 30 lines. "
+                "_emit_smart_quality_report call in its window. "
                 "Resume paths must NOT re-emit quality_report — the "
                 "original run already wrote it; resume re-emit would "
                 "clobber the audit with empty sections (resume has no "
@@ -474,13 +491,18 @@ class TestQualityReportTerminalWiring:
         assert site >= 0
 
         # The gate that wraps _emit_smart_quality_report at this site
-        # must include the effective-mode check. Look ~80 lines below
-        # the marker call for the actual quality-report gate.
-        lookahead = source[site : site + 9000]
+        # must include the effective-mode check. Use marker-bounded
+        # window (until next marker call, or end-of-file) so future
+        # code growth between markers doesn't break this anchor.
+        # (Task #27 2026-05-24: previously fixed 9000-char window
+        # broke when Phase 5 evidence fields were added upstream.)
+        next_site = source.find(marker_call, site + 1)
+        end = next_site if next_site > 0 else len(source)
+        lookahead = source[site:end]
         qr_call_idx = lookahead.find("_emit_smart_quality_report(")
         assert qr_call_idx >= 0, (
-            "_emit_smart_quality_report call not found near main-run "
-            "terminal. P3-a wiring missing or relocated."
+            "_emit_smart_quality_report call not found in main-run "
+            "terminal window. P3-a wiring missing or relocated."
         )
 
         # Find the gating ``if`` that wraps the quality_report call.
