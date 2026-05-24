@@ -1056,6 +1056,8 @@ def find_subtitle_width_issues(
 实施：
 
 - 先做 shadow/detect-only：`AVT_VOICE_SAMPLE_SCORING_SHADOW` 写 `voice_sample_manifest_v2`，`AVT_TRANSLATION_SCRIPT_GATE_SHADOW` 写 `translation_quality_report.json`，两者都不改变 prompt、重试、TTS、对齐或样本选择。
+- 2026-05-24 已补后台/本地聚合工具：`src/services/phase1b_report_summary.py` 负责纯文件聚合，`scripts/phase1b_report_summary.py` 可本地导出 JSON/CSV，Gateway 暴露 `/api/admin/smart-analytics/job-reports-summary` 与 `/job-reports-csv`，Next 后台入口为 `/admin/report-analysis`。
+- 2026-05-24 已补 runtime flag 控制面：`/api/admin/smart-analytics/phase1b-flags` 写入 `admin_settings.json`，App 侧 `services.runtime_flags.runtime_flag()` 支持 admin settings 覆盖 env。当前 shadow flags 已接入 runtime flag；真实行为 flags 先作为灰度配置预留，必须等对应行为代码读取后才算生效。
 - 翻译语言全名 prompt 注入、zh-CN script gate、有限 literal-reflect/adapt。
 - voice sample scoring 接管候选选择。
 - script gate retry 预算、batch 失败率熔断、hard reject 降级路径。

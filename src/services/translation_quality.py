@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from utils.env_flags import env_flag
+from services.runtime_flags import runtime_flag
 
 
 logger = logging.getLogger(__name__)
@@ -27,8 +27,8 @@ def translation_quality_report_path(project_dir: Path) -> Path:
 
 def translation_script_gate_shadow_enabled() -> bool:
     return (
-        env_flag("AVT_TRANSLATION_SCRIPT_GATE_SHADOW")
-        or env_flag("AVT_TRANSLATION_SCRIPT_GATE_DETECT_ONLY")
+        runtime_flag("AVT_TRANSLATION_SCRIPT_GATE_SHADOW")
+        or runtime_flag("AVT_TRANSLATION_SCRIPT_GATE_DETECT_ONLY")
     )
 
 

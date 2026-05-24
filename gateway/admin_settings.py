@@ -151,6 +151,17 @@ class AdminSettings(BaseModel):
     smart_auto_clone_enabled: bool = True
     smart_reuse_user_voice_enabled: bool = True
     smart_pause_on_possible_user_voice_match: bool = False
+    # --- Phase 1b report-driven rollout flags (2026-05-24) ---
+    # These fields are written by /api/admin/smart-analytics/phase1b-flags.
+    # Missing keys fall back to env vars in app-side runtime_flags.py; explicit
+    # bools here override env so ops can change report/shadow rollout without a
+    # container rebuild. Behavior flags remain OFF by default.
+    phase1b_translation_script_gate_shadow: bool = False
+    phase1b_voice_sample_scoring_shadow: bool = False
+    phase1b_translation_script_gate_enabled: bool = False
+    phase1b_voice_sample_scoring_enabled: bool = False
+    phase1b_audio_tail_trim_enabled: bool = False
+    phase1b_whisper_quality_gate_enabled: bool = False
 
     @field_validator("whisper_alignment_trigger")
     @classmethod

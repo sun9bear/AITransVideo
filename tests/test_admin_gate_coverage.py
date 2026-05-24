@@ -46,6 +46,7 @@ _ADMIN_FILES = (
     "gateway/admin_settings.py",
     "gateway/admin_disk_api.py",
     "gateway/admin_job_monitor_api.py",
+    "gateway/admin_smart_analytics_api.py",
     "gateway/cost_management.py",
     "gateway/credits_observability.py",
     "gateway/pricing_admin.py",

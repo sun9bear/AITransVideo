@@ -690,3 +690,67 @@ class TestEndpointCsv:
         assert resp.status_code == 200
         assert "text/csv" in resp.headers["content-type"]
         assert "attachment" in resp.headers["content-disposition"]
+
+
+class TestPhase1bReportEndpoints:
+    def test_job_reports_summary_aggregates_report_sidecars(self, tmp_path):
+        from admin_smart_analytics_api import get_job_reports_summary
+
+        project = tmp_path / "job_reports"
+        (project / "reports").mkdir(parents=True)
+        (project / "reports" / "translation_quality_report.json").write_text(
+            json.dumps({"checked_segments": 8, "issue_count": 2}),
+            encoding="utf-8",
+        )
+        job = _make_job(
+            job_id="job_reports",
+            project_dir=str(project),
+            status="succeeded",
+            created_at=datetime.now(timezone.utc),
+        )
+        owner = SimpleNamespace(email="admin@example.test")
+        admin_user = SimpleNamespace(role="admin", email="a@x")
+        db_result = MagicMock()
+        db_result.all = MagicMock(return_value=[(job, owner)])
+        db_mock = MagicMock()
+        db_mock.execute = AsyncMock(return_value=db_result)
+
+        resp = _run(
+            get_job_reports_summary(
+                days=30,
+                status="all",
+                user="all",
+                service_mode="all",
+                user_acc=admin_user,
+                db=db_mock,
+            )
+        )
+
+        assert resp.status_code == 200
+        payload = json.loads(resp.body)
+        assert payload["kpi"]["translation_issue_count"] == 2
+        assert payload["jobs"][0]["reports"]["translation_quality"]["issue_rate"] == 0.25
+
+    def test_phase1b_flags_update_persists_admin_values(self, tmp_path, monkeypatch):
+        import admin_smart_analytics_api as mod
+
+        settings_path = tmp_path / "admin_settings.json"
+        monkeypatch.setattr(mod.admin_settings_store, "SETTINGS_FILE", settings_path)
+        monkeypatch.setenv("AVT_TRANSLATION_SCRIPT_GATE_SHADOW", "1")
+        admin_user = SimpleNamespace(role="admin", email="a@x")
+
+        body = mod.Phase1bFlagUpdate(
+            flags={
+                "voice_sample_scoring": True,
+            }
+        )
+        resp = _run(mod.update_phase1b_flags(body=body, user_acc=admin_user))
+
+        assert resp.status_code == 200
+        payload = json.loads(resp.body)
+        by_key = {row["key"]: row for row in payload["flags"]}
+        assert by_key["translation_script_gate_shadow"]["effective"] is True
+        assert by_key["voice_sample_scoring"]["effective"] is True
+        saved = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert saved["phase1b_translation_script_gate_shadow"] is True
+        assert saved["phase1b_voice_sample_scoring_enabled"] is True

@@ -27,20 +27,37 @@ import csv
 import io
 import json
 import logging
+import os
 import re
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
+for _candidate in [
+    Path(__file__).resolve().parent.parent / "src",
+    Path("/opt/aivideotrans/app/src"),
+]:
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+
+import admin_settings as admin_settings_store
 from auth import get_current_user
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import Job, User
+from services.phase1b_report_summary import (
+    build_phase1b_csv,
+    build_phase1b_summary,
+    summarize_project_reports,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -672,6 +689,94 @@ def _aggregate_rows(rows: list[tuple[Any, Any]]) -> list[JobAggregatedMetrics]:
     return metrics
 
 
+def _build_report_jobs_query(
+    *,
+    days: int,
+    status: str | None,
+    user: str | None,
+    service_mode: str | None,
+):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    stmt = (
+        select(Job, User)
+        .outerjoin(User, Job.user_id == User.id)
+        .where(Job.created_at >= cutoff)
+        .order_by(Job.created_at.desc())
+    )
+    if status and status != "all":
+        stmt = stmt.where(Job.status == status)
+    if user and user != "all":
+        stmt = stmt.where(Job.user_id == user)
+    if service_mode and service_mode != "all":
+        stmt = stmt.where(Job.service_mode == service_mode)
+    return stmt
+
+
+async def _query_report_jobs(
+    db: AsyncSession,
+    *,
+    days: int,
+    status: str | None,
+    user: str | None,
+    service_mode: str | None,
+) -> list[tuple[Any, Any]]:
+    stmt = _build_report_jobs_query(
+        days=days,
+        status=status,
+        user=user,
+        service_mode=service_mode,
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+    out: list[tuple[Any, Any]] = []
+    for row in rows:
+        if isinstance(row, tuple):
+            job_obj = row[0]
+            owner = row[1] if len(row) > 1 else None
+        else:
+            job_obj = row[0]
+            owner = row[1] if len(row) > 1 else None
+        out.append((job_obj, owner))
+    return out
+
+
+def _aggregate_report_rows(rows: list[tuple[Any, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for job, owner in rows:
+        job_id = str(getattr(job, "job_id", "") or "")
+        project_dir = getattr(job, "project_dir", None)
+        report_summary = summarize_project_reports(project_dir, job_id=job_id)
+        created_at = getattr(job, "created_at", None)
+        if isinstance(created_at, datetime):
+            created_at_iso = created_at.isoformat()
+        elif created_at:
+            created_at_iso = str(created_at)
+        else:
+            created_at_iso = None
+        out.append({
+            "job_id": job_id,
+            "user_id": str(getattr(job, "user_id", "") or ""),
+            "user_email": getattr(owner, "email", None) if owner is not None else None,
+            "display_name": (
+                getattr(job, "display_name", None)
+                or getattr(job, "title", None)
+                or ""
+            ),
+            "status": str(getattr(job, "status", "") or ""),
+            "service_mode": str(getattr(job, "service_mode", "") or ""),
+            "created_at": created_at_iso,
+            "project_dir_name": report_summary.get("project_dir_name"),
+            "reports": {
+                "translation_quality": report_summary["translation_quality"],
+                "subtitle_width": report_summary["subtitle_width"],
+                "speaker_evidence": report_summary["speaker_evidence"],
+                "voice_sample_scoring": report_summary["voice_sample_scoring"],
+            },
+            "cost_view_url": f"/admin/jobs/{job_id}/cost" if job_id else "",
+        })
+    return out
+
+
 def _json_response(status_code: int, body: Any) -> Response:
     return Response(
         content=json.dumps(body, ensure_ascii=False, default=str),
@@ -683,6 +788,144 @@ def _json_response(status_code: int, body: Any) -> Response:
 # ─────────────────────────────────────────────────────────────────────
 # Endpoints
 # ─────────────────────────────────────────────────────────────────────
+
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
+_PHASE1B_FLAG_SPECS: dict[str, dict[str, Any]] = {
+    "translation_script_gate_shadow": {
+        "admin_key": "phase1b_translation_script_gate_shadow",
+        "env": "AVT_TRANSLATION_SCRIPT_GATE_SHADOW",
+        "label": "Translation script gate shadow",
+        "category": "shadow",
+        "implemented": True,
+        "risk": "low",
+    },
+    "voice_sample_scoring_shadow": {
+        "admin_key": "phase1b_voice_sample_scoring_shadow",
+        "env": "AVT_VOICE_SAMPLE_SCORING_SHADOW",
+        "label": "Voice sample scoring shadow",
+        "category": "shadow",
+        "implemented": True,
+        "risk": "low",
+    },
+    "translation_script_gate": {
+        "admin_key": "phase1b_translation_script_gate_enabled",
+        "env": "AVT_TRANSLATION_SCRIPT_GATE",
+        "label": "Translation script gate behavior",
+        "category": "behavior",
+        "implemented": False,
+        "risk": "medium",
+    },
+    "voice_sample_scoring": {
+        "admin_key": "phase1b_voice_sample_scoring_enabled",
+        "env": "AVT_VOICE_SAMPLE_SCORING",
+        "label": "Voice sample scoring behavior",
+        "category": "behavior",
+        "implemented": False,
+        "risk": "high",
+    },
+    "audio_tail_trim": {
+        "admin_key": "phase1b_audio_tail_trim_enabled",
+        "env": "AVT_AUDIO_TAIL_TRIM",
+        "label": "Audio tail trim behavior",
+        "category": "behavior",
+        "implemented": False,
+        "risk": "medium",
+    },
+    "whisper_quality_gate": {
+        "admin_key": "phase1b_whisper_quality_gate_enabled",
+        "env": "AVT_WHISPER_QUALITY_GATE",
+        "label": "Whisper quality gate behavior",
+        "category": "behavior",
+        "implemented": False,
+        "risk": "medium",
+    },
+}
+
+
+class Phase1bFlagUpdate(BaseModel):
+    flags: dict[str, bool] = Field(default_factory=dict)
+
+
+def _env_flag_value(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    return None
+
+
+def _load_raw_admin_settings() -> dict[str, Any]:
+    path = admin_settings_store.SETTINGS_FILE
+    try:
+        if path.is_file():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+    except (OSError, json.JSONDecodeError, ValueError):
+        logger.warning("phase1b flags: failed to parse %s", path, exc_info=True)
+    return {}
+
+
+def _build_phase1b_flags_payload() -> dict[str, Any]:
+    raw_settings = _load_raw_admin_settings()
+    flags: list[dict[str, Any]] = []
+    for public_key, spec in _PHASE1B_FLAG_SPECS.items():
+        admin_raw = raw_settings.get(spec["admin_key"])
+        admin_value = admin_raw if isinstance(admin_raw, bool) else None
+        env_value = _env_flag_value(str(spec["env"]))
+        if admin_value is not None:
+            effective = admin_value
+            source = "admin_settings"
+        elif env_value is not None:
+            effective = env_value
+            source = "env"
+        else:
+            effective = False
+            source = "default"
+        flags.append({
+            "key": public_key,
+            "admin_key": spec["admin_key"],
+            "env": spec["env"],
+            "label": spec["label"],
+            "category": spec["category"],
+            "implemented": spec["implemented"],
+            "risk": spec["risk"],
+            "admin_value": admin_value,
+            "env_value": env_value,
+            "effective": effective,
+            "effective_source": source,
+        })
+    return {"flags": flags}
+
+
+def _update_phase1b_admin_flags(updates: dict[str, bool]) -> dict[str, Any]:
+    unknown = sorted(set(updates) - set(_PHASE1B_FLAG_SPECS))
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unknown_phase1b_flags", "flags": unknown},
+        )
+    settings = admin_settings_store.load_settings()
+    raw_settings = _load_raw_admin_settings()
+    for public_key, spec in _PHASE1B_FLAG_SPECS.items():
+        admin_key = str(spec["admin_key"])
+        if public_key in updates or admin_key in raw_settings:
+            continue
+        env_value = _env_flag_value(str(spec["env"]))
+        if env_value is not None:
+            setattr(settings, admin_key, env_value)
+    for public_key, enabled in updates.items():
+        admin_key = str(_PHASE1B_FLAG_SPECS[public_key]["admin_key"])
+        setattr(settings, admin_key, bool(enabled))
+    admin_settings_store.save_settings(settings)
+    return _build_phase1b_flags_payload()
 
 
 @router.get("/summary")
@@ -724,3 +967,82 @@ async def get_csv(
             "content-disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+@router.get("/job-reports-summary")
+async def get_job_reports_summary(
+    days: int = Query(30, ge=1, le=365),
+    status: str = Query("all"),
+    user: str = Query("all"),
+    service_mode: str = Query("all"),
+    user_acc: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Aggregate Phase 1a/1b job report sidecars across recent jobs."""
+    _require_admin(user_acc)
+    rows = await _query_report_jobs(
+        db,
+        days=days,
+        status=status,
+        user=user,
+        service_mode=service_mode,
+    )
+    job_rows = _aggregate_report_rows(rows)
+    payload = build_phase1b_summary(job_rows, days=days)
+    payload["filters"] = {
+        "status": status,
+        "user": user,
+        "service_mode": service_mode,
+    }
+    return _json_response(200, payload)
+
+
+@router.get("/job-reports-csv")
+async def get_job_reports_csv(
+    days: int = Query(30, ge=1, le=365),
+    status: str = Query("all"),
+    user: str = Query("all"),
+    service_mode: str = Query("all"),
+    user_acc: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Export Phase 1a/1b report analysis rows as Excel-compatible CSV."""
+    _require_admin(user_acc)
+    rows = await _query_report_jobs(
+        db,
+        days=days,
+        status=status,
+        user=user,
+        service_mode=service_mode,
+    )
+    body = build_phase1b_csv(_aggregate_report_rows(rows))
+    filename = f"job-report-analysis-{datetime.now(timezone.utc).date().isoformat()}.csv"
+    return Response(
+        content=body,
+        status_code=200,
+        headers={
+            "content-type": "text/csv; charset=utf-8",
+            "content-disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@router.get("/phase1b-flags")
+async def get_phase1b_flags(
+    user_acc: User | None = Depends(get_current_user),
+) -> Response:
+    _require_admin(user_acc)
+    return _json_response(200, _build_phase1b_flags_payload())
+
+
+@router.post(
+    "/phase1b-flags",
+    dependencies=[Depends(require_same_origin_state_change)],
+)
+async def update_phase1b_flags(
+    body: Phase1bFlagUpdate,
+    user_acc: User | None = Depends(get_current_user),
+) -> Response:
+    _require_admin(user_acc)
+    payload = _update_phase1b_admin_flags(body.flags)
+    return _json_response(200, payload)

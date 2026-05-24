@@ -11,6 +11,7 @@ import admin_cost_api  # noqa: E402
 import admin_disk_api  # noqa: E402
 import admin_job_monitor_api  # noqa: E402
 import admin_settings  # noqa: E402
+import admin_smart_analytics_api  # noqa: E402
 import admin_support_api  # noqa: E402
 import cost_management  # noqa: E402
 import credits_observability  # noqa: E402
@@ -30,6 +31,7 @@ _SESSION_ADMIN_ROUTERS = [
     ("admin_disk_api", admin_disk_api.router),
     ("admin_job_monitor_api", admin_job_monitor_api.router),
     ("admin_settings", admin_settings.router),
+    ("admin_smart_analytics_api", admin_smart_analytics_api.router),
     ("admin_support_api", admin_support_api.router),
     ("cost_management", cost_management.router),
     ("credits_observability", credits_observability.router),

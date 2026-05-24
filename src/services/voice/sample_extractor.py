@@ -12,6 +12,7 @@ from pathlib import Path
 from pydub import AudioSegment
 
 from services.assemblyai.transcriber import TranscriptLine
+from services.runtime_flags import runtime_flag
 from utils.env_flags import env_flag
 
 
@@ -174,7 +175,7 @@ class VoiceSampleExtractor:
                 min_duration_ms=min_duration_ms,
                 max_duration_ms=max_duration_ms,
             )
-        if env_flag("AVT_VOICE_SAMPLE_SCORING_SHADOW"):
+        if runtime_flag("AVT_VOICE_SAMPLE_SCORING_SHADOW"):
             _write_sample_scoring_shadow_manifest(
                 output_file=output_file,
                 source_path=source_path,
