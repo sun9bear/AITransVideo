@@ -129,6 +129,15 @@ class AdminSettings(BaseModel):
     # user's library beyond a chosen threshold. Default 30 mirrors
     # MiniMax's commonly-stated per-account voice quota.
     smart_user_voice_clone_cap: int = 30
+    # --- Smart Auto Pipeline kill switch — Layer 2 (P2 launch blocker #1) ---
+    # Admin runtime toggle for the smart kill switch. False (default) means
+    # smart is removed from every user's allowed_service_modes even if the
+    # env-level Settings.enable_smart_mode is True. Both layers must be
+    # True for smart to appear. Hot-reloadable via admin UI mtime poll —
+    # use this as the emergency-stop switch (no gateway restart needed).
+    # Spec: docs/plans/2026-05-13-smart-mvp-p2-implementation-plan.md §5.3 +
+    #       docs/plans/2026-05-24-smart-auto-pipeline-rebaseline.md §3.1
+    smart_mode_enabled: bool = False
     # --- Phase 3 (plan 2026-05-17-user-voice-candidate-first §后台策略字段) ---
     # Smart MVP candidate-first voice policy. These 3 toggles control how
     # Smart treats personal-voice candidates and new clones independently.

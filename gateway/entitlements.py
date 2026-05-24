@@ -3,9 +3,17 @@
 Trial-aware (P3 fix): when a user is within an active trial window,
 ``get_effective_plan_gate`` from ``plan_catalog`` elevates their capabilities
 (Studio, Plus-tier duration/concurrency) while ``user.plan_code`` stays "free".
+
+Smart kill switch (Task #23, P2 launch blocker #1):
+``get_effective_allowed_service_modes(user)`` is the single source of
+truth for the smart kill switch. All three gates (this file's two
+branches + ``job_intercept.py`` create gate) MUST use it, or admin
+toggle / env var becomes meaningless.
 """
 
 from __future__ import annotations
+
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -13,7 +21,81 @@ from auth import get_current_user
 from models import User
 from plan_catalog import get_effective_plan_gate, is_user_in_active_trial
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["entitlements"])
+
+
+def get_effective_allowed_service_modes(
+    user: User | None, *, settings=None
+) -> list[str]:
+    """Compute the user's effective allowed_service_modes after applying
+    the two-layer Smart kill switch.
+
+    Layers (BOTH must be True for ``smart`` to appear):
+      1. Env: ``Settings.enable_smart_mode`` (``AVT_ENABLE_SMART_MODE``)
+      2. Admin runtime: ``AdminSettings.smart_mode_enabled`` (hot-flip)
+
+    Admin users do NOT auto-bypass the kill switch — same logic as
+    regular users (per Codex F2 fix, P2 plan §4.1). Without this, any
+    admin would still get smart even when ops flipped the toggle off.
+
+    Inputs:
+      user: The User row (may be None — anonymous returns empty list).
+      settings: Optional override for tests. Defaults to live config.
+
+    Returns:
+      A NEW list (caller can mutate safely). Always preserves
+      express / studio order from the plan; only removes smart when the
+      kill switch is off.
+
+    Defensive: if admin_settings is unreadable for any reason, the helper
+    fails CLOSED (treats admin toggle as False → smart removed). This
+    matches the kill switch contract — a broken admin store should never
+    accidentally enable a feature.
+    """
+    if user is None:
+        return []
+
+    # Plan-level base list. Admin users still use their plan_code's plan
+    # so an admin who upgraded their own account to "free" doesn't
+    # accidentally bypass any non-smart gates (e.g., studio in free plan).
+    plan_info = get_effective_plan_gate(user)
+    base = list(plan_info.get("allowed_service_modes", ()))
+
+    # Special-case: legacy admin behavior allowed admin to see all
+    # non-smart modes regardless of plan. Preserve that — kill switch
+    # only affects ``smart``, not express/studio.
+    role = getattr(user, "role", "user") or "user"
+    if role == "admin":
+        for mode in ("express", "studio"):
+            if mode not in base:
+                base.append(mode)
+
+    # Now apply the kill switch to ``smart`` regardless of source (plan
+    # or admin-augmented).
+    if settings is None:
+        from config import settings as _global_settings
+        settings = _global_settings
+
+    env_enabled = bool(getattr(settings, "enable_smart_mode", False))
+    admin_enabled = False
+    try:
+        from admin_settings import load_settings as _load_admin_settings
+        admin_enabled = bool(
+            getattr(_load_admin_settings(), "smart_mode_enabled", False)
+        )
+    except Exception as exc:
+        # Fail-closed: unreadable admin_settings → smart removed.
+        logger.warning(
+            "smart kill switch: admin_settings unreadable, treating as "
+            "disabled (smart removed). cause=%s", exc,
+        )
+        admin_enabled = False
+
+    if not (env_enabled and admin_enabled) and "smart" in base:
+        base.remove("smart")
+
+    return base
 
 
 @router.get("/api/me/entitlements")
@@ -35,6 +117,14 @@ async def get_entitlements(
     quota_total = getattr(user, "free_jobs_quota_total", 5)
     quota_used = getattr(user, "free_jobs_quota_used", 0)
 
+    # Single source of truth for allowed_service_modes — applies the
+    # Smart kill switch (env + admin runtime toggle). Without this,
+    # admin always saw the hardcoded ["express","studio","smart"] list
+    # regardless of toggle state, and the frontend smart card showed up
+    # for non-admin Plus/Pro users even with smart disabled at the env
+    # level — both bypassed the kill switch.
+    effective_modes = get_effective_allowed_service_modes(user)
+
     if is_admin:
         return {
             "role": role,
@@ -42,13 +132,7 @@ async def get_entitlements(
             "limits": {
                 "max_duration_minutes": None,
                 "max_concurrent_jobs": None,
-                # Smart MVP P2 launch (2026-05-16): admin sees smart in
-                # the frontend mode picker too. Backend gate already
-                # bypasses for admin (job_intercept.py:777
-                # ``if user and not is_admin: ...``), but the frontend
-                # ``smart card visible`` check uses this list and
-                # without smart here the smart button shows as "即将开放".
-                "allowed_service_modes": ["express", "studio", "smart"],
+                "allowed_service_modes": effective_modes,
                 "free_jobs_quota_total": None,
                 "free_jobs_quota_used": None,
                 "free_jobs_quota_remaining": None,
@@ -66,7 +150,7 @@ async def get_entitlements(
         "limits": {
             "max_duration_minutes": plan_info["max_duration_minutes"],
             "max_concurrent_jobs": plan_info["max_concurrent_jobs"],
-            "allowed_service_modes": plan_info["allowed_service_modes"],
+            "allowed_service_modes": effective_modes,
             "free_jobs_quota_total": quota_total if plan == "free" and not in_trial else None,
             "free_jobs_quota_used": quota_used if plan == "free" and not in_trial else None,
             "free_jobs_quota_remaining": (quota_total - quota_used) if plan == "free" and not in_trial else None,

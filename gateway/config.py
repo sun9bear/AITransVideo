@@ -100,6 +100,22 @@ class GatewaySettings(BaseSettings):
     # flag NEXT_PUBLIC_ENABLE_POST_EDIT which gates the UI entry points.
     enable_post_edit: bool = False
 
+    # --- Smart Auto Pipeline kill switch (P2 launch blocker #1) ---
+    # Layer 1 of the two-layer kill switch. False (default) means the
+    # gateway refuses to create smart jobs AND strips "smart" from every
+    # user's allowed_service_modes (regardless of plan). Required AND'd
+    # with AdminSettings.smart_mode_enabled (Layer 2 — admin hot-flip).
+    #
+    # Operations:
+    #   - Long-term close: docker-compose.yml AVT_ENABLE_SMART_MODE="false"
+    #     + gateway recreate. Always-off after deploy.
+    #   - Emergency stop without redeploy: flip AdminSettings.smart_mode_enabled
+    #     to False via admin UI — takes effect within mtime poll window.
+    #
+    # Spec: docs/plans/2026-05-13-smart-mvp-p2-implementation-plan.md §5.3 +
+    #       docs/plans/2026-05-24-smart-auto-pipeline-rebaseline.md §3.1
+    enable_smart_mode: bool = False
+
     # --- Phase 2 R2 download backend (plan 2026-04-23) ---
     # Pluggable artifact-download target. "local" (default) keeps the historic
     # gateway → Job API byte-passthrough. "r2" redirects the user with HTTP 302

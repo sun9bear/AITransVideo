@@ -1133,13 +1133,21 @@ async def intercept_create_job(
             )
 
     # --- 1. Validate service_mode ---
+    # Use get_effective_allowed_service_modes (Task #23, P2 launch
+    # blocker #1) — single source of truth that applies the smart kill
+    # switch (env AVT_ENABLE_SMART_MODE + admin runtime toggle). Reading
+    # plan_info["allowed_service_modes"] directly bypasses both layers
+    # of the kill switch and lets Plus/Pro users create smart jobs even
+    # when ops flipped the toggle off.
     if user and not is_admin:
-        if service_mode not in plan_info["allowed_service_modes"]:
+        from entitlements import get_effective_allowed_service_modes
+        effective_modes = get_effective_allowed_service_modes(user)
+        if service_mode not in effective_modes:
             return _error_response(
                 403, "service_mode_not_allowed",
                 f"当前套餐（{user_plan}）不支持{service_mode}模式，请升级套餐。",
                 {"plan_code": user_plan, "requested_mode": service_mode,
-                 "allowed_modes": plan_info["allowed_service_modes"]},
+                 "allowed_modes": effective_modes},
             )
 
     # --- 2. Concurrency limit ---
