@@ -669,24 +669,59 @@ def _apply_smart_reused_voice_decision(
             f"[smart] voice reuse usage audit failed speaker={decision.speaker_id}",
             flush=True,
         )
+    # Task #27 (prereq for Task #26) — 2026-05-24 audit contract fix:
+    # Don't hardcode reason_code or drop Phase 5 metrics. Three tiers
+    # of REUSED decisions land here (strong same-source, strong_named,
+    # Phase 5 possible_user_voice_match_auto_reused) and analytics
+    # downstream needs to tell them apart from the on-disk JSONL.
+    #
+    # Before this fix:
+    #   - reason_code was always "reused_user_voice" (overwriting Phase 5's
+    #     own reason_code "possible_user_voice_match_auto_reused")
+    #   - evidence missed auto_reused_from_possible_match /
+    #     possible_match_count / top_candidate_* fields that Phase 5 set
+    #     in decision.metrics
+    #   - extra.voice_clone_decision was also hardcoded
+    #
+    # After:
+    #   - reason_code = decision.reason_code (passthrough)
+    #   - evidence carries Phase 5 fields (None for non-Phase-5 paths)
+    #   - extra.voice_reuse_reason_code = decision.reason_code for
+    #     readers that look at the extra block instead of evidence
+    _is_possible_auto_reuse = bool(
+        decision.metrics.get("auto_reused_from_possible_match", False)
+    )
+    _evidence: dict[str, Any] = {
+        "voice_id": decision.cloned_voice_id,
+        "clone_provider": decision.cloned_provider_name,
+        "match_confidence": decision.metrics.get("match_confidence"),
+        "match_reason": decision.metrics.get("match_reason"),
+        "matched_user_voice_id": decision.metrics.get("matched_user_voice_id"),
+    }
+    if _is_possible_auto_reuse:
+        # Only emit Phase 5 fields on the Phase 5 path so strong /
+        # strong_named records don't accidentally carry None values
+        # that downstream might interpret as "Phase 5 hit" (anything
+        # not absent could be misread).
+        _evidence["auto_reused_from_possible_match"] = True
+        _evidence["possible_match_count"] = decision.metrics.get("possible_match_count")
+        _evidence["top_candidate_voice_id"] = decision.metrics.get("top_candidate_voice_id")
+        _evidence["top_candidate_label"] = decision.metrics.get("top_candidate_label")
+        _evidence["top_candidate_match_scope"] = decision.metrics.get("top_candidate_match_scope")
+        _evidence["top_candidate_confidence"] = decision.metrics.get("top_candidate_confidence")
     _emit_smart_audit(
         project_dir,
         decision_type="voice_clone",
         decision="approved",
-        reason_code="reused_user_voice",
-        evidence={
-            "voice_id": decision.cloned_voice_id,
-            "clone_provider": decision.cloned_provider_name,
-            "match_confidence": decision.metrics.get("match_confidence"),
-            "match_reason": decision.metrics.get("match_reason"),
-            "matched_user_voice_id": decision.metrics.get("matched_user_voice_id"),
-        },
+        reason_code=decision.reason_code,
+        evidence=_evidence,
         smart_decision_id=decision.smart_decision_id,
         extra={
             "speaker_id": decision.speaker_id,
             "job_id": job_id,
             "user_id": user_id,
             "voice_clone_decision": "reused_user_voice",
+            "voice_reuse_reason_code": decision.reason_code,
         },
     )
 
@@ -6059,9 +6094,23 @@ class ProcessPipeline:
                     if _dec.choice not in (VoiceReviewChoice.CLONED, VoiceReviewChoice.REUSED):
                         _entry["fallback_reason"] = _dec.reason_code
                     if _dec.choice == VoiceReviewChoice.REUSED:
+                        # Task #27 (prereq for Task #26) — keep quality_report
+                        # voice_decisions symmetric with smart_decisions.jsonl
+                        # so the two audit files don't diverge. The REUSED
+                        # branch covers strong / strong_named / Phase 5
+                        # possible_user_voice_match_auto_reused; downstream
+                        # needs reason_code to distinguish them.
+                        _entry["reason_code"] = _dec.reason_code
                         _entry["match_confidence"] = _dec.metrics.get("match_confidence")
                         _entry["match_reason"] = _dec.metrics.get("match_reason")
                         _entry["matched_user_voice_id"] = _dec.metrics.get("matched_user_voice_id")
+                        if _dec.metrics.get("auto_reused_from_possible_match"):
+                            # Phase 5 only: preserve the metrics that let
+                            # analytics tell auto_reuse apart from strong.
+                            _entry["auto_reused_from_possible_match"] = True
+                            _entry["possible_match_count"] = _dec.metrics.get("possible_match_count")
+                            _entry["top_candidate_confidence"] = _dec.metrics.get("top_candidate_confidence")
+                            _entry["top_candidate_match_scope"] = _dec.metrics.get("top_candidate_match_scope")
                     _qr_voice_decisions.append(_entry)
 
             # Build translation_review from decision (when available)
