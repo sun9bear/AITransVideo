@@ -3,10 +3,15 @@
 - 创建日期：2026-05-04
 - 状态：方案草案，待审核
 - 适用范围：快捷版 / 工作台版之上的智能版自动交付能力
+
+> 2026-05-24 执行基线更新：本文件保留为智能版原始主纲和历史设计依据。当前执行状态、已发生的路线调整、P3/P4/P5 后续策略与 launch blocker 以 `docs/plans/2026-05-24-smart-auto-pipeline-rebaseline.md` 为准。
+
 - 更新记录：
+  - 2026-05-24 增加执行基线指向：Smart P0/P1 已完成，P2 主体已大规模落地但仍有 launch blocker，P3/P4 verifier 路线调整为 shadow / only-report 优先，P5 已部分启动；详见 `docs/plans/2026-05-24-smart-auto-pipeline-rebaseline.md`。
   - 2026-05-04 吸收评审意见，明确 Smart MVP 不依赖独立多模态 verifier，补充降级交付契约、幂等闸、付费 API 守卫、成本汇总、kill switch 和 Smart → Studio 接管契约；补充已落地 P0 的 `user_edit_events.jsonl` 作为 Smart shadow evaluation 与 verifier learning 的人类纠错事实源；补齐 Express / Studio / Smart 定位、translation auto-approval 风险边界、clone 配额和失败重试策略、长视频 retry cap、Smart 成功后进入 Studio 精修，以及 P0 shadow evaluator 执行入口。
   - 2026-05-06 执行前复核：吸收字幕音频同步 Phase A-D 已落地能力，明确 Smart MVP 必须复用 `tts_input_cn_text`、`text_audio_drift`、`ensure_whisper_aligned_subtitles()` 和 Whisper 双闸门 / 指纹缓存边界；补充 faster-whisper 作为可选部署能力而非默认依赖的要求。
 - 关联文档：
+  - `docs/plans/2026-05-24-smart-auto-pipeline-rebaseline.md`
   - `docs/plans/2026-04-24-video-translation-quality-cost-optimization-plan.md`
   - `docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md`
   - `docs/plans/2026-05-04-subtitle-audio-sync-plan.md`
