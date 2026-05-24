@@ -359,16 +359,22 @@ def _load_segment_to_speaker_mapping(project_dir: Path) -> dict[str, str]:
 
 def _count_voice_overrides_per_speaker(
     events_path: Path, segment_to_speaker: dict[str, str]
-) -> tuple[set[str], int, int]:
+) -> tuple[set[str], int, int, list[dict[str, Any]]]:
     """Count distinct speakers with at least one
     ``post_edit_voice_override_changed`` event (design §3.1 main numerator).
 
     Returns ``(set_of_changed_speakers, unmapped_segment_count,
-    total_voice_override_event_count)``.
+    total_voice_override_event_count, override_details)``.
 
-    The 3rd element (added per codex v2 review #5) is the denominator
-    for the unmapped-rate signal in the UI: ``unmapped / total > 5%``
-    triggers an ochre warning on the dashboard.
+    The 3rd element (codex v2 review #5) is the denominator for the
+    unmapped-rate signal in the UI: ``unmapped / total > 5%`` triggers
+    an ochre warning on the dashboard.
+
+    The 4th element (codex v2 followup #1) is a list of per-event dicts
+    with the speaker_id resolved + before/after voice_id + operation +
+    changed_at, so the case_rows table can show "from what to what".
+    Only mapped events appear in this list (unmapped are excluded —
+    they'd have a null speaker and clutter the case table).
 
     ``voice_selection_speaker_reassigned`` and
     ``voice_selection_dubbing_mode_changed`` are intentionally excluded
@@ -378,6 +384,7 @@ def _count_voice_overrides_per_speaker(
     changed: set[str] = set()
     unmapped = 0
     total = 0
+    details: list[dict[str, Any]] = []
     for record in _iter_jsonl_records(events_path):
         if record.get("event_type") != "post_edit_voice_override_changed":
             continue
@@ -395,29 +402,52 @@ def _count_voice_overrides_per_speaker(
             unmapped += 1
             continue
         changed.add(speaker_id)
-    return changed, unmapped, total
+        # Capture event details for case_rows downstream. Defensive
+        # dict access — older records may be missing some sub-blocks.
+        before = record.get("before") or {}
+        after = record.get("after") or {}
+        context = record.get("context") or {}
+        details.append({
+            "speaker_id": speaker_id,
+            "before_voice_id": (before.get("voice_id") if isinstance(before, dict) else None),
+            "after_voice_id": (after.get("voice_id") if isinstance(after, dict) else None),
+            "operation": (context.get("operation") if isinstance(context, dict) else None),
+            "changed_at": record.get("created_at"),
+        })
+    return changed, unmapped, total, details
 
 
 def _count_speaker_reassigned_per_job(
-    events_path: Path, segment_to_speaker: dict[str, str]
+    events_path: Path,
+    segment_to_speaker: dict[str, str] | None = None,
 ) -> set[str]:
-    """Auxiliary indicator (design §3.4): distinct speakers that had
-    a ``voice_selection_speaker_reassigned`` event. Tracked separately
-    from the main numerator so speaker-segmentation churn doesn't
-    pollute auto-reuse change rates."""
+    """Auxiliary indicator (design §3.4 + codex v2 followup #2).
+
+    Reads ``before.speaker_id`` / ``after.speaker_id`` DIRECTLY from
+    the voice_selection_speaker_reassigned event. The earlier
+    implementation went through ``segment_to_speaker`` mapping, which
+    is wrong because that mapping reflects the CURRENT editor state —
+    a segment that was reassigned now points to after.speaker_id, so
+    the original ``from`` correction signal would be lost.
+
+    Returns the union of ``before.speaker_id`` ∪ ``after.speaker_id``
+    so the caller can intersect against auto-reuse hit_speakers.
+
+    ``segment_to_speaker`` kwarg is kept for back-compat with callers
+    that still pass it (no longer used).
+    """
+    _ = segment_to_speaker  # silence "unused"
     out: set[str] = set()
     for record in _iter_jsonl_records(events_path):
         if record.get("event_type") != "voice_selection_speaker_reassigned":
             continue
-        seg_id = record.get("segment_id") or (
-            (record.get("segment") or {}).get("segment_id")
-            if isinstance(record.get("segment"), dict) else None
-        )
-        if seg_id is None:
-            continue
-        speaker_id = segment_to_speaker.get(str(seg_id))
-        if speaker_id:
-            out.add(speaker_id)
+        for block_key in ("before", "after"):
+            block = record.get(block_key) or {}
+            if not isinstance(block, dict):
+                continue
+            sp = block.get("speaker_id")
+            if sp:
+                out.add(str(sp))
     return out
 
 
@@ -489,8 +519,9 @@ def _aggregate_voice_reuse_quality(
             getattr(m, "voice_override_event_count", 0) or 0
         )
 
-        # Per-bucket per-job tallies + collect candidate case rows.
+        # Per-bucket per-job tallies + map speaker → bucket for case rows.
         job_hit_speakers: set[str] = set()
+        speaker_to_bucket: dict[str, str] = {}
         changed = m.voice_changed_speakers or set()
         for bucket in _VOICE_REUSE_BUCKETS:
             speakers = (m.voice_reuse_hits or {}).get(bucket) or set()
@@ -498,15 +529,26 @@ def _aggregate_voice_reuse_quality(
             hit_and_changed = speakers & changed
             per_bucket_changes[bucket] += len(hit_and_changed)
             job_hit_speakers |= speakers
-            # Codex #4: emit one case row per (job_id, speaker_id) where
-            # a hit speaker was subsequently changed by the user.
-            for sp in hit_and_changed:
-                case_rows.append({
-                    "job_id": str(getattr(m, "job_id", "") or ""),
-                    "speaker_id": sp,
-                    "bucket": bucket,
-                    "created_at": getattr(m, "created_at", None),
-                })
+            for sp in speakers:
+                speaker_to_bucket[sp] = bucket
+
+        # Codex v2 followup #1: emit one case row per voice_override
+        # event whose speaker is in any auto-reuse hit bucket. Use the
+        # event-level details (before/after voice_id + operation +
+        # changed_at) so admin sees "from what to what".
+        for detail in getattr(m, "voice_override_details", None) or []:
+            sp = detail.get("speaker_id")
+            if not sp or sp not in speaker_to_bucket:
+                continue
+            case_rows.append({
+                "job_id": str(getattr(m, "job_id", "") or ""),
+                "speaker_id": sp,
+                "bucket": speaker_to_bucket[sp],
+                "before_voice_id": detail.get("before_voice_id"),
+                "after_voice_id": detail.get("after_voice_id"),
+                "operation": detail.get("operation"),
+                "changed_at": detail.get("changed_at"),
+            })
 
         if job_hit_speakers:
             jobs_with_hits += 1
@@ -538,9 +580,10 @@ def _aggregate_voice_reuse_quality(
     overall_hits = sum(per_bucket_hits.values())
     overall_changes = sum(per_bucket_changes.values())
 
-    # Codex #4 case_rows: sort by created_at desc, cap at 20.
+    # Codex #4 case_rows: sort by changed_at desc (event time, not
+    # job created_at — admin wants the most recent edits first), cap at 20.
     case_rows.sort(
-        key=lambda r: (r.get("created_at") or ""),
+        key=lambda r: (r.get("changed_at") or ""),
         reverse=True,
     )
     case_rows = case_rows[:20]
@@ -673,6 +716,11 @@ class JobAggregatedMetrics:
     # Total post_edit_voice_override_changed event count (denominator
     # for unmapped_segment_rate per codex v2 review #5).
     voice_override_event_count: int = 0
+    # Per-event details (codex v2 followup #1): each entry holds
+    # speaker_id (resolved), before_voice_id, after_voice_id,
+    # operation, changed_at. Used by _aggregate_voice_reuse_quality
+    # to build case_rows for the admin Tab 4.
+    voice_override_details: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
@@ -717,16 +765,18 @@ def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
             voice_changed_speakers,
             unmapped_segment_count,
             voice_override_event_count,
+            voice_override_details,
         ) = _count_voice_overrides_per_speaker(events_path, segment_to_speaker)
-        speakers_reassigned = _count_speaker_reassigned_per_job(
-            events_path, segment_to_speaker,
-        )
+        # Codex v2 followup #2: read before/after speaker_id directly
+        # from event, NOT via segment_to_speaker mapping.
+        speakers_reassigned = _count_speaker_reassigned_per_job(events_path)
     else:
         voice_reuse_hits = _empty_voice_reuse_hits()
         voice_changed_speakers = set()
         speakers_reassigned = set()
         unmapped_segment_count = 0
         voice_override_event_count = 0
+        voice_override_details = []
 
     edit_event_count = sum(edit_events_by_type.values())
     edit_generation = int(getattr(job, "edit_generation", 0) or 0)
@@ -790,6 +840,7 @@ def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
         speakers_reassigned=speakers_reassigned,
         unmapped_segment_count=unmapped_segment_count,
         voice_override_event_count=voice_override_event_count,
+        voice_override_details=voice_override_details,
     )
 
 

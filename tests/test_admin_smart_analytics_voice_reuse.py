@@ -319,7 +319,7 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a", "s2": "speaker_b"}
-        changed, unmapped, total = _count_voice_overrides_per_speaker(
+        changed, unmapped, total, _details = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == {"speaker_a", "speaker_b"}
@@ -343,7 +343,7 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a"}
-        changed, unmapped, total = _count_voice_overrides_per_speaker(
+        changed, unmapped, total, _details = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == {"speaker_a"}
@@ -377,7 +377,7 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a", "s2": "speaker_a"}
-        changed, _, total = _count_voice_overrides_per_speaker(
+        changed, _, total, _details = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == {"speaker_a"}
@@ -398,7 +398,7 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a"}
-        changed, unmapped, total = _count_voice_overrides_per_speaker(
+        changed, unmapped, total, _details = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == set()
@@ -420,7 +420,7 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a"}
-        changed, _, total = _count_voice_overrides_per_speaker(
+        changed, _, total, _details = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == set()
@@ -433,9 +433,22 @@ class TestCountVoiceOverridesPerSpeaker:
 
 
 class TestCountSpeakerReassigned:
-    """Auxiliary indicator (design §3.4) — track separately."""
+    """Auxiliary indicator (design §3.4 + codex v2 review #2 followup):
+    read before.speaker_id / after.speaker_id DIRECTLY from the event
+    (not via segment_id → speaker_id mapping). The mapping reflects the
+    CURRENT editor state, so post-reassignment the mapping returns
+    after_speaker_id and the original speaker correction is lost.
 
-    def test_counts_unique_speakers_reassigned(self, tmp_path):
+    Returns the union (before ∪ after) so the caller can intersect
+    against hit_speakers."""
+
+    def test_reads_before_and_after_directly_from_event(self, tmp_path):
+        """Real event shape (see build_voice_selection_speaker_reassigned_event):
+          event["before"] = {"speaker_id": from_speaker_id}
+          event["after"]  = {"speaker_id": to_speaker_id}
+        Both speakers must end up in the returned set so caller can
+        intersect with auto-reuse hit_speakers. Mapping is no longer
+        consulted (codex v2 followup)."""
         from admin_smart_analytics_api import _count_speaker_reassigned_per_job
 
         path = tmp_path / "audit" / "user_edit_events.jsonl"
@@ -443,16 +456,43 @@ class TestCountSpeakerReassigned:
         path.write_text("\n".join(json.dumps(e) for e in [
             {
                 "event_type": "voice_selection_speaker_reassigned",
-                "segment_id": "s1",
+                "segment": {"segment_id": "s1"},
+                "before": {"speaker_id": "speaker_a"},
+                "after": {"speaker_id": "speaker_b"},
             },
             {
                 "event_type": "voice_selection_speaker_reassigned",
-                "segment_id": "s2",
+                "segment": {"segment_id": "s2"},
+                "before": {"speaker_id": "speaker_b"},
+                "after": {"speaker_id": "speaker_c"},
             },
         ]), encoding="utf-8")
-        mapping = {"s1": "speaker_a", "s2": "speaker_a"}  # same speaker
-        out = _count_speaker_reassigned_per_job(path, mapping)
-        assert out == {"speaker_a"}, "duplicate per-speaker should dedup"
+        # Pass empty mapping — function should NOT depend on it.
+        out = _count_speaker_reassigned_per_job(path, {})
+        # All three (a, b, c) appear as either before or after.
+        assert out == {"speaker_a", "speaker_b", "speaker_c"}
+
+    def test_handles_missing_before_after_blocks(self, tmp_path):
+        """Defensive: event missing before/after still gracefully
+        contributes nothing rather than crashing."""
+        from admin_smart_analytics_api import _count_speaker_reassigned_per_job
+
+        path = tmp_path / "audit" / "user_edit_events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(e) for e in [
+            {
+                "event_type": "voice_selection_speaker_reassigned",
+                "segment": {"segment_id": "s1"},
+                # no before/after blocks
+            },
+            {
+                "event_type": "voice_selection_speaker_reassigned",
+                "before": {"speaker_id": "speaker_a"},
+                "after": {},  # missing speaker_id
+            },
+        ]), encoding="utf-8")
+        out = _count_speaker_reassigned_per_job(path, {})
+        assert out == {"speaker_a"}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -819,7 +859,10 @@ class TestAggregateJobAddsVoiceReuseFields:
 
     def test_speaker_reassigned_populated_from_events(self, tmp_path):
         """voice_selection_speaker_reassigned event → speakers_reassigned
-        set (auxiliary indicator, separate from change rate)."""
+        set (auxiliary indicator, separate from change rate).
+
+        Codex v2 followup #2: reads before/after.speaker_id directly
+        from event, not via segment_to_speaker mapping."""
         from admin_smart_analytics_api import _aggregate_job
 
         proj = self._setup_project(
@@ -835,10 +878,12 @@ class TestAggregateJobAddsVoiceReuseFields:
             events=[
                 {
                     "event_type": "voice_selection_speaker_reassigned",
-                    "segment_id": "s1",
+                    "segment": {"segment_id": "s1"},
+                    "before": {"speaker_id": "speaker_a"},
+                    "after": {"speaker_id": "speaker_b"},
                 },
             ],
-            segments=[{"segment_id": "s1", "speaker_id": "speaker_a"}],
+            segments=[{"segment_id": "s1", "speaker_id": "speaker_b"}],  # post-reassign state
         )
         job = SimpleNamespace(
             job_id="j_reassign", user_id="u", display_name="t",
@@ -852,8 +897,11 @@ class TestAggregateJobAddsVoiceReuseFields:
         m = _aggregate_job(job, user_email=None)
         # Main numerator stays empty (codex #3)
         assert m.voice_changed_speakers == set()
-        # Auxiliary populated
-        assert m.speakers_reassigned == {"speaker_a"}
+        # Auxiliary populated with BOTH before (speaker_a, the original
+        # auto-reuse target) AND after (speaker_b). Caller intersects
+        # with hit_speakers — speaker_a IS in hits, so the aggregator
+        # will count this reassignment as relevant.
+        assert m.speakers_reassigned == {"speaker_a", "speaker_b"}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -895,6 +943,7 @@ class TestBuildSummaryPayloadVoiceReuseQuality:
             "speakers_reassigned": set(),
             "unmapped_segment_count": 0,
             "voice_override_event_count": 0,
+            "voice_override_details": [],
         }
         defaults.update(kwargs)
         return JobAggregatedMetrics(**defaults)
@@ -936,10 +985,12 @@ class TestBuildSummaryPayloadVoiceReuseQuality:
 
     def test_payload_includes_case_rows(self):
         """Codex #4: backend must expose case_rows so frontend Tab 4
-        can render the case table without a second backend round-trip."""
+        can render the case table without a second backend round-trip.
+        Updated v2 codex review: rows must include before_voice_id /
+        after_voice_id / operation / changed_at so admins can see
+        "from what to what" (排查价值不足 otherwise)."""
         from admin_smart_analytics_api import _build_summary_payload
 
-        # 2 hit metrics, top-1 has a change → 1 case row produced.
         metrics = [self._metric_with_hits(
             job_id="job_x",
             voice_reuse_hits={
@@ -947,24 +998,63 @@ class TestBuildSummaryPayloadVoiceReuseQuality:
                 "possible_auto": set(), "strong_or_legacy_null": set(),
             },
             voice_changed_speakers={"speaker_c"},
+            # New: voice override details with speaker mapped.
+            voice_override_details=[
+                {
+                    "speaker_id": "speaker_c",
+                    "before_voice_id": "vt_auto_reuse_x",
+                    "after_voice_id": "vt_preset_b",
+                    "operation": "set",
+                    "changed_at": "2026-05-24T01:23:45+00:00",
+                },
+            ],
         )]
         payload = _build_summary_payload(metrics, days=30)
 
-        assert "voice_reuse_quality" in payload
         vrq = payload["voice_reuse_quality"]
-        assert "case_rows" in vrq, (
-            "voice_reuse_quality must include case_rows so frontend "
-            "Tab 4 can render the case table without backend re-call "
-            "(design §4 + codex #4)."
-        )
+        assert "case_rows" in vrq
         assert isinstance(vrq["case_rows"], list)
-        # Each case row has job_id, speaker_id, bucket, created_at.
-        if vrq["case_rows"]:
-            row = vrq["case_rows"][0]
-            for key in ("job_id", "speaker_id", "bucket", "created_at"):
-                assert key in row, (
-                    f"case row missing key {key!r}; got: {row}"
-                )
+        assert len(vrq["case_rows"]) == 1
+        row = vrq["case_rows"][0]
+        for key in (
+            "job_id", "speaker_id", "bucket",
+            "before_voice_id", "after_voice_id", "operation", "changed_at",
+        ):
+            assert key in row, (
+                f"case row missing key {key!r} (codex v2 followup — needs "
+                f"before/after voice + operation for admin 排查); got: {row}"
+            )
+        assert row["before_voice_id"] == "vt_auto_reuse_x"
+        assert row["after_voice_id"] == "vt_preset_b"
+        assert row["operation"] == "set"
+        assert row["changed_at"] == "2026-05-24T01:23:45+00:00"
+
+    def test_case_rows_skip_when_speaker_not_in_hits(self):
+        """A voice override event whose speaker_id isn't in any
+        auto-reuse hit bucket MUST NOT generate a case row — we're
+        documenting auto-reuse misfires, not arbitrary voice changes."""
+        from admin_smart_analytics_api import _build_summary_payload
+
+        metrics = [self._metric_with_hits(
+            job_id="job_y",
+            voice_reuse_hits={
+                "strong": {"speaker_a"}, "strong_named": set(),
+                "possible_auto": set(), "strong_or_legacy_null": set(),
+            },
+            voice_changed_speakers={"speaker_z"},  # not a hit speaker
+            voice_override_details=[
+                {
+                    "speaker_id": "speaker_z",  # not a hit speaker
+                    "before_voice_id": "vt_x",
+                    "after_voice_id": "vt_y",
+                    "operation": "set",
+                    "changed_at": "2026-05-24T01:23:45+00:00",
+                },
+            ],
+        )]
+        payload = _build_summary_payload(metrics, days=30)
+        # No case row because speaker_z wasn't in hits.
+        assert payload["voice_reuse_quality"]["case_rows"] == []
 
     def test_case_rows_capped_at_twenty(self):
         """Cap at 20 rows (design §4 case 表)."""
@@ -979,13 +1069,20 @@ class TestBuildSummaryPayloadVoiceReuseQuality:
                     "possible_auto": set(), "strong_or_legacy_null": set(),
                 },
                 voice_changed_speakers={f"speaker_{i}"},
+                voice_override_details=[
+                    {
+                        "speaker_id": f"speaker_{i}",
+                        "before_voice_id": f"vt_b_{i}",
+                        "after_voice_id": f"vt_a_{i}",
+                        "operation": "set",
+                        "changed_at": f"2026-05-{(i % 28) + 1:02d}T00:00:00+00:00",
+                    },
+                ],
                 created_at=f"2026-05-{(i % 28) + 1:02d}T00:00:00+00:00",
             ))
         payload = _build_summary_payload(metrics, days=30)
         case_rows = payload["voice_reuse_quality"]["case_rows"]
-        assert len(case_rows) <= 20, (
-            f"case_rows must be capped at 20 (design §4); got {len(case_rows)}"
-        )
+        assert len(case_rows) <= 20
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1028,6 +1125,7 @@ class TestCsvVoiceReuseColumns:
             "speakers_reassigned": set(),
             "unmapped_segment_count": 1,
             "voice_override_event_count": 5,
+            "voice_override_details": [],
         }
         defaults.update(kwargs)
         return JobAggregatedMetrics(**defaults)
