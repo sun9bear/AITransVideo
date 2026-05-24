@@ -26,6 +26,7 @@
 | `deployment-legacy/` | 单机 / Windows 远程工作台 / Linux 迁移阶段的部署文档（已被 Docker Compose + Caddy 统一替代） | 仅做历史参考 |
 | `web-ui-single-user/` | Web UI 8876 单机时代的架构文档（`WEB_UI_STATUS/ROADMAP`、`PUBLIC_WEB_UI_SECURITY_BOUNDARY`、`JOB_API_A1_QUICKSTART`、`WEB_CONSOLE_*_GUIDELINES`；注意路由/端口全部与当前不一致） | 回顾 Web UI 为何下线 |
 | `s2-investigations-2026-04-08/` | S2 审校阶段调查与草案（7 份，均已被 `plans/2026-04-08-s2-three-pass-split-plan` 落地解决） | 回查 S2 优化思路起源 |
+| `ai-workgroup/` | AI 多智能体协作协议、队列、worker/context/logs 等实验性工作区；协议完整但未进入当前开发执行流 | 仅在复盘多 agent 协作实验时查看 |
 
 > Hermes 方向 4 份文档未归档，已单独收在 `docs/plans/hermes/`（无时间表但保留可见）。被 `plans/2026-04-13-*` 两份取代的 `2026-04-12-probe-tts-calibration.md` 和 `2026-04-13-voice-speed-catalog.md` 归入本 archive 的 `plans/`。
 
@@ -38,5 +39,7 @@
 - 归档目录结构由本 README 维护，新增子目录需同步更新此表。
 
 ## 本次重组记录
+
+2026-05-24 docs status cleanup 批次：将停滞且未纳入当前执行流的 `docs/plans/AI-workgroup/` 移至 `docs/archive/ai-workgroup/`；当前 plans 的阅读入口与状态索引改由 `docs/plans/README.md` 维护。Smart 相关方案按当前项目判断标为“正在实施中”，不归档。
 
 2026-04-17 legacy cleanup 批次进行了一次集中归档：顶层散落的 5 份快照、`docs/phases/` (10)、`docs/acceptance/` (14)、`docs/reviews/` (5)、`docs/architecture/` 里的 Web UI 文档 (9)、`docs/deployment/` 部分 (5)、`docs/issues/` + `docs/analysis/` 全部 (7)、`docs/plans/` 已完成 (20+)、`docs/specs/` 已完成 (9)、`docs/superpowers/` 部分 (2 份被取代的 plan)，共约 80 份归入对应子目录。原目录 `phases/` `acceptance/` `reviews/` `issues/` `analysis/` `superpowers/` 已清空删除。Hermes 4 份（原 `docs/superpowers/plans/` + `docs/superpowers/specs/`）保留在 `docs/plans/hermes/`，不归档。
