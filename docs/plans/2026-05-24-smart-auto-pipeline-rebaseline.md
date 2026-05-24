@@ -13,7 +13,9 @@
 
 ## 1. 结论
 
-截至 2026-05-24，Smart Auto Pipeline 已从原始方案进入实装阶段，但不能简单标为全部完成。
+截至 2026-05-24（晚间更新），Smart Auto Pipeline 已从原始方案进入实装阶段。
+**P2 三个 launch blocker 全部闭环**；P2 主体可安全接收新用户。仍有
+非阻塞 backlog（文档 drift / 监控指标 / 试点工作）。
 
 当前基线：
 
@@ -21,9 +23,9 @@
 |---|---|---|
 | P0 离线评估 | DONE | shadow evaluator / P0 results 已形成进入后续阶段的依据。 |
 | P1 shadow simulator | DONE | 模拟器、聚合器和 P1 done note 已完成。 |
-| P2 Smart MVP | IN_PROGRESS | 主体代码、Gateway 入口、pipeline 集成、sidecar 和测试已大规模落地，但仍有 launch blocker。 |
+| P2 Smart MVP | **LAUNCH-READY** | 主体代码、Gateway 入口、pipeline 集成、sidecar、测试、kill switch、pricing fallback、fail_and_refund 决断全部到位。launch blockers 已闭环（详见 §3），仍有非阻塞 backlog（文档 drift、监控指标补全）。 |
 | P3 multimodal verifier | DEFERRED | 不按原方案直接做完整独立 verifier；先做 shadow / only-report 试点。 |
-| P4 verifier 自动接入 | DEFERRED | 不推进无人确认的 verifier -> auto re-TTS 路径。 |
+| P4 verifier 自动接入 | DEFERRED | 不推进无人确认的 verifier -> auto re-TTS 路径。未来若做必须改成"用户确认 + 一键修复"路径。 |
 | P5 规模化优化 | PARTIAL STARTED | Smart analytics v1、possible-match auto-reuse、strong_named 等已开始落地。 |
 
 原则上，后续开发应以本文件作为当前路线依据；2026-05-04 主纲保留为历史设计基线。
@@ -87,31 +89,75 @@
 - Smart succeeded 且 `smart_state` 为可编辑状态时，允许进入 post-edit。
 - Jianying draft 生成入口已允许 Smart job，但仍依赖 Smart state gate。
 
-## 3. Launch Blockers / 未完成项
+## 3. Launch Blockers — 闭环状态（2026-05-24 晚间更新）
 
-### 3.1 Smart kill switch / 灰度门禁
+### 3.1 Smart kill switch / 灰度门禁 —— DONE（Task #23, commit `a5e8aae`）
 
-原方案和 P2 实施计划要求 `AVT_ENABLE_SMART_MODE=false` 默认关闭，并配合 admin runtime toggle / allowlist 控制灰度。
+**当前代码事实**：
 
-当前代码事实：
+- `Settings.enable_smart_mode` 字段已落地（`gateway/config.py`），从
+  `AVT_ENABLE_SMART_MODE` 环境变量读取，默认 `False`。
+- `AdminSettings.smart_mode_enabled` 字段已落地
+  （`gateway/admin_settings.py`），默认 `False`，热重载（mtime 监听）。
+- `gateway/entitlements.py::get_effective_allowed_service_modes(user)`
+  helper 是唯一决策点，env AND admin 两层都必须 True smart 才出现。
+- 3 个 call site 都已切到 helper：
+  - `entitlements.py::get_entitlements` admin 分支
+  - `entitlements.py::get_entitlements` 普通用户分支
+  - `gateway/job_intercept.py` create-job service_mode 验证
+- **Admin 不再 auto-bypass**（codex audit 2026-05-24 修复）：smart
+  kill switch 提前到 smart_consent 校验之前并覆盖 admin。
+- 错误码 `smart_disabled`（403）区分于 `smart_consent_invalid`，便于
+  ops 从访问日志识别原因。
+- Admin UI 已落地（`frontend-next/.../admin/settings/page.tsx`）：
+  "智能版总开关" section，cinnabar badge "Kill switch · 默认关闭"。
 
-- `AVT_ENABLE_SMART_MODE` 只在文档中出现，代码中没有真实 gate。
-- `smart_mode_enabled`、`user.smart_enabled`、`get_effective_allowed_service_modes()` 等多层灰度机制仍停留在实施计划文本中。
-- Plus / Pro 当前直接暴露 Smart entitlement。
+**生产环境当前状态（保留现有行为，可随时关停）**：
 
-结论：这是 P2 launch blocker。上线前必须实现真实 kill switch，或更新产品策略明确 Smart 已不再按灰度默认关闭。
+- `/opt/aivideotrans/config/.env` 设 `AVT_ENABLE_SMART_MODE=true`
+- `/opt/aivideotrans/config/admin_settings.json` 设 `smart_mode_enabled=true`
+- effective = True AND True = **smart ENABLED**，13 个现有用户行为零变化。
+- 紧急关停：admin 后台 → 系统设置 → 智能版总开关 → 取消勾选；下次
+  API 请求立即返回 `smart_disabled` 403（包括 admin 自己）。
 
-### 3.2 Clean-local Smart 定价 fallback
+**回归覆盖**：`tests/test_smart_kill_switch.py` 共 15 个（7 helper +
+2 字段存在性 + 2 call-site 契约 + 4 行为测试）+ 3 个
+`test_gateway_create_job.py` quota preflight 测试已修适配新 gate。
 
-原方案要求 Smart 固定 100 credits/source minute，P2 计划进一步要求 clean-local fallback 包含 `smart.standard: 100`。
+**剩余非阻塞 follow-up**：UI 文案写"≤5 分钟 mtime 轮询"，实际
+gateway 每次 `load_settings()` 重读配置，生效更快；将来可改为
+"保存后对新建请求生效"。
 
-当前代码事实：
+### 3.2 Clean-local Smart 定价 fallback —— DONE（Task #24, commit `9bc3cc2`）
 
-- 生产 runtime pricing 文档记录已包含 `smart.standard: 100`。
-- repo 默认 fallback 的 `gateway/credits_service.py` / `gateway/pricing_schema.py` 仍缺 `smart.standard: 100`。
-- clean-local 默认估价会回退到非 Smart 默认值。
+**当前代码事实**：
 
-结论：必须补齐默认 pricing payload 和相关测试，避免本地、测试、fallback 路径与生产事实漂移。
+- `gateway/pricing_schema.py::build_default_pricing_payload`：
+  - `debit_rates += {"smart.standard": 100}`
+  - `bucket_priority += {"smart": ["trial", "subscription", "topup", "free"]}`
+  - `plans.plus.allowed_service_modes += "smart"`
+  - `plans.pro.allowed_service_modes += "smart"`
+- `gateway/credits_service.py` 冻结常量（pricing_runtime 失败时的
+  最终 fallback）：
+  - `DEBIT_RATES += ("smart", "standard"): 100`
+  - `BUCKET_PRIORITY += "smart": ["trial", "subscription", "topup", "free"]`
+- `estimate_credits(1.0, "smart", "standard") == 100` 已锁定。
+
+**生产 runtime 也已校准**：手动补丁 `/opt/aivideotrans/config/pricing_runtime.json`，
+plus/pro 的 `allowed_service_modes` 加上 smart，`bucket_priority`
+加上 smart 键。gateway 通过 mtime poll 热重载，无需重建容器。
+
+**回归覆盖**：`tests/test_smart_pricing_fallback.py` 13 个测试（5
+默认 payload + 2 冻结常量 + 5 estimate_credits 行为 + 1 runtime
+bucket priority）+ 既有 `test_pricing_schema.py` snapshot 测试已更新。
+
+**架构警示**：pricing 有三层独立源——admin 维护的
+`pricing_runtime.json`（生产真源）、`build_default_pricing_payload`
+（clean-local 默认）、frozen `DEBIT_RATES`（最终 fallback）。Task
+#24 校准了后两层；admin pricing UI 维护的 JSON 是独立的，admin 编辑
+plan 时如果忘记某 service_mode 仍可能造成偏移。建议未来加一个回归
+守卫：admin pricing API 保存 plus/pro 时校验 `allowed_service_modes`
+覆盖所有 `bucket_priority` 引用的 service_mode（非本次范围）。
 
 ### 3.3 `fail_and_refund` settlement —— DEFERRED（2026-05-24 Task #25 决断）
 
@@ -323,18 +369,36 @@ verifier detects issue -> user-facing warning / admin report -> user confirms ->
 
 ## 7. 短期执行清单
 
-优先级从高到低：
+### 已闭环（2026-05-24）
 
-1. 实现或正式废弃 Smart kill switch / 灰度门禁策略。
-2. 补齐 clean-local `smart.standard: 100` fallback 和测试。
-3. ~~决定 `fail_and_refund`：实现 settlement，或从当前产品面移除。~~
-   **已决断（Task #25, 2026-05-24）**：deferred / not implemented，详见 §3.3。
-   `fail_and_refund` 不在 Smart MVP launch 路径；validator + 前端均已 hard
-   block。要真做时另起 PR 设计完整三步 settlement。
+1. ✅ **Smart kill switch / 灰度门禁** — Task #23 / commit `a5e8aae`。
+   env + admin 两层 AND，admin 不绕过，admin UI toggle 已上线。详见
+   §3.1。
+2. ✅ **clean-local `smart.standard: 100` fallback** — Task #24 /
+   commit `9bc3cc2`。pricing_schema / credits_service / 生产 runtime
+   JSON 三处都校准。详见 §3.2。
+3. ✅ **`fail_and_refund` 决断 — DEFERRED** — Task #25 / commit
+   `c654ffc`。validator 拒绝 + 前端硬编码 + 用户无可选项 + 回归测试 +
+   docs 标注 deferred；不实现 settlement。详见 §3.3。
+
+### 待办（非阻塞 backlog，优先级从高到低）
+
 4. 修正文档 / 注释漂移，尤其是 Jianying draft 对 Smart 的支持描述。
-5. 在 Smart analytics 中补 voice auto-reuse 后改音色比例指标。
-6. 设计 P3 shadow verifier 的 only-report schema 和人工抽样流程。
-7. 为毛利分析补触发条件监控，而不是立即做完整毛利系统。
+5. 在 Smart analytics 中补 voice auto-reuse 后改音色比例指标
+   （strong_named 命中后改音色比例、possible_match_auto_reused 后改
+   音色比例、进入 post-edit 比例等 — 见 §6.3 阈值）。Task #26。
+6. 设计 P3 shadow verifier 的 only-report schema 和人工抽样流程（见
+   §5.2 主动抽样要求）。Task #22，2-4 周后启动。
+7. 为毛利分析补触发条件监控，而不是立即做完整毛利系统（见 §6.1）。
+
+### 附带 follow-up（顺手做）
+
+- Admin UI 文案"≤5 分钟 mtime 轮询"改为更准确的"保存后对新建请求
+  立即生效"（gateway 每次 load_settings 重读）。
+- Pricing admin API 在保存 plus/pro plan 时校验
+  `allowed_service_modes` 覆盖所有 `bucket_priority` 引用的
+  service_mode，防止运营误配置（避免再发生像 2026-05-24 那样 admin
+  pricing UI 没暴露 smart 导致 entitlements 漂移的事故）。
 
 ## 8. 审计口径
 
@@ -346,4 +410,6 @@ verifier detects issue -> user-facing warning / admin report -> user confirms ->
 - DRIFT：文档或注释仍描述旧行为，但主代码已改变。
 - BLOCKER：影响灰度 / 生产发布安全性的缺口。
 
-按此口径，当前最重要的结论不是“Smart 是否已做”，而是“Smart 已大量完成，但发布安全边界还没有完全闭环”。
+按此口径，当前最重要的结论是：**Smart MVP launch blockers 已全部
+闭环；可安全接收新用户**。剩余的是 follow-up（监控指标补全、文档
+drift 清理、shadow verifier 试点），都属于产品迭代，不阻塞用户使用。
