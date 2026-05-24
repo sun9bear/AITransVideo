@@ -471,7 +471,8 @@ export default function AdminSettingsPage() {
               开启后（需同时设置 <code className="font-mono">AVT_ENABLE_SMART_MODE=true</code>），
               智能版会出现在用户的 <code className="font-mono">allowed_service_modes</code> 列表里，
               所有创建智能版任务的 API 调用通过。
-              <strong className="text-[color:var(--cinnabar)]">关闭后立即生效（≤ 5 分钟 mtime 轮询）</strong>，
+              <strong className="text-[color:var(--cinnabar)]">保存后对新建请求立即生效</strong>（gateway
+              每次 API 调用重读 admin_settings；无 mtime poll 延迟），
               所有人（包括管理员）创建智能版任务会返回 <code className="font-mono">smart_disabled</code> 403。
               已在跑的任务不会被中断。
             </p>

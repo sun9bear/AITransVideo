@@ -76,6 +76,34 @@ class PricingPayload(BaseModel):
     def validate_cross_refs(self):
         if self.trial.fallback_plan not in self.plans:
             raise ValueError("trial fallback_plan must reference an existing plan")
+
+        # Codex follow-up B (2026-05-24): every service_mode key in
+        # credits.bucket_priority must be reachable via at least one
+        # plan's allowed_service_modes. Otherwise it's dead config —
+        # users that pricing thinks should consume buckets in this
+        # mode can never actually select it.
+        #
+        # This catches the exact 2026-05-24 incident: pricing_runtime
+        # had bucket_priority['smart'] but no plan listed smart in
+        # allowed_service_modes → entitlements API returned without
+        # smart → frontend showed "即将开放" even though pricing was
+        # ready. The clean-local default already satisfies this; the
+        # check protects admin-edited runtime JSON from re-introducing
+        # the drift.
+        reachable_modes = {
+            mode
+            for plan in self.plans.values()
+            for mode in plan.allowed_service_modes
+        }
+        for mode in self.credits.bucket_priority:
+            if mode not in reachable_modes:
+                raise ValueError(
+                    f"credits.bucket_priority['{mode}'] is configured but "
+                    f"no plan offers '{mode}' in allowed_service_modes "
+                    f"(reachable modes: {sorted(reachable_modes)}). "
+                    f"Either remove '{mode}' from bucket_priority, or add "
+                    f"it to at least one plan's allowed_service_modes."
+                )
         return self
 
 
