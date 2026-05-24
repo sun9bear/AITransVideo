@@ -155,21 +155,36 @@ class TestClassifyVoiceDecision:
 
 
 class TestLoadSegmentToSpeakerMapping:
-    """Per design §2.3:
-      1. editor/baseline/segments.json (preferred — post-edit baseline)
-      2. editor/editing/segments.json (current draft fallback)
-      3. transcript/segments.json (earliest source)
-    Missing project_dir → empty dict (graceful)."""
+    """Per design §2.3 v2 (corrected for actual project layout):
+      1. editor/editing/segments.json (active editing draft — most recent
+         truth for in-progress jobs)
+      2. editor/segments.json (canonical post-commit baseline — what
+         process.py / editing_commit write)
+      3. translation/segments.json (legacy fallback for tasks that never
+         entered editing)
 
-    def _write_segments(self, path: Path, segments: list[dict]):
+    Missing project_dir → empty dict (graceful).
+
+    Both shapes supported per editor_baseline.normalise pattern:
+      - {"segments": [...]}
+      - raw [...] at top level
+    """
+
+    def _write_segments_wrapped(self, path: Path, segments: list[dict]):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"segments": segments}), encoding="utf-8")
 
-    def test_loads_from_baseline_first(self, tmp_path):
+    def _write_segments_raw_list(self, path: Path, segments: list[dict]):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(segments), encoding="utf-8")
+
+    def test_loads_from_editing_first(self, tmp_path):
+        """For in-progress (editing) jobs, editor/editing/segments.json
+        is the most current truth."""
         from admin_smart_analytics_api import _load_segment_to_speaker_mapping
 
-        self._write_segments(
-            tmp_path / "editor" / "baseline" / "segments.json",
+        self._write_segments_wrapped(
+            tmp_path / "editor" / "editing" / "segments.json",
             [
                 {"segment_id": "s1", "speaker_id": "speaker_a"},
                 {"segment_id": "s2", "speaker_id": "speaker_b"},
@@ -178,41 +193,71 @@ class TestLoadSegmentToSpeakerMapping:
         mapping = _load_segment_to_speaker_mapping(tmp_path)
         assert mapping == {"s1": "speaker_a", "s2": "speaker_b"}
 
-    def test_falls_back_to_editing_when_baseline_missing(self, tmp_path):
+    def test_falls_back_to_editor_segments_when_no_active_editing(self, tmp_path):
+        """For committed jobs, editor/segments.json is the canonical
+        baseline (written by process.py publish + editing_commit)."""
         from admin_smart_analytics_api import _load_segment_to_speaker_mapping
 
-        self._write_segments(
-            tmp_path / "editor" / "editing" / "segments.json",
+        self._write_segments_wrapped(
+            tmp_path / "editor" / "segments.json",
             [{"segment_id": "s1", "speaker_id": "speaker_a"}],
         )
         mapping = _load_segment_to_speaker_mapping(tmp_path)
         assert mapping == {"s1": "speaker_a"}
 
-    def test_falls_back_to_transcript_when_no_editor(self, tmp_path):
+    def test_falls_back_to_translation_when_no_editor(self, tmp_path):
+        """Legacy tasks that never went through editing keep
+        translation/segments.json as the only source."""
         from admin_smart_analytics_api import _load_segment_to_speaker_mapping
 
-        self._write_segments(
-            tmp_path / "transcript" / "segments.json",
+        self._write_segments_wrapped(
+            tmp_path / "translation" / "segments.json",
             [{"segment_id": "s1", "speaker_id": "speaker_a"}],
         )
         mapping = _load_segment_to_speaker_mapping(tmp_path)
         assert mapping == {"s1": "speaker_a"}
 
-    def test_baseline_wins_over_editing(self, tmp_path):
-        """Baseline takes precedence — post-edit users don't always
-        commit, baseline is the most stable per-job snapshot."""
+    def test_editing_wins_over_committed_baseline(self, tmp_path):
+        """Active edit > committed baseline — speaker reassign mid-edit
+        should show in mapping immediately."""
         from admin_smart_analytics_api import _load_segment_to_speaker_mapping
 
-        self._write_segments(
-            tmp_path / "editor" / "baseline" / "segments.json",
+        self._write_segments_wrapped(
+            tmp_path / "editor" / "editing" / "segments.json",
             [{"segment_id": "s1", "speaker_id": "speaker_a"}],
         )
-        self._write_segments(
-            tmp_path / "editor" / "editing" / "segments.json",
+        self._write_segments_wrapped(
+            tmp_path / "editor" / "segments.json",
             [{"segment_id": "s1", "speaker_id": "speaker_b"}],  # different!
         )
         mapping = _load_segment_to_speaker_mapping(tmp_path)
-        assert mapping["s1"] == "speaker_a"  # baseline wins
+        assert mapping["s1"] == "speaker_a", "editing wins (most recent)"
+
+    def test_editor_segments_wins_over_translation(self, tmp_path):
+        from admin_smart_analytics_api import _load_segment_to_speaker_mapping
+
+        self._write_segments_wrapped(
+            tmp_path / "editor" / "segments.json",
+            [{"segment_id": "s1", "speaker_id": "speaker_a"}],
+        )
+        self._write_segments_wrapped(
+            tmp_path / "translation" / "segments.json",
+            [{"segment_id": "s1", "speaker_id": "speaker_b"}],
+        )
+        mapping = _load_segment_to_speaker_mapping(tmp_path)
+        assert mapping["s1"] == "speaker_a"
+
+    def test_supports_raw_list_shape(self, tmp_path):
+        """editor_baseline writes {"segments": [...]} wrapped, but some
+        tooling writes raw list[segment]. Both should parse."""
+        from admin_smart_analytics_api import _load_segment_to_speaker_mapping
+
+        self._write_segments_raw_list(
+            tmp_path / "editor" / "segments.json",
+            [{"segment_id": "s1", "speaker_id": "speaker_a"}],
+        )
+        mapping = _load_segment_to_speaker_mapping(tmp_path)
+        assert mapping == {"s1": "speaker_a"}
 
     def test_no_sources_returns_empty_dict(self, tmp_path):
         from admin_smart_analytics_api import _load_segment_to_speaker_mapping
@@ -225,8 +270,8 @@ class TestLoadSegmentToSpeakerMapping:
         keep_original). They shouldn't appear in the mapping."""
         from admin_smart_analytics_api import _load_segment_to_speaker_mapping
 
-        self._write_segments(
-            tmp_path / "editor" / "baseline" / "segments.json",
+        self._write_segments_wrapped(
+            tmp_path / "editor" / "segments.json",
             [
                 {"segment_id": "s1", "speaker_id": "speaker_a"},
                 {"segment_id": "s2", "speaker_id": None},
@@ -245,7 +290,10 @@ class TestLoadSegmentToSpeakerMapping:
 class TestCountVoiceOverridesPerSpeaker:
     """Per design §2.2: main numerator is ONLY
     post_edit_voice_override_changed. speaker_reassigned is separate.
-    Returns (set_of_changed_speakers, unmapped_count)."""
+
+    Returns (set_of_changed_speakers, unmapped_count, total_event_count).
+    The 3rd element (added per codex #5) is the denominator for the
+    unmapped rate shown in the UI (> 5% → ochre)."""
 
     def _write_events(self, path: Path, events: list[dict]):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,11 +319,12 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a", "s2": "speaker_b"}
-        changed, unmapped = _count_voice_overrides_per_speaker(
+        changed, unmapped, total = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == {"speaker_a", "speaker_b"}
         assert unmapped == 0
+        assert total == 2
 
     def test_unmapped_segment_counted_separately(self, tmp_path):
         from admin_smart_analytics_api import _count_voice_overrides_per_speaker
@@ -294,7 +343,7 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a"}
-        changed, unmapped = _count_voice_overrides_per_speaker(
+        changed, unmapped, total = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == {"speaker_a"}
@@ -302,11 +351,16 @@ class TestCountVoiceOverridesPerSpeaker:
             "Unmapped segment_id MUST be tallied separately so admin "
             "can detect data-contract drift (design §3.4)."
         )
+        assert total == 2, (
+            "Total event count is the denominator for unmapped_rate. "
+            "Codex #5: '> 5% unmapped' UI signal needs both numerator "
+            "(unmapped) and denominator (total events)."
+        )
 
     def test_multiple_overrides_to_same_speaker_count_once(self, tmp_path):
         """User changing the same speaker's voice 3 times still =
         '1 speaker changed' — we're measuring distinct speakers, not
-        action counts."""
+        action counts. (total_event_count is still 2 though.)"""
         from admin_smart_analytics_api import _count_voice_overrides_per_speaker
 
         self._write_events(
@@ -323,10 +377,11 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a", "s2": "speaker_a"}
-        changed, _ = _count_voice_overrides_per_speaker(
+        changed, _, total = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == {"speaker_a"}
+        assert total == 2
 
     def test_speaker_reassigned_NOT_in_numerator(self, tmp_path):
         """Codex 第二轮 review #3: speaker_reassigned doesn't count
@@ -343,11 +398,12 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a"}
-        changed, unmapped = _count_voice_overrides_per_speaker(
+        changed, unmapped, total = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == set()
         assert unmapped == 0
+        assert total == 0, "speaker_reassigned doesn't count as a voice-override event"
 
     def test_dubbing_mode_changed_NOT_in_numerator(self, tmp_path):
         """voice_selection_dubbing_mode_changed (keep_original / mute)
@@ -364,10 +420,11 @@ class TestCountVoiceOverridesPerSpeaker:
             ],
         )
         mapping = {"s1": "speaker_a"}
-        changed, _ = _count_voice_overrides_per_speaker(
+        changed, _, total = _count_voice_overrides_per_speaker(
             tmp_path / "audit" / "user_edit_events.jsonl", mapping
         )
         assert changed == set()
+        assert total == 0
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -403,9 +460,25 @@ class TestCountSpeakerReassigned:
 # ─────────────────────────────────────────────────────────────────────
 
 
+def _empty_metric(**overrides):
+    """Build a minimal SimpleNamespace with all voice-reuse fields
+    defaulted to empty. Tests override only what they care about."""
+    defaults = dict(
+        voice_reuse_hits={"strong": set(), "strong_named": set(),
+                          "possible_auto": set(), "strong_or_legacy_null": set()},
+        voice_changed_speakers=set(),
+        speakers_reassigned=set(),
+        unmapped_segment_count=0,
+        voice_override_event_count=0,
+        entered_editing=False,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
 class TestAggregateVoiceReuseQuality:
-    """Pure aggregator — takes per-job hit/change tallies and produces
-    the 4 main + 1 overall + 2 derived job-level metrics + unmapped."""
+    """Pure aggregator — produces 4+1 bucket rates + auxiliary +
+    derived job-level + unmapped rate (per codex #2 #3 #5)."""
 
     def test_empty_metrics_returns_dashes(self):
         """Design §6.1: when no hits, rates show "—" (None) not 0%."""
@@ -417,12 +490,17 @@ class TestAggregateVoiceReuseQuality:
             assert out[bucket]["change_rate"] is None
             assert out[bucket]["hits"] == 0
             assert out[bucket]["changes"] == 0
+        assert out["jobs_with_voice_change_rate"] is None
+        assert out["auto_reuse_jobs_entering_edit_rate"] is None
+        assert out["speaker_reassigned_rate"] is None
+        assert out["unmapped_segment_rate"] is None
+        assert out["unmapped_segment_count"] == 0
 
     def test_strong_named_50pct_change_rate(self):
         from admin_smart_analytics_api import _aggregate_voice_reuse_quality
 
         # 4 speakers hit strong_named, 2 of them got voice override.
-        metrics = [SimpleNamespace(
+        metrics = [_empty_metric(
             voice_reuse_hits={
                 "strong": {"speaker_a", "speaker_b"},
                 "strong_named": {"speaker_c", "speaker_d", "speaker_e", "speaker_f"},
@@ -430,7 +508,6 @@ class TestAggregateVoiceReuseQuality:
                 "strong_or_legacy_null": set(),
             },
             voice_changed_speakers={"speaker_c", "speaker_d"},
-            unmapped_segment_count=0,
             entered_editing=True,
         )]
         out = _aggregate_voice_reuse_quality(metrics)
@@ -438,10 +515,36 @@ class TestAggregateVoiceReuseQuality:
         assert out["strong_named"]["changes"] == 2
         assert out["strong_named"]["change_rate"] == pytest.approx(0.5)
 
+    def test_strong_change_counts_only_intersection(self):
+        """Codex #3: bucket-level changes use hit_speakers ∩
+        voice_changed_speakers, not just 'voice_changed_speakers non-empty'.
+
+        Speaker_z is changed but never appeared in strong's hits — it
+        must NOT inflate strong's change count."""
+        from admin_smart_analytics_api import _aggregate_voice_reuse_quality
+
+        metrics = [_empty_metric(
+            voice_reuse_hits={
+                "strong": {"speaker_a", "speaker_b"},
+                "strong_named": set(),
+                "possible_auto": set(),
+                "strong_or_legacy_null": set(),
+            },
+            voice_changed_speakers={"speaker_z"},  # not in strong's hits!
+        )]
+        out = _aggregate_voice_reuse_quality(metrics)
+        assert out["strong"]["hits"] == 2
+        assert out["strong"]["changes"] == 0, (
+            "Strong's bucket change count must only count speakers that "
+            "are BOTH a strong hit AND in voice_changed_speakers. "
+            "Codex #3."
+        )
+        assert out["strong"]["change_rate"] == 0.0
+
     def test_overall_aggregates_across_buckets(self):
         from admin_smart_analytics_api import _aggregate_voice_reuse_quality
 
-        metrics = [SimpleNamespace(
+        metrics = [_empty_metric(
             voice_reuse_hits={
                 "strong": {"speaker_a", "speaker_b"},
                 "strong_named": {"speaker_c"},
@@ -449,71 +552,116 @@ class TestAggregateVoiceReuseQuality:
                 "strong_or_legacy_null": set(),
             },
             voice_changed_speakers={"speaker_a", "speaker_d"},
-            unmapped_segment_count=0,
             entered_editing=True,
         )]
         out = _aggregate_voice_reuse_quality(metrics)
-        # overall: 4 hits, 2 changes = 50%
         assert out["overall"]["hits"] == 4
         assert out["overall"]["changes"] == 2
         assert out["overall"]["change_rate"] == pytest.approx(0.5)
 
-    def test_unmapped_segment_count_summed(self):
+    def test_unmapped_segment_count_and_rate(self):
+        """Codex #5: surface unmapped_segment_rate so UI can show
+        '> 5% → ochre'. Needs denominator = total override events."""
         from admin_smart_analytics_api import _aggregate_voice_reuse_quality
 
         metrics = [
-            SimpleNamespace(
-                voice_reuse_hits={"strong": set(), "strong_named": set(),
-                                  "possible_auto": set(), "strong_or_legacy_null": set()},
-                voice_changed_speakers=set(),
-                unmapped_segment_count=3,
-                entered_editing=False,
-            ),
-            SimpleNamespace(
-                voice_reuse_hits={"strong": set(), "strong_named": set(),
-                                  "possible_auto": set(), "strong_or_legacy_null": set()},
-                voice_changed_speakers=set(),
-                unmapped_segment_count=2,
-                entered_editing=False,
-            ),
+            _empty_metric(unmapped_segment_count=3, voice_override_event_count=10),
+            _empty_metric(unmapped_segment_count=2, voice_override_event_count=10),
         ]
         out = _aggregate_voice_reuse_quality(metrics)
         assert out["unmapped_segment_count"] == 5
+        assert out["unmapped_segment_rate"] == pytest.approx(5 / 20)
 
-    def test_jobs_with_voice_change_rate(self):
-        """Derived job-level: smart jobs containing at least one
-        auto-reuse hit AND at least one voice change."""
+    def test_unmapped_segment_rate_when_no_events(self):
+        """No override events → rate is None (UI shows "—" not 0%)."""
+        from admin_smart_analytics_api import _aggregate_voice_reuse_quality
+
+        out = _aggregate_voice_reuse_quality([_empty_metric()])
+        assert out["unmapped_segment_rate"] is None
+
+    def test_jobs_with_voice_change_rate_intersection(self):
+        """Codex #3: a job 'has voice change for its auto-reuse hits'
+        iff hit_speakers ∩ voice_changed_speakers is non-empty.
+
+        Job that changed speaker_z (not in any hit) must NOT be counted
+        as a 'voice-changed' auto-reuse job."""
         from admin_smart_analytics_api import _aggregate_voice_reuse_quality
 
         metrics = [
-            # job 1: hit + change
-            SimpleNamespace(
+            # job 1: hit speaker_a, changed speaker_a — counts.
+            _empty_metric(
                 voice_reuse_hits={"strong": {"a"}, "strong_named": set(),
                                   "possible_auto": set(), "strong_or_legacy_null": set()},
                 voice_changed_speakers={"a"},
-                unmapped_segment_count=0,
                 entered_editing=True,
             ),
-            # job 2: hit but no change
-            SimpleNamespace(
+            # job 2: hit speaker_a, changed speaker_z (different) — does NOT count.
+            _empty_metric(
                 voice_reuse_hits={"strong": {"a"}, "strong_named": set(),
                                   "possible_auto": set(), "strong_or_legacy_null": set()},
-                voice_changed_speakers=set(),
-                unmapped_segment_count=0,
+                voice_changed_speakers={"z"},
                 entered_editing=True,
             ),
-            # job 3: no hits — shouldn't count toward denominator
-            SimpleNamespace(
-                voice_reuse_hits={"strong": set(), "strong_named": set(),
+            # job 3: hit speaker_b, no changes — doesn't count.
+            _empty_metric(
+                voice_reuse_hits={"strong": {"b"}, "strong_named": set(),
                                   "possible_auto": set(), "strong_or_legacy_null": set()},
                 voice_changed_speakers=set(),
-                unmapped_segment_count=0,
                 entered_editing=False,
+            ),
+            # job 4: no hits at all — excluded from denominator.
+            _empty_metric(voice_changed_speakers={"x"}, entered_editing=True),
+        ]
+        out = _aggregate_voice_reuse_quality(metrics)
+        # Denominator: jobs with hits = 3 (jobs 1, 2, 3). Job 4 excluded.
+        # Numerator: jobs where hit_speakers ∩ changed != ∅ = 1 (only job 1).
+        assert out["jobs_with_voice_change_rate"] == pytest.approx(1 / 3)
+
+    def test_auto_reuse_jobs_entering_edit_rate(self):
+        """Design §3.2: among jobs that hit auto-reuse, the fraction
+        that subsequently entered editing (regardless of voice change)."""
+        from admin_smart_analytics_api import _aggregate_voice_reuse_quality
+
+        metrics = [
+            # job 1: hit + entered editing
+            _empty_metric(
+                voice_reuse_hits={"strong": {"a"}, "strong_named": set(),
+                                  "possible_auto": set(), "strong_or_legacy_null": set()},
+                entered_editing=True,
+            ),
+            # job 2: hit + NOT entered editing
+            _empty_metric(
+                voice_reuse_hits={"strong": {"b"}, "strong_named": set(),
+                                  "possible_auto": set(), "strong_or_legacy_null": set()},
+                entered_editing=False,
+            ),
+            # job 3: no hit, entered editing — excluded from denominator
+            _empty_metric(entered_editing=True),
+        ]
+        out = _aggregate_voice_reuse_quality(metrics)
+        # 1 of 2 hit-jobs entered editing.
+        assert out["auto_reuse_jobs_entering_edit_rate"] == pytest.approx(0.5)
+
+    def test_speaker_reassigned_rate(self):
+        """Auxiliary indicator (codex #2): per-speaker reassign rate
+        across all jobs that had any hit."""
+        from admin_smart_analytics_api import _aggregate_voice_reuse_quality
+
+        metrics = [
+            _empty_metric(
+                voice_reuse_hits={"strong": {"a", "b"}, "strong_named": set(),
+                                  "possible_auto": set(), "strong_or_legacy_null": set()},
+                speakers_reassigned={"a"},
+            ),
+            _empty_metric(
+                voice_reuse_hits={"strong": {"c", "d"}, "strong_named": set(),
+                                  "possible_auto": set(), "strong_or_legacy_null": set()},
+                speakers_reassigned=set(),
             ),
         ]
         out = _aggregate_voice_reuse_quality(metrics)
-        # 1 of 2 hit-jobs had a change = 50%
-        assert out["jobs_with_voice_change_rate"] == pytest.approx(0.5)
+        # 4 hit speakers, 1 reassigned.
+        assert out["speaker_reassigned_rate"] == pytest.approx(1 / 4)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -537,9 +685,10 @@ class TestAggregateJobAddsVoiceReuseFields:
         (proj / "audit" / "user_edit_events.jsonl").write_text(
             "\n".join(json.dumps(e) for e in events), encoding="utf-8",
         )
-        # Map segments via editor/baseline (preferred)
-        (proj / "editor" / "baseline").mkdir(parents=True)
-        (proj / "editor" / "baseline" / "segments.json").write_text(
+        # Map segments via editor/segments.json (canonical post-commit
+        # baseline — what process.py actually writes).
+        (proj / "editor").mkdir(parents=True)
+        (proj / "editor" / "segments.json").write_text(
             json.dumps({"segments": segments}), encoding="utf-8",
         )
         return proj
@@ -579,6 +728,7 @@ class TestAggregateJobAddsVoiceReuseFields:
         assert m.voice_reuse_hits["strong"] == set()
         assert m.voice_changed_speakers == {"speaker_a"}
         assert m.unmapped_segment_count == 0
+        assert m.voice_override_event_count == 1
 
     def test_possible_auto_hit_no_change(self, tmp_path):
         from admin_smart_analytics_api import _aggregate_job
@@ -663,7 +813,47 @@ class TestAggregateJobAddsVoiceReuseFields:
                        "strong_or_legacy_null"):
             assert m.voice_reuse_hits[bucket] == set()
         assert m.voice_changed_speakers == set()
+        assert m.speakers_reassigned == set()
         assert m.unmapped_segment_count == 0
+        assert m.voice_override_event_count == 0
+
+    def test_speaker_reassigned_populated_from_events(self, tmp_path):
+        """voice_selection_speaker_reassigned event → speakers_reassigned
+        set (auxiliary indicator, separate from change rate)."""
+        from admin_smart_analytics_api import _aggregate_job
+
+        proj = self._setup_project(
+            tmp_path,
+            decisions=[
+                {
+                    "decision_type": "voice_clone",
+                    "reason_code": "reused_user_voice",
+                    "speaker_id": "speaker_a",
+                    "evidence": {"match_confidence": "strong"},
+                },
+            ],
+            events=[
+                {
+                    "event_type": "voice_selection_speaker_reassigned",
+                    "segment_id": "s1",
+                },
+            ],
+            segments=[{"segment_id": "s1", "speaker_id": "speaker_a"}],
+        )
+        job = SimpleNamespace(
+            job_id="j_reassign", user_id="u", display_name="t",
+            title="", status="succeeded",
+            source_duration_seconds=600.0,
+            project_dir=str(proj),
+            smart_state=None, error_summary=None,
+            edit_generation=0,
+            created_at=datetime(2026, 5, 24, tzinfo=timezone.utc),
+        )
+        m = _aggregate_job(job, user_email=None)
+        # Main numerator stays empty (codex #3)
+        assert m.voice_changed_speakers == set()
+        # Auxiliary populated
+        assert m.speakers_reassigned == {"speaker_a"}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -702,7 +892,9 @@ class TestBuildSummaryPayloadVoiceReuseQuality:
                 "possible_auto": set(), "strong_or_legacy_null": set(),
             },
             "voice_changed_speakers": set(),
+            "speakers_reassigned": set(),
             "unmapped_segment_count": 0,
+            "voice_override_event_count": 0,
         }
         defaults.update(kwargs)
         return JobAggregatedMetrics(**defaults)
@@ -736,6 +928,64 @@ class TestBuildSummaryPayloadVoiceReuseQuality:
                        "strong_or_legacy_null", "overall"):
             assert vrq[bucket]["change_rate"] is None
             assert vrq[bucket]["hits"] == 0
+        # New aux + derived indicators (codex #2)
+        assert vrq["jobs_with_voice_change_rate"] is None
+        assert vrq["auto_reuse_jobs_entering_edit_rate"] is None
+        assert vrq["speaker_reassigned_rate"] is None
+        assert vrq["unmapped_segment_rate"] is None
+
+    def test_payload_includes_case_rows(self):
+        """Codex #4: backend must expose case_rows so frontend Tab 4
+        can render the case table without a second backend round-trip."""
+        from admin_smart_analytics_api import _build_summary_payload
+
+        # 2 hit metrics, top-1 has a change → 1 case row produced.
+        metrics = [self._metric_with_hits(
+            job_id="job_x",
+            voice_reuse_hits={
+                "strong": set(), "strong_named": {"speaker_c"},
+                "possible_auto": set(), "strong_or_legacy_null": set(),
+            },
+            voice_changed_speakers={"speaker_c"},
+        )]
+        payload = _build_summary_payload(metrics, days=30)
+
+        assert "voice_reuse_quality" in payload
+        vrq = payload["voice_reuse_quality"]
+        assert "case_rows" in vrq, (
+            "voice_reuse_quality must include case_rows so frontend "
+            "Tab 4 can render the case table without backend re-call "
+            "(design §4 + codex #4)."
+        )
+        assert isinstance(vrq["case_rows"], list)
+        # Each case row has job_id, speaker_id, bucket, created_at.
+        if vrq["case_rows"]:
+            row = vrq["case_rows"][0]
+            for key in ("job_id", "speaker_id", "bucket", "created_at"):
+                assert key in row, (
+                    f"case row missing key {key!r}; got: {row}"
+                )
+
+    def test_case_rows_capped_at_twenty(self):
+        """Cap at 20 rows (design §4 case 表)."""
+        from admin_smart_analytics_api import _build_summary_payload
+
+        metrics = []
+        for i in range(30):
+            metrics.append(self._metric_with_hits(
+                job_id=f"j{i}",
+                voice_reuse_hits={
+                    "strong": {f"speaker_{i}"}, "strong_named": set(),
+                    "possible_auto": set(), "strong_or_legacy_null": set(),
+                },
+                voice_changed_speakers={f"speaker_{i}"},
+                created_at=f"2026-05-{(i % 28) + 1:02d}T00:00:00+00:00",
+            ))
+        payload = _build_summary_payload(metrics, days=30)
+        case_rows = payload["voice_reuse_quality"]["case_rows"]
+        assert len(case_rows) <= 20, (
+            f"case_rows must be capped at 20 (design §4); got {len(case_rows)}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -775,7 +1025,9 @@ class TestCsvVoiceReuseColumns:
                 "possible_auto": {"d"}, "strong_or_legacy_null": set(),
             },
             "voice_changed_speakers": {"a", "d"},
+            "speakers_reassigned": set(),
             "unmapped_segment_count": 1,
+            "voice_override_event_count": 5,
         }
         defaults.update(kwargs)
         return JobAggregatedMetrics(**defaults)

@@ -288,14 +288,28 @@ def _classify_voice_decision(record: dict) -> str | None:
 def _load_segment_to_speaker_mapping(project_dir: Path) -> dict[str, str]:
     """Build segment_id → speaker_id mapping from segments.json files.
 
-    Multi-source fallback (design §2.3):
-      1. editor/baseline/segments.json (most stable post-edit anchor)
-      2. editor/editing/segments.json (current draft)
-      3. transcript/segments.json (earliest)
+    Codex review v2 (2026-05-24, codex #1): the canonical project
+    layout in this repo (see process.py:6332-6346 + editing.py:108)
+    is:
 
-    Earlier sources win — baseline beats editing beats transcript.
+      1. editor/editing/segments.json — active editing draft. Most
+         recent truth while a user is editing. Snapshotted from
+         editor/segments.json on enter_editing.
+      2. editor/segments.json — canonical post-commit baseline. Written
+         by pipeline publish step + editing_commit (overwrite path).
+         Stores user text edits + voice_map overrides + str-normalised
+         segment_id.
+      3. translation/segments.json — legacy fallback for tasks that
+         never went through editing.
+
+    Earlier sources win on collision (editing > committed > legacy).
     Segments without speaker_id are silently skipped (keep_original /
     overlap suspected).
+
+    Both JSON shapes supported (mirrors editor_baseline /
+    write_editor_segments_from_translation):
+      - {"segments": [...]}
+      - raw [...] at top level
 
     Returns {} when project_dir is None / missing or no sources exist.
     """
@@ -303,9 +317,9 @@ def _load_segment_to_speaker_mapping(project_dir: Path) -> dict[str, str]:
         return {}
 
     sources = (
-        project_dir / "editor" / "baseline" / "segments.json",
         project_dir / "editor" / "editing" / "segments.json",
-        project_dir / "transcript" / "segments.json",
+        project_dir / "editor" / "segments.json",
+        project_dir / "translation" / "segments.json",
     )
 
     mapping: dict[str, str] = {}
@@ -319,7 +333,13 @@ def _load_segment_to_speaker_mapping(project_dir: Path) -> dict[str, str]:
                 "segments.json parse failed at %s: %s", path, exc,
             )
             continue
-        segments = data.get("segments") if isinstance(data, dict) else None
+        # Accept both shapes: wrapped {"segments": [...]} OR raw list.
+        if isinstance(data, dict):
+            segments = data.get("segments")
+        elif isinstance(data, list):
+            segments = data
+        else:
+            segments = None
         if not isinstance(segments, list):
             continue
         for seg in segments:
@@ -331,7 +351,7 @@ def _load_segment_to_speaker_mapping(project_dir: Path) -> dict[str, str]:
                 continue
             seg_id_str = str(seg_id)
             if seg_id_str in mapping:
-                # Earlier source already populated; skip (baseline wins).
+                # Earlier source already populated; skip (editing wins).
                 continue
             mapping[seg_id_str] = str(speaker_id)
     return mapping
@@ -339,23 +359,32 @@ def _load_segment_to_speaker_mapping(project_dir: Path) -> dict[str, str]:
 
 def _count_voice_overrides_per_speaker(
     events_path: Path, segment_to_speaker: dict[str, str]
-) -> tuple[set[str], int]:
+) -> tuple[set[str], int, int]:
     """Count distinct speakers with at least one
     ``post_edit_voice_override_changed`` event (design §3.1 main numerator).
 
-    Returns (set_of_changed_speakers, unmapped_segment_count).
+    Returns ``(set_of_changed_speakers, unmapped_segment_count,
+    total_voice_override_event_count)``.
+
+    The 3rd element (added per codex v2 review #5) is the denominator
+    for the unmapped-rate signal in the UI: ``unmapped / total > 5%``
+    triggers an ochre warning on the dashboard.
 
     ``voice_selection_speaker_reassigned`` and
     ``voice_selection_dubbing_mode_changed`` are intentionally excluded
-    from the main numerator (codex 第二轮 review #3 + design §2.2).
+    from the main numerator AND the total (they're not voice-override
+    events — codex 第二轮 review #3 + design §2.2).
     """
     changed: set[str] = set()
     unmapped = 0
+    total = 0
     for record in _iter_jsonl_records(events_path):
         if record.get("event_type") != "post_edit_voice_override_changed":
             continue
+        total += 1
         segment = record.get("segment") or {}
         if not isinstance(segment, dict):
+            unmapped += 1
             continue
         seg_id = segment.get("segment_id")
         if seg_id is None:
@@ -366,7 +395,7 @@ def _count_voice_overrides_per_speaker(
             unmapped += 1
             continue
         changed.add(speaker_id)
-    return changed, unmapped
+    return changed, unmapped, total
 
 
 def _count_speaker_reassigned_per_job(
@@ -420,47 +449,81 @@ def _aggregate_voice_reuse_quality(
 ) -> dict[str, Any]:
     """Cross-job aggregation of voice auto-reuse hit/change tallies.
 
+    Codex v2 review #2 #3 #4 #5 — output now includes:
+      - 4+1 bucket {hits, changes, change_rate, thresholds}
+      - jobs_with_voice_change_rate (codex #3 — uses hit∩changed
+        intersection, not "any voice change" non-empty)
+      - auto_reuse_jobs_entering_edit_rate (codex #2 — design §3.2)
+      - speaker_reassigned_rate (codex #2 — design §3.4 auxiliary)
+      - unmapped_segment_rate (codex #5 — denominator from
+        voice_override_event_count)
+      - case_rows (codex #4 — backend produces sample table for UI)
+
     Input: iterable of objects exposing:
+      - job_id, created_at
       - voice_reuse_hits: dict[bucket -> set[speaker_id]]
       - voice_changed_speakers: set[speaker_id]
+      - speakers_reassigned: set[speaker_id]
       - unmapped_segment_count: int
+      - voice_override_event_count: int
       - entered_editing: bool
-
-    Output (design §3.1 + §3.4):
-      {
-        "strong": {hits, changes, change_rate, threshold_warn, threshold_crit},
-        "strong_named": {...},
-        "possible_auto": {...},
-        "strong_or_legacy_null": {...},
-        "overall": {...},
-        "speaker_reassigned_count": int,  # auxiliary
-        "unmapped_segment_count": int,
-        "jobs_with_voice_change_rate": float | None,
-      }
     """
     THRESHOLD_WARN = 0.30  # rebaseline §6.3
     THRESHOLD_CRIT = 0.50  # cinnabar / "强烈建议收紧"
+    UNMAPPED_WARN = 0.05   # design §3.4: >5% triggers ochre
 
     per_bucket_hits = {b: 0 for b in _VOICE_REUSE_BUCKETS}
     per_bucket_changes = {b: 0 for b in _VOICE_REUSE_BUCKETS}
     jobs_with_hits = 0
-    jobs_with_hits_and_change = 0
+    jobs_with_hits_and_relevant_change = 0
+    jobs_with_hits_entered_editing = 0
     unmapped_total = 0
+    voice_override_total = 0
+    total_hit_speakers = 0
+    total_reassigned_speakers = 0
+    case_rows: list[dict[str, Any]] = []
 
     for m in metrics_list:
         unmapped_total += int(getattr(m, "unmapped_segment_count", 0) or 0)
-        job_has_hit = False
+        voice_override_total += int(
+            getattr(m, "voice_override_event_count", 0) or 0
+        )
+
+        # Per-bucket per-job tallies + collect candidate case rows.
+        job_hit_speakers: set[str] = set()
+        changed = m.voice_changed_speakers or set()
         for bucket in _VOICE_REUSE_BUCKETS:
             speakers = (m.voice_reuse_hits or {}).get(bucket) or set()
             per_bucket_hits[bucket] += len(speakers)
-            changed = speakers & (m.voice_changed_speakers or set())
-            per_bucket_changes[bucket] += len(changed)
-            if speakers:
-                job_has_hit = True
-        if job_has_hit:
+            hit_and_changed = speakers & changed
+            per_bucket_changes[bucket] += len(hit_and_changed)
+            job_hit_speakers |= speakers
+            # Codex #4: emit one case row per (job_id, speaker_id) where
+            # a hit speaker was subsequently changed by the user.
+            for sp in hit_and_changed:
+                case_rows.append({
+                    "job_id": str(getattr(m, "job_id", "") or ""),
+                    "speaker_id": sp,
+                    "bucket": bucket,
+                    "created_at": getattr(m, "created_at", None),
+                })
+
+        if job_hit_speakers:
             jobs_with_hits += 1
-            if m.voice_changed_speakers:
-                jobs_with_hits_and_change += 1
+            total_hit_speakers += len(job_hit_speakers)
+            total_reassigned_speakers += len(
+                (m.speakers_reassigned or set()) & job_hit_speakers
+            )
+            # Codex #3: a job 'has voice change for its auto-reuse hits'
+            # iff hit_speakers ∩ voice_changed_speakers is non-empty.
+            # Plain "voice_changed_speakers non-empty" would over-count
+            # because changing speaker_z (not in hits) shouldn't reflect
+            # on auto-reuse quality.
+            if job_hit_speakers & changed:
+                jobs_with_hits_and_relevant_change += 1
+            # Design §3.2: jobs that hit auto-reuse AND then entered editing.
+            if getattr(m, "entered_editing", False):
+                jobs_with_hits_entered_editing += 1
 
     def _bucket_payload(hits: int, changes: int) -> dict[str, Any]:
         rate = (changes / hits) if hits > 0 else None
@@ -475,8 +538,17 @@ def _aggregate_voice_reuse_quality(
     overall_hits = sum(per_bucket_hits.values())
     overall_changes = sum(per_bucket_changes.values())
 
+    # Codex #4 case_rows: sort by created_at desc, cap at 20.
+    case_rows.sort(
+        key=lambda r: (r.get("created_at") or ""),
+        reverse=True,
+    )
+    case_rows = case_rows[:20]
+
     return {
-        "strong": _bucket_payload(per_bucket_hits["strong"], per_bucket_changes["strong"]),
+        "strong": _bucket_payload(
+            per_bucket_hits["strong"], per_bucket_changes["strong"],
+        ),
         "strong_named": _bucket_payload(
             per_bucket_hits["strong_named"], per_bucket_changes["strong_named"],
         ),
@@ -488,12 +560,34 @@ def _aggregate_voice_reuse_quality(
             per_bucket_changes["strong_or_legacy_null"],
         ),
         "overall": _bucket_payload(overall_hits, overall_changes),
+        # Auxiliary indicator (codex #2 + design §3.4)
+        "speaker_reassigned_rate": (
+            (total_reassigned_speakers / total_hit_speakers)
+            if total_hit_speakers > 0
+            else None
+        ),
+        # Data-contract drift signal (codex #5 + design §3.4)
         "unmapped_segment_count": unmapped_total,
+        "unmapped_segment_rate": (
+            (unmapped_total / voice_override_total)
+            if voice_override_total > 0
+            else None
+        ),
+        "unmapped_threshold_warn": UNMAPPED_WARN,
+        # Derived job-level (codex #3 fixed + codex #2 added)
         "jobs_with_voice_change_rate": (
-            (jobs_with_hits_and_change / jobs_with_hits)
+            (jobs_with_hits_and_relevant_change / jobs_with_hits)
             if jobs_with_hits > 0
             else None
         ),
+        "auto_reuse_jobs_entering_edit_rate": (
+            (jobs_with_hits_entered_editing / jobs_with_hits)
+            if jobs_with_hits > 0
+            else None
+        ),
+        # Codex #4: backend produces the case table so frontend doesn't
+        # need a second round-trip. Top 20 by created_at desc.
+        "case_rows": case_rows,
     }
 
 
@@ -569,10 +663,16 @@ class JobAggregatedMetrics:
     )
     # Speakers that the user changed via post_edit_voice_override_changed.
     voice_changed_speakers: set[str] = field(default_factory=set)
+    # Speakers that had voice_selection_speaker_reassigned events
+    # (auxiliary indicator — codex v2 review #2 + design §3.4).
+    speakers_reassigned: set[str] = field(default_factory=set)
     # post_edit_voice_override_changed events whose segment_id couldn't
     # be mapped to a speaker — surfaced at the top of the dashboard as
     # a data-contract drift signal.
     unmapped_segment_count: int = 0
+    # Total post_edit_voice_override_changed event count (denominator
+    # for unmapped_segment_rate per codex v2 review #5).
+    voice_override_event_count: int = 0
 
 
 def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
@@ -609,17 +709,24 @@ def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
         events_path = project_dir / "audit" / "user_edit_events.jsonl"
         edit_events_by_type = _count_edit_events(events_path)
 
-        # Task #26: voice auto-reuse quality enrichment (design §3.1)
+        # Task #26: voice auto-reuse quality enrichment (design §3.1 + §3.4)
         decisions_path = project_dir / "audit" / "smart_decisions.jsonl"
         voice_reuse_hits = _collect_voice_reuse_hits(decisions_path)
         segment_to_speaker = _load_segment_to_speaker_mapping(project_dir)
-        voice_changed_speakers, unmapped_segment_count = (
-            _count_voice_overrides_per_speaker(events_path, segment_to_speaker)
+        (
+            voice_changed_speakers,
+            unmapped_segment_count,
+            voice_override_event_count,
+        ) = _count_voice_overrides_per_speaker(events_path, segment_to_speaker)
+        speakers_reassigned = _count_speaker_reassigned_per_job(
+            events_path, segment_to_speaker,
         )
     else:
         voice_reuse_hits = _empty_voice_reuse_hits()
         voice_changed_speakers = set()
+        speakers_reassigned = set()
         unmapped_segment_count = 0
+        voice_override_event_count = 0
 
     edit_event_count = sum(edit_events_by_type.values())
     edit_generation = int(getattr(job, "edit_generation", 0) or 0)
@@ -680,7 +787,9 @@ def _aggregate_job(job: Any, user_email: str | None) -> JobAggregatedMetrics:
         created_at=created_at_iso,
         voice_reuse_hits=voice_reuse_hits,
         voice_changed_speakers=voice_changed_speakers,
+        speakers_reassigned=speakers_reassigned,
         unmapped_segment_count=unmapped_segment_count,
+        voice_override_event_count=voice_override_event_count,
     )
 
 
