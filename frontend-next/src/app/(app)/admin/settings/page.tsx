@@ -45,6 +45,11 @@ interface AdminSettings {
   smart_auto_clone_enabled: boolean
   smart_reuse_user_voice_enabled: boolean
   smart_pause_on_possible_user_voice_match: boolean
+  // --- Phase 5 (2026-05-24, P5 data analysis follow-up) ---
+  // When True (default), possible (non-strong) personal voice candidates
+  // are auto-promoted to REUSED instead of pausing the pipeline. Wins
+  // over smart_pause_on_possible_user_voice_match when both are True.
+  smart_auto_reuse_on_possible_user_voice_match: boolean
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -71,6 +76,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   smart_auto_clone_enabled: true,
   smart_reuse_user_voice_enabled: true,
   smart_pause_on_possible_user_voice_match: false,
+  smart_auto_reuse_on_possible_user_voice_match: true,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [
@@ -469,7 +475,33 @@ export default function AdminSettingsPage() {
           </div>
         </label>
 
-        {/* Toggle 3: smart_pause_on_possible_user_voice_match */}
+        {/* Toggle 3 (P5 follow-up, 2026-05-24):
+            smart_auto_reuse_on_possible_user_voice_match. Wins over Toggle 4
+            below when both are enabled — this is the "stop pausing" fix. */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.smart_auto_reuse_on_possible_user_voice_match}
+            onChange={(e) => setSettings((s) => ({ ...s, smart_auto_reuse_on_possible_user_voice_match: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              弱匹配自动复用
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                Phase 5 · 默认开启
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后（默认），智能版任务遇到“可能匹配”的个人音色时，
+              <strong>自动选 score 最高的那个直接复用</strong>，不调用克隆 provider、不打断流程。
+              用户事后不满意可在编辑页改回去。优先级高于下方“弱匹配确认模式” —— 两者都开时以本项为准。
+              关闭后回退到 Phase 4 行为（看下方开关决定暂停或忽略）。
+            </p>
+          </div>
+        </label>
+
+        {/* Toggle 4: smart_pause_on_possible_user_voice_match */}
         <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
           <input
             type="checkbox"
@@ -489,6 +521,10 @@ export default function AdminSettingsPage() {
               会暂停到音色审核页面，等用户确认是否复用。
               <strong className="text-[color:var(--ochre)]">提醒：开启后所有提交智能版的用户会在提交页看到警示</strong>，
               他们的任务可能不会全自动跑完。默认关闭以避免破坏“智能版=全自动”的产品预期。
+              <br />
+              <span className="text-[11px] text-muted-foreground/80">
+                注：当上方“弱匹配自动复用”同时开启时，本项被忽略。
+              </span>
             </p>
           </div>
         </label>
