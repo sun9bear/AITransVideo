@@ -534,6 +534,11 @@ class GeminiTranslator:
             if checkpoint_path.exists():
                 checkpoint_path.unlink()
             _write_json(output_path, asdict(result))
+            _maybe_write_translation_quality_report(
+                output_root,
+                result,
+                glossary=effective_glossary,
+            )
             return result
 
         translatable_groups = [
@@ -629,6 +634,11 @@ class GeminiTranslator:
             output_path=str(output_path),
         )
         _write_json(output_path, asdict(result))
+        _maybe_write_translation_quality_report(
+            output_root,
+            result,
+            glossary=effective_glossary,
+        )
         if checkpoint_path.exists():
             checkpoint_path.unlink()
         return result
@@ -2614,6 +2624,28 @@ def _write_json(path: Path, payload: Any) -> None:
         json.dumps(_to_jsonable(payload), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _maybe_write_translation_quality_report(
+    output_root: Path,
+    result: TranslationResult,
+    *,
+    glossary: dict[str, str],
+) -> None:
+    project_dir = output_root.parent if output_root.name == "translation" else output_root
+    try:
+        from services.translation_quality import write_translation_quality_report
+
+        write_translation_quality_report(
+            project_dir,
+            segments=result.segments,
+            glossary=glossary,
+        )
+    except Exception as exc:
+        print(
+            f"[S3] translation quality report write skipped (non-fatal): {exc}",
+            flush=True,
+        )
 
 
 def _to_jsonable(value: Any) -> Any:

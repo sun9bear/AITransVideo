@@ -88,6 +88,13 @@ def test_job_reports_catalog_and_fetch_are_job_scoped(tmp_path: Path) -> None:
             ),
             encoding="utf-8",
         )
+        (project_dir / "reports" / "translation_quality_report.json").write_text(
+            json.dumps(
+                {"schema_version": "translation_quality_report_v1", "issues": []},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
         status, catalog = _request_json("GET", f"{base_url}/jobs/job_reports/reports")
         assert status == 200
@@ -97,6 +104,7 @@ def test_job_reports_catalog_and_fetch_are_job_scoped(tmp_path: Path) -> None:
         }
         assert by_name["speaker-evidence"]["exists"] is True
         assert by_name["subtitle-width"]["exists"] is True
+        assert by_name["translation-quality"]["exists"] is True
         assert by_name["speaker-evidence"]["filename"] == "speaker_evidence.jsonl"
 
         status, content_type, body = _request(
@@ -114,6 +122,14 @@ def test_job_reports_catalog_and_fetch_are_job_scoped(tmp_path: Path) -> None:
         assert status == 200
         assert content_type.startswith("application/json")
         assert json.loads(body)["schema_version"] == "subtitle_width_report_v1"
+
+        status, content_type, body = _request(
+            "GET",
+            f"{base_url}/jobs/job_reports/reports/translation_quality",
+        )
+        assert status == 200
+        assert content_type.startswith("application/json")
+        assert json.loads(body)["schema_version"] == "translation_quality_report_v1"
     finally:
         server.shutdown()
         server.server_close()
@@ -156,6 +172,10 @@ def test_job_reports_do_not_join_artifacts_or_result_summary(tmp_path: Path) -> 
             json.dumps({"schema_version": "subtitle_width_report_v1"}),
             encoding="utf-8",
         )
+        (project_dir / "reports" / "translation_quality_report.json").write_text(
+            json.dumps({"schema_version": "translation_quality_report_v1"}),
+            encoding="utf-8",
+        )
         (project_dir / "manifest.json").write_text(
             json.dumps(
                 {
@@ -177,6 +197,7 @@ def test_job_reports_do_not_join_artifacts_or_result_summary(tmp_path: Path) -> 
             serialized = json.dumps(payload, ensure_ascii=False)
             assert "speaker_evidence" not in serialized
             assert "subtitle_width_report" not in serialized
+            assert "translation_quality_report" not in serialized
             assert "/reports/" not in serialized.replace("\\", "/")
     finally:
         server.shutdown()

@@ -37,10 +37,12 @@ def test_voice_sample_observability_path_does_not_import_clone_providers() -> No
     )
 
 
-def test_voice_sample_scoring_behavior_flag_is_not_implemented_in_phase1a() -> None:
+def test_voice_sample_scoring_shadow_does_not_enable_behavior_flag() -> None:
     source = SAMPLE_EXTRACTOR.read_text(encoding="utf-8")
 
     assert "voice_sample_manifest_v1" in source
+    assert "voice_sample_manifest_v2" in source
     assert "AVT_VOICE_SAMPLE_MANIFEST" in source
-    assert "AVT_VOICE_SAMPLE_SCORING" not in source
-    assert "hard_reject_reasons" not in source
+    assert "AVT_VOICE_SAMPLE_SCORING_SHADOW" in source
+    assert 'env_flag("AVT_VOICE_SAMPLE_SCORING")' not in source
+    assert "hard_reject_reasons" in source

@@ -36,10 +36,15 @@ _JOB_REPORT_SPECS: dict[str, tuple[str, str]] = {
         "subtitle_width_report.json",
         "application/json; charset=utf-8",
     ),
+    "translation-quality": (
+        "translation_quality_report.json",
+        "application/json; charset=utf-8",
+    ),
 }
 _JOB_REPORT_ALIASES = {
     "speaker_evidence": "speaker-evidence",
     "subtitle_width": "subtitle-width",
+    "translation_quality": "translation-quality",
 }
 
 

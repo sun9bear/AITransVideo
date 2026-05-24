@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import subprocess
 import tempfile
@@ -173,6 +174,18 @@ class VoiceSampleExtractor:
                 min_duration_ms=min_duration_ms,
                 max_duration_ms=max_duration_ms,
             )
+        if env_flag("AVT_VOICE_SAMPLE_SCORING_SHADOW"):
+            _write_sample_scoring_shadow_manifest(
+                output_file=output_file,
+                source_path=source_path,
+                speaker_lines=speaker_lines,
+                all_candidates=all_candidates,
+                extract_plan=emitted_extract_plan,
+                selected_line_ids=emitted_line_ids,
+                total_ms=sum(duration_ms for _start_ms, duration_ms in emitted_extract_plan),
+                min_duration_ms=min_duration_ms,
+                max_duration_ms=max_duration_ms,
+            )
 
         return str(output_file)
 
@@ -231,6 +244,30 @@ def _calculate_silence_ratio(audio: AudioSegment) -> float:
     if total_chunks == 0:
         return 1.0
     return silent_chunks / total_chunks
+
+
+def _calculate_peak_dbfs(audio: AudioSegment) -> float:
+    peak = int(getattr(audio, "max", 0) or 0)
+    if peak <= 0:
+        return -100.0
+    return 20.0 * math.log10(min(peak, 32768) / 32768.0)
+
+
+def _weighted_dbfs(values: list[tuple[float, int]]) -> float | None:
+    weighted_power = 0.0
+    total_ms = 0
+    for dbfs, duration_ms in values:
+        if duration_ms <= 0:
+            continue
+        weighted_power += (10.0 ** (dbfs / 10.0)) * duration_ms
+        total_ms += duration_ms
+    if total_ms <= 0 or weighted_power <= 0:
+        return None
+    return 10.0 * math.log10(weighted_power / total_ms)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 # ---------------------------------------------------------------------------
@@ -506,3 +543,247 @@ def _write_sample_manifest(
             exc_info=True,
         )
         return
+
+
+def _write_sample_scoring_shadow_manifest(
+    *,
+    output_file: Path,
+    source_path: Path,
+    speaker_lines: list[TranscriptLine],
+    all_candidates: list[_SpeakerCandidate],
+    extract_plan: list[tuple[int, int]],
+    selected_line_ids: list[int],
+    total_ms: int,
+    min_duration_ms: int,
+    max_duration_ms: int,
+) -> None:
+    payload = _build_sample_scoring_shadow_payload(
+        output_file=output_file,
+        source_path=source_path,
+        speaker_lines=speaker_lines,
+        all_candidates=all_candidates,
+        extract_plan=extract_plan,
+        selected_line_ids=selected_line_ids,
+        total_ms=total_ms,
+        min_duration_ms=min_duration_ms,
+        max_duration_ms=max_duration_ms,
+    )
+    manifest_path = output_file.with_suffix(".manifest.v2.json")
+    try:
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.warning(
+            "voice sample scoring shadow manifest write failed; continuing: %s",
+            manifest_path,
+            exc_info=True,
+        )
+        return
+
+
+def _build_sample_scoring_shadow_payload(
+    *,
+    output_file: Path,
+    source_path: Path,
+    speaker_lines: list[TranscriptLine],
+    all_candidates: list[_SpeakerCandidate],
+    extract_plan: list[tuple[int, int]],
+    selected_line_ids: list[int],
+    total_ms: int,
+    min_duration_ms: int,
+    max_duration_ms: int,
+) -> dict:
+    speaker_id = ""
+    if speaker_lines:
+        speaker_id = str(getattr(speaker_lines[0], "speaker_id", "") or "")
+    unique_selected_line_ids = list(dict.fromkeys(selected_line_ids))
+    candidate_scores = [
+        _score_sample_candidate(
+            source_path=source_path,
+            candidate=candidate,
+            candidate_index=index,
+            min_duration_ms=min_duration_ms,
+        )
+        for index, candidate in enumerate(all_candidates)
+    ]
+    viable_candidates = [
+        candidate
+        for candidate in candidate_scores
+        if not candidate.get("hard_reject_reasons")
+    ]
+    recommended = max(
+        viable_candidates or candidate_scores,
+        key=lambda item: float(item.get("score") or 0.0),
+        default=None,
+    )
+    selected_sample_stats = _analyze_selected_sample(output_file)
+    return {
+        "schema_version": "voice_sample_manifest_v2",
+        "advisory_only": True,
+        "shadow_only": True,
+        "scoring_policy_version": "voice_sample_scoring_shadow_v1",
+        "behavior_flag": "AVT_VOICE_SAMPLE_SCORING",
+        "behavior_flag_enabled": False,
+        "shadow_flag": "AVT_VOICE_SAMPLE_SCORING_SHADOW",
+        "speaker_id": speaker_id or None,
+        "selected_sample_path": output_file.name,
+        "source_audio_name": source_path.name,
+        "total_duration_ms": int(total_ms),
+        "min_duration_ms": int(min_duration_ms),
+        "max_duration_ms": int(max_duration_ms),
+        "candidate_count": len(all_candidates),
+        "selected_interval_count": len(extract_plan),
+        "selected_line_ids": unique_selected_line_ids,
+        "selected_intervals": [
+            {
+                "start_ms": int(start_ms),
+                "duration_ms": int(duration_ms),
+                "end_ms": int(start_ms + duration_ms),
+            }
+            for start_ms, duration_ms in extract_plan
+        ],
+        "selected_sample_stats": selected_sample_stats,
+        "candidate_scores": candidate_scores,
+        "shadow_recommended_candidate_index": (
+            None if recommended is None else recommended.get("candidate_index")
+        ),
+        "shadow_recommended_score": (
+            None if recommended is None else recommended.get("score")
+        ),
+        "warnings": [
+            "boundary_gap_ms_unavailable: extractor receives speaker-only lines",
+            "shadow report does not change selected sample or call clone providers",
+        ],
+    }
+
+
+def _score_sample_candidate(
+    *,
+    source_path: Path,
+    candidate: _SpeakerCandidate,
+    candidate_index: int,
+    min_duration_ms: int,
+) -> dict:
+    interval_stats: list[tuple[float, int]] = []
+    intervals_payload: list[dict[str, int]] = []
+    for start_ms, end_ms in candidate.intervals:
+        duration_ms = max(0, end_ms - start_ms)
+        intervals_payload.append(
+            {
+                "start_ms": int(start_ms),
+                "end_ms": int(end_ms),
+                "duration_ms": int(duration_ms),
+            }
+        )
+        rms = _ffmpeg_probe_rms_db(source_path, start_ms, end_ms)
+        if rms is not None:
+            interval_stats.append((rms, duration_ms))
+
+    rms_dbfs = _weighted_dbfs(interval_stats)
+    duration_ms = int(candidate.duration_ms)
+    hard_reject_reasons: list[str] = []
+    warnings: list[str] = []
+    if duration_ms < FALLBACK_SEGMENT_DURATION_MS:
+        hard_reject_reasons.append("duration_below_fallback_min")
+    elif duration_ms < min_duration_ms:
+        warnings.append("duration_below_target_min")
+    if rms_dbfs is None:
+        hard_reject_reasons.append("rms_unavailable")
+    elif rms_dbfs <= LOW_VOLUME_THRESHOLD_DBFS:
+        hard_reject_reasons.append("rms_below_threshold")
+    if len(candidate.intervals) >= 8:
+        warnings.append("fragmented_candidate")
+
+    duration_score = _clamp01(duration_ms / max(1.0, float(min_duration_ms)))
+    if rms_dbfs is None:
+        loudness_score = 0.0
+    else:
+        loudness_score = _clamp01((rms_dbfs - LOW_VOLUME_THRESHOLD_DBFS) / 22.0)
+    continuity_score = _clamp01(1.0 - max(0, len(candidate.intervals) - 1) * 0.08)
+    score = round(
+        (0.45 * loudness_score)
+        + (0.35 * duration_score)
+        + (0.20 * continuity_score),
+        4,
+    )
+    if hard_reject_reasons:
+        score = 0.0
+
+    return {
+        "candidate_index": int(candidate_index),
+        "score": score,
+        "duration_ms": duration_ms,
+        "interval_count": len(candidate.intervals),
+        "line_ids": [
+            int(line_id)
+            for line_id in candidate.line_indices
+            if line_id is not None
+        ],
+        "rms_dbfs": None if rms_dbfs is None else round(float(rms_dbfs), 2),
+        "silence_ratio": None,
+        "peak_dbfs": None,
+        "boundary_gap_ms": None,
+        "hard_reject_reasons": hard_reject_reasons,
+        "warnings": warnings,
+        "score_components": {
+            "duration_score": round(duration_score, 4),
+            "loudness_score": round(loudness_score, 4),
+            "continuity_score": round(continuity_score, 4),
+        },
+        "intervals": intervals_payload,
+    }
+
+
+def _analyze_selected_sample(output_file: Path) -> dict:
+    hard_reject_reasons: list[str] = []
+    warnings: list[str] = []
+    if not output_file.exists():
+        return {
+            "exists": False,
+            "duration_ms": 0,
+            "rms_dbfs": None,
+            "silence_ratio": None,
+            "peak_dbfs": None,
+            "hard_reject_reasons": ["selected_sample_missing"],
+            "warnings": warnings,
+        }
+    try:
+        audio = AudioSegment.from_wav(output_file)
+    except Exception:
+        logger.warning(
+            "voice sample scoring shadow audio analysis failed; continuing: %s",
+            output_file,
+            exc_info=True,
+        )
+        return {
+            "exists": True,
+            "duration_ms": 0,
+            "rms_dbfs": None,
+            "silence_ratio": None,
+            "peak_dbfs": None,
+            "hard_reject_reasons": ["selected_sample_unreadable"],
+            "warnings": warnings,
+        }
+    duration_ms = int(len(audio))
+    rms_dbfs = round(_safe_dbfs(audio), 2)
+    silence_ratio = round(_calculate_silence_ratio(audio), 4)
+    peak_dbfs = round(_calculate_peak_dbfs(audio), 2)
+    if duration_ms < int(MIN_SAMPLE_DURATION_SECONDS * 1000):
+        hard_reject_reasons.append("duration_below_clone_min")
+    if rms_dbfs <= LOW_VOLUME_THRESHOLD_DBFS:
+        hard_reject_reasons.append("rms_below_threshold")
+    if silence_ratio > SILENCE_WARNING_RATIO:
+        warnings.append("silence_ratio_above_warning")
+    if peak_dbfs >= -0.1:
+        warnings.append("near_clipping_peak")
+    return {
+        "exists": True,
+        "duration_ms": duration_ms,
+        "rms_dbfs": rms_dbfs,
+        "silence_ratio": silence_ratio,
+        "peak_dbfs": peak_dbfs,
+        "hard_reject_reasons": hard_reject_reasons,
+        "warnings": warnings,
+    }

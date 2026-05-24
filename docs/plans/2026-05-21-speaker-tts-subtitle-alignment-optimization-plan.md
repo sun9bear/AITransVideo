@@ -621,7 +621,8 @@ Phase 1a 路径说明：
 schema 演进约束：
 
 - Phase 1a 已落地的 manifest schema 固定为 `voice_sample_manifest_v1`，只表达“实际产出了哪些 sample slice”和基本上下文，不表达样本质量排序。
-- Phase 1b 如启用 `AVT_VOICE_SAMPLE_SCORING`，必须显式升级到 `voice_sample_manifest_v2`，新增 `score`、`rms_dbfs`、`silence_ratio`、`boundary_gap_ms`、`hard_reject_reasons`、`warnings` 等字段。
+- Phase 1b shadow 阶段先启用 `AVT_VOICE_SAMPLE_SCORING_SHADOW`，写独立的 `.manifest.v2.json`，新增 `score`、`rms_dbfs`、`silence_ratio`、`boundary_gap_ms`、`hard_reject_reasons`、`warnings` 等字段，但不改变当前样本选择。
+- 后续如启用行为开关 `AVT_VOICE_SAMPLE_SCORING`，必须继续使用 `voice_sample_manifest_v2` 语义，且先通过 shadow 数据证明新选择优于“最长可用”。
 - v1 保留只读兼容，v2 由 scoring 路径写出；不要在 v1 中悄悄追加行为语义字段，避免审核 UI / admin tooling 做隐式 schema 猜测。
 
 hard reject 行为必须写死：
@@ -994,10 +995,12 @@ def find_subtitle_width_issues(
 
 | 功能 | 后端 env | 前端 env | 默认 | 关闭后行为 |
 | --- | --- | --- | --- | --- |
+| 翻译 script gate detect-only | `AVT_TRANSLATION_SCRIPT_GATE_SHADOW` 或 `AVT_TRANSLATION_SCRIPT_GATE_DETECT_ONLY` | 无，除非展示质量标记 | off | 不写 `translation_quality_report.json` |
 | 翻译 script gate | `AVT_TRANSLATION_SCRIPT_GATE` | 无，除非展示质量标记 | off | 走旧 prompt、旧解析、旧校验 |
 | 翻译 script gate 付费重试 | `AVT_TRANSLATION_SCRIPT_GATE_RETRY` | 无 | off | script gate 失败直接进审核/降级，不自动重试 |
 | Speaker evidence sidecar | `AVT_SPEAKER_EVIDENCE` | `NEXT_PUBLIC_SPEAKER_EVIDENCE_PANEL` | off | 不写 JSONL，pipeline 行为零变化 |
 | Voice sample manifest | `AVT_VOICE_SAMPLE_MANIFEST` | 无 | off | 不写样本 manifest |
+| Voice sample scoring shadow | `AVT_VOICE_SAMPLE_SCORING_SHADOW` | 无 | off | 不写 `.manifest.v2.json`，仍保持 v1/旧逻辑 |
 | Voice sample scoring | `AVT_VOICE_SAMPLE_SCORING` | 无 | off | 仍按当前“最长可用”逻辑选择样本 |
 | TTS tail trim | `AVT_AUDIO_TAIL_TRIM` | 无 | off | `fit_audio_to_slot()` 保持现状 |
 | Whisper 质量门 | `AVT_WHISPER_QUALITY_GATE` | `NEXT_PUBLIC_ALIGNMENT_WARNINGS` | off | 现有 `_block_is_in_sync` 和 fallback 逻辑不变 |
@@ -1052,6 +1055,7 @@ def find_subtitle_width_issues(
 
 实施：
 
+- 先做 shadow/detect-only：`AVT_VOICE_SAMPLE_SCORING_SHADOW` 写 `voice_sample_manifest_v2`，`AVT_TRANSLATION_SCRIPT_GATE_SHADOW` 写 `translation_quality_report.json`，两者都不改变 prompt、重试、TTS、对齐或样本选择。
 - 翻译语言全名 prompt 注入、zh-CN script gate、有限 literal-reflect/adapt。
 - voice sample scoring 接管候选选择。
 - script gate retry 预算、batch 失败率熔断、hard reject 降级路径。

@@ -72,6 +72,7 @@ class TestJobSubresourceRouting:
         "materials-availability",
         "reports",
         "reports/speaker-evidence",
+        "reports/translation-quality",
     ])
     def test_get_post_subresources_hit_intercept(self, subpath):
         """GET/POST /job-api/jobs/{id}/{subpath} should match intercept_job_subresource."""

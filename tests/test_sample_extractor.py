@@ -233,6 +233,47 @@ def test_sample_manifest_records_only_emitted_slices(
     ]
 
 
+def test_sample_scoring_shadow_writes_v2_without_changing_v1(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    audio_path = _build_timeline_audio(
+        tmp_path / "audio" / "original.wav",
+        [
+            (0, 10_000, 0),
+            (12_000, 22_000, 0),
+            (24_000, 34_000, -3),
+        ],
+    )
+    lines = [
+        _line(1, 0, 10_000),
+        _line(2, 12_000, 22_000),
+        _line(3, 24_000, 34_000),
+    ]
+    monkeypatch.setenv("AVT_VOICE_SAMPLE_SCORING_SHADOW", "1")
+
+    output_path = tmp_path / "speaker_b.wav"
+    VoiceSampleExtractor().extract_sample(
+        str(audio_path),
+        lines,
+        str(output_path),
+    )
+
+    assert not output_path.with_suffix(".manifest.json").exists()
+    manifest_path = output_path.with_suffix(".manifest.v2.json")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "voice_sample_manifest_v2"
+    assert payload["advisory_only"] is True
+    assert payload["shadow_only"] is True
+    assert payload["behavior_flag_enabled"] is False
+    assert payload["selected_sample_stats"]["exists"] is True
+    assert isinstance(payload["selected_sample_stats"]["rms_dbfs"], float)
+    assert payload["candidate_count"] >= 1
+    assert payload["candidate_scores"]
+    assert "hard_reject_reasons" in payload["candidate_scores"][0]
+    assert payload["shadow_recommended_candidate_index"] is not None
+
+
 def test_sample_manifest_write_failure_warns_without_raising(
     tmp_path: Path,
     caplog,
