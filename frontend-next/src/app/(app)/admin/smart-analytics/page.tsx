@@ -86,6 +86,41 @@ type TaskTableRow = {
   cost_view_url: string
 }
 
+type VoiceReuseBucketKey =
+  | "strong"
+  | "strong_named"
+  | "possible_auto"
+  | "strong_or_legacy_null"
+  | "overall"
+
+type VoiceReuseBucketPayload = {
+  hits: number
+  changes: number
+  change_rate: number | null
+  threshold_warn: number
+  threshold_crit: number
+}
+
+type VoiceReuseCaseRow = {
+  job_id: string
+  speaker_id: string
+  bucket: VoiceReuseBucketKey
+  before_voice_id: string | null
+  after_voice_id: string | null
+  operation: string | null
+  changed_at: string | null
+}
+
+type VoiceReuseQuality = Record<VoiceReuseBucketKey, VoiceReuseBucketPayload> & {
+  speaker_reassigned_rate: number | null
+  unmapped_segment_count: number
+  unmapped_segment_rate: number | null
+  unmapped_threshold_warn: number
+  jobs_with_voice_change_rate: number | null
+  auto_reuse_jobs_entering_edit_rate: number | null
+  case_rows: VoiceReuseCaseRow[]
+}
+
 type SummaryResponse = {
   window: { days: number; from: string; to: string }
   filters: { status: string; user: string }
@@ -106,6 +141,7 @@ type SummaryResponse = {
   rework_by_user: ReworkByUserRow[]
   edit_event_distribution: EditEventRow[]
   task_table: TaskTableRow[]
+  voice_reuse_quality: VoiceReuseQuality
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +168,7 @@ const TAB_OPTIONS = [
   { value: "handoff", label: "Handoff 分布" },
   { value: "alignment", label: "对齐质量" },
   { value: "rework", label: "用户返工" },
+  { value: "voice_reuse", label: "自动复用质量" },
 ] as const
 
 type TabValue = (typeof TAB_OPTIONS)[number]["value"]
@@ -344,6 +381,9 @@ export default function AdminSmartAnalyticsPage() {
                   byUser={data.rework_by_user}
                   events={data.edit_event_distribution}
                 />
+              )}
+              {activeTab === "voice_reuse" && (
+                <VoiceReuseTab quality={data.voice_reuse_quality} />
               )}
             </div>
           </div>
@@ -761,6 +801,223 @@ function ReworkTab({
       </div>
     </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Tab 4 — Voice auto-reuse quality (Task #26 PR-2)
+// ---------------------------------------------------------------------------
+// Spec: docs/plans/2026-05-24-smart-analytics-voice-reuse-quality-design.md
+// Codex 2026-05-25 PR-2 guidance:
+//   1. rate=null → 显示 "—"，不要显示 0%
+//   2. unmapped_segment_rate >= 5% 用 warning 色
+//   3. change_rate >= 30% warning, >= 50% danger
+//   4. case_rows 表按 changed_at desc 展示，字段含 before/after/operation/bucket
+//   5. 前端只消费 voice_reuse_quality，不重新计算指标
+
+const VOICE_REUSE_BUCKET_LABELS: Record<VoiceReuseBucketKey, string> = {
+  strong: "Strong（同源）",
+  strong_named: "Strong_named（跨源同名）",
+  possible_auto: "Possible（弱匹配自动复用）",
+  strong_or_legacy_null: "Legacy / 未标注",
+  overall: "总体",
+}
+
+const VOICE_REUSE_BUCKET_DESC: Record<VoiceReuseBucketKey, string> = {
+  strong: "同源同 speaker_id 强匹配，自动复用",
+  strong_named: "跨视频同名唯一，自动复用（Task strong_named）",
+  possible_auto: "弱匹配 / 多候选，Phase 5 自动选 top-1",
+  strong_or_legacy_null: "audit 修复前的 legacy 数据 / 缺失 confidence",
+  overall: "上述四档合并",
+}
+
+function VoiceReuseTab({ quality }: { quality: VoiceReuseQuality }) {
+  const buckets: VoiceReuseBucketKey[] = [
+    "strong",
+    "strong_named",
+    "possible_auto",
+    "strong_or_legacy_null",
+  ]
+  const unmappedActive =
+    quality.unmapped_segment_rate != null &&
+    quality.unmapped_segment_rate >= quality.unmapped_threshold_warn
+
+  return (
+    <div className="space-y-6">
+      {unmappedActive && (
+        <div className="rounded-lg border border-[color:var(--ochre)]/40 bg-[color:var(--ochre)]/5 px-4 py-3 text-sm text-[color:var(--ochre)]">
+          ⚠️ <strong>数据契约可能漂移</strong>：
+          <code className="font-mono">post_edit_voice_override_changed</code> 事件中
+          {fmtPct(quality.unmapped_segment_rate)}（{quality.unmapped_segment_count} 个）
+          的 segment_id 找不到对应 speaker。可能是新写入路径或
+          segments.json 结构变更，请检查
+          <code className="font-mono">_load_segment_to_speaker_mapping</code> 三级 fallback。
+        </div>
+      )}
+
+      {/* Overall summary card */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs text-muted-foreground">总体改音色率</p>
+          <p className={`mt-1 text-2xl font-semibold ${rateColorClass(quality.overall.change_rate, quality.overall.threshold_warn, quality.overall.threshold_crit)}`}>
+            {fmtRate(quality.overall.change_rate)}
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {quality.overall.changes} / {quality.overall.hits} 个 speaker 被改
+          </p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs text-muted-foreground">含 auto-reuse 任务进编辑率</p>
+          <p className="mt-1 text-2xl font-semibold text-foreground">
+            {fmtRate(quality.auto_reuse_jobs_entering_edit_rate)}
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            jobs_with_voice_change_rate: {fmtRate(quality.jobs_with_voice_change_rate)}
+          </p>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs text-muted-foreground">辅助 · speaker reassign 率</p>
+          <p className="mt-1 text-2xl font-semibold text-foreground">
+            {fmtRate(quality.speaker_reassigned_rate)}
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            S2 / voice_selection 阶段的归属修正，独立于音色满意度
+          </p>
+        </div>
+        <div className={`rounded-lg border bg-card p-4 ${unmappedActive ? "border-[color:var(--ochre)]/40" : "border-border"}`}>
+          <p className="text-xs text-muted-foreground">未映射 segment 比例</p>
+          <p className={`mt-1 text-2xl font-semibold ${unmappedActive ? "text-[color:var(--ochre)]" : "text-foreground"}`}>
+            {fmtRate(quality.unmapped_segment_rate)}
+          </p>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {quality.unmapped_segment_count} 个事件；阈值 {fmtRate(quality.unmapped_threshold_warn)}
+          </p>
+        </div>
+      </div>
+
+      {/* Per-bucket cards */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+        {buckets.map((b) => {
+          const p = quality[b]
+          return (
+            <div
+              key={b}
+              className={`rounded-lg border bg-card p-4 ${rateBorderClass(p.change_rate, p.threshold_warn, p.threshold_crit)}`}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-foreground">
+                  {VOICE_REUSE_BUCKET_LABELS[b]}
+                </span>
+              </div>
+              <p className={`mt-2 text-2xl font-semibold ${rateColorClass(p.change_rate, p.threshold_warn, p.threshold_crit)}`}>
+                {fmtRate(p.change_rate)}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {p.changes} / {p.hits} speaker 被改
+              </p>
+              <p className="mt-2 text-[11px] text-muted-foreground/80 leading-relaxed">
+                {VOICE_REUSE_BUCKET_DESC[b]}
+              </p>
+              <p className="mt-2 text-[10px] text-muted-foreground/60">
+                阈值: warn ≥ {fmtRate(p.threshold_warn)} · danger ≥ {fmtRate(p.threshold_crit)}
+              </p>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Case rows table (codex #4: before/after voice + operation + bucket + time) */}
+      <div className="overflow-x-auto rounded-lg border border-border bg-background">
+        <div className="border-b border-border bg-muted/30 px-3 py-2 text-xs font-medium text-foreground">
+          改音色案例（最近 20 条，按事件时间倒序）
+        </div>
+        <table className="w-full min-w-[900px] text-sm">
+          <thead className="border-b border-border bg-muted/10 text-xs text-muted-foreground">
+            <tr>
+              <Th>任务</Th>
+              <Th>Speaker</Th>
+              <Th>命中档</Th>
+              <Th>操作</Th>
+              <Th>原音色 → 新音色</Th>
+              <Th>事件时间</Th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {quality.case_rows.length === 0 ? (
+              <EmptyRow colSpan={6} text="当前窗口内没有 auto-reuse 后被改音色的案例" />
+            ) : (
+              quality.case_rows.map((row, i) => (
+                <tr key={`${row.job_id}-${row.speaker_id}-${i}`} className="hover:bg-muted/20">
+                  <Td>
+                    <Link
+                      href={`/admin/jobs/${row.job_id}/cost`}
+                      className="block max-w-[220px] truncate font-mono text-xs text-primary hover:underline"
+                    >
+                      {row.job_id.slice(0, 24)}…
+                    </Link>
+                  </Td>
+                  <Td>
+                    <span className="font-mono text-xs">{row.speaker_id}</span>
+                  </Td>
+                  <Td>
+                    <span className="rounded-md bg-primary/10 px-2 py-0.5 text-[11px] text-primary">
+                      {VOICE_REUSE_BUCKET_LABELS[row.bucket]?.split("（")[0] ?? row.bucket}
+                    </span>
+                  </Td>
+                  <Td>
+                    <span className="text-xs">{row.operation || "—"}</span>
+                  </Td>
+                  <Td>
+                    <span className="block max-w-[260px] truncate font-mono text-[11px] text-muted-foreground">
+                      {row.before_voice_id || "—"}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground/60">↓</span>
+                    <span className="block max-w-[260px] truncate font-mono text-[11px] text-foreground">
+                      {row.after_voice_id || "—"}
+                    </span>
+                  </Td>
+                  <Td>
+                    <span className="text-xs text-muted-foreground">
+                      {fmtDate(row.changed_at)}
+                    </span>
+                  </Td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+/** Format a rate ∈ [0,1] as "12.3%" — null → "—" (codex #1). */
+function fmtRate(value: number | null | undefined): string {
+  if (value == null || isNaN(value)) return "—"
+  return `${(value * 100).toFixed(1)}%`
+}
+
+/** Pick text color by rate-vs-thresholds (codex #3). */
+function rateColorClass(
+  rate: number | null,
+  warn: number,
+  crit: number,
+): string {
+  if (rate == null) return "text-muted-foreground"
+  if (rate >= crit) return "text-[color:var(--cinnabar)]"
+  if (rate >= warn) return "text-[color:var(--ochre)]"
+  return "text-foreground"
+}
+
+/** Pick border color by rate-vs-thresholds (matches text color). */
+function rateBorderClass(
+  rate: number | null,
+  warn: number,
+  crit: number,
+): string {
+  if (rate == null) return "border-border"
+  if (rate >= crit) return "border-[color:var(--cinnabar)]/40"
+  if (rate >= warn) return "border-[color:var(--ochre)]/40"
+  return "border-border"
 }
 
 // ---------------------------------------------------------------------------
