@@ -50,6 +50,12 @@ interface AdminSettings {
   // are auto-promoted to REUSED instead of pausing the pipeline. Wins
   // over smart_pause_on_possible_user_voice_match when both are True.
   smart_auto_reuse_on_possible_user_voice_match: boolean
+  // --- Smart Auto Pipeline kill switch — Layer 2 (Task #23, P2 blocker #1) ---
+  // Admin runtime toggle for the smart kill switch. False = emergency
+  // stop active = smart removed from every user's allowed_service_modes
+  // even if env-level AVT_ENABLE_SMART_MODE=true. Hot-reloadable (no
+  // gateway restart needed).
+  smart_mode_enabled: boolean
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -77,6 +83,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   smart_reuse_user_voice_enabled: true,
   smart_pause_on_possible_user_voice_match: false,
   smart_auto_reuse_on_possible_user_voice_match: true,
+  smart_mode_enabled: false,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [
@@ -431,6 +438,42 @@ export default function AdminSettingsPage() {
               普通 speaker 行为不变。关闭时回退到原 8 维度评分。
               <br />
               <span className="text-[color:var(--ochre)]">默认关闭：建议先观察 metrics（speed_param_distribution + first_pass_error_pct）一段真实数据再启用。</span>
+            </p>
+          </div>
+        </label>
+      </SettingSection>
+
+      {/* Smart kill switch — Task #23, P2 launch blocker #1.
+          The master ON/OFF for the entire Smart pipeline. When OFF,
+          every user (including admin) has smart removed from their
+          allowed_service_modes — creation API returns smart_disabled.
+          Separated from the per-strategy section below since this is
+          a different concern (whole-feature toggle vs voice strategy). */}
+      <SettingSection
+        title="智能版总开关"
+        description="智能版（Smart Auto Pipeline）的运行时总开关，与环境变量 AVT_ENABLE_SMART_MODE 双层 AND。任一关闭 → 所有用户（含管理员）无法创建智能版任务。建议保持开启，需要紧急关停时切换。"
+      >
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.smart_mode_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, smart_mode_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              开启智能版（Smart Mode）
+              <span className="ml-2 inline-block rounded bg-[color:var(--cinnabar)]/20 px-1.5 py-0.5 text-[10px] text-[color:var(--cinnabar)]">
+                Kill switch · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后（需同时设置 <code className="font-mono">AVT_ENABLE_SMART_MODE=true</code>），
+              智能版会出现在用户的 <code className="font-mono">allowed_service_modes</code> 列表里，
+              所有创建智能版任务的 API 调用通过。
+              <strong className="text-[color:var(--cinnabar)]">关闭后立即生效（≤ 5 分钟 mtime 轮询）</strong>，
+              所有人（包括管理员）创建智能版任务会返回 <code className="font-mono">smart_disabled</code> 403。
+              已在跑的任务不会被中断。
             </p>
           </div>
         </label>

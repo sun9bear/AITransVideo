@@ -309,3 +309,222 @@ class TestKillSwitchCallSitesUseHelper:
 
         # Confirm the validation block calls the helper, not just imports it.
         assert "get_effective_allowed_service_modes(" in source
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Behavior tests on intercept_create_job — codex audit requirement
+# ─────────────────────────────────────────────────────────────────────
+# Source-level contract tests above only prove the helper is called.
+# These tests drive the actual HTTP request path and check that:
+#   - Admin canNOT bypass the kill switch via direct API call
+#   - The disabled gate runs BEFORE smart_consent validation so users
+#     get the correct error code ("smart_disabled") not a misleading
+#     consent error
+# ─────────────────────────────────────────────────────────────────────
+
+
+import asyncio  # noqa: E402
+import json as _json  # noqa: E402
+import types  # noqa: E402
+import uuid  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock as _MagicMock  # noqa: E402
+
+
+_VALID_SMART_CONSENT = {
+    "auto_voice_clone": True,
+    "auto_retts": True,
+    "auto_translate": False,
+    "auto_retranslate": False,
+    "auto_multimodal_verification": False,
+    "no_extra_charge_without_confirmation": True,
+    "on_budget_exhausted": "degraded_delivery_with_report",
+}
+
+
+def _stub_database_module():
+    """Install a stub `database` module before importing job_intercept.
+    Mirrors test_gateway_create_job.py's pattern."""
+    if "database" not in sys.modules or not hasattr(
+        sys.modules["database"], "_kill_switch_stub"
+    ):
+        fake = types.ModuleType("database")
+        fake.get_db = _MagicMock()
+        fake.engine = _MagicMock()
+        fake.async_session = _MagicMock()
+        fake._kill_switch_stub = True  # marker
+        sys.modules["database"] = fake
+
+
+def _create_job_user(*, role="user", plan_code="plus"):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        email="u@test.com",
+        display_name="Test",
+        role=role,
+        plan_code=plan_code,
+        free_jobs_quota_total=5,
+        free_jobs_quota_used=0,
+    )
+
+
+def _create_job_request(body: dict):
+    req = _MagicMock()
+    encoded = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req.body = AsyncMock(return_value=encoded)
+    req.headers = {"content-type": "application/json"}
+    req.method = "POST"
+    req.url = _MagicMock()
+    req.url.path = "/job-api/jobs"
+    req.query_params = {}
+    return req
+
+
+def _create_job_db():
+    """Minimal AsyncSession mock — execute returns a scalar/all chain
+    that never trips. Kill switch must fire BEFORE any DB query."""
+    db = _MagicMock()
+    result = _MagicMock()
+    result.scalar = _MagicMock(return_value=0)
+    result.all = _MagicMock(return_value=[])
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+def _run_create_job(req, db, user):
+    _stub_database_module()
+    from job_intercept import intercept_create_job
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(intercept_create_job(req, db, user))
+    finally:
+        loop.close()
+
+
+class TestSmartKillSwitchBehavior:
+    """End-to-end behavior tests on the create-job path.
+
+    Each test patches the two kill switch layers + the plan gate (which
+    in local dev doesn't include smart for plus, see Task #24) and then
+    asserts the HTTP response. NO DB is required because the kill switch
+    runs before any DB query."""
+
+    def test_admin_blocked_when_env_off(self):
+        """Admin + env=False + admin toggle=True + smart request → 403.
+
+        This is THE bug codex called out — previous gate used
+        ``if user and not is_admin`` which let admin slip through API
+        even after entitlements UI hid Smart."""
+        req = _create_job_request({
+            "service_mode": "smart",
+            "smart_consent": _VALID_SMART_CONSENT,
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+        })
+        db = _create_job_db()
+        user = _create_job_user(role="admin", plan_code="plus")
+
+        with _patch_plan_gate_with_smart(), patch(
+            "admin_settings.load_settings",
+            return_value=_fake_admin_settings(smart_mode_enabled=True),
+        ), patch(
+            "config.settings",
+            _fake_settings(enable_smart_mode=False),
+        ):
+            resp = _run_create_job(req, db, user)
+
+        body = _json.loads(resp.body)
+        assert resp.status_code == 403, (
+            f"Admin must be blocked when env layer off, got {resp.status_code}. "
+            f"Body: {body}"
+        )
+        assert body["error"] == "smart_disabled", (
+            f"Expected smart_disabled, got {body['error']}. The kill switch "
+            f"must distinguish itself from generic service_mode_not_allowed "
+            f"so ops can identify the cause from access logs."
+        )
+
+    def test_admin_blocked_when_admin_toggle_off(self):
+        """Admin + env=True + admin toggle=False + smart → 403.
+
+        Admin runtime toggle is the 5-min emergency stop; it MUST work
+        against admin users too, otherwise it's useless as an emergency
+        stop (any admin would just go around it)."""
+        req = _create_job_request({
+            "service_mode": "smart",
+            "smart_consent": _VALID_SMART_CONSENT,
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+        })
+        db = _create_job_db()
+        user = _create_job_user(role="admin", plan_code="plus")
+
+        with _patch_plan_gate_with_smart(), patch(
+            "admin_settings.load_settings",
+            return_value=_fake_admin_settings(smart_mode_enabled=False),
+        ), patch(
+            "config.settings",
+            _fake_settings(enable_smart_mode=True),
+        ):
+            resp = _run_create_job(req, db, user)
+
+        body = _json.loads(resp.body)
+        assert resp.status_code == 403
+        assert body["error"] == "smart_disabled"
+
+    def test_non_admin_blocked_when_both_off(self):
+        """Plus user + env=False + admin toggle=False + smart → 403.
+
+        Default ship state: both layers off, no one creates smart jobs."""
+        req = _create_job_request({
+            "service_mode": "smart",
+            "smart_consent": _VALID_SMART_CONSENT,
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+        })
+        db = _create_job_db()
+        user = _create_job_user(role="user", plan_code="plus")
+
+        with _patch_plan_gate_with_smart(), patch(
+            "admin_settings.load_settings",
+            return_value=_fake_admin_settings(smart_mode_enabled=False),
+        ), patch(
+            "config.settings",
+            _fake_settings(enable_smart_mode=False),
+        ):
+            resp = _run_create_job(req, db, user)
+
+        body = _json.loads(resp.body)
+        assert resp.status_code == 403
+        assert body["error"] == "smart_disabled"
+
+    def test_kill_switch_returns_smart_disabled_not_consent_error(self):
+        """When smart is disabled AND consent is invalid, the error code
+        must be ``smart_disabled`` not ``smart_consent_invalid``.
+
+        Without this the user sees a confusing "your consent payload is
+        invalid" message for a feature they can't even use. The kill
+        switch gate must run BEFORE consent validation."""
+        req = _create_job_request({
+            "service_mode": "smart",
+            # NOTE: empty consent (would be smart_consent_invalid if we
+            # got past the kill switch)
+            "smart_consent": {},
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+        })
+        db = _create_job_db()
+        user = _create_job_user(role="user", plan_code="plus")
+
+        with _patch_plan_gate_with_smart(), patch(
+            "admin_settings.load_settings",
+            return_value=_fake_admin_settings(smart_mode_enabled=False),
+        ), patch(
+            "config.settings",
+            _fake_settings(enable_smart_mode=False),
+        ):
+            resp = _run_create_job(req, db, user)
+
+        body = _json.loads(resp.body)
+        assert resp.status_code == 403
+        assert body["error"] == "smart_disabled", (
+            f"Got {body['error']}. Kill switch gate must run BEFORE "
+            f"smart_consent validation so users hit the more informative "
+            f"error when smart is shut off entirely."
+        )
+

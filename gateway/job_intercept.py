@@ -1010,6 +1010,29 @@ async def intercept_create_job(
     if service_mode not in ("express", "studio", "smart"):
         service_mode = "express"
 
+    # --- Smart kill switch — runs FIRST (Task #23, P2 launch blocker #1) ---
+    # Codex audit 2026-05-24: previous implementation put the kill switch
+    # at L1135 inside ``if user and not is_admin:`` so admin users could
+    # bypass it via direct API call even when ops flipped the emergency
+    # toggle. Plus: the disabled gate ran AFTER smart_consent validation,
+    # so a user with empty consent on a kill-switched smart job got the
+    # misleading ``smart_consent_invalid`` error instead of ``smart_disabled``.
+    #
+    # Fix (both issues at once):
+    #   - Move kill switch HERE, before smart_consent validation
+    #   - Apply to all users including admin (concurrency/quota/duration
+    #     admin bypass is preserved below; kill switch is a safety
+    #     boundary that must NOT be bypassable)
+    if service_mode == "smart" and user is not None:
+        from entitlements import get_effective_allowed_service_modes
+        effective_modes = get_effective_allowed_service_modes(user)
+        if "smart" not in effective_modes:
+            return _error_response(
+                403, "smart_disabled",
+                "智能版当前未启用。请联系管理员开启 Smart 模式后再试。",
+                {"requested_mode": "smart"},
+            )
+
     # --- smart_consent validation (PR#3C-b3g, hardened Codex 第四十轮 P1.1) ---
     # Smart pipeline reads `_snap("smart_consent")` to gate auto-clone
     # and (future) on_budget_exhausted policy. Master plan §5.3 mandates

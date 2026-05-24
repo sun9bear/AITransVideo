@@ -1320,6 +1320,7 @@ class TestSmartVoiceQuotaPreflightGates:
         must respect the admin gate and skip.
         """
         import admin_settings as admin_mod
+        from types import SimpleNamespace as _SN
 
         async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
             return _upstream_success()
@@ -1341,16 +1342,29 @@ class TestSmartVoiceQuotaPreflightGates:
         def mock_load():
             s = original_load()
             s.smart_auto_clone_enabled = False
+            # Task #23: kill switch admin layer must be ON for the smart
+            # job to reach the preflight branch under test (without this,
+            # the request stops at the smart_disabled gate before quota
+            # preflight runs).
+            s.smart_mode_enabled = True
             return s
 
+        # Task #23: bypass kill switch entirely — these tests are about
+        # the QUOTA PREFLIGHT branch, not the kill switch. Patch the
+        # helper directly to return smart in the allowed list so the
+        # request reaches the preflight code under test.
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
             with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 with patch.object(admin_mod, "load_settings", mock_load):
                     with patch(
-                        "plan_catalog.get_effective_plan_gate",
-                        return_value=self._PLUS_SMART_GATE,
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
                     ):
-                        resp = _run(intercept_create_job(req, db, user))
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202, (
             f"Expected job creation success when admin disables auto-clone; "
@@ -1388,13 +1402,29 @@ class TestSmartVoiceQuotaPreflightGates:
             track_user_voice_query=track_queries,
         )
 
+        # Task #23: kill switch both layers must be ON for the smart
+        # job to reach the preflight branch under test.
+        import admin_settings as _admin_mod
+        from types import SimpleNamespace as _SN
+        _orig_load = _admin_mod.load_settings
+
+        def _mock_load():
+            s = _orig_load()
+            s.smart_mode_enabled = True
+            return s
+
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
             with patch("job_intercept._probe_youtube_metadata", return_value=None):
-                with patch(
-                    "plan_catalog.get_effective_plan_gate",
-                    return_value=self._PLUS_SMART_GATE,
-                ):
-                    resp = _run(intercept_create_job(req, db, user))
+                with patch.object(_admin_mod, "load_settings", _mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202, (
             f"Expected job creation success when consent.auto_voice_clone "
@@ -1428,13 +1458,29 @@ class TestSmartVoiceQuotaPreflightGates:
         )
 
         # Both gates open (admin default is True, consent set True).
+        # Task #23: also enable both kill switch layers so the request
+        # reaches the preflight branch (smart_mode_enabled + env).
+        import admin_settings as _admin_mod
+        from types import SimpleNamespace as _SN
+        _orig_load = _admin_mod.load_settings
+
+        def _mock_load():
+            s = _orig_load()
+            s.smart_mode_enabled = True
+            return s
+
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
             with patch("job_intercept._probe_youtube_metadata", return_value=None):
-                with patch(
-                    "plan_catalog.get_effective_plan_gate",
-                    return_value=self._PLUS_SMART_GATE,
-                ):
-                    resp = _run(intercept_create_job(req, db, user))
+                with patch.object(_admin_mod, "load_settings", _mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            resp = _run(intercept_create_job(req, db, user))
 
         body = json.loads(resp.body)
         assert resp.status_code == 400, (
