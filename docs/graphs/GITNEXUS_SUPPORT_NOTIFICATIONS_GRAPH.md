@@ -13,6 +13,8 @@
 - system announcements / live audiences / popup notifications
 - pan backup / restore failure and token notification recipes
 - admin compliance override notification
+- support / notification write route CSRF guard
+- visibility-aware polling for bell, support widget and admin heartbeat
 
 ## 2. 主图
 
@@ -24,8 +26,10 @@ graph TD
 
     FrontApi --> SupportAPI["/api/support/*"]
     FrontApi --> NotifAPI["/api/notifications*"]
+    FrontApi --> Polling["usePollingTask visibility-aware polling"]
 
     SupportAPI --> SupportSvc["support_service.py"]
+    SupportAPI --> CSRF["require_same_origin_state_change"]
     SupportSvc --> Policy["support_policy / route decision"]
     SupportSvc --> Knowledge["FAQ + plan facts + sanitized job context"]
     SupportSvc --> AI["support_ai / llm_registry"]
@@ -38,6 +42,7 @@ graph TD
     AdminRouters --> Announcements["audience resolution + send / recall"]
 
     NotifAPI --> UserNotif["user_notifications"]
+    NotifAPI --> CSRF
     Announcements --> UserNotif
     AuthPhone["complete-registration"] --> LiveDispatch["dispatch_announcements_for_new_user"]
     LiveDispatch --> UserNotif
@@ -50,6 +55,9 @@ graph TD
     UserNotif --> Bell["NotificationBell / unread count"]
     UserNotif --> Popup["NotificationPopupModal"]
     UserNotif --> Feed["NotificationsPage"]
+    Polling --> Bell
+    Polling --> SupportWidget["SupportWidget online status"]
+    Polling --> AdminHeartbeat["admin support heartbeat"]
 ```
 
 ## 3. 当前最重要的结构认知
@@ -142,6 +150,22 @@ graph TD
 
 结论：通知中心现在覆盖运营公告、客服消息之外的运维风险事件。
 
+### 3.8 支持和通知写路由受 CSRF 保护
+
+- `support_api.py` 的 router 接入 `require_same_origin_state_change`，创建会话、发送消息、handoff 请求等 session 写操作需要同源。
+- `admin_support_api.py` 的 admin router 也接入 same-origin guard，settings、presence、handoff close、公告发布/撤回等写操作不再只靠 session cookie。
+- `notifications_api.py` 的用户通知 router 接入 same-origin guard，mark read、archive、popup acknowledge 等写操作需要合法 Origin/Referer。
+
+结论：support/notification 是用户可操作面，排查 403 时要同时看 auth 和 CSRF origin，不要只查权限。
+
+### 3.9 通知和支持轮询现在感知页面可见性
+
+- `NotificationBell.tsx` 使用 `usePollingTask` 每 30 秒刷新 unread count；hidden tab 下由 hook 控制暂停/恢复，visibility 恢复时刷新。
+- `SupportWidget.tsx` 的在线状态刷新也走 `usePollingTask`，只在浮窗打开时轮询。
+- `useAdminHeartbeat.ts` 在 hidden 超过阈值时停止持续 heartbeat，恢复可见时重新同步。
+
+结论：后台标签页里“没有持续刷新”现在是前端压力治理的一部分，不一定是 API 或通知链路故障。
+
 ## 4. 关键证据
 
 - `gateway/support_api.py`
@@ -161,6 +185,7 @@ graph TD
   - `for_new_registrations`
 - `gateway/notifications_api.py`
   - bell / feed / popup API
+  - CSRF-protected write routes
 - `gateway/notifications_service.py`
   - event-driven notification rows
 - `gateway/notification_dispatch_map.py`
@@ -174,6 +199,10 @@ graph TD
   - `SupportWidget`
   - `NotificationBell`
   - `NotificationPopupModal`
+- `frontend-next/src/lib/react/usePollingTask.ts`
+  - visibility-aware polling
+- `frontend-next/src/components/support/useAdminHeartbeat.ts`
+  - visibility-aware admin presence heartbeat
 - `frontend-next/src/app/(app)/help/page.tsx`
   - help center landing page
 
@@ -184,3 +213,5 @@ graph TD
 - 想接入或修改 WeChat QR / email / chatwoot / wechat_kf handoff
 - 想做系统公告、popup 触达、或新注册用户 onboarding 通知
 - 想接入 pan.* 或 admin compliance 这类运维/风险通知
+- 想排查 support / notification 写请求为什么被 CSRF 拦截
+- 想排查通知铃铛、客服在线状态、admin heartbeat 为什么在后台标签页暂停

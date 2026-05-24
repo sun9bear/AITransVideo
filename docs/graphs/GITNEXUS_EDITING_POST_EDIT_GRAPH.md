@@ -19,6 +19,7 @@
 - Smart/Studio 项目列表“修改”入口
 - editing 内音色复用、显式 clone、审听与 post-edit re-synthesis 计量
 - `edit_generation` 与 Pan backup/restore 的当前代约束
+- editing 写请求经 Gateway Job API proxy 时受 CSRF same-origin guard
 
 ## 2. 主图
 
@@ -35,6 +36,7 @@ graph TD
     EditPage --> Speakers["editor/editing/speakers.json"]
     EditPage --> VoiceModify["VoiceModifyTab"]
     VoiceModify --> CandidateApi["voice-candidates candidate-first"]
+    CandidateApi --> StrongNamed["strong_named cross-source unique-name"]
     VoiceModify --> ReuseMatch["matchVoiceForSelection legacy reuse check"]
     VoiceModify --> CloneModal["VoiceCloneModal reuse / explicit clone"]
     VoiceModify --> AudioAudit["SpeakerAudioAuditModal"]
@@ -102,11 +104,19 @@ graph TD
 
 - `VoiceModifyTab.tsx` 复用 `VoiceCloneModal` 和 `SpeakerAudioAuditModal`，避免编辑页自建第二套 clone / 审听逻辑。
 - modal 打开时同样查询 `voice-match`，可直接复用同源 UserVoice；需要新 clone 时仍要求用户显式点击。
-- `VoiceModifyTab.tsx` 也调用 `voice-candidates`，按强匹配、可能匹配、其他个人音色分组展示，和 Studio voice selection 保持一致。
+- `VoiceModifyTab.tsx` 也调用 `voice-candidates`，按强匹配、可能匹配、其他个人音色分组展示，和 Studio voice selection 保持一致；跨源唯一同名候选可作为 `strong_named` 强复用候选出现。
 - approve payload 可以带 `voice_reuse`，让 Gateway 区分复用已有音色与新克隆。
 - clone 不是进入编辑页后的自动动作，仍受 clone lock、source metadata、calibration hook 约束。
 
 结论：后编辑音色修改已经接回主审核流的复用/克隆安全边界，不做后台自动克隆。
+
+### 3.2.1 Editing 写操作受 Gateway CSRF guard 保护
+
+- editing 相关 POST/PATCH/DELETE 多数经 `/job-api/jobs/{job_id}/{subpath:path}` 代理到 Job API。
+- `gateway/main.py` 给该 catch-all 加 `require_same_origin_state_change`，因此 split、regenerate、commit、speaker write 等浏览器发起的状态变更需要合法 Origin/Referer。
+- CSRF 不改变 editing 的业务 gate：`editing_audio_sync_required`、lineage、generation、clone lock 仍由原业务代码判定。
+
+结论：排查 editing 403 时要先分清是同源保护失败，还是编辑态业务约束失败。
 
 ### 3.3 编辑页已经拆成左视频操作面 + 右段落列表
 
@@ -232,6 +242,8 @@ graph TD
   - `BackupRecord.job_edit_generation`
 - `gateway/pan/restore_executor.py`
   - restore generation guard
+- `gateway/main.py`
+  - CSRF-protected Job API subresource proxy
 
 ## 5. 什么时候优先看这张图
 
@@ -245,3 +257,4 @@ graph TD
 - 想判断为什么某次 commit 报 `editing_audio_sync_required`
 - 想改 post-edit 后交付物失效策略
 - 想改 post-edit、归档备份、恢复之间的 generation 一致性约束
+- 想排查 editing split/regenerate/commit 写请求为什么被 CSRF 拦截

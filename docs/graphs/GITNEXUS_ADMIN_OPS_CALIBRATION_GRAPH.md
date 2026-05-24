@@ -9,6 +9,9 @@
 - alignment / whisper / paid fallback settings
 - Smart prompt model settings
 - Smart voice candidate / clone / weak-match policy settings
+- Smart analytics、report analysis 与 Phase 1b rollout flags
+- CSRF same-origin guard、production startup guard 与 fake payment gate
+- frontend polling governance
 - voice calibration control plane
 - user voice quota、same-source match、Smart clone mirror 与 source metadata
 - support admin、traffic analytics、cost management
@@ -29,16 +32,20 @@ graph TD
     Gateway --> Traffic["/api/admin/traffic"]
     Gateway --> Costs["credits observability / cost management"]
     Gateway --> AdminCost["/api/admin/jobs/{id}/cost"]
+    Gateway --> SmartAnalytics["/api/admin/smart-analytics/*"]
     Gateway --> AdminDisk["/api/admin/disk/*"]
     Gateway --> PanAdmin["/api/admin/pan/*"]
+    Gateway --> Security["csrf + production safety"]
     Gateway --> Cleanup["cleanup / purge / sweeper"]
 
     Settings --> AlignPolicy["force_dsp_alignment + paid_fallback"]
     Settings --> WhisperPolicy["whisper policy fields"]
     Settings --> PromptModels["prompt_models studio/express/smart"]
-    Settings --> SmartVoicePolicy["smart_auto_clone / reuse / pause_on_possible"]
+    Settings --> SmartVoicePolicy["smart_auto_clone / reuse / auto_reuse_possible / pause_on_possible"]
+    Settings --> Phase1BFlags["phase1b report flags"]
     PromptModels --> LLMRegistry["llm_registry mode defaults + admin override"]
     SmartVoicePolicy --> SmartRuntime["process.py read_admin_setting"]
+    Phase1BFlags --> RuntimeFlags["services.runtime_flags"]
     OpsEnv["INSTALL_WHISPER + .[whisper] + HF_HOME"] --> WhisperCap["runtime capability"]
     WhisperCap --> WhisperPolicy
 
@@ -94,6 +101,15 @@ graph TD
     Traffic --> Categories["human / search / AI crawler / scanner"]
     Costs --> CostRows["LLM / TTS / voice_clone / smart policy / margin rows"]
     CostCatalog["cost_management RMB-direct catalog"] --> Costs
+    SmartAnalytics --> SmartSummary["summary / csv"]
+    SmartAnalytics --> ReportAnalysis["job-reports summary / csv"]
+    SmartAnalytics --> Phase1BFlags
+    SmartSummary --> AdminUI
+    ReportAnalysis --> AdminUI
+    Security --> CSRFGuard["require_same_origin_state_change"]
+    Security --> StartupGuard["validate_production_safety"]
+    Security --> FakePaymentGate["fake payment dev/test default"]
+    PollingGov["usePollingTask + visibility-aware admin heartbeat"] --> AdminUI
     PanAdmin --> PanStatus["status / quota / credentials"]
     PanAdmin --> PanBackups["backup list / manifest / restore / delete"]
     PanAdmin --> PanBatch["single + batch backup enqueue"]
@@ -153,12 +169,13 @@ graph TD
 
 ### 3.5 Smart voice policy 进入 admin settings
 
-- `gateway/admin_settings.py` 新增 `smart_auto_clone_enabled`、`smart_reuse_user_voice_enabled`、`smart_pause_on_possible_user_voice_match`。
-- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露三个开关，其中弱匹配确认默认关闭。
+- `gateway/admin_settings.py` 管理 `smart_auto_clone_enabled`、`smart_reuse_user_voice_enabled`、`smart_auto_reuse_on_possible_user_voice_match`、`smart_pause_on_possible_user_voice_match`。
+- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露四个开关，其中 P5 possible-match auto-reuse 默认开启，弱匹配确认默认关闭。
+- P5 auto-reuse 优先于 pause：两个开关都打开时，possible match 自动复用 top candidate，不进入人工确认。
 - pipeline 使用 app-side `services.admin_settings.read_admin_setting` 读取这些字段，避免 runtime 误用 Gateway-only settings loader。
 - Gateway create path 的 Smart quota preflight 与 runtime 保持一致：只有 consent 允许克隆且 admin clone enabled 时才检查 clone quota。
 
-结论：Smart 的“复用、克隆、弱匹配暂停”不再是硬编码策略，而是进入 admin 控制面。
+结论：Smart 的“复用、possible-match 自动复用、克隆、弱匹配暂停”不再是硬编码策略，而是进入 admin 控制面。
 
 ### 3.6 UserVoice source metadata 成为复用与诊断主键
 
@@ -219,7 +236,8 @@ graph TD
 
 - `gateway/cost_management.py` 的默认价格目录版本为 RMB-direct catalog。
 - LLM rate 直接使用 `input_per_million_rmb / output_per_million_rmb / audio_input_per_million_rmb`，`usd_to_rmb` 只保留兼容旧 override。
-- 当前工作区成本目录按 2026-05-20 价格固化 Gemini 3.1 Pro：input ¥14.4/M、output ¥86.4/M、audio input ¥14.4/M，并新增 Gemini 3.5 Flash 价格项。
+- 当前成本目录按 2026-05-20 价格固化 Gemini 3.1 Pro：input ¥14.4/M、output ¥86.4/M、audio input ¥14.4/M，并新增 Gemini 3.5 Flash 价格项。
+- 2026-05-21 后，Gemini 3.1 Flash Lite 使用 GA endpoint `gemini-3.1-flash-lite`，preview key 仅保留历史行兼容。
 
 结论：成本管理面现在以人民币价格为主事实，减少汇率漂移。
 
@@ -239,6 +257,32 @@ graph TD
 - 项目列表与 admin jobs 页增加批量备份入口，后台仍由 `/api/admin/pan/backups/batch` 统一校验。
 
 结论：Pan backup 是 admin 归档/恢复控制面，和 disk cleanup、R2 sweeper 一样属于运维工具链。
+
+### 3.15 Smart analytics 和 report analysis 成为 admin 诊断面
+
+- `gateway/admin_smart_analytics_api.py` 提供 `/summary`、`/csv`，按 Smart job 汇总状态、handoff reason、alignment metrics、edit events、quality/cost sidecar。
+- `/job-reports-summary` 与 `/job-reports-csv` 汇总 Phase 1a/1b report sidecars，覆盖 translation quality、subtitle width、speaker evidence、voice sample scoring。
+- `/phase1b-flags` 读取 env + admin settings，`POST /phase1b-flags` 写 admin overrides，支持不用重建容器就调整 shadow/behavior rollout。
+- `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx` 与 `/admin/report-analysis/page.tsx` 已加入 admin shell。
+
+结论：Smart 诊断从单任务 cost page 推进到跨任务监控和 Phase 1b 质量开关控制。
+
+### 3.16 CSRF 和生产安全成为 Gateway 横切运维项
+
+- `gateway/csrf.py` 通过 `Origin/Referer/Host/SITE_URL/AVT_CORS_ORIGINS` 做 same-origin state-change guard，默认不信任 forwarded host。
+- `gateway/main.py` 对 job proxy、upload、auth/account 写请求等加依赖，多数 Gateway routers 也在 APIRouter 层接入同一 guard。
+- `gateway/startup_checks.py` 拒绝未知 `AVT_ENV`，生产环境要求 `AVT_AUTH_REQUIRED=true`。
+- `gateway/payment_providers.py` 默认只在 dev/test 允许 fake payment，生产需显式 opt-in；`billing.py` 的 fake-pay disabled 分支返回 403 或 error redirect。
+
+结论：排查 admin/write 403、生产启动失败或 fake-pay 不可用时，先看环境、Origin/Referer 与生产 safety guard。
+
+### 3.17 前端 polling 治理进入运维面
+
+- `frontend-next/src/lib/react/usePollingTask.ts` 在 hidden tab 可暂停轮询，并在 visibility 恢复后刷新。
+- `useBackgroundTask.ts`、`NotificationBell.tsx`、support heartbeat 也接入 hidden/visible 语义，减少后台窗口持续打 Gateway。
+- admin report/analytics 页面继续通过显式刷新和 CSV 导出拉取数据，不应通过高频隐式 polling 观察长窗口指标。
+
+结论：看接口压力或“为什么刚才没刷新”时，需要区分 visibility-aware pause 与真实接口失败。
 
 ## 4. 关键证据
 
@@ -271,6 +315,15 @@ graph TD
   - backup list / manifest / restore / delete UI
 - `frontend-next/src/app/(app)/admin/jobs/[id]/cost/page.tsx`
   - admin Smart cost UI
+- `gateway/admin_smart_analytics_api.py`
+  - Smart summary / CSV
+  - Phase 1a/1b report aggregation
+  - Phase 1b flags API
+- `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx`
+  - admin Smart analytics dashboard
+- `frontend-next/src/app/(app)/admin/report-analysis/page.tsx`
+  - report analysis dashboard
+  - Phase 1b flag switches
 - `gateway/cost_summary_backfill.py`
   - post-settle cost summary update
 - `gateway/user_voice_api.py`
@@ -296,10 +349,23 @@ graph TD
 - `gateway/admin_settings.py`
   - prompt model settings
   - Smart voice policy settings
+  - Phase 1b report rollout flags
 - `src/services/llm_registry.py`
   - mode-aware LLM defaults
+- `src/services/runtime_flags.py`
+  - env/admin flag resolver
 - `gateway/cost_management.py`
   - RMB-direct provider cost catalog
+- `gateway/csrf.py`
+  - same-origin state-change guard
+- `gateway/startup_checks.py`
+  - production safety validation
+- `gateway/payment_providers.py`
+  - fake payment production gate
+- `frontend-next/src/lib/react/usePollingTask.ts`
+  - visibility-aware polling governance
+- `frontend-next/src/lib/react/useBackgroundTask.ts`
+  - background task polling governance
 - `gateway/project_cleanup.py`
   - cleanup parity gate
 - `src/services/r2_publisher_lib/r2_parity.py`
@@ -315,7 +381,11 @@ graph TD
 - 想改 voice calibration 行为或入口
 - 想排查 Smart prompt model 为什么选了某个模型
 - 想排查 Smart voice policy 为什么允许/禁止复用、克隆或弱匹配暂停
+- 想排查 P5 possible-match 为什么自动复用或没有暂停
 - 想排查 Smart clone quota / match / register-smart / UserVoice mirror
+- 想看 Smart analytics、report analysis、Phase 1b flags 为什么显示某个统计或开关状态
+- 想排查 CSRF 403、生产启动 safety guard、fake payment 被禁用
+- 想排查前端后台标签页为什么没有持续 polling 或恢复后才刷新
 - 想排查 admin disk 为什么显示可以或不能扩容
 - 想改 admin 网盘备份、恢复、Pan OAuth、auto archive、stale/orphan cleanup
 - 想排查 cleanup 为什么没有 purge 某个过期项目

@@ -14,6 +14,8 @@
 - Smart sidecar trio
 - Smart handoff quality report synthesis
 - Smart admin-only cost summary 与 settlement backfill
+- Smart analytics summary / CSV
+- Phase 1a/1b reports and report-analysis flags
 - `user_edit_events.jsonl`
 - `effective_marker.marked_event_ids`
 - `smart_shadow_eval / smart_shadow_sim`
@@ -40,11 +42,25 @@ graph TD
     Smart --> SmartCost["smart_cost_summary.json"]
     Smart --> SmartState["JobRecord.smart_state"]
     Smart --> RetryStats["retry_summary / budget_exhausted events"]
+    Smart --> SmartAnalytics["admin_smart_analytics summary/csv"]
 
     SmartDecision --> Synth["quality_report_synthesizer.py"]
     Synth --> UserQuality["Job API smart-quality-report"]
     SmartQuality --> UserQuality
     SmartCost --> AdminCost["admin_cost_api"]
+    SmartAnalytics --> Admin["admin costs / credits observability"]
+
+    Workflow --> ReportSidecars["reports/*.json/jsonl"]
+    ReportSidecars --> TranslationQuality["translation_quality_report"]
+    ReportSidecars --> SubtitleWidth["subtitle_width_report"]
+    ReportSidecars --> SpeakerEvidence["speaker_evidence.jsonl"]
+    ReportSidecars --> VoiceSampleScoring["voice sample scoring shadow"]
+    TranslationQuality --> ReportAnalysis["phase1b_report_summary"]
+    SubtitleWidth --> ReportAnalysis
+    SpeakerEvidence --> ReportAnalysis
+    VoiceSampleScoring --> ReportAnalysis
+    ReportAnalysis --> Admin
+    ReportAnalysis --> PhaseFlags["phase1b flags"]
 
     SmartState --> Settlement["credits_service smart credits_policy"]
     Settlement --> Backfill["cost_summary_backfill.py"]
@@ -90,6 +106,7 @@ graph TD
 - `UsageMeter`：LLM / TTS / voice clone / voice reuse / post-edit resynth 计量与成本
 - `user_edit_events.jsonl`：用户行为 / 编辑动作 / effective markers
 - Smart sidecar：`smart_decisions.jsonl`、`smart_quality_report.json`、`smart_cost_summary.json`
+- Phase 1a/1b report sidecars：`reports/translation_quality_report.json`、`subtitle_width_report.json`、`speaker_evidence.jsonl`、voice sample scoring shadow manifest
 
 结论：系统行为、用户行为、资源计量、Smart 决策审计各自有独立 sink。
 
@@ -159,12 +176,31 @@ graph TD
 
 - `gateway/cost_management.py` 默认 catalog 以人民币字段作为主要事实。
 - LLM 成本字段使用 `input_per_million_rmb / output_per_million_rmb / audio_input_per_million_rmb`，`usd_to_rmb` 只作为旧目录兼容 fallback。
-- 当前工作区成本目录把 Gemini 3.1 Pro official ≤200K tier 固化为 input ¥14.4/M、output ¥86.4/M、audio input ¥14.4/M。
+- 当前成本目录把 Gemini 3.1 Pro official ≤200K tier 固化为 input ¥14.4/M、output ¥86.4/M、audio input ¥14.4/M。
 - Gemini 3.5 Flash 也进入 RMB-direct catalog，作为 admin 可选但非默认的 Smart 模型候选。
+- Gemini 3.1 Flash Lite 迁移到 GA `gemini-3.1-flash-lite`，preview key 保留同价历史兼容。
 
 结论：admin 成本分析现在优先读 RMB-direct 目录，汇率字段不再是新目录的主路径。
 
-### 3.10 pan.* events 进入运维观测
+### 3.10 Smart analytics 是跨任务质量 / 成本聚合层
+
+- `gateway/admin_smart_analytics_api.py` 读取 Smart jobs、alignment report、handoff reasons、edit events、quality report 和 cost summary，生成 `/summary`。
+- `/csv` 输出 job-level rows，适合分析 P5 possible-match auto-reuse 是否减少 handoff、Smart 成本是否与 fixed price 匹配。
+- `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx` 是 admin-facing dashboard，侧重趋势、分布、reason 和成本摘要，不替代单任务 sidecar。
+
+结论：单任务 Smart sidecar 解释“为什么”，Smart analytics 解释“整体表现是否值得继续推进策略”。
+
+### 3.11 Phase 1a/1b report analysis 是 shadow-first 质量推进面
+
+- `translation_quality_report.json` 检测中文译文中 Latin-only / Latin-dominant 等 wrong-script 风险，当前 shadow flag 下只写报告。
+- `subtitle_width_report.json` 与 `subtitle_quality_report.json` 从 output dispatcher 产生，帮助发现字幕宽度和 cue 质量问题。
+- `speaker_evidence.jsonl` 记录 transcript reviewer 对 speaker snapshot 的 changed/uncertain evidence。
+- voice sample scoring shadow manifest 标记 `shadow_only=True`，只评估候选样本，不改变实际 clone sample。
+- `src/services/phase1b_report_summary.py` 汇总这些 report，生成 recommendations；`/phase1b-flags` 把 shadow/behavior flag 暴露给 admin。
+
+结论：Phase 1b 的行为开关必须先看 report coverage 和 recommendation，不应直接把 shadow 检测改成硬 gate。
+
+### 3.12 pan.* events 进入运维观测
 
 - `gateway/storage/event_log.py` 允许 `pan.backup.started/succeeded/failed`、`pan.restore.started/succeeded/failed`、`pan.token_revoked`、`pan.residue_cleanup.completed`。
 - `scripts/r2_observability.py` 将 pan event group 汇总为备份、恢复、token 和 residue cleanup 维度。
@@ -172,7 +208,7 @@ graph TD
 
 结论：网盘备份的质量/可靠性分析已经有独立事件面。
 
-### 3.11 Smart credits policy 进入 terminal settlement
+### 3.13 Smart credits policy 进入 terminal settlement
 
 - `settle_job_credit_ledger(...)` 会先看 `smart_state.credits_policy`。
 - `refund_full`、`capture_full`、`capture_actual_cost_capped_at_studio_price` 是当前 dispatcher 分支。
@@ -181,7 +217,7 @@ graph TD
 
 结论：Smart 的结算策略有审计入口，但真实财务动作必须以 Gateway ledger 为准。
 
-### 3.12 `effective_marker.marked_event_ids` 仍是行为归因主键
+### 3.14 `effective_marker.marked_event_ids` 仍是行为归因主键
 
 - `user_edit_audit.py` 采用 append-only JSONL。
 - `effective_marker` 表示最终存活的 prior intent。
@@ -189,7 +225,7 @@ graph TD
 
 结论：用户行为分析仍以 survivor-intent join 为核心。
 
-### 3.13 `smart_shadow_eval / sim` 是离线验证闭环
+### 3.15 `smart_shadow_eval / sim` 是离线验证闭环
 
 - collector 汇总 review state、editor segments、subtitle cues、usage events、user edit events、Smart decisions。
 - simulator 对 eligibility、voice sample、translation auto approval、TTS duration repair、subtitle sync policy 做离线决策。
@@ -217,6 +253,23 @@ graph TD
 - `gateway/cost_management.py`
   - RMB-direct provider/model cost catalog
   - backward-compatible USD conversion fallback
+  - Gemini 3.5 Flash and Gemini 3.1 Flash Lite GA pricing
+- `gateway/admin_smart_analytics_api.py`
+  - Smart analytics summary / CSV
+  - Phase 1a/1b report analysis endpoints
+  - Phase 1b flag read/update API
+- `src/services/phase1b_report_summary.py`
+  - report sidecar aggregation and recommendations
+- `src/services/translation_quality.py`
+  - translation script shadow report
+- `src/modules/subtitles/quality.py`
+  - subtitle width report
+- `src/services/speaker_evidence.py`
+  - speaker evidence JSONL
+- `src/services/voice/sample_extractor.py`
+  - voice sample scoring shadow manifest
+- `src/services/runtime_flags.py`
+  - env/admin flag resolver
 - `gateway/job_intercept.py`
   - voice reuse event recording
   - rejected personal-voice candidate audit
@@ -252,6 +305,9 @@ graph TD
 - 想做 Smart 自动审核质量分析
 - 想改 Smart sidecar、quality report、cost summary
 - 想改 provider/model RMB 成本目录或 admin 成本读模型
+- 想看 Smart analytics summary / CSV 的指标来源
+- 想看 Phase 1a/1b report analysis、translation quality、subtitle width、speaker evidence、voice sample scoring 的数据口径
+- 想决定某个 Phase 1b shadow flag 能否升级为行为 gate
 - 想看 pan backup / restore / token / residue cleanup 的事件观测口径
 - 想改 Smart quality report 的 handoff 合成逻辑
 - 想改 admin-only 成本暴露或 settlement backfill

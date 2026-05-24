@@ -12,7 +12,7 @@
 - Smart handoff 后如何重新进入 Studio review
 - Smart full-auto 后 translation review 不再默认成为人工 gate
 - Smart 完成或 handoff 后如何显示用户可见决策摘要
-- voice selection approve 前的 candidate-first 音色候选、同源音色复用、克隆锁与 calibration preflight
+- voice selection approve 前的 candidate-first 音色候选、`strong_named`/possible-match 复用、克隆锁与 calibration preflight
 
 ## 2. 主图
 
@@ -46,9 +46,11 @@ graph TD
 
     VoiceSelectPanel --> CandidateApi["getVoiceCandidates / voice-candidates"]
     CandidateApi --> StrongReuse["强匹配 autoReuseVoice"]
+    CandidateApi --> StrongNamed["strong_named cross-source unique-name"]
     CandidateApi --> PossibleCandidates["可能匹配 requires confirmation"]
     CandidateApi --> OtherPersonal["其他个人音色"]
     StrongReuse --> ReuseApprove["voice_reuse approve payload"]
+    StrongNamed --> ReuseApprove
     PossibleCandidates --> ReuseApprove
     OtherPersonal --> ReuseApprove
     VoiceSelectPanel --> VoiceMatch["matchVoiceForSelection / voice-match"]
@@ -141,14 +143,16 @@ tab 映射仍然是：
 - `VoiceSelectionPanel` 加载 speaker 后逐个调用 `getVoiceCandidates(...)`，这是只读 registry lookup，不调用 clone provider、不预留点数。
 - UI 按“个人音色 · 强匹配 (不扣点) / 个人音色 · 可能匹配 (需要确认) / 其他个人音色”分组展示。
 - 命中强匹配时会自动预选 `autoReuseVoice`，提交 `voice_reuse=true`，不消耗 clone 点。
-- 如果 Smart Phase 4 弱匹配暂停已经在 review payload 写了 `smart_offered_candidates`，UI 会优先预选该候选，减少用户二次查找。
-- 可能匹配包含 same-source named、same-source speaker-id changed、cross-source named；用户选中后也是复用事件，不是新克隆。
+- 跨源唯一同名候选现在可提升为 `strong_named`，也进入 auto-reuse allowed；它通常不会再把 Smart 拉到人工确认。
+- P5 默认开启 `smart_auto_reuse_on_possible_user_voice_match` 后，Smart possible-match top candidate 会在自动层复用，只有关闭该开关且开启 pause 时才写 `smart_offered_candidates`。
+- 如果 Smart 弱匹配暂停已经在 review payload 写了 `smart_offered_candidates`，UI 会优先预选该候选，减少用户二次查找。
+- 可能匹配包含 same-source named、same-source speaker-id changed、cross-source named；人工选中后也是复用事件，不是新克隆。
 - `VoiceCloneModal` 打开时仍调用 `matchVoiceForSelection(jobId, speakerId)`，用于显式 clone 流程里的可复用提示。
 - 用户仍可显式触发 clone；Gateway 用 `review_state` 中的 per-speaker `cloning.started_at` 做短期 clone lock，重复点击返回 `clone_in_progress`。
 - clone 成功后写入 UserVoice source metadata，并通过 calibration hook 触发速度校准。
 - 如果 Smart 因弱匹配暂停写入了 `smart_offered_candidates`，用户最后选择候选以外的 voice，Gateway 会记录非计费 `voice_candidate_rejected` usage event。
 
-结论：voice selection 现在把“复用已有个人音色”和“新克隆”放在同一个人工确认入口里，避免重复克隆。
+结论：voice selection 现在把“复用已有个人音色”和“新克隆”放在同一个人工确认入口里；但 Smart P5 已经尽量在自动层消化 possible-match，人工确认主要是保守策略或用户主动修改入口。
 
 ## 9. Voice selection approve 会先做 T2 calibration preflight
 
@@ -196,6 +200,9 @@ tab 映射仍然是：
   - `_record_voice_candidate_rejection_events`
 - `gateway/user_voice_service.py`
   - same-source / cross-source candidate scopes
+  - `strong_named` auto-reuse tier
+- `src/services/smart/auto_voice_review.py`
+  - P5 possible-match auto-reuse precedence over pause
 - `src/services/jobs/review_actions.py`
   - review submit 与 resume
 - `src/services/jobs/api.py`
@@ -209,6 +216,7 @@ tab 映射仍然是：
 - translation review 能否改 speaker 名称和 segment speaker
 - 为什么 Smart 全自动任务不再因为 translation review advisory metrics 进入人工确认
 - voice selection 为什么提示强匹配/可能匹配/其他个人音色、为什么 clone 按钮被锁住
+- Smart possible-match 为什么自动复用、为什么没有进入弱匹配暂停
 - Smart 弱匹配暂停后，用户确认或拒绝候选分别如何审计
 - review submit 前为什么会先跑 voice calibration
 - pipeline 怎样进入 `waiting_for_review`，又怎样恢复

@@ -14,6 +14,7 @@
 - archive scanner、stale reaper、orphan cleanup、residue cleanup
 - pan 事件、通知、R2 observability
 - Admin dashboard / backups list / 项目列表批量备份
+- Pan admin/auth write routes 的 CSRF same-origin guard
 
 ## 2. 主图
 
@@ -24,6 +25,7 @@ graph TD
     JobsAdminUI["admin jobs bulk backup"] --> PanApiClient
     PanApiClient --> AdminApi["gateway/pan/admin_api.py"]
     PanApiClient --> AuthApi["gateway/pan/auth.py"]
+    PanApiClient --> CSRF["require_same_origin_state_change"]
 
     AuthApi --> OAuthState["PanOauthState state token"]
     AuthApi --> BaiduOAuth["Baidu OAuth code exchange / refresh"]
@@ -104,6 +106,7 @@ graph TD
 
 - 前端入口在 `/admin/pan/dashboard`、`/admin/pan/backups`、任务管理页和项目列表 admin 批量工具栏。
 - Gateway surface 统一挂在 `/api/admin/pan/*`，所有入口都要求 admin。
+- `gateway/pan/admin_api.py` 和 `gateway/pan/auth.py` 的 APIRouter 都接入 `require_same_origin_state_change`，connect、backup、restore、delete credentials/delete backup 等写操作还必须通过同源校验。
 - Admin API 返回备份列表 key 是 `items`，不是 `backups`；前端 `pan.ts` 已按后端 shape 对齐。
 
 结论：网盘备份是管理员运维归档面，不改变普通用户结果页下载语义。
@@ -169,10 +172,12 @@ graph TD
   - `/backups/batch`
   - `/restores`
   - soft delete / 412 guard
+  - CSRF-protected APIRouter
 - `gateway/pan/auth.py`
   - OAuth connect/callback
   - state token
   - token refresh
+  - CSRF-protected connect route
 - `gateway/pan/backup_executor.py`
   - backup state machine
   - advisory lock
@@ -208,6 +213,7 @@ graph TD
 
 - 想改百度网盘 OAuth、token refresh、凭证加密
 - 想改 admin 备份/恢复 API 或前端网盘页面
+- 想排查 Pan connect/backup/restore/delete 为什么被 CSRF 拦截
 - 想排查 `archiving / archived / restoring` 状态
 - 想排查 `BackupRecord.uploading / uploaded / restoring / restored / failed`
 - 想改 auto-archive、stale reaper、orphan cleanup、residue cleanup

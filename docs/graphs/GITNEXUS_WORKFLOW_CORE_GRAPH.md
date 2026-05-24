@@ -8,8 +8,9 @@
 
 - `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
 - 主对齐路径仍然是 `DSP-first alignment`
-- Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、translation audit metrics、handoff、terminal reports
-- Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部读取 app-safe admin policy，优先使用个人音色候选，再决定是否 clone 或暂停确认
+- Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、P5 possible-match auto-reuse、translation audit metrics、handoff、terminal reports
+- Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部读取 app-safe admin policy，优先使用个人音色候选，再决定是否 reuse、clone 或暂停确认
+- Phase 1a/1b reports 是 shadow-first 质量观测，不改变 `SemanticBlock` 和 DSP-first 主线
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
 - `derive_effective_pipeline_mode(...)` 决定 Smart job 是否继续走自动层，还是回到 Studio 控制流
 
@@ -40,16 +41,22 @@ graph TD
     Eligibility --> Candidates["UserVoice candidates endpoint"]
     CandidateGate --> Candidates
     Candidates --> ReusedVoice["strong reused_user_voice decision"]
+    Candidates --> StrongNamed["strong_named cross-source unique-name"]
     Candidates --> PossibleMatch["possible personal-voice candidates"]
+    PossibleMatch --> PossibleAutoReuse["P5 auto-reuse top candidate"]
     PossibleMatch --> WeakPause["pause for user confirmation"]
     WeakPause --> ReviewPause
     Candidates --> Quota["user voice quota snapshot"]
     AdminPolicy --> Quota
     Quota --> Provider["smart_wiring MiniMax clone provider"]
     Provider --> CloneMeter["record_voice_clone usage event"]
+    Provider --> BalanceExhaust["MiniMax 1008 / balance exhaustion"]
+    BalanceExhaust --> VoiceHandoff
     Provider --> VoiceDecision["clone / preset / pause"]
     CloneMeter --> VoiceDecision
     ReusedVoice --> VoiceDecision
+    StrongNamed --> VoiceDecision
+    PossibleAutoReuse --> VoiceDecision
     VoiceDecision --> MinorPreset["minor speaker preset auto-match"]
     VoiceDecision --> DubbingMode["aggregate speaker dubbing_mode"]
     VoiceDecision --> VoiceHandoff["voice-stage handoff"]
@@ -82,6 +89,8 @@ graph TD
     Editor --> TerminalSmart["terminal smart_state marker"]
     TerminalSmart --> Quality["smart_quality_report.json"]
     TerminalSmart --> Cost["smart_cost_summary.json"]
+    TerminalSmart --> Reports["reports/*.json/jsonl sidecars"]
+    Reports --> ReportAnalysis["admin report-analysis"]
 
     WhisperCap[".[whisper] + INSTALL_WHISPER + HF_HOME"] --> WhisperGate["env + admin + trigger context"]
     CueGate --> WhisperGate
@@ -113,9 +122,12 @@ graph TD
 
 - eligibility gate 在 voice selection 阶段前执行，先筛出主说话人与被排除说话人。
 - pipeline 通过 app-safe `read_admin_setting` 读取 `smart_auto_clone_enabled`、`smart_reuse_user_voice_enabled`、`smart_pause_on_possible_user_voice_match`，避免 app runtime 直接依赖 Gateway-only settings loader。
+- pipeline 还读取 `smart_auto_reuse_on_possible_user_voice_match`；默认开启时，possible match 自动复用 top candidate，不再进入人工暂停。
 - consent 与 admin policy 同时允许自动克隆时，pipeline 会抽样、校验样本、查询 user voice quota，再构造真实 `CloneProvider`。
 - 克隆前会调用内部 `/api/internal/user-voices/candidates`，强匹配可以直接 `reused_user_voice`，不再消耗 clone 点数。
-- admin 开启弱匹配暂停时，possible personal voice candidates 会写入 review payload，等待用户确认，而不是继续静默 clone。
+- 跨源唯一同名候选会被提升为 `strong_named`，也可自动复用。
+- admin 关闭 P5 auto-reuse 且开启弱匹配暂停时，possible personal voice candidates 才会写入 review payload，等待用户确认，而不是继续静默 clone。
+- MiniMax `status_code=1008 / insufficient balance / 余额不足` 被视为 provider exhaustion，进入 pause/handoff，不按普通 provider failure 重试到 preset。
 - Smart 自动克隆成功后会写 `UsageMeter.record_voice_clone(...)`，避免 terminal cost summary 漏掉 pipeline 内真实克隆成本。
 - quota 不可用、样本失败、provider pause、clone mirror 失败都会 fail-closed handoff。
 - 非主说话人通过 `_resolve_smart_minor_speaker_voices(...)` 从 `auto_matched_voice` 解析 preset voice，并先聚合 segment-level `dubbing_mode`，避免 keep-original / mute-or-background 说话人被错误配音。
@@ -149,7 +161,17 @@ graph TD
 
 结论：Smart reporting 已经是 workflow terminal 与 handoff 路径的一部分。
 
-### 3.7 whisper gate 仍然是部署能力 + admin policy + trigger context
+### 3.7 Phase 1a/1b reports 是 shadow-first 观测层
+
+- `translation_quality.py` 在 shadow flag 下写 `reports/translation_quality_report.json`，只检测 wrong-script 风险，不改变翻译。
+- `output_dispatcher.py` 写 `reports/subtitle_width_report.json` 和 `output/subtitle_quality_report.json`，为字幕宽度和 cue 质量提供证据。
+- `transcript_reviewer.py` / `speaker_evidence.py` 写 speaker evidence JSONL，记录 speaker snapshot 的 changed/uncertain 决策。
+- `sample_extractor.py` 可写 voice sample scoring shadow manifest，明确不改变实际 clone sample 选择。
+- Job API `/jobs/{id}/reports` 只暴露白名单报告目录，admin report-analysis 再做跨任务汇总。
+
+结论：这些 report 是 workflow 的旁路观测层，不替代 deterministic 主线和硬 gate。
+
+### 3.8 whisper gate 仍然是部署能力 + admin policy + trigger context
 
 - 部署能力：`.[whisper]`、`INSTALL_WHISPER`、`HF_HOME`
 - admin policy：`whisper_alignment_enabled / trigger / skip_cache / model`
@@ -177,6 +199,7 @@ graph TD
   - internal UserVoice match and candidates endpoints
 - `gateway/user_voice_service.py`
   - match scopes and candidate confidence
+  - `strong_named` auto-reuse tier
 - `src/services/usage_meter.py`
   - Smart auto clone usage recording
 - `gateway/smart_consent.py`
@@ -190,9 +213,19 @@ graph TD
   - main speaker gate
 - `src/services/smart/auto_voice_review.py`
   - clone / preset / pause orchestration
+  - possible-match auto-reuse
+  - MiniMax quota/balance exhaustion classifier
 - `src/services/smart/auto_translation_review.py`
   - audit-only translation metrics
   - full-auto default
+- `src/services/translation_quality.py`
+  - translation quality report sidecar
+- `src/services/speaker_evidence.py`
+  - speaker evidence report sidecar
+- `src/services/voice/sample_extractor.py`
+  - voice sample scoring shadow manifest
+- `src/services/jobs/api.py`
+  - job reports catalog / report streaming endpoints
 - `src/services/alignment/aligner.py`
   - parallel alignment
   - paid fallback semaphore
@@ -206,6 +239,7 @@ graph TD
 
 - 想改 `process.py` 主流水线
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
-- 想改 Smart voice review、个人音色候选、弱匹配暂停、同源音色复用、translation review、handoff、terminal report
+- 想改 Smart voice review、个人音色候选、P5 possible-match auto-reuse、弱匹配暂停、同源音色复用、translation review、handoff、terminal report
+- 想改 Phase 1a/1b report sidecars 或 Job API reports 目录
 - 想改 DSP / paid fallback / force_dsp review 语义
 - 想改 cue pipeline、SRT、deliverable-time whisper

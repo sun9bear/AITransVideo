@@ -13,6 +13,7 @@
 - proactive publish、registry redirect、lazy fallback
 - terminal mirror、R2 parity、cleanup 与 observability
 - Pan archive 后的本地 project_dir / R2 artifacts 删除与恢复边界
+- materials pack / job subresource 写路由的 CSRF same-origin guard
 
 ## 2. 主图
 
@@ -23,6 +24,7 @@ graph TD
     ResultUI --> JDraft["editor.jianying_draft_zip"]
 
     Pack --> TaskPlane["Gateway background task plane"]
+    Pack --> CSRF["require_same_origin_state_change"]
     TaskPlane --> PreAlign["aligning_subtitles"]
     PreAlign --> EnsureApi["ensure-whisper-aligned-subtitles"]
     EnsureApi --> JobApi["Job API"]
@@ -125,6 +127,14 @@ graph TD
 
 结论：R2 是在线交付缓存，Pan 是 admin 归档副本，两者不是同一个存储 backend。
 
+### 3.7 交付物生成类写请求现在受 CSRF 保护
+
+- `gateway/materials_api.py` 的 router 接入 `require_same_origin_state_change`，`POST /api/jobs/{job_id}/materials-pack` 不再只靠 session cookie。
+- `gateway/main.py` 的 `/job-api/jobs/{job_id}/{subpath:path}` catch-all 对 GET/POST 都加 same-origin guard，覆盖 generate-jianying-draft、continue、review actions 等 Job API 子资源代理。
+- 下载类 GET 仍通过 ownership / download key / storage router 判定，不把 CSRF 当作下载权限真源。
+
+结论：生成交付物是 state-changing action，需要同源保护；下载交付物仍以 ownership/storage resolution 为主。
+
 ## 4. 关键证据
 
 - `gateway/r2_artifact_sweeper.py`
@@ -144,6 +154,10 @@ graph TD
 - `gateway/storage/backend_router.py`
   - registry redirect
   - lazy fallback
+- `gateway/materials_api.py`
+  - CSRF-protected materials-pack generation route
+- `gateway/main.py`
+  - CSRF-protected job subresource proxy
 - `gateway/pan/backup_executor.py`
   - archive commit point
   - local + R2 deletion after uploaded
@@ -161,3 +175,4 @@ graph TD
 - 想看 R2 redirect / fallback 的观测口径
 - 想判断 Pan 归档后为什么本地或 R2 还没删除
 - 想判断 archived 任务恢复后为什么 R2 registry 没自动回来
+- 想排查 materials pack / generate draft / review 子资源为什么被 CSRF 拦截

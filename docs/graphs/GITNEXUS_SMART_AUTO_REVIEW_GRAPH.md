@@ -8,13 +8,13 @@
 
 - Smart 提交入口与 consent payload
 - Gateway `compute_job_policy("smart")` 与 `smart_consent` schema lock
-- admin Smart voice policy: auto-clone / reuse / weak-match pause
+- admin Smart voice policy: auto-clone / reuse / possible-match auto-reuse / weak-match pause
 - Smart 2026-05-20 full-auto contract
 - admin compliance notify-only / non-admin compliance hard fail
 - speaker eligibility gate
 - translation review audit metrics
-- candidate-first user voice reuse / weak-match confirmation / voice clone / preset / pause orchestration
-- user voice quota 与真实 provider wiring
+- candidate-first user voice reuse / P5 possible-match auto-reuse / weak-match confirmation / voice clone / preset / pause orchestration
+- user voice quota、MiniMax balance exhaustion 与真实 provider wiring
 - minor speaker preset auto-match
 - handoff 到 Studio human review
 - `[SMART_STATE]` marker、`smart_decisions.jsonl`、quality report、admin cost summary、credits policy
@@ -46,18 +46,24 @@ graph TD
     Consent --> AdminPolicy["read_admin_setting smart voice policy"]
     AdminPolicy --> ReuseMatch["/match or /candidates"]
     ReuseMatch --> ReuseHit["strong same-source UserVoice reuse"]
+    ReuseMatch --> StrongNamed["strong_named cross-source unique-name"]
     ReuseMatch --> PossibleMatch["medium / weak / cross-source candidates"]
+    PossibleMatch --> PossibleAutoReuse["P5 auto-reuse top possible-match"]
     PossibleMatch --> WeakPause["possible_user_voice_match_requires_confirmation"]
     ReuseMatch --> Samples["VoiceSampleExtractor per main speaker"]
     Samples --> Quota["GET /api/internal/user-voices/quota"]
     Quota --> Provider["smart_wiring.py build_smart_clone_provider"]
     Provider --> VoiceReview["auto_voice_review.py"]
     ReuseHit --> VoiceReview
+    StrongNamed --> VoiceReview
+    PossibleAutoReuse --> VoiceReview
     WeakPause --> VoiceReview
     VoiceReview --> Cloned["CLONED"]
     VoiceReview --> Reused["REUSED_USER_VOICE"]
     VoiceReview --> Preset["PRESET"]
     VoiceReview --> Paused["PAUSED"]
+    Provider --> BalanceExhaust["MiniMax 1008 / insufficient balance"]
+    BalanceExhaust --> Paused
     Cloned --> Register["POST /api/internal/user-voices/register-smart"]
     Register --> SourceMeta["source metadata + clone sample metadata"]
     SourceMeta --> MirrorOk["UserVoice mirror ok"]
@@ -93,6 +99,8 @@ graph TD
     Eligibility --> Decisions["smart_decisions.jsonl"]
     ReuseHit --> Decisions
     PossibleMatch --> Decisions
+    PossibleAutoReuse --> Decisions
+    StrongNamed --> Decisions
     VoiceReview --> Decisions
     Register --> Decisions
     Translation --> Decisions
@@ -108,6 +116,9 @@ graph TD
     Synth --> UserQuality["Job API smart-quality-report"]
     Quality --> UserQuality
     Cost --> AdminCost["GET /api/admin/jobs/{id}/cost"]
+    Decisions --> SmartAnalytics["/api/admin/smart-analytics summary/csv"]
+    Quality --> SmartAnalytics
+    Cost --> SmartAnalytics
     Cloned --> CloneMeter["UsageMeter record_voice_clone"]
     Reused --> ReuseMeter["UsageMeter record_voice_reuse"]
     OfferedCandidates --> RejectMeter["UsageMeter voice_candidate_rejected on user rejection"]
@@ -149,14 +160,17 @@ graph TD
 
 - Smart 只有在 `smart_consent.auto_voice_clone is True` 且存在主说话人时才进入复用或克隆路径。
 - pipeline 会先按 admin policy 决定是否查询候选：`smart_reuse_user_voice_enabled=False` 时跳过复用路径。
-- 默认路径继续使用 internal `/user-voices/match` 做强匹配；当 `smart_pause_on_possible_user_voice_match=True` 时改用 `/user-voices/candidates`，一次取 strong auto-reuse 与 non-strong candidates。
+- 默认路径继续使用 internal `/user-voices/match` 做强匹配；当 possible-match 自动复用或 pause 策略需要更多候选时改用 `/user-voices/candidates`。
 - 同用户、同源、同 speaker 的强匹配会记为 `reused_user_voice`，不产生 clone 点。
-- medium / weak / cross-source candidate 不自动复用；admin opt-in 后触发 `possible_user_voice_match_requires_confirmation`，交给用户确认。
+- 跨源唯一同名候选会提升为 `strong_named`，可自动复用，解决旧数据里同一个用户多来源同名音色被误判为 weak 的问题。
+- `smart_auto_reuse_on_possible_user_voice_match=True` 时，medium / weak / cross-source possible match 会自动提升 top candidate 为 `possible_user_voice_match_auto_reused`，不产生 paid clone。
+- P5 auto-reuse 优先级高于旧的 `smart_pause_on_possible_user_voice_match`；只有关闭 auto-reuse 且开启 pause 时，possible match 才触发 `possible_user_voice_match_requires_confirmation`。
 - Gateway create path 只有在 consent 和 `smart_auto_clone_enabled` 都允许新克隆时，才对非 admin 做 voice library quota 安全水位预检；pipeline runtime 仍保留 fail-closed quota check。
 - `_fetch_smart_user_voice_quota_remaining(...)` 调 Gateway internal quota endpoint，失败或无 internal key 会 fail-closed handoff。
 - `src/services/smart_wiring.py` 是真实 MiniMax clone adapter 的 composition root。
 - `_register_smart_clone_in_user_voices(...)` 把 clone 成功结果连同源内容、speaker、样本秒数、样本 segment ids 等 metadata 镜像进 Gateway UserVoice；镜像失败会 handoff，避免后续 quota stale。
 - Smart auto-clone 成功现在会同步写 `UsageMeter.record_voice_clone(...)`，不再只登记 UserVoice 而漏掉 provider 成本。
+- `_looks_like_quota_error(...)` 现在识别 `quota`、`balance`、`insufficient_balance`、`余额不足`、`payment_required` 和 MiniMax `1008`，provider balance exhaustion 会 PAUSED，而不是普通错误重试到 preset。
 
 结论：Smart auto voice 的正确性依赖 consent、admin policy、候选匹配、quota snapshot、provider wiring、UserVoice mirror、UsageMeter 成本记录共同成立。
 
@@ -185,13 +199,14 @@ graph TD
 
 ### 3.7 弱匹配暂停会把候选写进审核态
 
+- 默认 P5 策略下，possible match 优先自动复用，不走本节的暂停路径。
 - `evaluate_voice_review(..., possible_voice_matches_by_speaker_id=..., admin_pause_on_possible_match=True)` 会在强匹配复用之后、新克隆之前执行。
 - 触发 speaker 的 reason code 是 `possible_user_voice_match_requires_confirmation`。
 - 后续 speaker 的级联 reason code 是 `paused_after_prior_possible_match_confirmation`。
 - pipeline 会把 `smart_offered_candidates` 写入 `voice_selection_review.payload.speakers[]`，供人工审核 UI 与拒绝审计读取。
 - 用户如果选择了候选以外的 voice，Gateway 会写非计费 `voice_candidate_rejected` usage event；如果选择复用则写 `record_voice_reuse`。
 
-结论：弱匹配暂停不是失败，而是把“可能是同一个人”的音色候选转成可审计的人类确认点。
+结论：弱匹配暂停现在是 P5 auto-reuse 关闭后的保守策略；开启时它不是失败，而是把“可能是同一个人”的音色候选转成可审计的人类确认点。
 
 ### 3.8 quality report 是用户解释层，不是成本层
 
@@ -211,15 +226,24 @@ graph TD
 
 结论：Smart 成本数据有正式读路径，但只属于管理员安全域。
 
-### 3.10 Smart LLM 模型选择进入 admin 可控面
+### 3.10 Smart analytics 汇总自动审核表现
+
+- `gateway/admin_smart_analytics_api.py` 汇总 Smart jobs、alignment report、handoff reasons、edit events、quality report 与 cost summary。
+- `/api/admin/smart-analytics/summary` 返回窗口级完成率、handoff reason、平均指标、cost/margin 和 report coverage。
+- `/api/admin/smart-analytics/csv` 导出 job 级行，供离线分析 P5 auto-reuse、handoff、成本和质量。
+- `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx` 是 admin shell 中的 Smart 监控入口。
+
+结论：Smart auto-review 不只靠单 job sidecar 解释，已经有跨任务 admin 级观测入口。
+
+### 3.11 Smart LLM 模型选择进入 admin 可控面
 
 - `src/services/llm_registry.py` 为 `smart` mode 的 `pass1 / pass2 / pass3 / translate / rewrite / probe_translate` 默认选择 Gemini 3.1 Pro。
 - `gateway/admin_settings.py` 暴露 `prompt_models[mode][prompt_key]`，Smart 可被 admin override。
 - pipeline 给 translator 写入 `_service_mode = job_service_mode`，让 prompt model resolution 能区分 Smart / Studio / Express。
 
-结论：Smart translation 仍是 deterministic review gate，但底层 LLM 模型选择不再误用平铺默认值。
+结论：Smart translation 现在是 deterministic 质量观测层，不是默认人工 gate；底层 LLM 模型选择也不再误用平铺默认值。
 
-### 3.11 smart_state 是跨进程状态通道
+### 3.12 smart_state 是跨进程状态通道
 
 - pipeline 只能通过 stdout 发 `[SMART_STATE] {...}`。
 - `process_runner.py` 先解析 Smart marker，再解析 web review marker。
@@ -269,6 +293,8 @@ graph TD
   - `VoiceReviewChoice`
   - `VoiceReviewOutcome`
   - `evaluate_voice_review(...)`
+  - P5 possible-match auto-reuse
+  - MiniMax quota/balance exhaustion classifier
   - possible-match pause
 - `src/services/smart/handoff.py`
   - review_state + smart_state + web_review marker triple
@@ -284,23 +310,34 @@ graph TD
   - internal quota, match, candidates, register-smart endpoints
 - `gateway/user_voice_service.py`
   - candidate match scopes
+  - `strong_named` cross-source unique-name auto-reuse tier
   - cross-source named matching
   - generic speaker name filter
+- `gateway/admin_smart_analytics_api.py`
+  - Smart summary / CSV analytics
+  - report analysis aggregation
+- `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx`
+  - admin Smart analytics UI
 - `frontend-next/src/components/workspace/TranslationForm.tsx`
   - Smart weak-match warning banner
 - `gateway/admin_cost_api.py`
   - admin-only cost summary endpoint
 - `gateway/cost_summary_backfill.py`
   - post-settle backfill
+- `tests/test_minimax_balance_exhaustion.py`
+  - MiniMax 1008 / insufficient balance contract
+- `tests/test_strong_named_auto_reuse.py`
+  - cross-source unique-name auto-reuse contract
 
 ## 5. 什么时候优先看这张图
 
 - 想改 Smart 自动审核是否能直接通过
-- 想改 Smart voice policy、强匹配复用、弱匹配暂停、新克隆开关
+- 想改 Smart voice policy、强匹配复用、P5 possible-match 自动复用、弱匹配暂停、新克隆开关
 - 想改 Smart 降级到 Studio 的状态机
 - 想接真实 clone / TTS / LLM provider 到 Smart
-- 想排查 Smart 为什么复用了已有个人音色、为什么没克隆、为什么 clone 被 quota 拦住
+- 想排查 Smart 为什么复用了已有个人音色、为什么 possible match 没暂停、为什么没克隆、为什么 clone 被 quota/balance 拦住
 - 想排查 Smart 为什么暂停到音色审核、为什么写了候选拒绝审计
 - 想排查 Smart job 为什么没有 quality report 或为什么显示转人工
 - 想排查 Smart 扣费、退款、成本摘要、sidecar 审计
+- 想看 Smart analytics 为什么统计某个 handoff reason、cost 或质量指标
 - 想改多说话人 Smart voice assignment

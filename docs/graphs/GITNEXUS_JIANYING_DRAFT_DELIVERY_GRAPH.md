@@ -13,6 +13,7 @@
 - deliverable-time subtitle alignment
 - Smart job 的 user-facing Studio gate
 - archived job 先通过 Pan restore 回到 `succeeded` 再进入草稿生成
+- generate-draft 写请求走 Gateway Job API proxy 的 CSRF guard
 
 ## 2. 主图
 
@@ -23,6 +24,7 @@ graph TD
     Restore --> Restored["status=succeeded + project_dir restored"]
     Restored --> ResultUI
     Trigger --> ApiPreflight["Job API preflight"]
+    Trigger --> CSRF["Gateway same-origin guard"]
     ApiPreflight --> ModeGate["EDITABLE_SERVICE_MODES"]
     ModeGate --> Studio["service_mode=studio"]
     ModeGate --> Smart["service_mode=smart"]
@@ -126,6 +128,14 @@ graph TD
 
 结论：网盘归档是交付物生命周期的外层冷存储；剪映草稿生成仍发生在恢复后的热项目目录上。
 
+### 3.10 generate-draft 是 state-changing action
+
+- 前端触发 `POST /jobs/{id}/generate-jianying-draft` 会经 Gateway `/job-api/jobs/{job_id}/{subpath:path}` proxy。
+- `gateway/main.py` 现在给该 job subresource proxy 加 `require_same_origin_state_change`。
+- CSRF 只保护“生成/变更”动作；最终 zip 下载仍由 ownership、download key 和 storage backend resolution 管理。
+
+结论：剪映草稿生成不是纯读取，排查 403 时要同时看 Smart/Jianying gate 和 CSRF origin。
+
 ## 4. 关键证据
 
 - `src/services/jobs/api.py`
@@ -143,6 +153,8 @@ graph TD
 - `src/modules/output/jianying/jianying_draft_writer.py`
   - user draft root
   - zip writer
+- `gateway/main.py`
+  - CSRF-protected Job API subresource proxy
 - `gateway/pan/backup_executor.py`
   - archive clears local project and R2 artifacts after verified upload
 - `gateway/pan/restore_executor.py`
@@ -159,3 +171,4 @@ graph TD
 - 想改 `user_draft_root` 或 zip 交付路径
 - 想改 post-edit overwrite 对旧草稿的失效策略
 - 想排查 archived 任务为什么需要先恢复再生成剪映草稿
+- 想排查生成草稿请求为什么被 CSRF 拦截

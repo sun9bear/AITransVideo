@@ -1,6 +1,6 @@
 # GitNexus 项目图谱
 
-新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-05-20`
+新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-05-24`
 
 生成方式：基于 GitNexus 最新索引、Git 历史 diff 与源代码交叉整理。
 
@@ -8,26 +8,24 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1368 |
-| 节点数 | 24,820 |
-| 关系数 | 56,380 |
-| 聚类数 | 921 |
+| 文件数 | 1418 |
+| 节点数 | 25,600 |
+| 关系数 | 57,969 |
+| 聚类数 | 950 |
 | 流程数 | 300 |
-| 索引提交 | `5dacc96` |
+| 索引提交 | `34a7838` |
 | 索引状态 | `up-to-date` |
 
 本轮最需要反映的结构变化：
 
-- 网盘备份成为新的完整子系统：`gateway/pan/*` 覆盖 Baidu OAuth、token 加密、admin API、BackgroundTask、backup/restore/residue/stale 状态机、scheduler、Admin UI、observability 和部署 runbook。
-- Job 生命周期扩展到 `archiving / archived / restoring`；`BackupRecord` 是备份生命周期真源，`BackgroundTask` 只代表调度状态。
-- 备份成功以 `BackupRecord.status=uploaded` 为 commit point，之后才删除本地 project dir 和 R2 artifacts；post-commit 残留由 `residue_cleanup` / `stale_reaper` 补偿。
-- 恢复流程从 `uploaded` tar 安全解包到 staging 后再 move into place；`moved=True` 后 DB finalize 失败不能回滚到 archived，而是留给 stale reaper forward-resolve。
-- Admin UI 新增 `/admin/pan/dashboard`、`/admin/pan/backups`，项目列表和任务管理页支持管理员批量备份。
-- Pan 事件进入 `gateway/storage/event_log.py`：backup/restore started/succeeded/failed、token_revoked、residue_cleanup.completed，并被 `r2_observability.py` 和通知 dispatch map 消费。
-- Smart 2026-05-20 语义改为全自动：translation review 的 glossary、speaker、length、checksum、uncertain speaker、clone eligible 检查只做审计 metrics，不再 handoff。
-- Smart 仍保留硬 gate：>3 主说话人、样本不足、音色库水位、MiniMax quota、clone expiry、弱个人音色确认、内容合规。
-- Admin 内容合规命中变成 notify-only，不影响 pipeline；非 admin 仍由早期合规 gate 失败退出。
-- 成本/模型配置继续推进：Smart 默认 Gemini 3.1 Pro，当前工作区成本目录新增 Gemini 3.5 Flash，并以 RMB-direct 字段固化 Gemini 价格。
+- Gateway 安全面完成 CSRF 收口：`gateway/csrf.py` 的 same-origin guard 覆盖 auth/account、job proxy、upload、admin、support、notifications、billing、Pan、voice catalog/user voice 等写路由。
+- 生产安全默认更严格：Compose 默认 `AVT_ENV=production`，`validate_production_safety` 要求生产 auth，fake payment 默认只允许 dev/test，Next healthcheck 改为静态 `/healthz.txt`。
+- Smart P5 进入默认自动化：`strong_named` 支持跨源唯一同名个人音色自动复用；`smart_auto_reuse_on_possible_user_voice_match=True` 会自动提升 top possible match，且优先于旧的 pause-on-possible-match。
+- MiniMax `status_code=1008 / insufficient balance / 余额不足` 被归类为 provider exhaustion，Smart clone 会暂停而不是按普通 provider error 重试到 preset。
+- Smart analytics 成为 admin 正式控制面：`gateway/admin_smart_analytics_api.py` 提供 summary/csv、job report summary/csv、Phase 1b flags，前端新增 `/admin/smart-analytics` 与 `/admin/report-analysis`。
+- Phase 1a/1b 质量 sidecar 进入项目事实：translation quality、subtitle width、speaker evidence、voice sample scoring shadow 通过 Job API `/jobs/{id}/reports` 与 admin report analysis 汇总。
+- 成本/模型配置继续推进：Gemini 3.5 Flash 可选，Gemini 3.1 Flash Lite 迁移到 GA `gemini-3.1-flash-lite`，成本目录继续以 RMB-direct 字段固化 provider price。
+- 前端 polling 治理落地：`usePollingTask`、`useBackgroundTask`、admin heartbeat、notification bell 在 hidden tab 暂停或降频，并在 visibility 恢复后刷新。
 
 ## 2. 关键基座
 
@@ -35,17 +33,18 @@
 | --- | --- | --- |
 | Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs`，Smart inline branch 挂在 review gate 前后 | `src/pipeline/process.py`, `src/services/alignment/aligner.py` |
 | Smart | deterministic auto-review, consent gate, admin policy, candidate-first reuse/clone/preset, sidecar audit, Studio handoff | `src/services/smart/*`, `src/services/smart_wiring.py`, `gateway/smart_consent.py`, `src/pipeline/process.py` |
-| Smart Reports | user quality report 与 admin cost summary 分离 | `src/services/smart/sidecar_emitter.py`, `src/services/smart/quality_report_synthesizer.py`, `gateway/admin_cost_api.py` |
+| Smart Reports | user quality report、admin cost summary、Smart analytics、Phase 1a/1b report analysis 分离 | `src/services/smart/sidecar_emitter.py`, `src/services/smart/quality_report_synthesizer.py`, `gateway/admin_cost_api.py`, `gateway/admin_smart_analytics_api.py` |
 | Review | `waiting_for_review -> WorkspacePage panels -> resume`，Smart handoff 复用 Studio gate，voice selection 支持 candidate-first clone/reuse | `src/services/review_state.py`, `src/services/jobs/review_actions.py`, `gateway/voice_selection_api.py` |
 | Editing | Smart/Studio `enter-edit -> editing speakers -> split-many / suggest-split -> regenerate -> batch -> commit` | `src/services/jobs/editing_segments.py`, `src/services/jobs/editing_split_suggest.py`, `src/services/jobs/editing_batch.py`, `src/services/jobs/editing_commit.py` |
 | Delivery | `materials_pack / generate_video / editor.jianying_draft_zip / R2 registry / parity` | `gateway/storage/backend_router.py`, `gateway/r2_artifact_sweeper.py`, `src/services/r2_publisher_lib/r2_parity.py` |
-| Commercialization | Gateway owns plan, trial, pricing, entitlement, Smart availability, consent, fixed price and policy | `gateway/plan_catalog.py`, `gateway/entitlements.py`, `gateway/credits_service.py`, `gateway/job_intercept.py` |
+| Commercialization | Gateway owns plan, trial, pricing, entitlement, Smart availability, consent, fixed price, payment provider policy and production safety | `gateway/plan_catalog.py`, `gateway/entitlements.py`, `gateway/credits_service.py`, `gateway/job_intercept.py`, `gateway/payment_providers.py` |
 | Auth | phone + email registration, reset, session | `gateway/auth_phone.py`, `gateway/auth_email.py`, `frontend-next/src/components/auth/*` |
+| Security | CSRF same-origin guard, production env validation, fake payment production gate | `gateway/csrf.py`, `gateway/main.py`, `gateway/startup_checks.py`, `gateway/payment_providers.py` |
 | Calibration | manual / clone-after / review-preflight / Smart clone mirror / candidate matching / source metadata | `gateway/user_voice_api.py`, `gateway/user_voice_service.py`, `gateway/voice_calibration_hook.py`, `gateway/voice_calibration_review_preflight.py` |
-| Admin/Ops | settings, Smart LLM defaults, Smart voice policy, traffic, support, cost, disk cleanup/resize, R2 sweeper | `gateway/admin_settings.py`, `src/services/llm_registry.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/main.py` |
+| Admin/Ops | settings, Smart LLM defaults, Smart voice policy, Smart analytics, report analysis, Phase 1b flags, traffic, support, cost, disk cleanup/resize, R2 sweeper | `gateway/admin_settings.py`, `src/services/llm_registry.py`, `gateway/admin_smart_analytics_api.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/main.py` |
 | Metering & Settlement | `UsageMeter`, voice reuse/clone/rejection meter, RMB-direct pricing, Smart credits policy, terminal settle, cost backfill | `src/services/usage_meter.py`, `gateway/cost_management.py`, `gateway/credits_service.py`, `gateway/job_terminal_mirror.py`, `gateway/cost_summary_backfill.py` |
 | Pan Backup | admin-only Baidu Pan archive/restore, BackupRecord state machine, schedulers, residue cleanup, observability | `gateway/pan/*`, `gateway/background_task_reconciler.py`, `frontend-next/src/lib/api/pan.ts`, `scripts/r2_observability.py` |
-| Offline Evaluation | `smart_shadow_eval / sim`, quality/cost reports | `scripts/smart_shadow_eval_collector.py`, `scripts/smart_shadow_sim_aggregator.py` |
+| Offline Evaluation | `smart_shadow_eval / sim`, Phase 1a baseline, Phase 1b report summaries, quality/cost reports | `scripts/smart_shadow_eval_collector.py`, `scripts/smart_shadow_sim_aggregator.py`, `src/services/phase1b_report_summary.py` |
 
 ## 3. 子图入口
 
@@ -76,6 +75,7 @@ graph TD
     AppShell["Bell / popup / support / admin entry"] --> FrontApi
     AdminUI["Admin / Ops UI"] --> FrontApi
     PanUI["Admin Pan dashboard / backups / bulk backup"] --> FrontApi
+    SmartAnalyticsUI["Admin smart-analytics / report-analysis"] --> FrontApi
 
     PlansSSR --> Gateway["Gateway truth + control"]
     AuthFront --> Gateway
@@ -89,6 +89,8 @@ graph TD
     Gateway --> Ops["settings / Smart voice policy / LLM models / costs / disk cleanup + resize"]
     Gateway --> CalibrationPlane["voice calibration + user voice quota + candidates + source metadata"]
     Gateway --> PanPlane["Pan backup admin API + OAuth"]
+    Gateway --> SecurityPlane["CSRF same-origin + production safety"]
+    Gateway --> SmartAnalyticsApi["admin_smart_analytics_api"]
     Gateway --> Proxy["ownership + subresource proxy"]
 
     JobApi --> Workflow["process.py / ProjectWorkflow"]
@@ -100,15 +102,21 @@ graph TD
     SmartPlane --> Eligibility["eligibility_gate"]
     Eligibility --> AutoVoice["auto_voice_review"]
     Eligibility --> AutoTranslation["auto_translation_review"]
-    AutoVoice --> SmartPolicy["admin smart_auto_clone / reuse / pause policy"]
+    AutoVoice --> SmartPolicy["admin smart_auto_clone / reuse / auto_reuse_possible / pause policy"]
     AutoVoice --> Quota["Gateway user voice quota"]
     AutoVoice --> VoiceCandidates["UserVoice candidates API"]
     VoiceCandidates --> VoiceReuse["strong auto-reuse"]
+    VoiceCandidates --> StrongNamed["strong_named cross-source unique-name"]
     VoiceCandidates --> WeakPause["weak/medium/cross-source confirmation pause"]
+    VoiceCandidates --> PossibleAutoReuse["P5 auto-reuse top possible-match"]
     AutoVoice --> CloneProvider["smart_wiring MiniMax clone provider"]
     VoiceReuse --> UserVoiceMirror["UserVoice source metadata"]
+    StrongNamed --> VoiceReuse
+    PossibleAutoReuse --> VoiceReuse
     WeakPause --> Handoff
     CloneProvider --> UserVoiceMirror["register-smart user voice mirror"]
+    CloneProvider --> ProviderExhaust["quota/balance exhaustion status_code=1008"]
+    ProviderExhaust --> Handoff
     AutoVoice --> MinorPreset["minor speaker preset auto-match"]
     MinorPreset --> VoiceIdProp["voice_id_a / voice_id_b propagation"]
     AutoTranslation --> SmartSidecar["smart_decisions / quality / cost"]
@@ -120,6 +128,11 @@ graph TD
     QualityApi --> ReviewUI
     SmartSidecar --> CostApi["Admin cost API"]
     CostApi --> AdminUI
+    SmartSidecar --> SmartAnalyticsApi
+    ReportSidecars["reports: translation/subtitle/speaker/sample"] --> SmartAnalyticsApi
+    SmartAnalyticsApi --> SmartAnalyticsUI
+    SmartAnalyticsApi --> Phase1BFlags["phase1b flags admin overrides"]
+    Phase1BFlags --> Ops
 
     Workflow --> ReviewGate
     ReviewGate --> ReviewUI
@@ -197,6 +210,10 @@ graph TD
     SupportPlane --> AppShell
     Ops --> AdminUI
     CalibrationPlane --> AdminUI
+    SecurityPlane --> CSRF["require_same_origin_state_change"]
+    SecurityPlane --> ProdSafety["AVT_ENV production + fake payment gate"]
+    SecurityPlane --> AdminUI
+    PollingGov["usePollingTask / useBackgroundTask visibility-aware"] --> FrontApi
 ```
 
 ## 5. 核心证据链
@@ -216,6 +233,7 @@ graph TD
 
 - `gateway/alembic/versions/028_user_voice_source_metadata.py` 为 `user_voices` 增加 source hash、source speaker、source job、sample seconds 等溯源字段和索引。
 - `gateway/user_voice_service.py::match_user_voices(...)` 输出 `same_source_strong / same_source_named / same_source_speaker_id_changed / cross_source_named_person`，并过滤 generic speaker name，避免“Speaker A”误匹配。
+- 2026-05-21 后，跨源唯一同名候选可提升为 `strong_named / cross_source_named_unique`，`auto_reuse_allowed=True`，服务 Smart P5 和 Studio/Post-edit 预选。
 - `gateway/user_voice_api.py` 暴露 internal `/api/internal/user-voices/candidates`，`gateway/voice_selection_api.py` 暴露 public `/job-api/jobs/{job_id}/voice-candidates`。
 - `VoiceSelectionPanel.tsx` 和 `VoiceModifyTab.tsx` 都按“强匹配 / 可能匹配 / 其他个人音色”顺序展示候选。
 - `src/services/usage_meter.py::record_voice_reuse(...)` 与 `record_voice_candidate_rejected(...)` 都是非计费审计事件。
@@ -227,7 +245,9 @@ graph TD
 - `_fetch_smart_user_voice_quota_remaining(...)` 通过 Gateway internal API 查询用户音色库剩余额度。
 - Gateway create path 只有在 consent 和 admin clone policy 都允许新克隆时，才对非 admin Smart job 做提交前 quota safety water mark 检查。
 - `smart_auto_clone_enabled=False` 只禁止新 clone，不禁止强匹配复用；`smart_reuse_user_voice_enabled=False` 才会跳过候选查询。
-- `smart_pause_on_possible_user_voice_match=True` 时，非强匹配候选会触发 `possible_user_voice_match_requires_confirmation`，并把候选写入 review payload。
+- `smart_auto_reuse_on_possible_user_voice_match=True` 是 P5 默认策略：非强 possible match 会自动提升 top candidate 为 reuse，不发起 paid clone；它优先于旧的 `smart_pause_on_possible_user_voice_match`。
+- 只有关闭 P5 auto-reuse 且开启 `smart_pause_on_possible_user_voice_match=True` 时，非强匹配候选才触发 `possible_user_voice_match_requires_confirmation` 并写入 review payload。
+- MiniMax `status_code=1008 / insufficient balance / 余额不足` 被 `_looks_like_quota_error(...)` 归类为 provider exhaustion，Smart clone 进入 quota/balance pause 而不是普通 provider retry。
 - `build_smart_clone_provider()` 仍集中在 `src/services/smart_wiring.py`，Smart 核心包不直接导入真实 provider。
 - `_register_smart_clone_in_user_voices(...)` 将 clone 成功结果镜像回 Gateway UserVoice，否则 fail-closed handoff。
 - `_resolve_smart_minor_speaker_voices(...)` 为非主说话人解析 preset voice，避免 Smart approved payload 留下空 voice_id。
@@ -242,6 +262,8 @@ graph TD
 - `quality_report_synthesizer.py` 会从 `smart_decisions.jsonl` 合成 handoff 摘要，避免用户看到误导性的“处理中”。
 - `smart_cost_summary.json` 由 admin-only `GET /api/admin/jobs/{job_id}/cost` 读取。
 - `cost_summary_backfill.py` 在 settlement 后回填实际扣点和 MiniMax quota 使用量。
+- `admin_smart_analytics_api.py` 汇总 Smart job、alignment report、handoff reason、edit events、quality/cost sidecar，并导出 JSON summary 与 CSV。
+- `phase1b_report_summary.py` 汇总 `reports/translation_quality_report.json`、`reports/subtitle_width_report.json`、`reports/speaker_evidence.jsonl` 和 voice sample scoring shadow manifest，供 `/admin/report-analysis` 判断哪些 shadow flag 可以继续推进。
 
 结论：质量解释给用户，成本审计给管理员，不能把内部成本字段泄漏到 Workspace。
 
@@ -271,7 +293,10 @@ graph TD
 - `gateway/admin_disk_api.py` 现在还输出 `resize_hint`，并通过 `POST /api/admin/disk/resize-filesystem` 代理到 loopback helper。
 - `gateway/disk_resize_helper.py` 独立持有 raw block device，要求 bearer token、`confirm=true`、ext4、`resize2fs/tune2fs` 可用，并有进程内 resize lock。
 - `src/services/llm_registry.py` 为 Smart mode 定义 Gemini 3.1 Pro per-mode defaults，admin settings 的 mode-aware prompt_models 可覆盖。
-- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露 Smart 自动克隆、复用个人音色、弱匹配确认三个策略开关。
+- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露 Smart 自动克隆、复用个人音色、possible-match 自动复用、弱匹配确认四个策略开关。
+- `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx` 与 `/admin/report-analysis/page.tsx` 进入 admin shell，分别服务 Smart 总览与 Phase 1a/1b 报告分析。
+- `gateway/csrf.py` 的 same-origin guard 已接入 admin、Pan、support、billing、user voice、voice catalog 等写路由；运维面排查 403 需要先看 `Origin/Referer/Host/SITE_URL/AVT_CORS_ORIGINS`。
+- `usePollingTask` / `useBackgroundTask` / support heartbeat 现在具备 visibility-aware pause/resume，前端运维问题需要区分主动停轮询和接口失败。
 
 结论：项目目录清理、受控扩容、Smart LLM 模型选择和 Smart voice policy 都进入 Gateway admin 控制平面。
 
@@ -290,16 +315,37 @@ graph TD
 
 - `gateway/plan_catalog.py`、`gateway/entitlements.py`、`gateway/credits_service.py` 管理 plan、allowed service modes、fixed price、credit estimate。
 - 前端只消费 Gateway facts，不能把智能版可用性或价格固化成第二套真源。
+- `gateway/payment_providers.py::is_fake_payment_enabled()` 默认只允许 dev/test，生产必须显式 opt-in；`billing.py` 的 fake-pay 端点被禁用时返回 403 或带 error redirect。
+- `gateway/startup_checks.py::validate_production_safety(...)` 要求生产环境启用 auth；Compose 默认 `AVT_ENV=production`，避免生产环境因漏配而走 dev fallback。
 
 结论：Smart 入口上线后，商业化约束仍是 Gateway-source-of-truth。
 
+### 5.10 CSRF 与生产安全成为横切控制面
+
+- `gateway/main.py` 对 auth/account、gateway upload、job create/delete、voice clone/match/candidates、job subresources 与 job-api catch-all 写路由加 same-origin dependency。
+- 多个 APIRouter 级别也接入 `require_same_origin_state_change`：admin support、notifications、billing、Pan、pricing admin、materials、user voice、voice catalog 等。
+- `gateway/csrf.py` 支持 `SITE_URL / AVT_CORS_ORIGINS / AVT_CSRF_TRUST_FORWARDED_HOST` 组合，默认不信任 forwarded host。
+- `.gitattributes` 固定 shell scripts LF，Next healthcheck 改为静态 `/healthz.txt`，降低生产容器运行时依赖漂移。
+
+结论：安全防线不再只靠 auth；会改变状态的浏览器请求还必须满足同源/可信 origin。
+
+### 5.11 Phase 1a/1b 报告是 shadow-first 质量推进面
+
+- `src/services/translation_quality.py` 只在 shadow flag 开启时写 `reports/translation_quality_report.json`，当前仍是 detect-only，不改变翻译行为。
+- `src/modules/output/output_dispatcher.py` 写 `subtitle_width_report.json` 与 `subtitle_quality_report.json`，其中 `subtitle_width_report` 进入 Phase 1b dashboard 汇总。
+- `src/services/speaker_evidence.py` 与 `transcript_reviewer.py` 写 speaker evidence JSONL，帮助判断 speaker 修正是否稳定。
+- `src/services/voice/sample_extractor.py` 可写 voice sample scoring shadow manifest，明确 `shadow_only=True` 且不改变 clone sample 选择。
+- `src/services/runtime_flags.py` 允许 env flag 与 admin settings Phase 1b flags 共同控制 shadow/behavior 开关。
+
+结论：质量改进先通过 sidecar 和 admin report-analysis 看数据，再决定是否打开行为 gate。
+
 ## 6. 按任务选图
 
-- 要看 Smart 自动审核、consent、voice reuse/clone quota、handoff、quality report、cost summary，读 `GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
-- 要看 phone/email auth、trial、pricing truth、Smart entry/entitlement/consent/weak-match warning，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 要看 Smart 自动审核、consent、P5 possible-match auto-reuse、voice reuse/clone quota、handoff、quality report、cost summary，读 `GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
+- 要看 phone/email auth、trial、pricing truth、Smart entry/entitlement/consent/weak-match warning、payment production gate、CSRF，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
 - 要看 Smart/Studio post-edit 修改入口、multi-cut、智能切点和编辑态克隆/复用音色，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
-- 要看 admin disk cleanup/resize、Smart voice policy、Smart LLM model config、cost summary admin page、settlement backfill、cleanup 运维面，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
-- 要看 Smart sidecar、UsageMeter、voice reuse/clone/rejection metering、RMB-direct pricing、shadow eval、质量与成本，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
+- 要看 admin disk cleanup/resize、Smart voice policy、Smart analytics、report analysis、Phase 1b flags、Smart LLM model config、cost summary admin page、settlement backfill、CSRF/polling/生产安全运维面，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
+- 要看 Smart sidecar、UsageMeter、voice reuse/clone/rejection metering、RMB-direct pricing、Phase 1a/1b reports、shadow eval、质量与成本，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
 - 要看 review UI、candidate-first voice selection、Smart 弱匹配暂停与决策摘要，读 `GITNEXUS_REVIEW_GRAPH.md`
 - 要看 workflow 内核、DSP-first 对齐、voice_id 传播与 cue pipeline，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
 - 要看百度网盘归档/恢复、Pan OAuth、BackupRecord 状态机、调度器、stale/residue/orphan cleanup，读 `GITNEXUS_PAN_BACKUP_GRAPH.md`
