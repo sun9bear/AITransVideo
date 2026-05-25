@@ -170,8 +170,9 @@ class MainlandWorkerClient:
     Parameters
     ----------
     base_url : str
-        Worker 入口，例如 ``http://8.148.83.128/internal/voice-clone/cosyvoice``。
-        注意末尾不加斜杠（构造请求时拼 ``/clone``、``/synthesize-batch``）。
+        Worker API base，例如 ``http://8.148.83.128/internal/voice-clone``。
+        注意末尾不加斜杠（构造请求时拼
+        ``/cosyvoice/clone``、``/cosyvoice/synthesize-batch``）。
     credentials : WorkerCredentials
         当前签名用的 ``(key_id, secret)``。
     transport : httpx.BaseTransport | None
