@@ -222,6 +222,17 @@ class GatewaySettings(BaseSettings):
     cosyvoice_sample_uploader: Literal["local_fs_stub", "aliyun_oss"] = "local_fs_stub"
     # 本地 stub 写入目录（仅 ``local_fs_stub`` backend 用）；生产部署可忽略。
     cosyvoice_sample_local_dir: str = ""
+    # 阿里云 OSS uploader 配置（仅 ``cosyvoice_sample_uploader=aliyun_oss`` 用）。
+    # 使用 OSS S3-compatible API；endpoint 支持官方 S3 endpoint
+    # ``https://s3.oss-{region}.aliyuncs.com`` 或已绑定证书的 CNAME endpoint。
+    cosyvoice_oss_endpoint: str = ""
+    cosyvoice_oss_bucket: str = ""
+    cosyvoice_oss_access_key_id: str = ""
+    cosyvoice_oss_access_key_secret: str = ""
+    cosyvoice_oss_region: str = "cn-beijing"
+    cosyvoice_oss_key_prefix: str = "cosyvoice/clone-samples"
+    cosyvoice_oss_connect_timeout_s: int = 10
+    cosyvoice_oss_read_timeout_s: int = 30
 
     model_config = {"env_prefix": "AVT_", "populate_by_name": True}
 

@@ -31,9 +31,12 @@ import hashlib
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,14 @@ class SampleUploader(Protocol):
         str
             DashScope 可访问的 URL。
         """
+        ...
+
+
+class SupportsDeleteUploadedUrl(Protocol):
+    """Optional cleanup hook implemented by real object-store uploaders."""
+
+    def delete_uploaded_url(self, url: str) -> None:
+        """Best-effort delete for the object behind a signed URL."""
         ...
 
 
@@ -168,45 +179,187 @@ class InMemoryUploader:
 # ---------------------------------------------------------------------------
 
 DEFAULT_LOCAL_FS_DIR = Path("/tmp/aivideotrans/cosyvoice_samples")
+DEFAULT_OSS_CONTENT_TYPE = "audio/wav"
+ALIYUN_OSS_REQUIRED_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("AVT_COSYVOICE_OSS_ENDPOINT", "cosyvoice_oss_endpoint"),
+    ("AVT_COSYVOICE_OSS_BUCKET", "cosyvoice_oss_bucket"),
+    ("AVT_COSYVOICE_OSS_ACCESS_KEY_ID", "cosyvoice_oss_access_key_id"),
+    ("AVT_COSYVOICE_OSS_ACCESS_KEY_SECRET", "cosyvoice_oss_access_key_secret"),
+)
+
+
+@dataclass
+class AliyunOssUploader:
+    """Upload clone samples to Alibaba Cloud OSS and return short-TTL URLs.
+
+    The implementation uses OSS's S3-compatible API through boto3. OSS only
+    supports virtual-hosted-style requests, and Python/boto3 should use the
+    OSS-compatible Signature V2 mode (``signature_version="s3"``).
+    """
+
+    endpoint: str
+    bucket: str
+    access_key_id: str
+    access_key_secret: str
+    region: str = "cn-beijing"
+    key_prefix: str = "cosyvoice/clone-samples"
+    connect_timeout_s: int = 10
+    read_timeout_s: int = 30
+    content_type: str = DEFAULT_OSS_CONTENT_TYPE
+    _client: object | None = field(default=None, init=False, repr=False)
+    _client_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _url_to_key: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        missing = [
+            name
+            for name, value in (
+                ("endpoint", self.endpoint),
+                ("bucket", self.bucket),
+                ("access_key_id", self.access_key_id),
+                ("access_key_secret", self.access_key_secret),
+            )
+            if not str(value or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                "AliyunOssUploader missing required config: " + ", ".join(missing)
+            )
+        self.endpoint = str(self.endpoint).strip().rstrip("/")
+        self.bucket = str(self.bucket).strip()
+        self.region = str(self.region or "cn-beijing").strip()
+        self.key_prefix = _normalize_key_prefix(self.key_prefix)
+
+    def upload_and_sign(
+        self,
+        data: bytes,
+        *,
+        filename_hint: str = "sample.wav",
+        ttl_seconds: int = 3600,
+    ) -> str:
+        if not data:
+            raise ValueError("AliyunOssUploader refuses to upload empty sample")
+        ttl = int(ttl_seconds)
+        if ttl <= 0:
+            raise ValueError("ttl_seconds must be positive")
+
+        ext = _safe_extension(filename_hint)
+        digest = hashlib.sha256(data).hexdigest()
+        key = self._build_object_key(digest=digest, ext=ext)
+        content_type = _content_type_for_ext(ext)
+
+        client = self._get_client()
+        client.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
+            Metadata={"sha256": digest},
+        )
+        signed_url = client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": self.bucket,
+                "Key": key,
+                "ResponseContentType": content_type,
+            },
+            ExpiresIn=ttl,
+            HttpMethod="GET",
+        )
+        with self._client_lock:
+            self._url_to_key[signed_url] = key
+        return signed_url
+
+    def delete_uploaded_url(self, url: str) -> None:
+        """Delete the object behind ``url`` after the synchronous clone call."""
+        with self._client_lock:
+            key = self._url_to_key.pop(url, None)
+        if not key:
+            key = _object_key_from_signed_url(url)
+        if not key:
+            raise ValueError("cannot infer OSS object key from signed URL")
+        self._get_client().delete_object(Bucket=self.bucket, Key=key)
+
+    def _build_object_key(self, *, digest: str, ext: str) -> str:
+        now = datetime.now(timezone.utc)
+        date_path = now.strftime("%Y/%m/%d")
+        return (
+            f"{self.key_prefix}/{date_path}/"
+            f"{uuid.uuid4().hex}_{digest[:16]}{ext}"
+        )
+
+    def _get_client(self):
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            if self._client is not None:
+                return self._client
+
+            import boto3  # type: ignore[import-untyped]
+            from botocore.client import Config  # type: ignore[import-untyped]
+
+            config = Config(
+                signature_version="s3",
+                region_name=self.region,
+                connect_timeout=self.connect_timeout_s,
+                read_timeout=self.read_timeout_s,
+                retries={"max_attempts": 1, "mode": "standard"},
+                s3={"addressing_style": "virtual"},
+            )
+            self._client = boto3.client(
+                "s3",
+                endpoint_url=self.endpoint,
+                aws_access_key_id=self.access_key_id,
+                aws_secret_access_key=self.access_key_secret,
+                config=config,
+            )
+            return self._client
+
+
+def missing_aliyun_oss_settings(settings: object) -> list[str]:
+    """Return missing ``AVT_COSYVOICE_OSS_*`` env names for early 503 gates."""
+    return [
+        env_name
+        for env_name, attr in ALIYUN_OSS_REQUIRED_SETTINGS
+        if not str(getattr(settings, attr, "") or "").strip()
+    ]
 
 
 # Codex 2026-05-25 C.2 二轮 review 部署前项 #A：``GatewaySettings.cosyvoice_sample_uploader``
-# 是 ``Literal["local_fs_stub", "aliyun_oss"]``，但工厂当前只实现 stub。
+# 是 ``Literal["local_fs_stub", "aliyun_oss"]``。``aliyun_oss`` 已由
+# Phase 4.1.x 落地，stub 仍只用于本地开发。
 # 下面三个集合显式区分"配置 schema 允许的值" vs "工厂已实现的值" vs "生产可用值"：
 #
 # - KNOWN_BACKENDS    ：配置 schema 接受（防 unknown env 反向探测）
 # - IMPLEMENTED_BACKENDS：工厂能真造出 uploader 实例
 # - PRODUCTION_READY_BACKENDS：DashScope 可访问 → 真实联调可走
 #
-# 当前状态（Phase 4.1 C.2）：
-#   IMPLEMENTED = {"local_fs_stub"}  — 仅本地 stub
-#   PROD_READY  = frozenset()        — 0；联调前 AliyunOssUploader 落地后加 "aliyun_oss"
+# 当前状态（Phase 4.1.x）：
+#   IMPLEMENTED = {"local_fs_stub", "aliyun_oss"}
+#   PROD_READY  = {"aliyun_oss"}
 #
 # 这让 endpoint Layer 3 可以两步 fail-closed：
 #   1. stub backend → 503 sample_uploader_not_configured（明确告知运维切换）
 #   2. 未实现的 backend（aliyun_oss）→ 503 sample_uploader_not_implemented
 #      （防止 endpoint 在 transcode + 上传后才 500，给运维明确信号）
 #
-# Phase 4.1.x AliyunOssUploader 落地时同步更新这两个集合 + 测试。
 KNOWN_BACKENDS: frozenset[str] = frozenset({"local_fs_stub", "aliyun_oss"})
-IMPLEMENTED_BACKENDS: frozenset[str] = frozenset({"local_fs_stub"})
-PRODUCTION_READY_BACKENDS: frozenset[str] = frozenset()  # Phase 4.1.x 加 "aliyun_oss"
+IMPLEMENTED_BACKENDS: frozenset[str] = frozenset({"local_fs_stub", "aliyun_oss"})
+PRODUCTION_READY_BACKENDS: frozenset[str] = frozenset({"aliyun_oss"})
 
 
 def build_sample_uploader_from_settings(settings: object) -> SampleUploader:
     """根据 ``GatewaySettings`` 构造合适的 uploader 实现。
 
-    当前只支持 ``local_fs_stub``（默认）。``aliyun_oss`` 在 config schema 中
-    已预留，但工厂未实现 —— 调用此函数会抛 ``NotImplementedError``。
+    ``local_fs_stub`` 仅用于本地开发。``aliyun_oss`` 是生产实现，但必须
+    配齐 ``AVT_COSYVOICE_OSS_*`` 设置。
 
     生产 endpoint 应该在调用此函数 **之前** 用 ``PRODUCTION_READY_BACKENDS``
     检查（``gateway/cosyvoice_clone/api.py`` Layer 3），让无 OSS 配置时
     直接 503 而不是走到这里抛 500。
 
-    Phase 4.1.x AliyunOssUploader 落地时：
-        if backend == "aliyun_oss":
-            return AliyunOssUploader(...)
-        # 并把 "aliyun_oss" 加进 IMPLEMENTED + PRODUCTION_READY
+    endpoint 会在读样本前用 ``missing_aliyun_oss_settings`` 做早期 503；
+    工厂这里重复校验是防御式兜底。
     """
     backend = getattr(settings, "cosyvoice_sample_uploader", "local_fs_stub")
     base_dir_str = getattr(settings, "cosyvoice_sample_local_dir", None) or str(
@@ -215,13 +368,53 @@ def build_sample_uploader_from_settings(settings: object) -> SampleUploader:
     if backend == "local_fs_stub":
         return LocalFsStubUploader(base_dir=Path(base_dir_str))
     if backend == "aliyun_oss":
-        # 工厂级 fail-closed：明确 NotImplementedError，让 endpoint Layer 3
-        # 守卫早期 503，而不是 transcode 完才 500。
-        raise NotImplementedError(
-            "AliyunOssUploader 尚未实现；当前 sample_uploader=aliyun_oss 仅是"
-            "配置占位。Phase 4.1.x 真实联调前必须补 AliyunOssUploader 实现。"
+        missing = missing_aliyun_oss_settings(settings)
+        if missing:
+            raise ValueError(
+                "cosyvoice_sample_uploader=aliyun_oss but required config missing: "
+                + ", ".join(missing)
+            )
+        return AliyunOssUploader(
+            endpoint=getattr(settings, "cosyvoice_oss_endpoint"),
+            bucket=getattr(settings, "cosyvoice_oss_bucket"),
+            access_key_id=getattr(settings, "cosyvoice_oss_access_key_id"),
+            access_key_secret=getattr(settings, "cosyvoice_oss_access_key_secret"),
+            region=getattr(settings, "cosyvoice_oss_region", "cn-beijing"),
+            key_prefix=getattr(
+                settings, "cosyvoice_oss_key_prefix", "cosyvoice/clone-samples"
+            ),
+            connect_timeout_s=int(
+                getattr(settings, "cosyvoice_oss_connect_timeout_s", 10) or 10
+            ),
+            read_timeout_s=int(
+                getattr(settings, "cosyvoice_oss_read_timeout_s", 30) or 30
+            ),
         )
     raise ValueError(
         f"Unknown cosyvoice_sample_uploader={backend!r}; "
         f"valid values: {sorted(KNOWN_BACKENDS)}"
     )
+
+
+def _normalize_key_prefix(value: str) -> str:
+    prefix = str(value or "cosyvoice/clone-samples").strip().strip("/")
+    cleaned = "/".join(
+        part for part in prefix.split("/") if part not in {"", ".", ".."}
+    )
+    return cleaned or "cosyvoice/clone-samples"
+
+
+def _content_type_for_ext(ext: str) -> str:
+    if ext == ".mp3":
+        return "audio/mpeg"
+    if ext == ".m4a":
+        return "audio/mp4"
+    return "audio/wav"
+
+
+def _object_key_from_signed_url(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path.lstrip("/")
+    if not path:
+        return ""
+    return unquote(path)

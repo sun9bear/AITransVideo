@@ -88,6 +88,7 @@ from cosyvoice_clone.sample_uploader import (
     PRODUCTION_READY_BACKENDS,
     SampleUploader,
     build_sample_uploader_from_settings,
+    missing_aliyun_oss_settings,
 )
 from cosyvoice_clone.sample_validator import (
     SampleValidationResult,
@@ -265,6 +266,24 @@ async def cosyvoice_clone(
                 ),
             },
         )
+    if uploader_backend == "aliyun_oss":
+        missing_oss = missing_aliyun_oss_settings(gw_settings)
+        if missing_oss:
+            logger.error(
+                "[cosyvoice_clone] refusing clone: sample uploader backend is "
+                "aliyun_oss but required config is missing: %s",
+                ", ".join(missing_oss),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "sample_uploader_config_missing",
+                    "message": (
+                        "CosyVoice 克隆功能不可用：aliyun_oss sample 存储后端缺少"
+                        f"必要配置：{', '.join(missing_oss)}。请联系管理员补齐生产 OSS 配置。"
+                    ),
+                },
+            )
 
     # === Layer 4 (UPDATED, fix #5)：consent 严格 literal "true" 校验（无 cost）===
     # FastAPI ``bool = Form(...)`` 会把 ``"1" / "yes" / "on"`` 也解析为 True；
@@ -369,7 +388,21 @@ async def cosyvoice_clone(
             detail={"code": exc.code, "message": str(exc)},
         ) from exc
 
-    # === Layer 10：上传 sample 拿 short-TTL URL（本地 stub / 真实 OSS）===
+    # === Layer 10：worker 配置 gate（无 cost；在 OSS upload 前 fail-closed）===
+    worker_client = build_mainland_voice_worker_client(gw_settings)
+    if worker_client is None:
+        # plan §Worker Degraded Mode：worker 未配置 / unavailable → 503，
+        # 不静默切 MiniMax（CLAUDE.md 付费 API 硬约束）。这一步必须在
+        # OSS upload 前执行，避免 worker 未配置时留下临时 sample object。
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "worker_disabled",
+                "message": "mainland voice worker disabled or misconfigured (admin to check)",
+            },
+        )
+
+    # === Layer 11：上传 sample 拿 short-TTL URL（本地 stub / 真实 OSS）===
     try:
         uploader: SampleUploader = build_sample_uploader_from_settings(gw_settings)
         sample_url = uploader.upload_and_sign(
@@ -379,6 +412,7 @@ async def cosyvoice_clone(
         )
     except Exception as exc:  # noqa: BLE001 — uploader 实现可能抛任意异常
         logger.exception("[cosyvoice_clone] sample upload failed: %s", exc)
+        _best_effort_close_worker_client(worker_client)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -387,19 +421,7 @@ async def cosyvoice_clone(
             },
         ) from exc
 
-    # === Layer 11：调武汉 worker — **唯一付费 API 触发点**★ ===
-    worker_client = build_mainland_voice_worker_client(gw_settings)
-    if worker_client is None:
-        # plan §Worker Degraded Mode：worker 未配置 / unavailable → 503，
-        # 不静默切 MiniMax（CLAUDE.md 付费 API 硬约束）
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "code": "worker_disabled",
-                "message": "mainland voice worker disabled or misconfigured (admin to check)",
-            },
-        )
-
+    # === Layer 12：调武汉 worker — **唯一付费 API 触发点**★ ===
     sample_sha256 = _sha256_hex(transcoded)
     try:
         clone_resp = worker_client.clone(WorkerCloneRequest(
@@ -453,6 +475,8 @@ async def cosyvoice_clone(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"code": f"provider_{exc.code}", "message": str(exc)},
         ) from exc
+    finally:
+        _best_effort_delete_uploaded_sample(uploader, sample_url)
 
     # === Layer 12 (NEW, fix #2)：worker 回包 target_model 契约校验 ===
     # Codex 2026-05-25 C.2 二轮 review：CosyVoice voice_id ↔ model 绑定核心
@@ -677,6 +701,27 @@ async def _acquire_clone_quota_transaction_lock(
 
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _best_effort_delete_uploaded_sample(uploader: SampleUploader, sample_url: str) -> None:
+    """Delete temporary sample object if the uploader supports cleanup."""
+    delete_fn = getattr(uploader, "delete_uploaded_url", None)
+    if not callable(delete_fn):
+        return
+    try:
+        delete_fn(sample_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[cosyvoice_clone] sample cleanup failed after worker clone attempt: %s",
+            exc,
+        )
+
+
+def _best_effort_close_worker_client(worker_client: Any) -> None:
+    try:
+        worker_client.close()
+    except Exception:  # pragma: no cover
+        pass
 
 
 def _bounded_best_effort_delete(

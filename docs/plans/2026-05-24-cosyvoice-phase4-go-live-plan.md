@@ -1168,11 +1168,15 @@ F — 锁死跨子树守卫测试集（9 invariant + 1 follow-up）
 
 **部署前剩余项**：
 
-- 🔴 **阻塞 live smoke**：`AliyunOssUploader` 实现 + `PRODUCTION_READY_BACKENDS`
-  加 `"aliyun_oss"` —— 当前工厂层抛 `NotImplementedError`，endpoint Layer 3
-  早期 fail-closed（503 `sample_uploader_not_implemented`），用户无法真实
-  上传 sample；C.2 endpoint 现状只能 stub / 测试。Phase 4.1.x 必须先补
-  AliyunOssUploader 才能开 Phase 4.2 UI
+- ✅ **Phase 4.1.x 已补**：`AliyunOssUploader` 实现 +
+  `PRODUCTION_READY_BACKENDS={"aliyun_oss"}`。Gateway 使用 OSS S3-compatible
+  API 上传 30s/16k/mono/PCM16 WAV 样本，返回短 TTL signed GET URL 给武汉
+  worker；endpoint Layer 3 在读样本前校验 `AVT_COSYVOICE_OSS_*` 必填配置，
+  缺失时 503 `sample_uploader_config_missing`，不转码、不上传、不调付费
+  worker。worker clone 调用完成后 best-effort 删除临时 OSS object。
+- 🔴 **阻塞 live smoke**：生产环境补齐 `AVT_COSYVOICE_OSS_*`、
+  `AVT_MAINLAND_VOICE_WORKER_*`，武汉 worker 切 `WORKER_MODE=live`，并确认
+  HTTPS/Nginx 对外入口。
 - 🟡 **首次实账单后回填**：`billing_sku` 字段当前 `None`，等首次 clone 真实
   扣费后从阿里云账单后台手工确认 SKU 名（admin manual UPDATE 或 backfill 脚本）
 - 🟢 **Phase 4.2 placeholder**：`cosyvoice_clone_max_concurrent_jobs`
