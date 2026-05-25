@@ -902,6 +902,239 @@ def test_read_back_probe_uses_correct_range_for_large_file(monkeypatch, tmp_path
     assert range_header == f'bytes={expected_start}-{expected_end}'
 
 
+# --- 2026-05-25: verify_remote_tail retry tests (production Anthropic
+# 4.73 GB backup failed at this gate with read timeout=30) ---
+
+
+def _make_dlink_mocker_with_range_failures(monkeypatch, *, tail_bytes: bytes,
+                                            remote_path: str, file_size: int,
+                                            range_failures: list,
+                                            fs_id: int = 999):
+    """Like _make_dlink_mocker but the Range GET step raises items from
+    range_failures (one per call) before falling through to a successful
+    tail response. ``range_failures`` is a list of exception INSTANCES; once
+    exhausted, subsequent Range calls return tail_bytes.
+
+    list() and filemetas() are mocked to ALWAYS succeed — only the final
+    Range GET on the dlink is allowed to fail. This matches the production
+    pattern: dlink fetch is cheap & cached, byte-streaming is the flaky part.
+    """
+    import requests
+
+    requests_made = []
+    failure_iter = iter(range_failures)
+    monkey_time_sleeps = []
+    monkeypatch.setattr('time.sleep', lambda s: monkey_time_sleeps.append(s))
+
+    def mock_get(url, params=None, headers=None, **kw):
+        requests_made.append({'url': url, 'params': params, 'headers': headers})
+        p = params or {}
+
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [{
+                            'path': remote_path, 'size': file_size,
+                            'fs_id': fs_id, 'isdir': 0,
+                        }],
+                    }
+
+                def raise_for_status(self):
+                    pass
+            return LR()
+
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+
+                def json(self):
+                    return {'list': [{'dlink': 'https://example.com/dl?token=fake'}]}
+
+                def raise_for_status(self):
+                    pass
+            return JR()
+
+        # Range GET on dlink — apply scripted failure if any remaining
+        try:
+            exc = next(failure_iter)
+            raise exc
+        except StopIteration:
+            pass
+
+        class BR:
+            status_code = 206
+            content = tail_bytes
+
+            def raise_for_status(self):
+                pass
+        return BR()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    return requests_made, monkey_time_sleeps
+
+
+def test_verify_remote_tail_retries_on_timeout(monkeypatch, tmp_path):
+    """2 read timeouts then success → retry yields the tail match."""
+    import requests as _requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'probe.tar.gz'
+    test_file.write_bytes(b'A' * 200_000)
+    remote = '/apps/AIVideoTrans/probe.tar.gz'
+
+    failures = [
+        _requests.exceptions.ReadTimeout(
+            "HTTPSConnectionPool(host='bjbgp01.baidupcs.com', port=443): "
+            "Read timed out. (read timeout=30)"),
+        _requests.exceptions.ReadTimeout(
+            "HTTPSConnectionPool(host='bjbgp01.baidupcs.com', port=443): "
+            "Read timed out. (read timeout=30)"),
+    ]
+    _, sleeps = _make_dlink_mocker_with_range_failures(
+        monkeypatch, tail_bytes=b'A' * 65_536, remote_path=remote,
+        file_size=200_000, range_failures=failures,
+    )
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    ok = c.verify_remote_tail(test_file, remote, size=200_000, access_token='at')
+    assert ok is True
+    # Backoff applied 2 sleeps (1s, 2s) — third attempt succeeded.
+    assert sleeps == [1.0, 2.0]
+
+
+def test_verify_remote_tail_gives_up_after_max_attempts(monkeypatch, tmp_path):
+    """3 read timeouts in a row → raise to caller (backup_executor handles)."""
+    import requests as _requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'probe.tar.gz'
+    test_file.write_bytes(b'A' * 200_000)
+    remote = '/apps/AIVideoTrans/probe.tar.gz'
+
+    failures = [
+        _requests.exceptions.ReadTimeout("Read timed out."),
+        _requests.exceptions.ReadTimeout("Read timed out."),
+        _requests.exceptions.ReadTimeout("Read timed out."),
+    ]
+    _make_dlink_mocker_with_range_failures(
+        monkeypatch, tail_bytes=b'A' * 65_536, remote_path=remote,
+        file_size=200_000, range_failures=failures,
+    )
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    import pytest
+    with pytest.raises(_requests.exceptions.ReadTimeout):
+        c.verify_remote_tail(test_file, remote, size=200_000, access_token='at')
+
+
+def test_verify_remote_tail_does_not_retry_on_4xx(monkeypatch, tmp_path):
+    """4xx (e.g. 401 token expired) → raise immediately, no retry waste."""
+    import requests as _requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'probe.tar.gz'
+    test_file.write_bytes(b'A' * 200_000)
+    remote = '/apps/AIVideoTrans/probe.tar.gz'
+
+    class FakeResponse401:
+        status_code = 401
+        content = b''
+
+        def raise_for_status(self):
+            raise _requests.HTTPError("401 unauthorized", response=self)
+
+    # 401 doesn't raise a Timeout — it returns response 401 that raise_for_status raises.
+    # We need a different mock here that doesn't go through range_failures, since
+    # 401 returns a response, not an exception. So embed it as a custom mock.
+    requests_made = []
+
+    def mock_get(url, params=None, headers=None, **kw):
+        requests_made.append({'url': url, 'params': params, 'headers': headers})
+        p = params or {}
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+                def json(self):
+                    return {'errno': 0, 'list': [{'path': remote, 'size': 200_000,
+                                                   'fs_id': 999, 'isdir': 0}]}
+                def raise_for_status(self): pass
+            return LR()
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+                def json(self): return {'list': [{'dlink': 'https://example.com/dl?t=x'}]}
+                def raise_for_status(self): pass
+            return JR()
+        return FakeResponse401()
+
+    monkeypatch.setattr(_requests, 'get', mock_get)
+    sleeps = []
+    monkeypatch.setattr('time.sleep', lambda s: sleeps.append(s))
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    import pytest
+    with pytest.raises(_requests.HTTPError):
+        c.verify_remote_tail(test_file, remote, size=200_000, access_token='at')
+    # 4xx must not have triggered any retry sleep
+    assert sleeps == []
+
+
+def test_verify_remote_tail_uses_tuple_timeout(monkeypatch, tmp_path):
+    """Smoke contract: the Range GET must be called with tuple-form timeout
+    ``(connect, read)`` not the legacy integer ``timeout=30`` (which urllib3
+    applied to both connect & read, causing the original 30s read failure)."""
+    import requests as _requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'probe.tar.gz'
+    test_file.write_bytes(b'A' * 200_000)
+    remote = '/apps/AIVideoTrans/probe.tar.gz'
+
+    captured_timeouts = []
+
+    def mock_get(url, params=None, headers=None, timeout=None, **kw):
+        captured_timeouts.append(timeout)
+        p = params or {}
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+                def json(self):
+                    return {'errno': 0, 'list': [{'path': remote, 'size': 200_000,
+                                                   'fs_id': 999, 'isdir': 0}]}
+                def raise_for_status(self): pass
+            return LR()
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+                def json(self): return {'list': [{'dlink': 'https://example.com/dl?t=x'}]}
+                def raise_for_status(self): pass
+            return JR()
+        class BR:
+            status_code = 206
+            content = b'A' * 65_536
+            def raise_for_status(self): pass
+        return BR()
+
+    monkeypatch.setattr(_requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    c.verify_remote_tail(test_file, remote, size=200_000, access_token='at')
+
+    # Find the Range GET call — the one whose timeout is not (None or 15)
+    # (15 is the filemetas timeout). The dlink Range call should use tuple
+    # form (30, 120).
+    tuple_timeouts = [t for t in captured_timeouts if isinstance(t, tuple)]
+    assert tuple_timeouts, f"expected tuple-form timeout, got {captured_timeouts}"
+    connect, read = tuple_timeouts[0]
+    assert connect == 30 and read >= 60, (
+        f"Range GET must use tuple-form timeout with read >= 60s, got "
+        f"connect={connect} read={read}"
+    )
+
+
 def test_get_dlink_chains_list_then_filemetas(monkeypatch):
     """Happy-path contract: _get_dlink calls list(parent) first, finds fs_id,
     then calls filemetas with the fsids JSON array (NOT path-based stub)."""

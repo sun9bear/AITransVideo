@@ -52,6 +52,22 @@ from auth import (
 )
 import logging
 
+# Configure root logger early so app-level WARN/INFO emits (pan.*, jobs, etc.)
+# actually reach `docker logs`. Without this, modules that do
+# ``logger = logging.getLogger(__name__)`` end up propagating to a handler-less
+# root → silent drops. Production 2026-05-25: this was why ``_upload_chunk``
+# retry warnings were invisible during the Anthropic 4.73 GB failure
+# investigation. Uvicorn's own loggers (uvicorn.error, uvicorn.access) have
+# their own handlers and are unaffected.
+#
+# If a handler is already attached (e.g. unit-test harness pre-configured one)
+# we leave it alone — basicConfig is a no-op when root already has handlers.
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
 from config import settings
 from csrf import require_same_origin_state_change
 from database import engine, init_db

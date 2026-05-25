@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 _CHUNK_UPLOAD_MAX_ATTEMPTS = 3
 _CHUNK_UPLOAD_BACKOFF_BASE_S = 1.0  # → 1s, 2s, 4s
 
+# Production 2026-05-25: the Anthropic 4.73 GB backup failed at the read-back
+# verify gate (NOT the chunk-upload phase — that already retries). Root cause:
+# ``verify_remote_tail()`` did ``timeout=30`` integer-form, which urllib3 maps
+# to BOTH connect=30 AND read=30. The error
+# ``HTTPSConnectionPool(host='bjbgp01.baidupcs.com', port=443):
+#  Read timed out. (read timeout=30)``
+# was the bytes-read timing out after a successful connect — the CDN edge had
+# just spent a few seconds finding the freshly-uploaded 4.73 GB file's tail
+# block. After upload + finalize, give the CDN ample headroom + retry transient
+# stalls (same shape as chunk-upload retry but separate constants because the
+# operation is small — one 64 KB Range GET, not a 4 MB POST).
+_VERIFY_TAIL_MAX_ATTEMPTS = 3
+_VERIFY_TAIL_BACKOFF_BASE_S = 1.0
+
 
 class BaiduPanClient:
     """Implements PanProvider protocol for Baidu Pan."""
@@ -278,6 +292,14 @@ class BaiduPanClient:
 
         Returns True if matched, False otherwise. Caller decides whether to
         raise or fall back.
+
+        Production 2026-05-25: cross-border Range GET against freshly-uploaded
+        Baidu PCS files occasionally has the CDN edge needing a few seconds to
+        warm the byte range; default 30s integer timeout (= 30 connect + 30
+        read) is too tight for first hits on a 4+ GB file. Now uses
+        ``timeout=(30, 120)`` tuple-form (30s connect, 120s read) and retries
+        up to 3 times with exponential backoff (1s, 2s, 4s). Read-back is
+        idempotent — safe to retry verbatim.
         """
         if size < probe_bytes:
             probe_bytes = size  # smaller files probe entirety
@@ -291,9 +313,58 @@ class BaiduPanClient:
         range_header = {'Range': f'bytes={size - probe_bytes}-{size - 1}'}
         # download link for the remote file
         dlink = self._get_dlink(remote_path, access_token)
-        resp = requests.get(dlink, headers=range_header, timeout=30)
-        resp.raise_for_status()
-        return resp.content == local_tail
+
+        last_exc: Exception | None = None
+        for attempt in range(_VERIFY_TAIL_MAX_ATTEMPTS):
+            try:
+                # Tuple form: (connect, read). 30s to handshake, 120s to receive
+                # the 64 KB tail bytes — CDN cold-start can stall the first
+                # bytes for tens of seconds on large fresh objects.
+                resp = requests.get(dlink, headers=range_header, timeout=(30, 120))
+                if 500 <= resp.status_code < 600:
+                    raise requests.HTTPError(
+                        f"verify_remote_tail returned 5xx {resp.status_code}",
+                        response=resp,
+                    )
+                resp.raise_for_status()
+                if attempt > 0:
+                    logger.info(
+                        "verify_remote_tail succeeded on attempt %d/%d "
+                        "(remote=%s size=%d)",
+                        attempt + 1, _VERIFY_TAIL_MAX_ATTEMPTS,
+                        remote_path, size,
+                    )
+                return resp.content == local_tail
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_exc = exc
+                if attempt + 1 >= _VERIFY_TAIL_MAX_ATTEMPTS:
+                    break
+                sleep_s = _VERIFY_TAIL_BACKOFF_BASE_S * (2 ** attempt)
+                logger.warning(
+                    "verify_remote_tail transient failure "
+                    "(remote=%s attempt=%d/%d): %s — retrying in %.1fs",
+                    remote_path, attempt + 1, _VERIFY_TAIL_MAX_ATTEMPTS,
+                    exc, sleep_s,
+                )
+                time.sleep(sleep_s)
+            except requests.HTTPError as exc:
+                # 5xx caught above; 4xx falls here → raise (auth / range bad).
+                if (exc.response is not None
+                        and 500 <= exc.response.status_code < 600
+                        and attempt + 1 < _VERIFY_TAIL_MAX_ATTEMPTS):
+                    last_exc = exc
+                    sleep_s = _VERIFY_TAIL_BACKOFF_BASE_S * (2 ** attempt)
+                    logger.warning(
+                        "verify_remote_tail 5xx (remote=%s attempt=%d/%d): "
+                        "%s — retrying in %.1fs",
+                        remote_path, attempt + 1, _VERIFY_TAIL_MAX_ATTEMPTS,
+                        exc, sleep_s,
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
 
     def download(self, remote_path: str, local_path: Path, *, access_token: str) -> dict:
         """Stream download to local_path. Computes sha256 + size locally.
