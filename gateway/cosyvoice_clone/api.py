@@ -53,6 +53,7 @@ worker 回包 ``target_model`` → 写 ``user_voices`` row → 返回 voice meta
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sys
@@ -71,6 +72,7 @@ for _candidate in [
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from admin_settings import _is_admin, load_settings
@@ -319,6 +321,9 @@ async def cosyvoice_clone(
     # 必须在 worker.clone 调用之前生效，否则灰度用户可反复触发付费。
     max_voices = int(admin_settings.cosyvoice_clone_max_voices_per_user or 0)
     if max_voices > 0:
+        await _acquire_clone_quota_transaction_lock(
+            db, user_id=auth_user.id, provider=PROVIDER_COSYVOICE_VOICE_CLONE,
+        )
         active_count = await count_active_voices_for_user_and_provider(
             db, user_id=auth_user.id, provider=PROVIDER_COSYVOICE_VOICE_CLONE,
         )
@@ -606,8 +611,71 @@ async def _read_upload_file(upload: UploadFile) -> bytes:
     return data
 
 
+def _session_dialect_name(db: object) -> str | None:
+    """Best-effort SQLAlchemy dialect name lookup without checking out a new connection."""
+
+    candidates: list[object] = []
+    get_bind = getattr(db, "get_bind", None)
+    if callable(get_bind):
+        try:
+            candidates.append(get_bind())
+        except Exception:
+            pass
+    bind = getattr(db, "bind", None)
+    if bind is not None:
+        candidates.append(bind)
+    sync_session = getattr(db, "sync_session", None)
+    sync_get_bind = getattr(sync_session, "get_bind", None)
+    if callable(sync_get_bind):
+        try:
+            candidates.append(sync_get_bind())
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        dialect = getattr(candidate, "dialect", None)
+        name = getattr(dialect, "name", None)
+        if name:
+            return str(name)
+    return None
+
+
+def _clone_quota_lock_key(*, user_id: object, provider: str) -> int:
+    """Stable signed 64-bit key for PostgreSQL advisory locks."""
+
+    raw = f"cosyvoice_clone_quota:{provider}:{user_id}".encode("utf-8")
+    digest = hashlib.blake2b(raw, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+async def _acquire_clone_quota_transaction_lock(
+    db: AsyncSession,
+    *,
+    user_id: object,
+    provider: str,
+) -> bool:
+    """Serialize clone quota check + paid clone for one user/provider pair.
+
+    PostgreSQL transaction advisory locks are held until ``add_user_voice`` commits
+    or the request rolls back. That keeps concurrent clone requests from both
+    passing ``max_voices_per_user`` before either paid clone call writes a row.
+    SQLite/fake sessions used in tests/local defaults intentionally no-op.
+    """
+
+    if not hasattr(db, "execute"):
+        return False
+    dialect = _session_dialect_name(db)
+    if dialect != "postgresql":
+        return False
+    lock_key = _clone_quota_lock_key(user_id=user_id, provider=provider)
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": lock_key},
+    )
+    return True
+
+
 def _sha256_hex(data: bytes) -> str:
-    import hashlib
     return hashlib.sha256(data).hexdigest()
 
 

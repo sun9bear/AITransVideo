@@ -1017,6 +1017,149 @@ def test_voice_quota_queries_cosyvoice_clone_provider_specifically(
     assert call["provider"] == PROVIDER_COSYVOICE_VOICE_CLONE
 
 
+def test_voice_quota_lock_acquired_before_count_and_worker_call(
+    monkeypatch, test_client, fake_worker_client,
+) -> None:
+    """PR #7 Codex review: quota guard must serialize before paid clone."""
+    events: list[str] = []
+
+    async def _fake_lock(db, *, user_id, provider):
+        events.append(f"lock:{provider}:{user_id}")
+        return True
+
+    async def _fake_count(db, user_id, *, provider):
+        events.append(f"count:{provider}:{user_id}")
+        return 2
+
+    original_clone = fake_worker_client.clone
+
+    def _clone_with_event(req):
+        events.append("clone")
+        return original_clone(req)
+
+    monkeypatch.setattr(clone_api, "_acquire_clone_quota_transaction_lock", _fake_lock)
+    monkeypatch.setattr(clone_api, "count_active_voices_for_user_and_provider", _fake_count)
+    fake_worker_client.clone = _clone_with_event
+
+    resp = _post_clone(test_client)
+
+    assert resp.status_code == 201, resp.text
+    assert events[:3] == [
+        f"lock:{PROVIDER_COSYVOICE_VOICE_CLONE}:u-test",
+        f"count:{PROVIDER_COSYVOICE_VOICE_CLONE}:u-test",
+        "clone",
+    ]
+
+
+def test_voice_quota_zero_max_skips_quota_lock(
+    monkeypatch, fake_uploader, fake_worker_client, fake_validator,
+    fake_normalizer, fake_db_add, fake_db_session,
+) -> None:
+    """When admin disables max_voices_per_user, no quota lock is acquired."""
+    s = AdminSettings(
+        cosyvoice_clone_worker_enabled=True,
+        cosyvoice_clone_user_allowlist=["u-test"],
+        cosyvoice_clone_max_voices_per_user=0,
+    )
+    monkeypatch.setattr(clone_api, "load_settings", lambda: s)
+
+    async def _unexpected_lock(*args, **kwargs):
+        raise AssertionError("quota lock must not be acquired when max_voices_per_user=0")
+
+    monkeypatch.setattr(clone_api, "_acquire_clone_quota_transaction_lock", _unexpected_lock)
+
+    from auth import get_current_user
+    from database import get_db
+
+    app = _make_app()
+    app.dependency_overrides[get_current_user] = lambda: _FakeUser("u-test", "user")
+    app.dependency_overrides[get_db] = fake_db_session
+    client = TestClient(app)
+
+    resp = _post_clone(client)
+
+    assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_clone_quota_lock_uses_postgresql_transaction_advisory_lock() -> None:
+    """Lock helper must use pg_advisory_xact_lock, not a non-locking count only."""
+    statements: list[tuple[object, dict | None]] = []
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _FakeDb:
+        def get_bind(self):
+            return _Bind()
+
+        async def execute(self, stmt, params=None):
+            statements.append((stmt, params))
+
+    acquired = await clone_api._acquire_clone_quota_transaction_lock(
+        _FakeDb(), user_id="u-test", provider=PROVIDER_COSYVOICE_VOICE_CLONE,
+    )
+
+    assert acquired is True
+    assert len(statements) == 1
+    assert "pg_advisory_xact_lock" in str(statements[0][0])
+    assert isinstance(statements[0][1]["lock_key"], int)
+
+
+@pytest.mark.asyncio
+async def test_clone_quota_lock_noops_for_non_postgresql_sessions() -> None:
+    """Local SQLite/fake sessions stay clean-local and do not attempt pg locks."""
+    class _Dialect:
+        name = "sqlite"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _FakeDb:
+        def get_bind(self):
+            return _Bind()
+
+        async def execute(self, stmt, params=None):
+            raise AssertionError("sqlite tests must not execute PostgreSQL advisory locks")
+
+    acquired = await clone_api._acquire_clone_quota_transaction_lock(
+        _FakeDb(), user_id="u-test", provider=PROVIDER_COSYVOICE_VOICE_CLONE,
+    )
+
+    assert acquired is False
+
+
+def test_clone_quota_lock_key_is_stable_and_provider_scoped() -> None:
+    key_a1 = clone_api._clone_quota_lock_key(
+        user_id="u-test", provider=PROVIDER_COSYVOICE_VOICE_CLONE,
+    )
+    key_a2 = clone_api._clone_quota_lock_key(
+        user_id="u-test", provider=PROVIDER_COSYVOICE_VOICE_CLONE,
+    )
+    key_b = clone_api._clone_quota_lock_key(
+        user_id="u-test", provider="minimax_voice_clone",
+    )
+
+    assert key_a1 == key_a2
+    assert key_a1 != key_b
+    assert -(2 ** 63) <= key_a1 < 2 ** 63
+
+
+def test_quota_lock_call_is_before_count_and_paid_worker_clone() -> None:
+    """Static guard: future refactors must not move the lock after count/clone."""
+    import inspect
+
+    source = inspect.getsource(clone_api.cosyvoice_clone)
+    lock_pos = source.index("_acquire_clone_quota_transaction_lock")
+    count_pos = source.index("count_active_voices_for_user_and_provider")
+    clone_pos = source.index("worker_client.clone")
+
+    assert lock_pos < count_pos < clone_pos
+
+
 def test_voice_quota_zero_max_disables_quota_check(
     monkeypatch, fake_uploader, fake_worker_client, fake_validator,
     fake_normalizer, fake_db_add, fake_db_session, fake_voice_count,
