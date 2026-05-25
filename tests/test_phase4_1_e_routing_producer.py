@@ -891,6 +891,53 @@ async def test_enrichment_strips_client_supplied_worker_fields_for_unmatched_voi
 
 
 @pytest.mark.asyncio
+async def test_blank_provider_known_clone_voice_fails_closed(monkeypatch):
+    """PR #7 Codex review: missing tts_provider must not let clone ids drift.
+
+    Even if the approve payload omits tts_provider, a voice_id that is known in
+    user_voices as a CosyVoice clone must be treated as clone-like. If the
+    current user's strict routing lookup does not authorize it, reject approve
+    instead of forwarding a non-worker payload.
+    """
+    from job_intercept import _enrich_speakers_with_clone_routing
+
+    mock_db = MagicMock()
+    job_result = MagicMock()
+    job_result.first.return_value = MagicMock(user_id="u-test")
+    known_clone_result = MagicMock()
+    known_clone_result.all.return_value = [("cosyvoice_custom_blank_provider",)]
+    mock_db.execute = AsyncMock(side_effect=[job_result, known_clone_result])
+
+    async def _empty_lookup(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "user_voice_service.lookup_clone_voice_routing_metadata",
+        _empty_lookup,
+    )
+
+    async def _fake_catalog(_db):
+        return set()
+
+    monkeypatch.setattr(
+        "job_intercept._fetch_cosyvoice_public_voice_ids", _fake_catalog,
+    )
+
+    speakers = [{
+        "speaker_id": "speaker_a",
+        "voice_id": "cosyvoice_custom_blank_provider",
+        # tts_provider intentionally omitted
+    }]
+    enriched, error = await _enrich_speakers_with_clone_routing(
+        mock_db, job_id="j1", speakers=speakers,
+    )
+    assert enriched is None
+    assert error is not None
+    assert error["code"] == "voice_clone_metadata_missing"
+    assert error["voice_id"] == "cosyvoice_custom_blank_provider"
+
+
+@pytest.mark.asyncio
 async def test_public_catalog_lookup_failure_for_unknown_cosyvoice_voice_fails_closed(monkeypatch):
     """E P1 #1/#2 fix: 公开 catalog 查询失败 + voice 看似 cosyvoice clone →
     无法判断是否为合法预设，必须 fail-closed（不能 degrade 让 clone voice

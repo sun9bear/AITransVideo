@@ -2528,6 +2528,29 @@ async def _fetch_cosyvoice_public_voice_ids(db: AsyncSession) -> set[str]:
     return {str(row[0]) for row in result.all()}
 
 
+async def _fetch_known_cosyvoice_clone_voice_ids(
+    db: AsyncSession,
+    voice_ids: list[str],
+) -> set[str]:
+    """Return voice ids that are known CosyVoice clone assets in user_voices.
+
+    This intentionally ignores ``user_id`` and ``expired_at``.  It is not used
+    for authorization; it is only an identity guard for approve payloads where
+    ``tts_provider`` is missing.  A voice id that belongs to another account or
+    was expired/deleted must still be treated as clone-like and rejected instead
+    of drifting to a legacy/non-worker path.
+    """
+    distinct_voice_ids = list({vid for vid in voice_ids if vid})
+    if not distinct_voice_ids:
+        return set()
+    stmt = select(UserVoice.voice_id).where(
+        UserVoice.voice_id.in_(distinct_voice_ids),
+        UserVoice.provider == "cosyvoice_voice_clone",
+    )
+    result = await db.execute(stmt)
+    return {str(row[0]) for row in result.all()}
+
+
 async def _enrich_speakers_with_clone_routing(
     db: AsyncSession,
     *,
@@ -2545,6 +2568,9 @@ async def _enrich_speakers_with_clone_routing(
       → ``voice_clone_provider_mismatch`` 400
     - ``voice_id`` 未命中但形似 CosyVoice clone（payload ``tts_provider ==
       "cosyvoice"`` 且不在 public catalog） → ``voice_clone_metadata_missing`` 400
+    - **PR #7 Codex review**：payload 漏写 ``tts_provider`` 时，如果 voice_id
+      在任意 user_voices row 中是 CosyVoice clone，也按 clone-like 处理并
+      fail-closed，而不是放行到 legacy/non-worker path。
     - **P1 #1 fix**：``lookup_clone_voice_routing_metadata`` 抛异常（DB 短暂
       不可用）→ 对任何 ``tts_provider="cosyvoice"`` 非 public preset voice
       返 ``voice_clone_routing_lookup_failed`` 503。**禁止** degrade 让 clone
@@ -2601,7 +2627,24 @@ async def _enrich_speakers_with_clone_routing(
         )
         routing_lookup_failed = True
 
-    # 4) 公开 catalog 集合（P1 #2 fix：直接 Gateway DB async 查，不走 self-HTTP）
+    # 4) 已知 clone voice id 集合（只作身份判断，不授权）。这补齐 payload
+    # 缺 tts_provider 时的 fail-closed 缺口：只要 voice_id 在 user_voices 任意
+    # row 中是 CosyVoice clone，就不能漂到 legacy/non-worker path。
+    known_clone_voice_ids: set[str] = set()
+    clone_identity_lookup_failed = False
+    try:
+        known_clone_voice_ids = await _fetch_known_cosyvoice_clone_voice_ids(
+            db, voice_ids_to_lookup,
+        )
+    except Exception as exc:
+        logger.warning(
+            "voice-selection/approve: clone identity lookup failed for job=%s: %s "
+            "(will fail-closed for blank-provider non-public voices)",
+            job_id, exc,
+        )
+        clone_identity_lookup_failed = True
+
+    # 5) 公开 catalog 集合（P1 #2 fix：直接 Gateway DB async 查，不走 self-HTTP）
     public_catalog_voice_ids: set[str] = set()
     public_catalog_lookup_failed = False
     try:
@@ -2617,7 +2660,7 @@ async def _enrich_speakers_with_clone_routing(
         )
         public_catalog_lookup_failed = True
 
-    # 5) 逐 speaker 应用 routing + fail-closed 校验
+    # 6) 逐 speaker 应用 routing + fail-closed 校验
     enriched: list = []
     for sp in speakers:
         if not isinstance(sp, dict):
@@ -2660,11 +2703,30 @@ async def _enrich_speakers_with_clone_routing(
             #   a) 该 voice 是公开预设 → 跳过（合法 legacy 路径）
             #   b) routing lookup 失败但 voice 像 cosyvoice clone → 503 fail-closed
             #   c) voice 像 cosyvoice clone 但 user_voices 真没有 → 400 fail-closed
-            is_cosyvoice_voice = (payload_tts_provider == "cosyvoice")
+            is_known_clone_voice = vid in known_clone_voice_ids
+            is_cosyvoice_voice = (
+                payload_tts_provider == "cosyvoice"
+                or (not payload_tts_provider and is_known_clone_voice)
+            )
             is_public_preset = (
                 not public_catalog_lookup_failed
                 and vid in public_catalog_voice_ids
             )
+
+            if (
+                not payload_tts_provider
+                and clone_identity_lookup_failed
+                and not is_public_preset
+            ):
+                return None, {
+                    "code": "voice_clone_routing_lookup_failed",
+                    "message": (
+                        f"voice_id={vid!r} 未携带 tts_provider，且用户音色库暂时"
+                        f"无法确认它是否为 CosyVoice clone。为防止 clone voice "
+                        f"走错路径，已拒绝当前 approve（请稍后重试）。"
+                    ),
+                    "voice_id": vid,
+                }
 
             if is_cosyvoice_voice and not is_public_preset:
                 # 这里 voice **不是** public preset（或我们无法确认它是）
