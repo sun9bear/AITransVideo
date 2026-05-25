@@ -179,6 +179,7 @@ def fake_worker_client(monkeypatch):
             provider_request_id="dashscope_req_test",
         )
         should_raise: Any = None
+        close_count: int = 0
 
         def clone(self, req):
             self.calls.append(req)
@@ -187,7 +188,7 @@ def fake_worker_client(monkeypatch):
             return self.clone_response
 
         def close(self):
-            pass
+            self.close_count += 1
 
     fake = _FakeClient()
     monkeypatch.setattr(
@@ -964,6 +965,30 @@ def test_uploaded_sample_is_deleted_after_worker_error(
     assert uploader.deletes == [
         "https://bucket.s3.oss-cn-beijing.aliyuncs.com/cosyvoice/sample.wav?sig=1"
     ]
+
+
+def test_sample_upload_failure_closes_worker_client(
+    monkeypatch, test_client, fake_worker_client, fake_db_add,
+) -> None:
+    """Codex PR #8 P2: uploader failure must close the already-built worker client."""
+
+    class _FailingUpload:
+        def upload_and_sign(self, data: bytes, *, filename_hint: str, ttl_seconds: int) -> str:
+            raise RuntimeError("OSS upload failed")
+
+    monkeypatch.setattr(
+        clone_api,
+        "build_sample_uploader_from_settings",
+        lambda settings: _FailingUpload(),
+    )
+
+    resp = _post_clone(test_client)
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["code"] == "sample_upload_failed"
+    assert fake_worker_client.calls == []
+    assert fake_worker_client.close_count == 1
+    assert fake_db_add == []
 
 
 # ---------------------------------------------------------------------------

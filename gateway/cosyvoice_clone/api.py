@@ -412,6 +412,7 @@ async def cosyvoice_clone(
         )
     except Exception as exc:  # noqa: BLE001 — uploader 实现可能抛任意异常
         logger.exception("[cosyvoice_clone] sample upload failed: %s", exc)
+        _best_effort_close_worker_client(worker_client)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -714,6 +715,13 @@ def _best_effort_delete_uploaded_sample(uploader: SampleUploader, sample_url: st
             "[cosyvoice_clone] sample cleanup failed after worker clone attempt: %s",
             exc,
         )
+
+
+def _best_effort_close_worker_client(worker_client: Any) -> None:
+    try:
+        worker_client.close()
+    except Exception:  # pragma: no cover
+        pass
 
 
 def _bounded_best_effort_delete(
