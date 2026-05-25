@@ -79,18 +79,31 @@ export interface BackupListResponse {
   offset?: number
 }
 
+/** Wire shape of `gateway/pan/manifest.py::build_manifest()`. The actual
+ * JSON that lands in `backup_records.manifest_json` AND `manifest.json`
+ * inside the tar. Top-level identity fields (job_id / user_id / edit_gen)
+ * are NESTED under `job_record` — the same shape the JobRecord serializer
+ * produces — not promoted to the root. Production 2026-05-25: an earlier
+ * flat-root interface caused the admin manifest dialog to render blank
+ * (every read was `undefined`).
+ */
 export interface BackupManifest {
   backup_format_version: number
-  job_id: string
-  user_id: string
-  edit_generation: number
-  created_at: string
+  created_at_utc: string
+  source_host?: string
+  job_record: {
+    job_id: string
+    status?: string
+    user_id: string
+    edit_generation: number
+    [k: string]: unknown
+  }
   file_inventory: Array<{
-    relpath: string
+    path: string
     size: number
     sha256: string
   }>
-  r2_artifacts: Array<{
+  r2_artifacts_snapshot?: Array<{
     artifact_key: string
     r2_key: string
     size?: number
@@ -173,13 +186,28 @@ export async function listBackups(params?: {
   return panFetch<BackupListResponse>(`/api/admin/pan/backups${suffix}`)
 }
 
-/** GET /api/admin/pan/backups/{id}/manifest — read tar's manifest.json. */
+/** Envelope shape returned by `gateway/pan/admin_api.py::get_backup_manifest`.
+ * The actual ``BackupManifest`` is nested under `.manifest` — callers should
+ * use ``getBackupManifest()`` which unwraps it. */
+export interface BackupManifestEnvelope {
+  backup_id: string
+  status: string
+  manifest: BackupManifest
+}
+
+/** GET /api/admin/pan/backups/{id}/manifest — read tar's manifest.json.
+ *
+ * Backend returns `{ backup_id, status, manifest: {...} }`. We unwrap the
+ * envelope so callers always receive the actual manifest. Previously the
+ * envelope was returned as-is and typed as `BackupManifest`, which made
+ * every field read `undefined` (admin manifest dialog rendered blank). */
 export async function getBackupManifest(
   backupId: string,
 ): Promise<BackupManifest> {
-  return panFetch<BackupManifest>(
+  const envelope = await panFetch<BackupManifestEnvelope>(
     `/api/admin/pan/backups/${encodeURIComponent(backupId)}/manifest`,
   )
+  return envelope.manifest
 }
 
 /** POST /api/admin/pan/backups — enqueue a single backup task. 202. */

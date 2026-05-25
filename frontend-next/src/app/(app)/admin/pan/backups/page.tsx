@@ -732,21 +732,25 @@ function ManifestDialog({
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <div>
                 <dt className="text-xs text-muted-foreground">format ver</dt>
-                <dd>{manifest.backup_format_version}</dd>
+                <dd>{manifest.backup_format_version ?? "—"}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">edit_gen</dt>
-                <dd>{manifest.edit_generation}</dd>
+                <dd>{manifest.job_record?.edit_generation ?? "—"}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">user_id</dt>
                 <dd className="truncate font-mono text-xs">
-                  {manifest.user_id}
+                  {manifest.job_record?.user_id ?? "—"}
                 </dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">备份时间</dt>
-                <dd>{formatTimestamp(manifest.created_at)}</dd>
+                <dd>
+                  {manifest.created_at_utc
+                    ? formatTimestamp(manifest.created_at_utc)
+                    : "—"}
+                </dd>
               </div>
             </dl>
             <div>
@@ -771,7 +775,7 @@ function ManifestDialog({
                   <tbody>
                     {(manifest.file_inventory ?? []).map((f, i) => (
                       <tr key={i} className="border-b last:border-b-0">
-                        <td className="px-3 py-1.5 font-mono">{f.relpath}</td>
+                        <td className="px-3 py-1.5 font-mono">{f.path}</td>
                         <td className="px-3 py-1.5 text-right font-mono">
                           {(f.size / 1024).toFixed(0)} KB
                         </td>
@@ -784,20 +788,21 @@ function ManifestDialog({
                 </table>
               </div>
             </div>
-            {manifest.r2_artifacts?.length > 0 && (
-              <div>
-                <h4 className="mb-2 text-sm font-medium">
-                  R2 制品快照 ({manifest.r2_artifacts.length})
-                </h4>
-                <ul className="space-y-1 text-xs">
-                  {manifest.r2_artifacts.map((a, i) => (
-                    <li key={i} className="font-mono text-muted-foreground">
-                      [{a.artifact_key}] {a.r2_key}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            {manifest.r2_artifacts_snapshot &&
+              manifest.r2_artifacts_snapshot.length > 0 && (
+                <div>
+                  <h4 className="mb-2 text-sm font-medium">
+                    R2 制品快照 ({manifest.r2_artifacts_snapshot.length})
+                  </h4>
+                  <ul className="space-y-1 text-xs">
+                    {manifest.r2_artifacts_snapshot.map((a, i) => (
+                      <li key={i} className="font-mono text-muted-foreground">
+                        [{a.artifact_key}] {a.r2_key}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
           </div>
         )}
       </DialogContent>
