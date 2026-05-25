@@ -938,6 +938,49 @@ async def test_blank_provider_known_clone_voice_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_known_clone_voice_with_forged_non_cosyvoice_provider_fails_closed(monkeypatch):
+    """PR #7 Codex review: known clone IDs cannot be approved as MiniMax/etc."""
+    from job_intercept import _enrich_speakers_with_clone_routing
+
+    mock_db = MagicMock()
+    job_result = MagicMock()
+    job_result.first.return_value = MagicMock(user_id="u-test")
+    known_clone_result = MagicMock()
+    known_clone_result.all.return_value = [("cosyvoice_custom_forged_provider",)]
+    mock_db.execute = AsyncMock(side_effect=[job_result, known_clone_result])
+
+    async def _empty_lookup(*args, **kwargs):
+        return {}
+
+    async def _empty_catalog(_db):
+        return set()
+
+    monkeypatch.setattr(
+        "user_voice_service.lookup_clone_voice_routing_metadata",
+        _empty_lookup,
+    )
+    monkeypatch.setattr(
+        "job_intercept._fetch_cosyvoice_public_voice_ids", _empty_catalog,
+    )
+
+    enriched, error = await _enrich_speakers_with_clone_routing(
+        mock_db,
+        job_id="j1",
+        speakers=[{
+            "speaker_id": "speaker_a",
+            "voice_id": "cosyvoice_custom_forged_provider",
+            "tts_provider": "minimax",
+        }],
+    )
+
+    assert enriched is None
+    assert error is not None
+    assert error["code"] == "voice_clone_provider_mismatch"
+    assert error["voice_id"] == "cosyvoice_custom_forged_provider"
+    assert error["submitted_tts_provider"] == "minimax"
+
+
+@pytest.mark.asyncio
 async def test_job_user_missing_cosyvoice_non_public_fails_closed(monkeypatch):
     """PR #7 Codex review: missing Job.user_id must not skip clone validation."""
     from job_intercept import _enrich_speakers_with_clone_routing
@@ -1054,6 +1097,46 @@ async def test_job_user_missing_blank_provider_known_clone_fails_closed(monkeypa
     assert error is not None
     assert error["code"] == "voice_clone_routing_lookup_failed"
     assert error["voice_id"] == "cosyvoice_custom_blank_provider_missing_user"
+
+
+@pytest.mark.asyncio
+async def test_job_user_missing_known_clone_with_forged_provider_fails_closed(monkeypatch):
+    """The missing-user fallback still rejects known clone IDs with non-cosyvoice provider."""
+    from job_intercept import _enrich_speakers_with_clone_routing
+
+    mock_db = MagicMock()
+    job_result = MagicMock()
+    job_result.first.return_value = None
+    mock_db.execute = AsyncMock(return_value=job_result)
+
+    async def _known_clone_ids(_db, voice_ids):
+        return {"cosyvoice_custom_missing_user_forged_provider"}
+
+    async def _public_voice_ids(_db):
+        return set()
+
+    monkeypatch.setattr(
+        "job_intercept._fetch_known_cosyvoice_clone_voice_ids", _known_clone_ids,
+    )
+    monkeypatch.setattr(
+        "job_intercept._fetch_cosyvoice_public_voice_ids", _public_voice_ids,
+    )
+
+    enriched, error = await _enrich_speakers_with_clone_routing(
+        mock_db,
+        job_id="missing-job",
+        speakers=[{
+            "speaker_id": "speaker_a",
+            "voice_id": "cosyvoice_custom_missing_user_forged_provider",
+            "tts_provider": "volcengine",
+        }],
+    )
+
+    assert enriched is None
+    assert error is not None
+    assert error["code"] == "voice_clone_provider_mismatch"
+    assert error["voice_id"] == "cosyvoice_custom_missing_user_forged_provider"
+    assert error["submitted_tts_provider"] == "volcengine"
 
 
 @pytest.mark.asyncio

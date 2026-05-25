@@ -2653,6 +2653,21 @@ async def _enrich_speakers_with_clone_routing(
                 and vid in public_catalog_voice_ids
             )
             is_known_clone_voice = vid in known_clone_voice_ids
+            if (
+                is_known_clone_voice
+                and payload_tts_provider
+                and payload_tts_provider != "cosyvoice"
+            ):
+                return None, {
+                    "code": "voice_clone_provider_mismatch",
+                    "message": (
+                        f"voice_id={vid!r} is a known CosyVoice clone voice, "
+                        f"but submitted tts_provider={payload_tts_provider!r}. "
+                        f"Cloned voices can only be approved with cosyvoice provider."
+                    ),
+                    "voice_id": vid,
+                    "submitted_tts_provider": payload_tts_provider,
+                }
             is_cosyvoice_clone_candidate = (
                 (payload_tts_provider == "cosyvoice" and not is_public_preset)
                 or (not payload_tts_provider and is_known_clone_voice)
@@ -2772,6 +2787,21 @@ async def _enrich_speakers_with_clone_routing(
             #   b) routing lookup 失败但 voice 像 cosyvoice clone → 503 fail-closed
             #   c) voice 像 cosyvoice clone 但 user_voices 真没有 → 400 fail-closed
             is_known_clone_voice = vid in known_clone_voice_ids
+            if (
+                is_known_clone_voice
+                and payload_tts_provider
+                and payload_tts_provider != "cosyvoice"
+            ):
+                return None, {
+                    "code": "voice_clone_provider_mismatch",
+                    "message": (
+                        f"voice_id={vid!r} is a known CosyVoice clone voice, "
+                        f"but submitted tts_provider={payload_tts_provider!r}. "
+                        f"Cloned voices can only be approved with cosyvoice provider."
+                    ),
+                    "voice_id": vid,
+                    "submitted_tts_provider": payload_tts_provider,
+                }
             is_cosyvoice_voice = (
                 payload_tts_provider == "cosyvoice"
                 or (not payload_tts_provider and is_known_clone_voice)
