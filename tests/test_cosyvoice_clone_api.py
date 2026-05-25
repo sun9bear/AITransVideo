@@ -147,6 +147,10 @@ def fake_uploader(monkeypatch):
     )
     # Fix #1: 让 endpoint Layer 3 uploader-backend guard 放过测试
     monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_sample_uploader", "aliyun_oss")
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_endpoint", "https://s3.oss-cn-beijing.aliyuncs.com")
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_bucket", "avt-cosyvoice-test")
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_access_key_id", "ak-test")
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_access_key_secret", "sk-test")
     # 部署前项 #A: 让 prod-ready 检查放行；模拟 AliyunOssUploader 已就绪
     monkeypatch.setattr(
         clone_api, "PRODUCTION_READY_BACKENDS", frozenset({"aliyun_oss"}),
@@ -557,9 +561,9 @@ def test_audio_processor_failure_blocks_pipeline(
 # ---------------------------------------------------------------------------
 
 def test_worker_disabled_returns_503(monkeypatch, fake_admin_settings, fake_uploader,
-                                       fake_validator, fake_normalizer, fake_db_add,
-                                       fake_db_session, fake_voice_count) -> None:
-    """build_mainland_voice_worker_client 返 None → 503，不写 DB。"""
+                                     fake_validator, fake_normalizer, fake_db_add,
+                                     fake_db_session, fake_voice_count) -> None:
+    """build_mainland_voice_worker_client 返 None → 503，不写 DB/不上传 sample。"""
     monkeypatch.setattr(
         clone_api, "build_mainland_voice_worker_client", lambda s: None,
     )
@@ -573,6 +577,7 @@ def test_worker_disabled_returns_503(monkeypatch, fake_admin_settings, fake_uplo
     resp = _post_clone(client)
     assert resp.status_code == 503
     assert resp.json()["detail"]["code"] == "worker_disabled"
+    assert fake_uploader.calls == []
     assert fake_db_add == []
 
 
@@ -788,23 +793,22 @@ def test_aliyun_oss_uploader_backend_passes_layer3_guard(
     assert resp.status_code == 201, resp.text
 
 
-def test_aliyun_oss_configured_but_factory_not_implemented_returns_503(
+def test_aliyun_oss_configured_but_required_config_missing_returns_503(
     monkeypatch, fake_admin_settings, fake_worker_client, fake_validator,
     fake_normalizer, fake_db_add, fake_db_session, fake_voice_count,
 ) -> None:
-    """部署前项 #A：backend=aliyun_oss 但 AliyunOssUploader 还没实现 → 503，
+    """backend=aliyun_oss 但 OSS 必需配置缺失 → 503，
     且不读样本 / 不转码 / 不上传 / 不调付费 worker。
-
-    模拟真实未联调状态：``PRODUCTION_READY_BACKENDS`` 仍是空集（默认），
-    config 把 backend 切到 ``aliyun_oss`` 但工厂层尚未补实现 → 早期 fail-closed。
     """
-    # 模拟生产 env 切到 aliyun_oss
     monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_sample_uploader", "aliyun_oss")
-    # 但 PRODUCTION_READY 仍为空（默认）—— 不 monkeypatch
-    # 显式让 build_sample_uploader_from_settings 抛 NotImplementedError；
-    # 但 endpoint 应该在 Layer 3 早期 503，根本不调到这里
+    monkeypatch.setattr(clone_api, "PRODUCTION_READY_BACKENDS", frozenset({"aliyun_oss"}))
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_endpoint", "")
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_bucket", "")
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_access_key_id", "")
+    monkeypatch.setattr(clone_api.gw_settings, "cosyvoice_oss_access_key_secret", "")
+
     def _factory_should_not_be_called(settings):
-        raise AssertionError("Layer 3 应该早期 fail-closed，不应该走到工厂")
+        raise AssertionError("Layer 3 config gate 应该早期 fail-closed，不应该走到工厂")
     monkeypatch.setattr(
         clone_api, "build_sample_uploader_from_settings", _factory_should_not_be_called,
     )
@@ -818,7 +822,7 @@ def test_aliyun_oss_configured_but_factory_not_implemented_returns_503(
     client = TestClient(app)
     resp = _post_clone(client)
     assert resp.status_code == 503
-    assert resp.json()["detail"]["code"] == "sample_uploader_not_implemented"
+    assert resp.json()["detail"]["code"] == "sample_uploader_config_missing"
     # fail-closed: 下游什么都不该调
     assert fake_validator.calls == []
     assert fake_normalizer.calls == []
@@ -826,30 +830,36 @@ def test_aliyun_oss_configured_but_factory_not_implemented_returns_503(
     assert fake_db_add == []
 
 
-def test_sample_uploader_factory_raises_notimplemented_for_aliyun_oss() -> None:
-    """部署前项 #A 工厂层契约：``aliyun_oss`` 必须抛 ``NotImplementedError``
-    （而不是 ValueError），便于运维区分"未实现" vs "未知 backend"。
-
-    AliyunOssUploader 真实补完后此测试要更新（删 raises 改为 assert isinstance）。
-    """
+def test_sample_uploader_factory_builds_aliyun_oss_uploader() -> None:
+    """Phase 4.1.x: ``aliyun_oss`` 工厂应构造真实 AliyunOssUploader。"""
     from cosyvoice_clone.sample_uploader import (  # type: ignore[import-not-found]
+        AliyunOssUploader,
         build_sample_uploader_from_settings,
         IMPLEMENTED_BACKENDS,
         KNOWN_BACKENDS,
         PRODUCTION_READY_BACKENDS,
     )
 
-    # 契约：aliyun_oss 在 KNOWN 里，但 IMPLEMENTED 还没；PROD_READY 空
     assert "aliyun_oss" in KNOWN_BACKENDS
-    assert "aliyun_oss" not in IMPLEMENTED_BACKENDS
-    assert "aliyun_oss" not in PRODUCTION_READY_BACKENDS
+    assert "aliyun_oss" in IMPLEMENTED_BACKENDS
+    assert "aliyun_oss" in PRODUCTION_READY_BACKENDS
 
     class _S:
         cosyvoice_sample_uploader = "aliyun_oss"
         cosyvoice_sample_local_dir = ""
+        cosyvoice_oss_endpoint = "https://s3.oss-cn-beijing.aliyuncs.com"
+        cosyvoice_oss_bucket = "avt-cosyvoice-test"
+        cosyvoice_oss_access_key_id = "ak-test"
+        cosyvoice_oss_access_key_secret = "sk-test"
+        cosyvoice_oss_region = "cn-beijing"
+        cosyvoice_oss_key_prefix = "cosyvoice/clone-samples"
+        cosyvoice_oss_connect_timeout_s = 10
+        cosyvoice_oss_read_timeout_s = 30
 
-    with pytest.raises(NotImplementedError, match="AliyunOssUploader"):
-        build_sample_uploader_from_settings(_S())
+    uploader = build_sample_uploader_from_settings(_S())
+
+    assert isinstance(uploader, AliyunOssUploader)
+    assert uploader.bucket == "avt-cosyvoice-test"
 
 
 def test_sample_uploader_factory_raises_valueerror_for_unknown_backend() -> None:
@@ -864,6 +874,96 @@ def test_sample_uploader_factory_raises_valueerror_for_unknown_backend() -> None
 
     with pytest.raises(ValueError, match="Unknown"):
         build_sample_uploader_from_settings(_S())
+
+
+def test_uploaded_sample_is_deleted_after_worker_clone(
+    monkeypatch, test_client, fake_worker_client,
+) -> None:
+    """AliyunOssUploader 支持 cleanup 时，worker clone 后应删除临时 sample object。"""
+
+    class _DeletingUploader:
+        def __init__(self):
+            self.uploads: list[str] = []
+            self.deletes: list[str] = []
+
+        def upload_and_sign(self, data: bytes, *, filename_hint: str, ttl_seconds: int) -> str:
+            url = "https://bucket.s3.oss-cn-beijing.aliyuncs.com/cosyvoice/sample.wav?sig=1"
+            self.uploads.append(url)
+            return url
+
+        def delete_uploaded_url(self, url: str) -> None:
+            self.deletes.append(url)
+
+    uploader = _DeletingUploader()
+    monkeypatch.setattr(
+        clone_api,
+        "build_sample_uploader_from_settings",
+        lambda settings: uploader,
+    )
+
+    resp = _post_clone(test_client)
+
+    assert resp.status_code == 201, resp.text
+    assert uploader.uploads == [
+        "https://bucket.s3.oss-cn-beijing.aliyuncs.com/cosyvoice/sample.wav?sig=1"
+    ]
+    assert uploader.deletes == uploader.uploads
+    assert fake_worker_client.calls
+
+
+def test_uploaded_sample_cleanup_failure_does_not_mask_worker_success(
+    monkeypatch, test_client,
+) -> None:
+    """sample cleanup 是 best-effort，失败不应把成功 clone 改成 5xx。"""
+
+    class _FailingDeleteUploader:
+        def upload_and_sign(self, data: bytes, *, filename_hint: str, ttl_seconds: int) -> str:
+            return "https://bucket.s3.oss-cn-beijing.aliyuncs.com/cosyvoice/sample.wav?sig=1"
+
+        def delete_uploaded_url(self, url: str) -> None:
+            raise RuntimeError("delete failed")
+
+    monkeypatch.setattr(
+        clone_api,
+        "build_sample_uploader_from_settings",
+        lambda settings: _FailingDeleteUploader(),
+    )
+
+    resp = _post_clone(test_client)
+
+    assert resp.status_code == 201, resp.text
+
+
+def test_uploaded_sample_is_deleted_after_worker_error(
+    monkeypatch, test_client, fake_worker_client,
+) -> None:
+    """worker 报错时也要清理已经上传的临时 sample object。"""
+
+    class _DeletingUploader:
+        def __init__(self):
+            self.deletes: list[str] = []
+
+        def upload_and_sign(self, data: bytes, *, filename_hint: str, ttl_seconds: int) -> str:
+            return "https://bucket.s3.oss-cn-beijing.aliyuncs.com/cosyvoice/sample.wav?sig=1"
+
+        def delete_uploaded_url(self, url: str) -> None:
+            self.deletes.append(url)
+
+    uploader = _DeletingUploader()
+    monkeypatch.setattr(
+        clone_api,
+        "build_sample_uploader_from_settings",
+        lambda settings: uploader,
+    )
+    fake_worker_client.should_raise = WorkerNetworkError("network down")
+
+    resp = _post_clone(test_client)
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"]["code"] == "worker_unreachable"
+    assert uploader.deletes == [
+        "https://bucket.s3.oss-cn-beijing.aliyuncs.com/cosyvoice/sample.wav?sig=1"
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -297,6 +297,20 @@ services:
       # not in user_voices/voice_catalog or non-MiniMax providers are skipped.
       # Pending tasks at 50s keep running in background (NOT cancelled).
       AVT_AUTO_CALIBRATE_ON_REVIEW_SUBMIT: "${AVT_AUTO_CALIBRATE_ON_REVIEW_SUBMIT:-false}"
+      # --- Phase 4.1.x CosyVoice clone sample uploader ---
+      # Default stays fail-closed: local_fs_stub is rejected by the clone
+      # endpoint when worker clone is enabled. To run live clone smoke, set
+      # AVT_COSYVOICE_SAMPLE_UPLOADER=aliyun_oss and populate all
+      # AVT_COSYVOICE_OSS_* values below.
+      AVT_COSYVOICE_SAMPLE_UPLOADER: "${AVT_COSYVOICE_SAMPLE_UPLOADER:-local_fs_stub}"
+      AVT_COSYVOICE_OSS_ENDPOINT: "${AVT_COSYVOICE_OSS_ENDPOINT:-}"
+      AVT_COSYVOICE_OSS_BUCKET: "${AVT_COSYVOICE_OSS_BUCKET:-}"
+      AVT_COSYVOICE_OSS_ACCESS_KEY_ID: "${AVT_COSYVOICE_OSS_ACCESS_KEY_ID:-}"
+      AVT_COSYVOICE_OSS_ACCESS_KEY_SECRET: "${AVT_COSYVOICE_OSS_ACCESS_KEY_SECRET:-}"
+      AVT_COSYVOICE_OSS_REGION: "${AVT_COSYVOICE_OSS_REGION:-cn-beijing}"
+      AVT_COSYVOICE_OSS_KEY_PREFIX: "${AVT_COSYVOICE_OSS_KEY_PREFIX:-cosyvoice/clone-samples}"
+      AVT_COSYVOICE_OSS_CONNECT_TIMEOUT_S: "${AVT_COSYVOICE_OSS_CONNECT_TIMEOUT_S:-10}"
+      AVT_COSYVOICE_OSS_READ_TIMEOUT_S: "${AVT_COSYVOICE_OSS_READ_TIMEOUT_S:-30}"
       # --- Phase 2 R2 download backend (plan 2026-04-23) ---
       # Default is intentionally safe: "local" keeps the existing Gateway
       # -> Job API byte-passthrough path. Flipping to "r2" requires ALL
