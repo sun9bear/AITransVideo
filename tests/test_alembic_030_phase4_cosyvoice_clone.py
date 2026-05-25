@@ -22,7 +22,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = (
     REPO_ROOT / "gateway" / "alembic" / "versions"
-    / "030_phase4_cosyvoice_clone_voice_metadata.py"
+    / "030_cosyvoice_clone_metadata.py"
 )
 
 
@@ -244,6 +244,24 @@ def test_migration_030_revises_029() -> None:
     assert 'down_revision: Union[str, None] = "029_pan_backup"' in src, (
         "030 down_revision 必须是 029_pan_backup"
     )
+
+
+def test_migration_030_revision_id_fits_alembic_version_column() -> None:
+    """Production ``alembic_version.version_num`` is VARCHAR(32)."""
+    src = MIGRATION_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    revision_value = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        if not (isinstance(node.target, ast.Name) and node.target.id == "revision"):
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            revision_value = node.value.value
+            break
+
+    assert revision_value == "030_cosyvoice_clone_metadata"
+    assert len(revision_value) <= 32
 
 
 def test_migration_030_has_downgrade_for_all_added_columns() -> None:

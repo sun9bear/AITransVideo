@@ -1,6 +1,6 @@
 """Phase 4.1 schema draft: CosyVoice clone voice metadata + worker dispatch fields.
 
-Revision ID: 030_phase4_cosyvoice_clone_voice_metadata
+Revision ID: 030_cosyvoice_clone_metadata
 Revises: 029_pan_backup
 Create Date: 2026-05-25
 
@@ -12,7 +12,7 @@ Create Date: 2026-05-25
 
 进入 Phase 4.1 编码 PR 时的迁移步骤：
 
-1. 把本文件复制到 ``gateway/alembic/versions/030_phase4_cosyvoice_clone_voice_metadata.py``
+1. 把本文件复制到 ``gateway/alembic/versions/030_cosyvoice_clone_metadata.py``
 2. 删除本顶部 "⚠️ 此文件不是真实 Alembic migration" 段
 3. **同一 PR** 给 ``gateway/models.py::UserVoice`` 加 9 个 ORM 字段，
    字段名 / 类型 / 默认值与本 migration 完全对齐，避免下次 autogenerate
@@ -65,7 +65,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "030_phase4_cosyvoice_clone_voice_metadata"
+revision: str = "030_cosyvoice_clone_metadata"
 down_revision: Union[str, None] = "029_pan_backup"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

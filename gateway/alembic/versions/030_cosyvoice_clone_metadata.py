@@ -1,6 +1,6 @@
 """Phase 4.1: CosyVoice clone voice metadata + worker dispatch fields.
 
-Revision ID: 030_phase4_cosyvoice_clone_voice_metadata
+Revision ID: 030_cosyvoice_clone_metadata
 Revises: 029_pan_backup
 Create Date: 2026-05-25
 
@@ -56,7 +56,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "030_phase4_cosyvoice_clone_voice_metadata"
+revision: str = "030_cosyvoice_clone_metadata"
 down_revision: Union[str, None] = "029_pan_backup"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

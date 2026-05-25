@@ -1043,7 +1043,7 @@ Codex 给的下一步顺序：
 **新增 / 修改的运行时代码**（按 7 个子阶段顺序）：
 
 A — Schema migration + ORM 字段
-- `gateway/alembic/versions/030_phase4_cosyvoice_clone_voice_metadata.py`：新增
+- `gateway/alembic/versions/030_cosyvoice_clone_metadata.py`：新增
   9 列（region_constraint / requires_worker / target_model / worker_provider /
   worker_region / clone_api_model / billing_sku / clone_provider_request_id /
   clone_worker_request_id）+ partial index on `clone_provider_request_id WHERE NOT NULL`

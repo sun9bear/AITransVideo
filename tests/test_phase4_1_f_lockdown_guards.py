@@ -136,7 +136,7 @@ F9_ROUTING_LITERAL_ALLOWLIST = {
     "gateway/cosyvoice_clone/api.py",          # C.2 writes user_voices
     "gateway/user_voice_service.py",           # lookup + add helpers + ROUTING_METADATA_FIELDS
     "gateway/models.py",                       # ORM column definition
-    "gateway/alembic/versions/030_phase4_cosyvoice_clone_voice_metadata.py",  # migration
+    "gateway/alembic/versions/030_cosyvoice_clone_metadata.py",  # migration
 }
 
 
