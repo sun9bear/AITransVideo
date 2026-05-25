@@ -61,6 +61,9 @@ _VALID_ENDPOINT_MODES = {"international", "mainland"}
 _VALID_WHISPER_TRIGGERS = {"publish", "deliverable", "manual"}
 _VALID_WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3"}
 
+# Phase 4.1 + Codex 2026-05-25 决策：flash 默认，plus 同时支持
+_VALID_CLONE_TARGET_MODELS = frozenset({"cosyvoice-v3.5-flash", "cosyvoice-v3.5-plus"})
+
 
 class AdminSettings(BaseModel):
     tts_provider: str = "minimax"          # "minimax" or "mimo"
@@ -180,6 +183,35 @@ class AdminSettings(BaseModel):
     phase1b_audio_tail_trim_enabled: bool = False
     phase1b_whisper_quality_gate_enabled: bool = False
 
+    # --- Phase 4.1 CosyVoice clone (Codex 2026-05-25 决策落地) ---
+    # 与 GatewaySettings.mainland_voice_worker_* 字段不同：这里的 5 项是
+    # **业务策略**（功能开关 / 默认模型 / allowlist），可由 admin 后台
+    # 修改并持久化到 admin_settings.json；secret / worker URL 仍在 env。
+    #
+    # 授权规则（plan §Phase 4.1 §Schema + Backend 接通）：
+    #   authorized = is_admin(user) OR (user.id in cosyvoice_clone_user_allowlist)
+    cosyvoice_clone_worker_enabled: bool = False
+    cosyvoice_clone_default_target_model: str = "cosyvoice-v3.5-flash"
+    cosyvoice_clone_user_allowlist: list[str] = []      # user_id 字符串数组
+    cosyvoice_clone_max_voices_per_user: int = 3        # 灰度期严控（C.2 已生效）
+    # ⚠️ Phase 4.2 占位字段 —— 尚未实现 ⚠️
+    # Codex 2026-05-25 C.2 二轮 review 部署前项 #B：此字段定义了"全局
+    # 并发上限"，但 endpoint 当前未读取。要做并发 gate 需要 Redis / DB
+    # counter（``cosyvoice_clone_in_progress`` table 或 atomic increment），
+    # 不在 Phase 4.1 范围内。
+    #
+    # 当前行为：
+    #   - 字段存在 admin_settings.json（schema 不破坏向后兼容）
+    #   - admin UI 可见、可改，但 **改了不会有任何运行时效果**
+    #   - 实际灰度并发由 ``cosyvoice_clone_max_voices_per_user`` 间接限制：
+    #     每用户最多 N 个 active 音色 → 单用户最多同时 N 次 clone-in-progress
+    #
+    # Phase 4.2 真正实现时需要：
+    #   1. ``cosyvoice_clone_in_progress`` 计数（Redis INCR / DB SELECT FOR UPDATE）
+    #   2. endpoint 在 Layer 7 后再加一道全局并发 gate
+    #   3. clone 完成 / 失败时 decrement
+    cosyvoice_clone_max_concurrent_jobs: int = 2        # Phase 4.2 占位（未生效）
+
     @field_validator("whisper_alignment_trigger")
     @classmethod
     def validate_whisper_alignment_trigger(cls, v: str) -> str:
@@ -218,6 +250,18 @@ class AdminSettings(BaseModel):
         normalized = v.strip().lower()
         if normalized not in _VALID_ENDPOINT_MODES:
             raise ValueError(f"端点模式必须是 {sorted(_VALID_ENDPOINT_MODES)} 之一，收到: {v!r}")
+        return normalized
+
+    @field_validator("cosyvoice_clone_default_target_model")
+    @classmethod
+    def validate_clone_default_target_model(cls, v: str) -> str:
+        """Phase 4.1 + Codex 2026-05-25 决策：flash / plus 之一。"""
+        normalized = v.strip()
+        if normalized not in _VALID_CLONE_TARGET_MODELS:
+            raise ValueError(
+                f"cosyvoice_clone_default_target_model 必须是 "
+                f"{sorted(_VALID_CLONE_TARGET_MODELS)} 之一，收到 {v!r}"
+            )
         return normalized
 
 

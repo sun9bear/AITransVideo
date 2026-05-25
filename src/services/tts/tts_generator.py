@@ -661,6 +661,223 @@ class TTSGenerator:
         """Return the job record in effect for the current generate_all() call."""
         return getattr(self, "_active_job_record", None) or self._default_job_record
 
+    def _generate_one_cosyvoice_via_worker(
+        self,
+        segment: DubbingSegment,
+        tts_text: str,
+        output_root: Path,
+    ) -> TTSResult:
+        """Phase 4.1 D.3：CosyVoice clone voice 走武汉 mainland worker。
+
+        当 ``segment.requires_worker=True`` 时由 ``_generate_one_cosyvoice``
+        早分支调用。**严格 fail-closed** —— 失败抛 ``TTSGenerationError``，
+        绝不静默 fallback 到 MiniMax / 其它 provider（CLAUDE.md 付费 API
+        硬约束）。
+
+        头部硬校验（Codex 2026-05-25 D v3 review #2）：
+
+        - ``voice_id`` 必填（worker clone voice 已经由 C.2 endpoint 落库时
+          锁定，pipeline 不再 matcher 或 default voice）
+        - ``worker_target_model`` 必填（来自 ``user_voices.target_model``，
+          不允许 hardcode）
+
+        speech_rate 来源（Codex 2026-05-25 D v3 review #3）：
+
+        - 与 legacy ``_generate_one_cosyvoice`` 完全一致地调用 ``decide_tts_speed``
+          算出 ``effective_speed``，传给 ``WorkerSegmentRequest.speech_rate``。
+          否则同段切到 cloned voice 后时长漂。
+
+        重试边界（Codex 2026-05-25 D HC#1）：
+
+        - 这里**不写任何 retry 逻辑**。唯一合法重试源是 ``MainlandWorkerClient``
+          内部的单段 3 / 多段 2 上限（plan §Retry，Phase 1 Fix #5 确立）。
+        - ``_generate_one_with_backoff`` 看到 ``requires_worker=True`` 走早
+          分支单次调用此方法，不进 5-min final retry / fallback provider。
+        """
+        # 延迟 import 避免 services.tts → services.mainland_worker 在不需要
+        # 走 worker 的部署里增加 import 时间
+        from services.mainland_worker.client import (
+            WorkerArtifactIntegrityError,
+            WorkerError,
+            WorkerNetworkError,
+            WorkerSignatureRejectedError,
+            MainlandWorkerClient,
+        )
+        from services.mainland_worker.client_factory import build_client_from_env
+        from services.mainland_worker.types import (
+            WorkerSegmentRequest,
+            WorkerSynthesizeBatchRequest,
+            compute_text_hash,
+        )
+
+        # ---- Head guard #1 (D v3 #2)：voice_id 必填 ----
+        voice_id = _normalize_optional_text(getattr(segment, "voice_id", None))
+        if not voice_id:
+            raise TTSGenerationError(
+                "requires_worker=True but voice_id is empty; "
+                "cloned voice must have an explicit voice_id (no matcher / default fallback on worker path)"
+            )
+
+        # ---- Head guard #2 (D v3 #2)：worker_target_model 必填 ----
+        target_model = _normalize_optional_text(getattr(segment, "worker_target_model", None))
+        if not target_model:
+            raise TTSGenerationError(
+                f"requires_worker=True but worker_target_model is empty for voice_id={voice_id!r}; "
+                "value must come from user_voices.target_model (no hardcoded default)"
+            )
+
+        # ---- speech_rate (D v3 #3)：与 legacy 路径完全一致的 decide_tts_speed ----
+        speaker_cps = self._chars_per_second_by_speaker.get(segment.speaker_id)
+        if speaker_cps is None:
+            speaker_cps = self._global_chars_per_second
+        try:
+            from services.tts.speed_decision import decide_tts_speed
+            decision = decide_tts_speed(
+                cn_text=tts_text,
+                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                chars_per_second=float(speaker_cps) if speaker_cps else None,
+            )
+        except Exception as exc:  # 与 legacy 一致：speed_decision 异常不阻塞 TTS
+            print(
+                f"[CosyVoice-Worker] speed_decision exception (fallback 1.0): {exc}",
+                flush=True,
+            )
+            from services.tts.speed_decision import SpeedDecision
+            decision = SpeedDecision(speed=1.0, reason="error", estimated_ms=0, ratio=0.0)
+
+        if decision.reason in ("disabled", "missing_inputs", "error"):
+            effective_speed = 1.0
+        else:
+            effective_speed = float(decision.speed)
+
+        try:
+            segment.dsp_speed_param = effective_speed
+        except Exception:
+            pass
+
+        # ---- 构造 client (D.2 唯一 secret 入口) ----
+        client = build_client_from_env()
+        if client is None:
+            raise TTSGenerationError(
+                "mainland voice worker unavailable (env config missing or disabled); "
+                "refusing to fall back to MiniMax/other provider per CLAUDE.md paid-API constraint"
+            )
+
+        # ---- 构造 WorkerSynthesizeBatchRequest (单段 batch) ----
+        job_rec = self._resolve_active_job_record()
+        job_id = (
+            _read_job_field(job_rec, "job_id")
+            or _read_job_field(job_rec, "id")
+            or "no_job"
+        )
+
+        seg_req = WorkerSegmentRequest(
+            segment_id=int(segment.segment_id),
+            speaker_id=str(segment.speaker_id),
+            voice_id=voice_id,
+            text=tts_text,
+            speech_rate=effective_speed,
+            target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0) or None,
+            text_hash=compute_text_hash(tts_text),
+        )
+        batch_req = WorkerSynthesizeBatchRequest(
+            job_id=str(job_id),
+            target_model=target_model,
+            audio_format="wav",
+            segments=(seg_req,),
+        )
+
+        output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+
+        # ---- 调 worker、解 artifact、写 wav；finally close ----
+        try:
+            try:
+                resp = client.synthesize_batch(batch_req)
+            except (WorkerNetworkError, WorkerSignatureRejectedError, WorkerError,
+                    WorkerArtifactIntegrityError) as exc:
+                # Codex D HC#4：转 TTSGenerationError；**不** retry，**不** fallback
+                raise TTSGenerationError(
+                    f"CosyVoice-Worker: {type(exc).__name__}: {exc}"
+                ) from exc
+
+            # 期望响应：单段返回，target_model 回包等于请求
+            if resp.target_model != target_model:
+                raise TTSGenerationError(
+                    f"CosyVoice-Worker: target_model echo mismatch "
+                    f"(requested {target_model!r} got {resp.target_model!r})"
+                )
+            if len(resp.segments) != 1:
+                raise TTSGenerationError(
+                    f"CosyVoice-Worker: expected 1 segment in batch response, "
+                    f"got {len(resp.segments)}"
+                )
+
+            # ★ Phase 4.1 D P2-1 (Codex 2026-05-25 D 三轮 review)：单段响应除
+            # target_model 外还要校验 segment_id / speaker_id / voice_id echo。
+            # 与 C.2 endpoint 同类防漂移；worker / provider bug 让 voice_id
+            # 漂到错误段会导致后续音频被写到错误位置。
+            seg_result = resp.segments[0]
+            if seg_result.segment_id != int(segment.segment_id):
+                raise TTSGenerationError(
+                    f"CosyVoice-Worker: segment_id echo mismatch "
+                    f"(requested {segment.segment_id!r} got {seg_result.segment_id!r})"
+                )
+            if seg_result.speaker_id != str(segment.speaker_id):
+                raise TTSGenerationError(
+                    f"CosyVoice-Worker: speaker_id echo mismatch "
+                    f"(requested {segment.speaker_id!r} got {seg_result.speaker_id!r})"
+                )
+            if seg_result.voice_id != voice_id:
+                raise TTSGenerationError(
+                    f"CosyVoice-Worker: voice_id echo mismatch "
+                    f"(requested {voice_id!r} got {seg_result.voice_id!r})"
+                )
+
+            # 解 artifact zip 拿 wav bytes (含三层 sha256 完整性校验)
+            try:
+                audio_map = MainlandWorkerClient.extract_artifact_segments(resp)
+            except WorkerArtifactIntegrityError as exc:
+                raise TTSGenerationError(f"CosyVoice-Worker artifact: {exc}") from exc
+
+            wav_bytes = audio_map.get(seg_result.audio_path)
+            if not wav_bytes:
+                raise TTSGenerationError(
+                    f"CosyVoice-Worker: artifact missing audio_path={seg_result.audio_path!r}"
+                )
+
+            atomic_write_bytes(str(output_path), wav_bytes)
+            duration_ms = _ffprobe_duration_ms(output_path)
+
+            print(
+                f"[CosyVoice-Worker] voice={voice_id} target_model={target_model} "
+                f"speed={effective_speed:.4f} worker_request_id={resp.worker_request_id} "
+                f"provider_request_id={seg_result.provider_request_id} "
+                f"billed_chars={seg_result.billed_chars} duration_ms={duration_ms} "
+                f"text={tts_text[:50]}...",
+                flush=True,
+            )
+
+            # Phase 4.1 D P2-2 (Codex 2026-05-25 D 三轮 review)：``match_confidence``
+            # 既有契约枚举 ``"high" / "medium" / "low"``（见 DubbingSegment 注释 +
+            # cosyvoice_voice_selector / minimax_voice_selector 等下游消费者）。
+            # 用户显式选了 cloned voice + worker 端 echo 一致 → 等价于既有
+            # "explicit_voice_id" 路径的 high confidence。避免引入 enum 外的
+            # ``"explicit_worker_voice"`` 让 analytics / UI 看到非预期值。
+            return TTSResult(
+                segment_id=segment.segment_id,
+                audio_path=str(output_path.resolve(strict=False)),
+                duration_ms=duration_ms,
+                voice_id=voice_id,
+                selected_voice=voice_id,
+                match_confidence="high",
+                billed_chars=seg_result.billed_chars,  # worker authoritative (HC#2)
+            )
+        finally:
+            try:
+                client.close()
+            except Exception:  # pragma: no cover — close 失败不阻塞主流
+                pass
+
     def _generate_one_volcengine(
         self,
         segment: DubbingSegment,
@@ -869,7 +1086,24 @@ class TTSGenerator:
         usage_bucket: str = TTS_BUCKET_FIRST,
     ) -> TTSResult:
         """Wrap _generate_one with exponential backoff + fallback provider chain."""
+        # Phase 4.1 D.5 (Codex 2026-05-25 v3 review #1)：先按现有逻辑解析
+        # ``provider``，再判断 ``requires_worker``，避免漂移 provider 解析路径。
         provider = getattr(self, "_job_provider", None) or get_tts_provider()
+
+        # === Phase 4.1 D.5 HC#1 early branch ===
+        # ``requires_worker=True`` 时 **单次** 调 ``_generate_one`` 并立即返回/抛错。
+        # 唯一合法重试源是 ``MainlandWorkerClient`` 内部（单段 3 / 多段 2，plan §Retry）。
+        # 这里**不进** ``_OUTER_BACKOFF_SCHEDULE`` 循环、**不 sleep**、**不**走
+        # ``get_fallback_provider`` 改调 MiniMax 等其它 provider（CLAUDE.md 付费
+        # API 硬约束 + 客户期望同一克隆音色不被静默切换）。
+        if bool(getattr(segment, "requires_worker", False)):
+            return self._generate_one(
+                segment,
+                output_dir,
+                provider=provider,
+                usage_bucket=usage_bucket,
+            )
+
         max_attempts = len(self._OUTER_BACKOFF_SCHEDULE)
         last_error: Exception | None = None
 
@@ -983,13 +1217,54 @@ class TTSGenerator:
         elif provider is None:
             provider = getattr(self, "_job_provider", None) or get_tts_provider()
 
+        # ★ Phase 4.1 D P1 fix (Codex 2026-05-25 D review)：``requires_worker=True``
+        # 必须强制走 cosyvoice 分支（→ worker path）。否则 E 阶段 segment producer
+        # 漏写 ``tts_provider="cosyvoice"`` + job-level provider 是 MiniMax 时，
+        # CosyVoice cloned voice_id 会被发到 MiniMax，触发错误付费 provider 调用。
+        # 这正违反 D 核心约束。
+        #
+        # 两种 fail-closed 形态（**只看 segment.tts_provider 不看 resolved
+        # provider**，否则会把"job-level fallback 到 MiniMax 但 segment 自己
+        # 没显式 mismatch"误判为数据不一致）：
+        #
+        #   1) ``segment.tts_provider`` 非空且 ≠ ``"cosyvoice"`` → 显式数据
+        #      不一致（用户/producer 主动配错），**抛错**拒绝付费
+        #   2) ``segment.tts_provider`` 空 / None → 强制 ``provider="cosyvoice"``
+        #      覆盖 job-level fallback；clone voice 只能在 cosyvoice provider 下用，
+        #      强制锁定不产生歧义。
+        if bool(getattr(segment, "requires_worker", False)):
+            seg_tts_provider = (getattr(segment, "tts_provider", "") or "").strip()
+            if seg_tts_provider and seg_tts_provider != "cosyvoice":
+                raise TTSGenerationError(
+                    f"requires_worker=True but segment.tts_provider={seg_tts_provider!r}; "
+                    f"CosyVoice cloned voice (voice_id={getattr(segment, 'voice_id', None)!r}) "
+                    f"cannot be used with non-cosyvoice provider. "
+                    f"Refusing to call paid {seg_tts_provider!r} provider with mismatched voice."
+                )
+            # 强制锁定走 worker 分支；覆盖 job-level / default 解析结果
+            provider = "cosyvoice"
+
         # Dispatch: cosyvoice / mimo / minimax (default)
         # Wrap provider-specific exceptions as TTSGenerationError so
         # _generate_one_with_backoff can catch them uniformly.
         if provider == "cosyvoice":
+            # Phase 4.1 D.3+D.4 (2026-05-25 Codex 三签字)：
+            # ``requires_worker=True`` 走武汉 mainland worker，**不允许** 静默
+            # fallback 到国际 DashScope endpoint，**不允许** 用 ``len(text)*2``
+            # 覆盖 worker 的 authoritative billed_chars。
+            requires_worker = bool(getattr(segment, "requires_worker", False))
             try:
-                result = self._generate_one_cosyvoice(segment, tts_text, output_root)
-                result.billed_chars = _cn_chars * 2  # 阿里云百炼: 1 汉字 = 2 计费字符
+                if requires_worker:
+                    result = self._generate_one_cosyvoice_via_worker(
+                        segment, tts_text, output_root,
+                    )
+                    # HC#2：worker 路径保留 worker 返回的 billed_chars（来自
+                    # Phase 4.0b billing_character_count，DashScope 真实计费规则）。
+                    # 不 overwrite。
+                else:
+                    result = self._generate_one_cosyvoice(segment, tts_text, output_root)
+                    # Legacy 国际 DashScope 路径：阿里云百炼 1 汉字 = 2 计费字符
+                    result.billed_chars = _cn_chars * 2
                 self._record_tts_usage(
                     result,
                     bucket=usage_bucket,

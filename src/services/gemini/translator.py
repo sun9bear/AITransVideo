@@ -370,6 +370,22 @@ class DubbingSegment:
     short_content_compact_upper_chars: int = 0
     short_content_compact_pre_chars: int = 0
     short_content_compact_post_chars: int = 0
+    # ---- Phase 4.1 D: CosyVoice mainland worker routing（2026-05-25 Codex v3 签字） ----
+    # **D 只是 plumbing**：这两个字段由 Phase 4.1 E (Gateway segment producer)
+    # 从 ``user_voices`` 的同名列填写；E 落地前默认值 False/"" 保证既有路径不变。
+    #
+    # ``requires_worker``：True 表示该段必须走武汉 mainland worker（即不能用
+    # 国际版 DashScope endpoint）。TTSGenerator / segment_regenerate 看到 True
+    # 时切到 worker path，**绝不静默 fallback** 到 MiniMax / 其它 provider
+    # （CLAUDE.md 付费 API 硬约束）。
+    #
+    # ``worker_target_model``：调 worker /synthesize-batch 时透传的 target_model
+    # 字符串（e.g. ``"cosyvoice-v3.5-flash"`` / ``"cosyvoice-v3.5-plus"``）。
+    # 来源是 ``user_voices.target_model``，clone 时锁定，TTS 必须用同一模型——
+    # 命名上避免 ``clone_target_model``（会和 ``voice-enrollment`` clone API
+    # 模型混淆）。**严禁** TTSGenerator hardcode；worker 路径头部硬校验非空。
+    requires_worker: bool = False
+    worker_target_model: str = ""
 
 
 @dataclass(slots=True)

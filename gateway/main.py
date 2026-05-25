@@ -60,6 +60,7 @@ from startup_checks import (
     is_startup_recovery_schema_missing_error,
     validate_environment_name,
     validate_internal_api_key,
+    validate_mainland_voice_worker_config,
     validate_pan_backup_config,
     validate_production_safety,
     validate_r2_backend,
@@ -119,6 +120,15 @@ async def lifespan(app: FastAPI):
     # Fernet key is missing/invalid. Fails hard (RuntimeError) so
     # misconfigured deploys surface immediately with a clear message.
     validate_pan_backup_config(settings)
+    # Mainland voice worker (plan 2026-05-24 Phase 1.5) — fail-graceful：
+    # 配置缺失时 CRITICAL log + 降级 enabled=False，不阻塞 gateway 启动。
+    # 主路径不依赖 worker；mainland clone 是子能力。
+    settings.mainland_voice_worker_enabled = validate_mainland_voice_worker_config(
+        settings.mainland_voice_worker_enabled,
+        settings.mainland_voice_worker_url,
+        settings.mainland_voice_worker_hmac_key_id,
+        settings.mainland_voice_worker_hmac_secret,
+    )
     # T3 — DB credentials are resolved and engine is built here. Raises if
     # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
     # avt:avt fallback).
@@ -402,6 +412,19 @@ app.include_router(materials_router)
 # serves /api/jobs/{id}/tasks/* which are Gateway-native (not proxied).
 app.include_router(background_task_router)
 app.include_router(voice_catalog_router)
+
+# Phase 1.5 (plan 2026-05-24): mainland_voice_worker admin status / healthz.
+# Read-only admin endpoints; secret never returned. Lifespan validate above
+# has already降级 enabled=False if secret incomplete, so router handlers
+# can safely call build_mainland_voice_worker_client() and get None.
+from mainland_voice_worker import router as mainland_voice_worker_router  # noqa: E402
+app.include_router(mainland_voice_worker_router)
+
+# Phase 4.1 (plan 2026-05-24): user-facing CosyVoice clone endpoint.
+# POST /api/voice/cosyvoice/clone — multipart upload + allowlist gate +
+# 5-layer fail-closed pipeline before any paid worker call.
+from cosyvoice_clone.api import router as cosyvoice_clone_router  # noqa: E402
+app.include_router(cosyvoice_clone_router)
 app.include_router(voice_catalog_internal_router)
 
 from user_voice_api import router as user_voice_router, internal_router as user_voice_internal_router

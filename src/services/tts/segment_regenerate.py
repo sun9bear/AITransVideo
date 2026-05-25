@@ -188,8 +188,18 @@ def build_real_segment_tts_caller(
             except Exception as exc:
                 logger.warning("segment_regenerate: usage meter setup skipped: %s", exc)
 
+        # Phase 4.1 D.6 (Codex 2026-05-25 D HC#1)：``requires_worker=True`` 段
+        # 必须跳过 caller 层重试。MainlandWorkerClient 内部已经按 plan §Retry
+        # 控住"单段 3 / 多段 2"上限；再叠加 caller 这层 3 retry × TTSGenerator
+        # 5 final-retry，单段最坏可达 ~45 次付费 worker 调用。fail-closed：
+        # 单次调用，失败抛 RuntimeError 给上层（前端 toast / 重新点击）。
+        if bool(getattr(ds, "requires_worker", False)):
+            effective_max_retries = 0
+        else:
+            effective_max_retries = max_retries
+
         last_exc: Exception | None = None
-        for attempt in range(max_retries + 1):
+        for attempt in range(effective_max_retries + 1):
             try:
                 # Each attempt gets a fresh temp dir so a half-written wav
                 # from a failed attempt can't fool the next one via
@@ -211,24 +221,24 @@ def build_real_segment_tts_caller(
                 if attempt > 0:
                     logger.info(
                         "segment_regenerate: segment %s succeeded on attempt %d/%d",
-                        ds.segment_id, attempt + 1, max_retries + 1,
+                        ds.segment_id, attempt + 1, effective_max_retries + 1,
                     )
                 return
             except (TTSGenerationError, RuntimeError, OSError) as exc:
                 last_exc = exc
-                if attempt >= max_retries:
+                if attempt >= effective_max_retries:
                     break
                 wait = backoff_schedule[min(attempt, len(backoff_schedule) - 1)]
                 logger.warning(
                     "segment_regenerate: segment %s attempt %d/%d failed (%s); "
                     "retrying in %.1fs",
-                    ds.segment_id, attempt + 1, max_retries + 1,
+                    ds.segment_id, attempt + 1, effective_max_retries + 1,
                     exc.__class__.__name__, wait,
                 )
                 time.sleep(wait)
 
         raise RuntimeError(
-            f"segment TTS re-generation failed after {max_retries + 1} attempts "
+            f"segment TTS re-generation failed after {effective_max_retries + 1} attempts "
             f"on provider={provider or '<default>'}: {last_exc}"
         ) from last_exc
 

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import logging
 import re
 import unicodedata
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import UserVoice
@@ -232,6 +232,118 @@ async def list_user_voices(
     stmt = stmt.order_by(UserVoice.created_at.desc())
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def count_active_voices_for_user_and_provider(
+    db: AsyncSession,
+    user_id: object,
+    *,
+    provider: str,
+) -> int:
+    """统计某 user 当前 active（``expired_at IS NULL``） + 指定 ``provider`` 的音色数。
+
+    Phase 4.1 C.2 二轮 review（Codex 2026-05-25）：CosyVoice clone endpoint
+    在调用付费 worker 前用此计数实施 ``cosyvoice_clone_max_voices_per_user``
+    quota，避免灰度用户反复触发 ¥0.01/次 clone。
+    """
+    result = await db.execute(
+        select(func.count())
+        .select_from(UserVoice)
+        .where(
+            UserVoice.user_id == user_id,
+            UserVoice.expired_at.is_(None),
+            UserVoice.provider == provider,
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.1 E.1: worker routing 元数据查询（Codex 2026-05-25 E v2 三签字版本）
+# ---------------------------------------------------------------------------
+
+# 路由字段白名单（Codex E v2 invariant #4）：
+# E 在 approved review payload speakers[i] 上**只新增** 这 2 个字段，
+# 而 ``tts_provider`` 已是既有字段（由 voice_selection_review 路径写入）。
+# 任何不在此集合内的 user_voices 列 **不允许** 流入 review payload / job spec。
+ROUTING_METADATA_FIELDS = frozenset({"requires_worker", "worker_target_model"})
+
+
+class CloneVoiceRoutingError(ValueError):
+    """E.6 fail-closed：voice_id 命中数据状态不一致（缺 user_voices row 但
+    形似 CosyVoice clone / payload tts_provider 与 row 不匹配）.
+
+    携带 HTTP 400 友好的 error code，供 gateway/job_intercept.py 的 approve
+    拦截器映射成 ``HTTPException(400, ...)``，而不是 500。
+    """
+    def __init__(self, message: str, *, code: str, voice_id: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.voice_id = voice_id
+
+
+async def lookup_clone_voice_routing_metadata(
+    db: AsyncSession,
+    *,
+    user_id: object,
+    voice_ids: list[str],
+) -> dict[str, dict[str, object]]:
+    """批量查 user_voices 拿 CosyVoice clone routing 元数据（Phase 4.1 E.1）。
+
+    **strict filter**（Codex 2026-05-25 E v2 P1 #4）：
+
+    - ``user_id`` 等于 caller（防跨账号偷别人 voice）
+    - ``voice_id`` ∈ 入参列表（批量 IN 单次查询，避免 N+1）
+    - ``expired_at IS NULL``（不返已删除）
+    - ``provider == "cosyvoice_voice_clone"``
+    - ``tts_provider == "cosyvoice"``
+    - ``requires_worker == True``
+    - ``target_model`` 非空非 NULL
+
+    任一条件不匹配 → row 不返回。
+
+    Returns
+    -------
+    dict[voice_id, {requires_worker, worker_target_model}]
+        只含命中 row 的 voice_id。**不返**任何非白名单字段（``label`` /
+        ``source_speaker_name`` / ``billing_sku`` / ``clone_provider_request_id``
+        / ... 一律不携带，防止泄漏到 review payload）。
+
+    Notes
+    -----
+    单次 SQL ``IN`` 查询 + dict 映射；N speakers → 1 次 DB 查询。
+    """
+    if not voice_ids:
+        return {}
+    # 去重防同一 voice_id 重复进 IN clause
+    distinct_voice_ids = list({vid for vid in voice_ids if vid})
+    if not distinct_voice_ids:
+        return {}
+
+    stmt = select(
+        UserVoice.voice_id,
+        UserVoice.target_model,
+    ).where(
+        UserVoice.user_id == user_id,
+        UserVoice.voice_id.in_(distinct_voice_ids),
+        UserVoice.expired_at.is_(None),
+        UserVoice.provider == "cosyvoice_voice_clone",
+        UserVoice.tts_provider == "cosyvoice",
+        UserVoice.requires_worker.is_(True),
+        UserVoice.target_model.isnot(None),
+        UserVoice.target_model != "",
+    )
+    result = await db.execute(stmt)
+
+    routing: dict[str, dict[str, object]] = {}
+    for row in result.all():
+        voice_id, target_model = row.voice_id, row.target_model
+        # 白名单输出：只两个字段，绝不携带 label / billing_sku / request_id 等
+        routing[voice_id] = {
+            "requires_worker": True,
+            "worker_target_model": str(target_model),
+        }
+    return routing
 
 
 def _clean_optional_text(value: object) -> str | None:
@@ -601,6 +713,16 @@ async def add_user_voice(
     clone_sample_segment_ids: object | None = None,
     created_from: str | None = None,
     notes: str | None = None,
+    # ---- Phase 4.1 (migration 030): CosyVoice worker dispatch + audit anchors ----
+    region_constraint: str = "overseas_ok",
+    requires_worker: bool = False,
+    target_model: str | None = None,
+    worker_provider: str | None = None,
+    worker_region: str | None = None,
+    clone_api_model: str | None = None,
+    billing_sku: str | None = None,
+    clone_provider_request_id: str | None = None,
+    clone_worker_request_id: str | None = None,
 ) -> UserVoice:
     if source_speaker_name_key is None:
         source_speaker_name_key = normalize_speaker_name_key(source_speaker_name)
@@ -637,6 +759,19 @@ async def add_user_voice(
         _set_if_empty(existing, "clone_sample_seconds", clone_sample_seconds, voice_id=voice_id)
         _set_if_empty(existing, "clone_sample_segment_ids", clone_sample_segment_ids, voice_id=voice_id)
         _set_if_empty(existing, "created_from", created_from, voice_id=voice_id)
+        # ---- Phase 4.1：刷新 worker dispatch / audit anchors（每次 clone 重新填）----
+        # 这些字段在每次 clone 都会变（新的 worker_request_id / provider_request_id），
+        # 所以不用 _set_if_empty 而是直接覆盖。requires_worker / region_constraint
+        # 重置成最新决策，避免旧 row 看起来仍是 overseas_ok 但实际是 mainland clone。
+        existing.region_constraint = region_constraint
+        existing.requires_worker = requires_worker
+        existing.target_model = target_model
+        existing.worker_provider = worker_provider
+        existing.worker_region = worker_region
+        existing.clone_api_model = clone_api_model
+        existing.billing_sku = billing_sku
+        existing.clone_provider_request_id = clone_provider_request_id
+        existing.clone_worker_request_id = clone_worker_request_id
         await db.commit()
         return existing
 
@@ -664,6 +799,16 @@ async def add_user_voice(
         clone_sample_segment_ids=clone_sample_segment_ids,
         created_from=created_from,
         notes=notes,
+        # Phase 4.1 worker dispatch + audit anchors
+        region_constraint=region_constraint,
+        requires_worker=requires_worker,
+        target_model=target_model,
+        worker_provider=worker_provider,
+        worker_region=worker_region,
+        clone_api_model=clone_api_model,
+        billing_sku=billing_sku,
+        clone_provider_request_id=clone_provider_request_id,
+        clone_worker_request_id=clone_worker_request_id,
     )
     db.add(voice)
     await db.commit()

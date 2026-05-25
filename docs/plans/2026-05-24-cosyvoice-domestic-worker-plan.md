@@ -693,6 +693,7 @@ Worker 本地写 JSONL：
 - `job_id`
 - `user_id`
 - `speaker_id`
+- `segment_id`（Phase 4.0b §A 新增：synthesize_segment 路径按段定位）
 - `voice_id`
 - `operation`
 - `provider`
@@ -961,3 +962,426 @@ DashScope key 已注入武汉 ECS：
 - Worker 通信模式应采用 US 主机主动请求武汉 worker，并由 US 主机主动拉取 artifact。
 - 不要设计成武汉 worker 主动 callback 到 US HTTP/HTTPS。
 - 大 artifact 回传需要 OSS 或带宽升级。
+
+### 2026-05-24 Phase 1 Mock Worker Skeleton
+
+仅本地代码层完成，未触发任何真实 DashScope / 公网调用。
+
+**新增运行时代码（`src/services/mainland_worker/`，整包独立、可拷贝部署）：**
+
+- `types.py` — 请求/响应 dataclass：`WorkerCloneRequest` / `WorkerCloneResponse` / `WorkerSynthesizeBatchRequest` / `WorkerSegmentRequest` / `WorkerSegmentResult` / `WorkerArtifactPackage` / `WorkerSynthesizeBatchResponse` / `WorkerDeleteVoiceRequest` / `WorkerDeleteVoiceResponse` / `WorkerHealthResponse` + `compute_text_hash()`（sha256/utf-8，不做 normalize）。
+- `hmac_auth.py` — 协议：headers `X-AVT-Key-Id` / `X-AVT-Timestamp` / `X-AVT-Nonce` / `X-AVT-Signature` / `X-AVT-Job-Id`；签名材料 `method\npath\nts\nnonce\nkey_id\nsha256(body)`；`InMemoryHmacKeyStore`（含 deprecated_at 轮换）+ `InMemoryNonceStore`（15 分钟窗 + 自清理）；`verify_request()` 顺序：size → headers → ts → key → signature → nonce（保证签名错误不污染 nonce 表）。
+- `dispatch.py` — `should_use_worker(voice)`：显式 `requires_worker` 永远 wins，否则从 `region_constraint == "mainland_only"` 派生；支持 dataclass / dict / SimpleNamespace 三种 voice 形态。
+- `silent_wav.py` — 纯 stdlib，16k mono 16-bit PCM，duration_ms 毫秒级精度。
+- `client.py` — `MainlandWorkerClient`（httpx-based sync）；clone `max_attempts=1`，synthesize-batch / delete `max_attempts=3`、退避 1/5/15s；health 不重试；5xx 重试、4xx / 401 立刻抛；artifact inline_base64 解包到 `audio_path → wav_bytes` dict。
+- `worker/app.py` — FastAPI；`/healthz`（不验签，给容器探活）+ 三个签名保护路由（clone / synthesize-batch / `DELETE voices/{id}`）；handler 取 `request.body()` raw bytes，与签名校验字节级一致；text_hash 校验 client 传入与 worker 重算必须一致，不一致拒。
+- `worker/audit.py` — `JsonlAuditLogger`（thread-safe append）+ `InMemoryAuditLogger`（测试用）；白名单字段集合与 plan §审计日志 一一对齐，禁止 `raw_audio` / `api_key` 等敏感字段；遇禁止字段 warn-and-drop。
+- `worker/providers/mock_cosyvoice.py` — deterministic voice_id（`mock_cosy_{sha256(speaker|model|sample_sha)[:16]}`）；`synthesize_segment` 按 CJK / ASCII 估时长，silent WAV bytes；`clone` 必须 `consent.voice_clone_confirmed == True`，否则 `ProviderError(code="consent_required")`。
+- `worker/config.py` — `WORKER_MODE=mock|live`，env 解析 active / deprecated keys。**live 模式启动时如果未注入 provider 会 RuntimeError**——Phase 4 真实 provider 出现前 live 模式不可用。
+
+**测试覆盖（5 个 test 文件 / 75 项）：**
+
+- `tests/test_mainland_worker_hmac.py` — 22 项：sign/verify 对称、6 字段任何变化签名改变、key store 轮换、nonce 重放与过期清理、verify_request 完整路径、签名错误不污染 nonce store 的关键安全属性。
+- `tests/test_mainland_worker_dispatch.py` — 14 项：决策真值表、dict / dataclass / SimpleNamespace 兼容、回归"不能只看 provider 字面量"。
+- `tests/test_mainland_worker_silent_wav.py` — 10 项：RIFF/WAV 格式、时长精度、全零样本、text_hash 与官方 SHA256 / case 敏感 / 不做 normalize。
+- `tests/test_mainland_worker_e2e.py` — 18 项：用 `_TestClientTransport`（FastAPI TestClient 包成 sync `httpx.BaseTransport`）做端到端；clone / synthesize 单段 / synthesize 多段 / delete 全成功路径 + audit；签名拒绝（错 secret / 错 key_id）；text_hash mismatch 拒；clone 网络错误不重试（验证 attempts==1）；synthesize 5xx 重试到 max_attempts（attempts==3）后抛；4xx 不重试；transient 5xx 后成功（attempts==2）。
+- `tests/test_phase1_mainland_worker_guards.py` — 11 项契约级守卫：
+  1. 整包不 import `dashscope`（mock-first 硬约束）
+  2. 不反向依赖 `services.jobs` / `services.gemini` / `services.tts` 等主 pipeline 模块
+  3. 整包无 `while True`（防无限循环）
+  4. `worker/app.py` 不出现 `/synthesize-one` 等替代 route（AST 看 `@app.post(...)` 字面量）
+  5. mock provider 不 import `httpx` / `requests` / `urllib` / `socket`
+  6. `client.py` 不出现 `minimax` / `volcengine` / `doubao` 名（防 silent fallback）
+  7. `audit._AUDIT_FIELDS` 与 plan §审计日志 字段集合双向对齐
+  8. `_FORBIDDEN_FIELDS` 覆盖 raw_audio / api_key / hmac_secret
+  9. `MockCosyvoiceProvider.clone` 方法体引用 `voice_clone_confirmed`
+  10. `_send_request` 有 `max_attempts` 参数且做 `>= 1` 运行时校验
+  11. `client.clone()` 方法体含 `max_attempts=1` 字面量（plan §Retry/Clone）
+
+**Phase 1 通过标准验收：**
+
+- ✅ `pytest tests/test_mainland_worker_*.py tests/test_phase1_mainland_worker_guards.py` — 75 / 75 通过，耗时约 1.4 秒。
+- ✅ Mock worker 零网络依赖；主 src 没有 import 新包，main.py 启动行为不变。
+- ✅ Single-segment 与 batch 共用 `/cosyvoice/synthesize-batch`，artifact 解 zip 后段数 / sha256 / RIFF 头三重对齐。
+- ✅ HMAC key id 协议落地（headers / 签名材料 / 轮换表三处一致），守卫 #10 / #11 防回归。
+- ✅ `requires_worker` / `region_constraint` 决策落在 `dispatch.should_use_worker()`，guard 测试覆盖 `provider` 字面量不当 signal 的反例。
+- ✅ 付费 API 硬约束守住：clone 单次（attempts==1）、TTS 三次上限、4xx 不重试不重复扣费、client 无其他付费 provider fallback。
+
+**尚未做（Phase 2+ 范围，刻意不在 Phase 1 触碰）：**
+
+- 主 `src/services/tts/*` / `gateway/*` / `frontend-next/` 都未触碰。voice metadata schema 落库、Studio voice selection UI、segment_regenerate.py 接 worker client 都是 Phase 4 工作。
+- 武汉 ECS 部署文件（systemd unit / Dockerfile / Nginx config）未生成；Phase 2 实际推到武汉时再做。
+- 真实 `RealCosyvoiceProvider`（调 DashScope）—— Phase 2 编码前必须有授权文案 + "只用已授权声音"规则。
+- artifact zip download endpoint（`http://.../artifacts/...`）—— Phase 3 切大文件传输时再加，Phase 1 全部走 inline_base64。
+
+**对 plan §推荐启动顺序 的兑现：**
+
+| 启动顺序条目 | 状态 |
+|---|---|
+| 0. ECS 续费 | ✅ 已完成 |
+| 1. Phase -1 账号能力 | ✅ 2026-05-24 完成（见上一节） |
+| 2. Phase 0 带宽实测 | ✅ 2026-05-24 完成（见上一节） |
+| 3. Worker secret 注入与权限 | ✅ Phase -1 已落 `/etc/aivideotrans-mainland-worker/worker.env` 600:root:root |
+| 4. `requires_worker` / `region_constraint` 字段落库位置 | 🟡 dispatch 协议已定，落库位置 Phase 4 工作 |
+| 5. Studio 单段 regenerate 走 batch endpoint | ✅ Phase 1 合约层落地 + guard 守住 |
+
+### 2026-05-24 Phase 1 Codex 审核 Fix
+
+Codex 对 Phase 1 mock worker skeleton 跑了一轮 review，给出 4 条 findings
++ 1 条 non-blocking。全部修复并补回归测试。
+
+**Fix #1：默认审计 logger 落盘**
+
+`create_app()` 未注入 `audit_logger` 时之前挂 `InMemoryAuditLogger()`，
+进程重启即丢历史，与 plan §审计日志 JSONL append-only 语义不一致。改成
+默认 `JsonlAuditLogger(config.audit_log_path)`；测试路径显式传
+`InMemoryAuditLogger()` 避免污染真实磁盘。
+
+**Fix #2：clone consent 严格 JSON ``true``**
+
+旧逻辑 `bool(consent_raw["voice_clone_confirmed"])` 会把字符串 ``"false"`` /
+``"0"`` / ``"no"`` / int ``1`` 等都判成 truthy，绕过授权。改成
+`is True` 严格校验，其他任何值返 400 ``consent_required``；同时把
+该 400 也写入 audit log（plan §审计日志 中"未授权尝试 clone"是高
+价值事件）。Regression 覆盖 11 种非 boolean 输入。
+
+**Fix #3：Artifact 三层 sha256 校验**
+
+`extract_artifact_segments()` 之前只解 zip 不验内容。改成三层校验：
+
+1. Package 级：`sha256(zip_bytes) == response.package.sha256`
+2. Manifest 级：每个 `audio_path` 必须在 zip 内
+3. Segment 级：每段 wav bytes 的 sha256 与 manifest 对齐
+
+任一失败抛 `WorkerArtifactIntegrityError`；只返回 manifest 列出的
+segments（防 zip 内额外文件被 client 误用）。Phase 0/1 走 HTTP 时这道
+校验是 artifact 完整性的唯一保障。
+
+**Fix #4：审计 sanitizer 默认丢弃未知字段**
+
+旧 `_sanitize_event()` 未知字段 ``logger.debug + passthrough``，
+意味着将来误传 ``sample_url`` / ``authorization`` / ``dashscope_response``
+等潜在敏感字段会被落盘。改成默认 drop + log warning；新增审计字段
+必须先进 `_AUDIT_FIELDS` 白名单。守卫测试 `test_audit_sanitize_fields_match_plan`
+确保白名单与 plan §审计日志 字段双向对齐。
+
+**Non-blocking：env-backed ASGI 入口**
+
+补 `create_app_from_env()` + 模块级 lazy ``app``，让武汉部署可以直接
+`uvicorn services.mainland_worker.worker.app:app`。Lazy wrapper 避免
+import 时触发 env 读取（缺 `WORKER_HMAC_KEYS` 时 pytest 仍可干净跑）。
+
+**回归测试**
+
+新增 `tests/test_mainland_worker_review_fixes.py`（26 项）：
+
+- Fix #1：3 项（默认 logger 类型 / 显式注入仍尊重 / 落盘后真有内容）
+- Fix #2：12 项（11 种非 boolean 输入参数化 + 1 项 JSON true 接受）
+- Fix #3：6 项（合法路径 / package sha mismatch / segment sha mismatch /
+  zip 缺段 / payload 空 / zip 内多余文件不暴露）
+- Fix #4：3 项（未知字段 drop / forbidden 字段 drop / JSONL 落盘也不漏）
+- Env entry：2 项（env 装配可用 / 模块级 app 是 lazy）
+
+**累计测试覆盖**：mainland_worker 套件 75 → **101** 项全过；相关
+guard 套件 165/165（2 个 pre-existing 失败与本任务无关，git status
+证实 `frontend-next/` clean、无根 `projects/` 改动）。
+
+### 2026-05-24 Phase 1 Codex 审核 Fix #5（batch retry 上限）
+
+Codex 在第二轮 review 发现一处 P1 语义错：
+
+**问题**：`synthesize_batch` 之前直接传 `max_attempts=self._max_network_retries`（默认 3），让多段 batch 5xx 时跑满 3 次 attempts。这等于"重提 2 次"，**超过 plan §Retry "batch 整体最多重提 1 次"**。
+
+**修复**：按 segments 数量分两种语义：
+
+| 路径 | 常量 | attempts 上限 | plan 对应 |
+|---|---|---|---|
+| 单段 `len(segments) == 1`（Studio post-edit regenerate-tts） | `SINGLE_SEGMENT_MAX_ATTEMPTS=3` | 3 | 单段 TTS 最多 3 次 |
+| 多段 `len(segments) > 1`（主 pipeline batch 合成） | `MULTI_SEGMENT_MAX_ATTEMPTS=2` | 2 | batch 整体最多重提 1 次 |
+
+实际上限 = `min(self._max_network_retries, 上述常量)`，让调用方可以从外部
+进一步收紧（灰度期限到 1）但不能放大。
+
+**回归测试新增（4 项在 `test_mainland_worker_review_fixes.py`，1 项守卫
+在 `test_phase1_mainland_worker_guards.py`）**：
+
+- `test_fix5_constants_match_plan` — 常量值锁定到 plan §Retry
+- `test_fix5_multi_segment_5xx_retries_only_2` — **关键回归**：多段 5xx attempts==2
+- `test_fix5_single_segment_5xx_retries_up_to_3` — 单段路径仍享 3 次
+- `test_fix5_caller_can_tighten_via_max_network_retries` — 外部传 1 时收紧到 1
+- `test_synthesize_batch_does_not_use_raw_max_network_retries`（AST 守卫）—
+  禁止有人未来"简化"回 `max_attempts=self._max_network_retries`
+- `test_retry_constants_locked_to_plan_values`（行为守卫）— 常量值漂移必须先改 plan
+
+**累计 mainland_worker 测试**：101 → **107** 项全过。
+
+部署联调前的 P1 finding 至此清空。
+
+### 2026-05-24 武汉 ECS 部署完成（Codex 落地）
+
+Codex 把 mock worker 部署到武汉 ECS，跑通 US ↔ 武汉跨境往返：
+
+**部署形态**：
+
+- 服务：`aivideotrans-mainland-worker.service`（systemd）
+- 本机监听：`127.0.0.1:8791`
+- Nginx 对外路径：`http://8.148.83.128/internal/voice-clone/`
+- 来源 IP 限制：US 主机 `5.78.122.220` + localhost
+- 模式：`WORKER_MODE=mock` — 未触发任何真实 DashScope 调用
+
+**关键路径**：
+
+| 类别 | 路径 |
+|---|---|
+| 代码 | `/opt/aivideotrans-mainland-worker/src` |
+| Env | `/etc/aivideotrans-mainland-worker/worker.env` |
+| Systemd | `/etc/systemd/system/aivideotrans-mainland-worker.service` |
+| Nginx | `/etc/nginx/sites-enabled/jiujun-payment-relay` |
+| 审计 | `/data/aivideotrans-mainland-worker/audit/worker-audit.jsonl` |
+
+**验证通过**：
+
+- 武汉本机 `/healthz` 200
+- 美国主机 `http://8.148.83.128/internal/voice-clone/healthz` 200
+- HMAC 签名 mock clone + mock synthesize 跨境 e2e 成功
+- Artifact zip 返回，三层 sha256 校验通过
+- Audit JSONL 已落 2 条记录
+
+**常用排查**：
+
+```bash
+sudo systemctl status aivideotrans-mainland-worker
+sudo journalctl -u aivideotrans-mainland-worker -n 100 --no-pager
+curl http://127.0.0.1:8791/healthz
+sudo nginx -t
+```
+
+### 2026-05-24 Phase 1.5：Gateway 接入配置层
+
+把 `MainlandWorkerClient` 接进 Gateway 的**配置 + 工厂层**，让武汉 mock worker
+能被 admin 探活，并为 Phase 2 / 4 业务路径（voice clone / segment regenerate）
+预留单一构造入口。
+
+**严格不做**（Phase 2/4 范围）：
+
+- 不接通 voice clone / segment regenerate 真实调用路径
+- 不动 voice library `requires_worker` schema
+- 不暴露 worker 路径给前端用户
+
+**改动清单**：
+
+- `gateway/config.py` — 加 4 个字段：
+  - `mainland_voice_worker_enabled: bool = False`
+  - `mainland_voice_worker_url: str = ""`
+  - `mainland_voice_worker_hmac_key_id: str = ""`
+  - `mainland_voice_worker_hmac_secret: str = ""`（secret 仅从 env 读，
+    不进 admin_settings.json、不进 API response、不进日志）
+- `gateway/startup_checks.py` — 新增 `validate_mainland_voice_worker_config()`，
+  fail-graceful 模式（仿 R2 backend 语义）：enabled=True 但 secret 缺时 CRITICAL log
+  + 降级返 False，**不阻塞 gateway 启动**。日志路径只打 url + key_id 的存在性，
+  **永远不打 secret 实体**。
+- `gateway/main.py` lifespan — 在 R2 / pan_backup validate 之后调用，结果写回
+  `settings.mainland_voice_worker_enabled`，所有 request-time 代码看到的是
+  effective 值。
+- 新建 `gateway/mainland_voice_worker.py`：
+  - `build_mainland_voice_worker_client(settings) -> MainlandWorkerClient | None`
+    — 工厂；disabled 或 secret 缺失返 None
+  - `GET /api/admin/mainland-voice-worker/status` — 返
+    `{effective_enabled, url, hmac_key_id, has_hmac_secret}`，
+    **永远不返 secret 实体**
+  - `GET /api/admin/mainland-voice-worker/healthz` — 通过 client 调武汉
+    worker `/healthz`，原样转回 `{ok, worker, region, providers}`；
+    disabled 时返 503 `worker_disabled`；网络不通返 502 `worker_unreachable`；
+    签名拒绝返 502 `worker_signature_rejected`
+- `tests/test_mainland_voice_worker_gateway.py` — 22 项回归测试
+
+**回归测试覆盖**：
+
+1. Settings 默认值（4 字段全空 + disabled）
+2. validate 决策矩阵 5 项（disabled / 缺 url / 缺 key_id / 缺 secret / 三件齐）
+3. **关键安全属性**：validate 的成功 + CRITICAL 日志路径都不含 secret 字面量
+4. 工厂 5 项（disabled / 缺 url / 缺 key_id / 缺 secret / 三件齐）
+5. Admin status：response 不含 secret + 未登录 401 + 普通用户 403
+6. Admin healthz：disabled → 503 + 未登录 401 + e2e proxy 武汉 mock worker 返回
+7. AST 守卫：`gateway/mainland_voice_worker.py` 内任何 dict 字面量都不能把 secret
+   作为字段值返回（只允许 `has_hmac_secret: bool` 这种形态）
+
+**通过验收**：
+
+- ✅ Gateway 接入测试 22/22 通过
+- ✅ Mainland_worker 107 项全过（无回归）
+- ✅ 现有 4 个相关 guard 套件 88/88 通过
+- ✅ AGENTS.md 约束：gateway 默认 disabled，干净 env 下 import / pytest 不依赖
+  worker；secret 仅 env，永不进 admin response / 日志
+- ✅ CLAUDE.md 约束：未授权付费 API 路径不开（Phase 2/4 才接业务路径）；
+  `requires_worker` / `region_constraint` 落库延后到 Phase 4
+
+**累计测试统计**：
+
+| 套件 | 项数 |
+|---|---|
+| mainland_worker hmac / dispatch / silent_wav | 46 |
+| mainland_worker e2e | 18 |
+| mainland_worker review fixes | 30 |
+| mainland_worker guards | 13 |
+| **mainland_voice_worker gateway 接入** | **22** |
+| **合计** | **129** |
+
+下一步：Phase 2 真实 clone POC（需要先有授权文案 + admin 自录样本规则）。
+
+### 2026-05-24 Phase 2 代码准备：RealCosyvoiceProvider + WORKER_MODE=live
+
+代码层落地完成，真实 DashScope 联调留待 Codex 在武汉切 `WORKER_MODE=live` 时手工触发。
+
+**新增运行时代码**：
+
+- `src/services/mainland_worker/worker/providers/real_cosyvoice.py` —
+  唯一允许 import dashscope 的 worker 文件：
+  - `__init__(api_key, *, max_sample_bytes=1MB, query_poll_interval_s=1.0,
+    query_max_polls=60, language_hints=("zh","en"))`
+  - `clone()`：HEAD 样本 size 预校验 → `VoiceEnrollmentService.create_voice()`
+    → 轮询 `query_voice()` 到 OK → 返 voice_id
+  - `synthesize_segment()`：`SpeechSynthesizer.call()` → silent WAV bytes →
+    `wav_duration_ms()` + `len(text)` billed_chars
+  - `delete_voice()`：`VoiceEnrollmentService.delete_voice()`
+  - 错误码映射：catch-all → `ProviderError(code=..., retryable=...)`，
+    retryable 仅在 5xx / 429 / timeout / rate-limit 关键字命中时为 True
+  - **Phase -1 实测硬规则**：样本 > 1 MB 拒（HEAD content-length 检查），
+    避免在 DashScope 端触发 `BadRequest.InputDownloadFailed` 浪费调用
+  - **不内部 retry**（plan §Retry 由 US client 收口）
+- `src/services/mainland_worker/worker/app.py`：`WORKER_MODE=live` 时挂
+  `RealCosyvoiceProvider`，启动前校验 `DASHSCOPE_API_KEY` env 存在
+  （fail-hard，因为 live 模式必须有 key）；`WORKER_MODE=mock` 路径与 Phase 1
+  完全相同（不感知 RealCosyvoiceProvider 存在，lazy import 不引爆 SDK 依赖）
+
+**守卫更新**：
+
+- `tests/test_phase1_mainland_worker_guards.py::test_no_dashscope_import_in_mainland_worker_package` —
+  放开 `providers/real_cosyvoice.py` 单文件允许 import dashscope，其他文件
+  仍禁止；同时跨平台路径分隔符规范化（Windows / Linux 都能跑）
+
+**测试覆盖**：
+
+`tests/test_mainland_worker_real_cosyvoice.py` — 45 项，**全部用 monkeypatch
+注入 fake dashscope SDK，永不真实联网**：
+
+- __init__ 拒空 api_key（1 项）
+- clone 路径 9 项：happy path / 样本过大 / HEAD 网络错 / HEAD 4xx /
+  create_voice 异常映射 / 5xx 标 retryable / 多次轮询直到 OK /
+  query timeout / create_voice 返空 voice_id
+- synthesize_segment 6 项：happy / 空文本 / SDK 异常 / 非 bytes 返回 /
+  0 时长 / 完成后 `dashscope.api_key` 恢复原值
+- delete_voice 3 项：成功 / 空 voice_id 拒 / SDK 异常
+- 纯函数参数化测试：`_retryable_keywords` 10 项 / `_is_voice_ready` 7 项 /
+  `_sanitize_prefix` 5 项
+- `app.create_app` 装配：live 模式 + key → 挂 RealCosyvoiceProvider /
+  live 模式缺 key → RuntimeError / mock 模式默认不变（Phase 1 兼容性）
+
+**通过验收**：
+
+- ✅ Phase 2 单元测试 45/45 通过
+- ✅ mainland_worker 套件累计 **174 项**全过（无回归）
+- ✅ 相关 guard 套件 88/88 全过（pre-existing 2 项失败与本任务无关）
+- ✅ CLAUDE.md 付费 API 硬约束：测试零真实 DashScope 调用、`WORKER_MODE=live`
+  必须显式配 key、无 fallback 路径自动调付费 API
+- ✅ AGENTS.md：默认 mock-first；`main.py` / `pytest` 在干净本地环境（无
+  `DASHSCOPE_API_KEY`）能跑
+
+**累计测试统计**：
+
+| 套件 | 项数 |
+|---|---|
+| Phase 1 hmac / dispatch / silent_wav | 46 |
+| Phase 1 e2e | 18 |
+| Phase 1 review fixes | 30 |
+| Phase 1 guards | 13 |
+| Phase 1.5 gateway 接入 | 22 |
+| **Phase 2 RealCosyvoiceProvider** | **45** |
+| **合计** | **174** |
+
+**Codex 部署后下一步联调清单**（武汉 ECS）：
+
+1. 把 `/etc/aivideotrans-mainland-worker/worker.env` 加上 `DASHSCOPE_API_KEY=...`
+   （Phase -1 验证过的 mainland key）
+2. 把 systemd unit 的 `WORKER_MODE` 改为 `live`，`systemctl daemon-reload`
+3. `systemctl restart aivideotrans-mainland-worker`，确认 `/healthz` 返回
+   `providers.cosyvoice.mode == "live"`
+4. **用 admin/dev 自录的 10 秒以内 / < 1 MB 的 WAV 样本**（plan §Phase 2 通过
+   标准硬规则）跑一次真实 clone（建议先用 `cosyvoice-v3.5-flash`）
+5. 用返回的 voice_id 跑一次单段中文 TTS（`language_hints=["zh"]`）
+6. 调 `DELETE /cosyvoice/voices/{voice_id}` 清理
+7. 阿里云后台对账单 → 验证 Phase 2 §通过标准全部满足
+8. 完成后把 `WORKER_MODE` 切回 `mock`（除非进入 Phase 4 灰度）
+
+**严格不做**（Phase 2 真实联调阶段也不要做）：
+
+- 不接通主 pipeline 的 voice clone 端点（仍是 Phase 4 工作）
+- 不让普通用户看到 CosyVoice clone 入口（前端 `supports_clone` 继续为 false）
+- 不在 fallback / 自动重试路径调真实 DashScope
+
+### 2026-05-25 Phase 2 Codex 部署联调与修正
+
+Codex 在武汉 ECS 上完成 Phase 2 live POC。联调前先审查并修正了 Claude Code
+Phase 2 代码里的两个真实 SDK 细节：
+
+1. **DashScope SDK endpoint 显式锁到中国内地**
+   - 官方 Python SDK 示例使用 `dashscope.api_key`、`dashscope.base_http_api_url`
+     和 `dashscope.base_websocket_api_url` 这三个 module-level 全局配置。
+   - `RealCosyvoiceProvider` 改为 `_dashscope_mainland_context()`：
+     - `base_http_api_url = https://dashscope.aliyuncs.com/api/v1`
+     - `base_websocket_api_url = wss://dashscope.aliyuncs.com/api-ws/v1/inference`
+     - 用 `RLock` 包住 DashScope 全局状态，调用结束后恢复旧值，避免并发或未来多
+       provider 场景污染 endpoint / api_key。
+2. **`language_hints` 必须只传 1 个值**
+   - 第一次 live clone 被 DashScope 400 拒绝：
+     `InvalidLanguageHints: the length of language_hints must be 1`。
+   - 默认值从 `("zh", "en")` 改为 `("zh",)`，测试断言同步改为 `["zh"]`。
+3. **真实 DashScope WAV duration 解析修复**
+   - 第一次 TTS 成功，但审计里 `duration_ms=67108860`，实际 WAV 约 247KB。
+   - 原因：真实 SDK 返回的 WAV header 可能带 streaming placeholder chunk size，
+     Python `wave` 模块按 header 报出不可能的超长时长。
+   - `wav_duration_ms()` 增加 RIFF chunk fallback：当 header 时长超过实际字节数可
+     能承载的上限时，按实际 `data` chunk bytes / block_align / sample_rate 计算。
+   - 新增回归：把 mock WAV 的 `data` chunk size 改成 `0xFFFFFFFF`，仍应解析为
+     1500ms。
+
+**本地验证**：
+
+- Phase 1 / 1.5 / 2 相关测试累计 **175/175** 通过。
+- 测试路径仍然全部 mock / fake SDK，不真实联网。
+
+**武汉 ECS 部署验证**：
+
+- 安装 `dashscope==1.25.18` 到 `/opt/aivideotrans-mainland-worker/.venv`。
+- 部署更新后的 `src/services/mainland_worker`。
+- `WORKER_MODE=live` 健康检查通过：
+  `providers.cosyvoice.mode == "live"`。
+- 完成后已切回 `WORKER_MODE=mock`，US 侧
+  `http://8.148.83.128/internal/voice-clone/healthz` 返回 HTTP 200 且 mode=mock。
+
+**真实 POC 结果**：
+
+- 样本：阿里云官方文档公开 sample，裁剪成 8 秒 WAV（768KB），临时暴露到武汉
+  Nginx 供 DashScope 抓取；POC 后已删除临时文件和 Nginx location。
+- 第一次 POC：
+  - clone 成功
+  - TTS 成功
+  - delete voice 成功
+  - 暴露出 duration parser 问题（已修）
+- 第二次 POC（修复后）：
+  - clone 成功，voice_id 形如
+    `cosyvoice-v3.5-flash-avtdocsa-...`
+  - 单段中文 TTS 成功
+  - artifact zip sha256 校验通过
+  - WAV `RIFF` 校验通过，`WAV_BYTES=229484`
+  - `duration_ms=7170`，`audio_seconds=7.17`
+  - delete voice 成功
+
+**当前运行状态**：
+
+- 武汉 worker 保持部署但默认 `WORKER_MODE=mock`。
+- DashScope API key 仍只在武汉 `/etc/aivideotrans-mainland-worker/worker.env`
+  中，未打印、未回传。
+- 审计 JSONL 已记录 live clone / synthesize / delete 事件，不含 raw audio / api key。
+- 主 pipeline、Gateway 业务路径、前端 voice selection 仍未接通 CosyVoice clone；
+  这些仍属于 Phase 4 灰度范围。
