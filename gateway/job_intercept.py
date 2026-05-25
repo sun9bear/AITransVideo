@@ -2607,7 +2607,75 @@ async def _enrich_speakers_with_clone_routing(
         await db.execute(select(Job.user_id).where(Job.job_id == job_id))
     ).first()
     if job_row is None or job_row.user_id is None:
-        return None, None
+        known_clone_voice_ids: set[str] = set()
+        clone_identity_lookup_failed = False
+        try:
+            known_clone_voice_ids = await _fetch_known_cosyvoice_clone_voice_ids(
+                db, voice_ids_to_lookup,
+            )
+        except Exception as exc:
+            logger.warning(
+                "voice-selection/approve: clone identity lookup failed while "
+                "job user is unavailable for job=%s: %s",
+                job_id, exc,
+            )
+            clone_identity_lookup_failed = True
+
+        public_catalog_voice_ids: set[str] = set()
+        public_catalog_lookup_failed = False
+        try:
+            public_catalog_voice_ids = await _fetch_cosyvoice_public_voice_ids(db)
+        except Exception as exc:
+            logger.warning(
+                "voice-selection/approve: public catalog lookup failed while "
+                "job user is unavailable for job=%s: %s",
+                job_id, exc,
+            )
+            public_catalog_lookup_failed = True
+
+        sanitized: list = []
+        for sp in speakers:
+            if not isinstance(sp, dict):
+                sanitized.append(sp)
+                continue
+            new_sp = dict(sp)
+            new_sp.pop("requires_worker", None)
+            new_sp.pop("worker_target_model", None)
+
+            vid = str(new_sp.get("voice_id", "") or "").strip()
+            payload_tts_provider = str(new_sp.get("tts_provider", "") or "").strip()
+            if not vid or vid == "auto":
+                sanitized.append(new_sp)
+                continue
+
+            is_public_preset = (
+                not public_catalog_lookup_failed
+                and vid in public_catalog_voice_ids
+            )
+            is_known_clone_voice = vid in known_clone_voice_ids
+            is_cosyvoice_clone_candidate = (
+                (payload_tts_provider == "cosyvoice" and not is_public_preset)
+                or (not payload_tts_provider and is_known_clone_voice)
+                or (
+                    not payload_tts_provider
+                    and clone_identity_lookup_failed
+                    and not is_public_preset
+                )
+            )
+            if is_cosyvoice_clone_candidate:
+                return None, {
+                    "code": "voice_clone_routing_lookup_failed",
+                    "message": (
+                        f"job={job_id!r} cannot resolve Gateway user_id while "
+                        f"approving voice_id={vid!r}; rejecting to prevent "
+                        f"CosyVoice clone routing from drifting to a legacy path."
+                    ),
+                    "voice_id": vid,
+                }
+
+            sanitized.append(new_sp)
+
+        return sanitized, None
     user_id = job_row.user_id
 
     # 3) 批量 strict filter 查询（Codex HC#4）

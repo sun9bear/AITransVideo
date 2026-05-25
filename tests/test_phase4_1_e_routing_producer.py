@@ -938,6 +938,125 @@ async def test_blank_provider_known_clone_voice_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_job_user_missing_cosyvoice_non_public_fails_closed(monkeypatch):
+    """PR #7 Codex review: missing Job.user_id must not skip clone validation."""
+    from job_intercept import _enrich_speakers_with_clone_routing
+
+    mock_db = MagicMock()
+    job_result = MagicMock()
+    job_result.first.return_value = None
+    mock_db.execute = AsyncMock(return_value=job_result)
+
+    async def _known_clone_ids(_db, voice_ids):
+        return set()
+
+    async def _public_voice_ids(_db):
+        return {"cosyvoice_public_preset"}
+
+    monkeypatch.setattr(
+        "job_intercept._fetch_known_cosyvoice_clone_voice_ids", _known_clone_ids,
+    )
+    monkeypatch.setattr(
+        "job_intercept._fetch_cosyvoice_public_voice_ids", _public_voice_ids,
+    )
+
+    enriched, error = await _enrich_speakers_with_clone_routing(
+        mock_db,
+        job_id="missing-job",
+        speakers=[{
+            "speaker_id": "speaker_a",
+            "voice_id": "cosyvoice_custom_missing_user",
+            "tts_provider": "cosyvoice",
+        }],
+    )
+
+    assert enriched is None
+    assert error is not None
+    assert error["code"] == "voice_clone_routing_lookup_failed"
+    assert error["voice_id"] == "cosyvoice_custom_missing_user"
+
+
+@pytest.mark.asyncio
+async def test_job_user_missing_public_preset_allows_sanitized_payload(monkeypatch):
+    """Missing Job.user_id can allow public presets, but forged worker fields are stripped."""
+    from job_intercept import _enrich_speakers_with_clone_routing
+
+    mock_db = MagicMock()
+    job_result = MagicMock()
+    job_result.first.return_value = MagicMock(user_id=None)
+    mock_db.execute = AsyncMock(return_value=job_result)
+
+    async def _known_clone_ids(_db, voice_ids):
+        return set()
+
+    async def _public_voice_ids(_db):
+        return {"cosyvoice_public_preset"}
+
+    monkeypatch.setattr(
+        "job_intercept._fetch_known_cosyvoice_clone_voice_ids", _known_clone_ids,
+    )
+    monkeypatch.setattr(
+        "job_intercept._fetch_cosyvoice_public_voice_ids", _public_voice_ids,
+    )
+
+    enriched, error = await _enrich_speakers_with_clone_routing(
+        mock_db,
+        job_id="missing-user",
+        speakers=[{
+            "speaker_id": "speaker_a",
+            "voice_id": "cosyvoice_public_preset",
+            "tts_provider": "cosyvoice",
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-plus",
+        }],
+    )
+
+    assert error is None
+    assert enriched is not None
+    assert enriched[0]["voice_id"] == "cosyvoice_public_preset"
+    assert "requires_worker" not in enriched[0]
+    assert "worker_target_model" not in enriched[0]
+
+
+@pytest.mark.asyncio
+async def test_job_user_missing_blank_provider_known_clone_fails_closed(monkeypatch):
+    """A known clone voice with blank provider still fails closed when user_id is unavailable."""
+    from job_intercept import _enrich_speakers_with_clone_routing
+
+    mock_db = MagicMock()
+    job_result = MagicMock()
+    job_result.first.return_value = None
+    mock_db.execute = AsyncMock(return_value=job_result)
+
+    async def _known_clone_ids(_db, voice_ids):
+        return {"cosyvoice_custom_blank_provider_missing_user"}
+
+    async def _public_voice_ids(_db):
+        return set()
+
+    monkeypatch.setattr(
+        "job_intercept._fetch_known_cosyvoice_clone_voice_ids", _known_clone_ids,
+    )
+    monkeypatch.setattr(
+        "job_intercept._fetch_cosyvoice_public_voice_ids", _public_voice_ids,
+    )
+
+    enriched, error = await _enrich_speakers_with_clone_routing(
+        mock_db,
+        job_id="missing-job",
+        speakers=[{
+            "speaker_id": "speaker_a",
+            "voice_id": "cosyvoice_custom_blank_provider_missing_user",
+        }],
+    )
+
+    assert enriched is None
+    assert error is not None
+    assert error["code"] == "voice_clone_routing_lookup_failed"
+    assert error["voice_id"] == "cosyvoice_custom_blank_provider_missing_user"
+
+
+@pytest.mark.asyncio
 async def test_public_catalog_lookup_failure_for_unknown_cosyvoice_voice_fails_closed(monkeypatch):
     """E P1 #1/#2 fix: 公开 catalog 查询失败 + voice 看似 cosyvoice clone →
     无法判断是否为合法预设，必须 fail-closed（不能 degrade 让 clone voice
