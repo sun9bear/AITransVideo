@@ -8105,6 +8105,12 @@ class ProcessPipeline:
                 segment.tts_provider = speaker_providers[segment.speaker_id]
 
             # Phase 4.1 E.3: worker routing (CosyVoice clone path)
+            # PR #7 Codex review (2026-05-25): reset first. Segments restored
+            # from cached snapshots may already carry requires_worker=True from
+            # a previous approve; if the user later switches this speaker to a
+            # non-worker voice, stale flags must not survive.
+            segment.requires_worker = False
+            segment.worker_target_model = ""
             if speaker_voice_routing and segment.speaker_id in speaker_voice_routing:
                 routing = speaker_voice_routing[segment.speaker_id]
                 segment.requires_worker = bool(routing.get("requires_worker", False))

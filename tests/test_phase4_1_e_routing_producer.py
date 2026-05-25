@@ -221,6 +221,35 @@ def test_apply_voice_overrides_without_routing_keeps_segment_defaults():
     assert seg.tts_provider == "minimax"  # 保持原值
 
 
+def test_apply_voice_overrides_clears_stale_worker_flags_without_routing():
+    """PR #7 Codex review: cache-restored segments may carry stale worker flags.
+
+    If the current approved voice has no routing entry, the override pass must
+    clear requires_worker / worker_target_model before TTS dispatch.
+    """
+    pipeline = make_pipeline_instance()
+    seg = make_segment(
+        speaker_id="speaker_a",
+        voice_id="cosyvoice_clone_old",
+        tts_provider="cosyvoice",
+        requires_worker=True,
+        worker_target_model="cosyvoice-v3.5-flash",
+    )
+    pipeline._apply_runtime_voice_overrides(
+        [seg],
+        voice_id_a="minimax_xyz",
+        display_name_a="X",
+        voice_id_b=None,
+        display_name_b="",
+        speaker_providers={"speaker_a": "minimax"},
+        speaker_voice_routing=None,
+    )
+    assert seg.voice_id == "minimax_xyz"
+    assert seg.tts_provider == "minimax"
+    assert seg.requires_worker is False
+    assert seg.worker_target_model == ""
+
+
 def test_apply_voice_overrides_speaker_a_b_routing_maps():
     """N-speaker (Codex P2): speaker_a + speaker_b 都各自映射."""
     pipeline = make_pipeline_instance()
@@ -803,6 +832,62 @@ async def test_routing_lookup_failure_for_minimax_voice_allows_through(monkeypat
     )
     assert error is None
     assert "requires_worker" not in (enriched[0] if enriched else {})
+
+
+@pytest.mark.asyncio
+async def test_enrichment_strips_client_supplied_worker_fields_for_unmatched_voices(monkeypatch):
+    """PR #7 Codex review: only Gateway-authorized routing fields may survive.
+
+    A client can submit stale/forged requires_worker fields on a public preset or
+    MiniMax voice. If user_voices strict lookup does not authorize routing for
+    that voice, enrichment must remove those fields before proxying approve.
+    """
+    from job_intercept import _enrich_speakers_with_clone_routing
+
+    mock_db = MagicMock()
+    job_result = MagicMock()
+    job_result.first.return_value = MagicMock(user_id="u-test")
+    mock_db.execute = AsyncMock(side_effect=[job_result])
+
+    async def _empty_lookup(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "user_voice_service.lookup_clone_voice_routing_metadata",
+        _empty_lookup,
+    )
+
+    async def _fake_catalog(_db):
+        return {"cosyvoice_preset_a"}
+
+    monkeypatch.setattr(
+        "job_intercept._fetch_cosyvoice_public_voice_ids", _fake_catalog,
+    )
+
+    speakers = [
+        {
+            "speaker_id": "speaker_a",
+            "voice_id": "minimax_voice_xyz",
+            "tts_provider": "minimax",
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        },
+        {
+            "speaker_id": "speaker_b",
+            "voice_id": "cosyvoice_preset_a",
+            "tts_provider": "cosyvoice",
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-plus",
+        },
+    ]
+    enriched, error = await _enrich_speakers_with_clone_routing(
+        mock_db, job_id="j1", speakers=speakers,
+    )
+    assert error is None
+    assert enriched is not None
+    for sp in enriched:
+        assert "requires_worker" not in sp
+        assert "worker_target_model" not in sp
 
 
 @pytest.mark.asyncio

@@ -2624,6 +2624,13 @@ async def _enrich_speakers_with_clone_routing(
             enriched.append(sp)
             continue
         new_sp = dict(sp)
+        # PR #7 Codex review (2026-05-25): approved payload must only carry
+        # worker routing fields that Gateway re-derived from user_voices. A
+        # client can resend stale or forged requires_worker / worker_target_model
+        # values for public presets or non-CosyVoice voices; strip them before
+        # deciding whether this speaker has an authorized routing entry.
+        new_sp.pop("requires_worker", None)
+        new_sp.pop("worker_target_model", None)
         vid = str(new_sp.get("voice_id", "") or "").strip()
         payload_tts_provider = str(new_sp.get("tts_provider", "") or "").strip()
 
