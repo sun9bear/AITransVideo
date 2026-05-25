@@ -42,6 +42,7 @@ for _candidate in [
 from log_redactor_loader import build_default_redactor
 
 from fastapi import Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2491,6 +2492,379 @@ async def _record_voice_candidate_rejection_events(
                 )
 
 
+async def _fetch_cosyvoice_public_voice_ids(db: AsyncSession) -> set[str]:
+    """Phase 4.1 E P1 #2 fix (Codex 2026-05-25 二轮 E review)：直接 async 查
+    Gateway 本地 ``voice_catalog`` 表，**不**走 ``services.tts.*`` 里的
+    self-HTTP helper（避免 Gateway 同步调自己 + event loop 阻塞 + 静态 fallback
+    只覆盖 flash 不覆盖 plus 的多重问题）。
+
+    过滤条件**严格复刻** internal ``/api/internal/voice-catalog`` 的契约
+    （Codex E 三轮 P1 #3 fix）—— 必须与 ``voice_catalog_api.py:157-162`` 同源：
+
+    - ``provider == "cosyvoice"``
+    - ``matchable IS True``
+    - ``archived_at IS NULL``
+    - ``_VERIFIED_TRUE_SQL`` —— ``verify_status`` 中至少一个维度
+      ``verified=true``。**必须有此条件**，否则 unverified 的 catalog row
+      会被当成 public preset，让 orphan clone voice 漂过 ``voice_clone_metadata_missing``
+      的 fail-closed 判断。
+
+    返 voice_id set。失败抛 ``RuntimeError`` —— 由调用方（``_enrich_speakers...``）
+    决定 fail-closed 还是 degrade（不会静默返空集，避免把所有 cosyvoice 音色
+    都误判为 clone candidate）。
+    """
+    # 从 voice_catalog_api 导入 verified SQL fragment —— **单源**，绝不复制写法，
+    # 防止 internal endpoint 改 verified 规则但此 helper 漏改导致 drift
+    from voice_catalog_api import _VERIFIED_TRUE_SQL
+    from voice_catalog_models import VoiceCatalog
+
+    stmt = select(VoiceCatalog.voice_id).where(
+        VoiceCatalog.provider == "cosyvoice",
+        VoiceCatalog.matchable.is_(True),
+        VoiceCatalog.archived_at.is_(None),
+        _VERIFIED_TRUE_SQL,
+    )
+    result = await db.execute(stmt)
+    return {str(row[0]) for row in result.all()}
+
+
+async def _fetch_known_cosyvoice_clone_voice_ids(
+    db: AsyncSession,
+    voice_ids: list[str],
+) -> set[str]:
+    """Return voice ids that are known CosyVoice clone assets in user_voices.
+
+    This intentionally ignores ``user_id`` and ``expired_at``.  It is not used
+    for authorization; it is only an identity guard for approve payloads where
+    ``tts_provider`` is missing.  A voice id that belongs to another account or
+    was expired/deleted must still be treated as clone-like and rejected instead
+    of drifting to a legacy/non-worker path.
+    """
+    distinct_voice_ids = list({vid for vid in voice_ids if vid})
+    if not distinct_voice_ids:
+        return set()
+    stmt = select(UserVoice.voice_id).where(
+        UserVoice.voice_id.in_(distinct_voice_ids),
+        UserVoice.provider == "cosyvoice_voice_clone",
+    )
+    result = await db.execute(stmt)
+    return {str(row[0]) for row in result.all()}
+
+
+async def _enrich_speakers_with_clone_routing(
+    db: AsyncSession,
+    *,
+    job_id: str,
+    speakers: list,
+) -> tuple[list | None, dict | None]:
+    """Phase 4.1 E.2 (Codex 2026-05-25 二轮 fix-up)：丰富 approved voice-selection
+    payload。
+
+    对每个 ``speakers[i]`` 按 ``voice_id`` 批量查 ``user_voices``（strict
+    filter），命中即添加 ``requires_worker`` / ``worker_target_model`` 两
+    字段。同时实施 4 项 fail-closed 约束：
+
+    - ``voice_id`` 命中 user_voices 但 payload ``tts_provider != "cosyvoice"``
+      → ``voice_clone_provider_mismatch`` 400
+    - ``voice_id`` 未命中但形似 CosyVoice clone（payload ``tts_provider ==
+      "cosyvoice"`` 且不在 public catalog） → ``voice_clone_metadata_missing`` 400
+    - **PR #7 Codex review**：payload 漏写 ``tts_provider`` 时，如果 voice_id
+      在任意 user_voices row 中是 CosyVoice clone，也按 clone-like 处理并
+      fail-closed，而不是放行到 legacy/non-worker path。
+    - **P1 #1 fix**：``lookup_clone_voice_routing_metadata`` 抛异常（DB 短暂
+      不可用）→ 对任何 ``tts_provider="cosyvoice"`` 非 public preset voice
+      返 ``voice_clone_routing_lookup_failed`` 503。**禁止** degrade 让 clone
+      voice 漂到 legacy 国际 DashScope endpoint。
+    - 预设公开音色 / MiniMax / VolcEngine / legacy → 不加 routing 保持原状
+
+    Returns
+    -------
+    (enriched_speakers, error_detail)
+        - 成功：``(enriched_list, None)``
+        - 拒绝：``(None, {"code": ..., "message": ..., ...})``
+        - 不需要 enrichment：``(None, None)``
+    """
+    # Lazy import 避开 services 命名空间循环
+    from user_voice_service import lookup_clone_voice_routing_metadata
+
+    if not speakers:
+        return None, None
+
+    # 1) 收集需要查 user_voices 的 voice_id
+    voice_ids_to_lookup: list[str] = []
+    for sp in speakers:
+        if not isinstance(sp, dict):
+            continue
+        vid = str(sp.get("voice_id", "") or "").strip()
+        if vid and vid != "auto":
+            voice_ids_to_lookup.append(vid)
+
+    if not voice_ids_to_lookup:
+        return None, None
+
+    # 2) 查 user_voices 对应 user_id —— 从 job 表反查
+    job_row = (
+        await db.execute(select(Job.user_id).where(Job.job_id == job_id))
+    ).first()
+    if job_row is None or job_row.user_id is None:
+        known_clone_voice_ids: set[str] = set()
+        clone_identity_lookup_failed = False
+        try:
+            known_clone_voice_ids = await _fetch_known_cosyvoice_clone_voice_ids(
+                db, voice_ids_to_lookup,
+            )
+        except Exception as exc:
+            logger.warning(
+                "voice-selection/approve: clone identity lookup failed while "
+                "job user is unavailable for job=%s: %s",
+                job_id, exc,
+            )
+            clone_identity_lookup_failed = True
+
+        public_catalog_voice_ids: set[str] = set()
+        public_catalog_lookup_failed = False
+        try:
+            public_catalog_voice_ids = await _fetch_cosyvoice_public_voice_ids(db)
+        except Exception as exc:
+            logger.warning(
+                "voice-selection/approve: public catalog lookup failed while "
+                "job user is unavailable for job=%s: %s",
+                job_id, exc,
+            )
+            public_catalog_lookup_failed = True
+
+        sanitized: list = []
+        for sp in speakers:
+            if not isinstance(sp, dict):
+                sanitized.append(sp)
+                continue
+            new_sp = dict(sp)
+            new_sp.pop("requires_worker", None)
+            new_sp.pop("worker_target_model", None)
+
+            vid = str(new_sp.get("voice_id", "") or "").strip()
+            payload_tts_provider = str(new_sp.get("tts_provider", "") or "").strip()
+            if not vid or vid == "auto":
+                sanitized.append(new_sp)
+                continue
+
+            is_public_preset = (
+                not public_catalog_lookup_failed
+                and vid in public_catalog_voice_ids
+            )
+            is_known_clone_voice = vid in known_clone_voice_ids
+            if (
+                is_known_clone_voice
+                and payload_tts_provider
+                and payload_tts_provider != "cosyvoice"
+            ):
+                return None, {
+                    "code": "voice_clone_provider_mismatch",
+                    "message": (
+                        f"voice_id={vid!r} is a known CosyVoice clone voice, "
+                        f"but submitted tts_provider={payload_tts_provider!r}. "
+                        f"Cloned voices can only be approved with cosyvoice provider."
+                    ),
+                    "voice_id": vid,
+                    "submitted_tts_provider": payload_tts_provider,
+                }
+            is_cosyvoice_clone_candidate = (
+                (payload_tts_provider == "cosyvoice" and not is_public_preset)
+                or (not payload_tts_provider and is_known_clone_voice)
+                or (
+                    not payload_tts_provider
+                    and clone_identity_lookup_failed
+                    and not is_public_preset
+                )
+            )
+            if is_cosyvoice_clone_candidate:
+                return None, {
+                    "code": "voice_clone_routing_lookup_failed",
+                    "message": (
+                        f"job={job_id!r} cannot resolve Gateway user_id while "
+                        f"approving voice_id={vid!r}; rejecting to prevent "
+                        f"CosyVoice clone routing from drifting to a legacy path."
+                    ),
+                    "voice_id": vid,
+                }
+
+            sanitized.append(new_sp)
+
+        return sanitized, None
+    user_id = job_row.user_id
+
+    # 3) 批量 strict filter 查询（Codex HC#4）
+    routing_lookup_failed = False
+    routing_map: dict[str, dict[str, object]] = {}
+    try:
+        routing_map = await lookup_clone_voice_routing_metadata(
+            db, user_id=user_id, voice_ids=voice_ids_to_lookup,
+        )
+    except Exception as exc:
+        # P1 #1 fix：**绝不**静默 degrade 让 clone voice 走 legacy。下面在
+        # 单个 speaker 循环里按 voice 形态做 fail-closed 决策。
+        logger.warning(
+            "voice-selection/approve: routing lookup raised for job=%s: %s "
+            "(will fail-closed for cosyvoice non-preset voices)",
+            job_id, exc,
+        )
+        routing_lookup_failed = True
+
+    # 4) 已知 clone voice id 集合（只作身份判断，不授权）。这补齐 payload
+    # 缺 tts_provider 时的 fail-closed 缺口：只要 voice_id 在 user_voices 任意
+    # row 中是 CosyVoice clone，就不能漂到 legacy/non-worker path。
+    known_clone_voice_ids: set[str] = set()
+    clone_identity_lookup_failed = False
+    try:
+        known_clone_voice_ids = await _fetch_known_cosyvoice_clone_voice_ids(
+            db, voice_ids_to_lookup,
+        )
+    except Exception as exc:
+        logger.warning(
+            "voice-selection/approve: clone identity lookup failed for job=%s: %s "
+            "(will fail-closed for blank-provider non-public voices)",
+            job_id, exc,
+        )
+        clone_identity_lookup_failed = True
+
+    # 5) 公开 catalog 集合（P1 #2 fix：直接 Gateway DB async 查，不走 self-HTTP）
+    public_catalog_voice_ids: set[str] = set()
+    public_catalog_lookup_failed = False
+    try:
+        public_catalog_voice_ids = await _fetch_cosyvoice_public_voice_ids(db)
+    except Exception as exc:
+        # public catalog 查询失败也得 fail-closed：因为无法区分 "voice_id 是
+        # 公开预设" vs "voice_id 是 orphan clone"，唯一安全的是当作 orphan
+        # 处理（拒绝 approve）。
+        logger.warning(
+            "voice-selection/approve: public catalog DB query failed for job=%s: %s "
+            "(will fail-closed for any unmatched cosyvoice voice)",
+            job_id, exc,
+        )
+        public_catalog_lookup_failed = True
+
+    # 6) 逐 speaker 应用 routing + fail-closed 校验
+    enriched: list = []
+    for sp in speakers:
+        if not isinstance(sp, dict):
+            enriched.append(sp)
+            continue
+        new_sp = dict(sp)
+        # PR #7 Codex review (2026-05-25): approved payload must only carry
+        # worker routing fields that Gateway re-derived from user_voices. A
+        # client can resend stale or forged requires_worker / worker_target_model
+        # values for public presets or non-CosyVoice voices; strip them before
+        # deciding whether this speaker has an authorized routing entry.
+        new_sp.pop("requires_worker", None)
+        new_sp.pop("worker_target_model", None)
+        vid = str(new_sp.get("voice_id", "") or "").strip()
+        payload_tts_provider = str(new_sp.get("tts_provider", "") or "").strip()
+
+        if not vid or vid == "auto":
+            enriched.append(new_sp)
+            continue
+
+        if not routing_lookup_failed and vid in routing_map:
+            # 命中 user_voices clone row
+            # HC#2: payload tts_provider 必须是 cosyvoice
+            if payload_tts_provider and payload_tts_provider != "cosyvoice":
+                return None, {
+                    "code": "voice_clone_provider_mismatch",
+                    "message": (
+                        f"voice_id={vid!r} 是 CosyVoice clone 音色，"
+                        f"但提交的 tts_provider={payload_tts_provider!r}。"
+                        f"克隆音色只能与 cosyvoice provider 配合使用。"
+                    ),
+                    "voice_id": vid,
+                    "submitted_tts_provider": payload_tts_provider,
+                }
+            new_sp["requires_worker"] = bool(routing_map[vid]["requires_worker"])
+            new_sp["worker_target_model"] = str(routing_map[vid]["worker_target_model"])
+            new_sp["tts_provider"] = "cosyvoice"
+        else:
+            # 未命中 user_voices —— 三种可能：
+            #   a) 该 voice 是公开预设 → 跳过（合法 legacy 路径）
+            #   b) routing lookup 失败但 voice 像 cosyvoice clone → 503 fail-closed
+            #   c) voice 像 cosyvoice clone 但 user_voices 真没有 → 400 fail-closed
+            is_known_clone_voice = vid in known_clone_voice_ids
+            if (
+                is_known_clone_voice
+                and payload_tts_provider
+                and payload_tts_provider != "cosyvoice"
+            ):
+                return None, {
+                    "code": "voice_clone_provider_mismatch",
+                    "message": (
+                        f"voice_id={vid!r} is a known CosyVoice clone voice, "
+                        f"but submitted tts_provider={payload_tts_provider!r}. "
+                        f"Cloned voices can only be approved with cosyvoice provider."
+                    ),
+                    "voice_id": vid,
+                    "submitted_tts_provider": payload_tts_provider,
+                }
+            is_cosyvoice_voice = (
+                payload_tts_provider == "cosyvoice"
+                or (not payload_tts_provider and is_known_clone_voice)
+            )
+            is_public_preset = (
+                not public_catalog_lookup_failed
+                and vid in public_catalog_voice_ids
+            )
+
+            if (
+                not payload_tts_provider
+                and clone_identity_lookup_failed
+                and not is_public_preset
+            ):
+                return None, {
+                    "code": "voice_clone_routing_lookup_failed",
+                    "message": (
+                        f"voice_id={vid!r} 未携带 tts_provider，且用户音色库暂时"
+                        f"无法确认它是否为 CosyVoice clone。为防止 clone voice "
+                        f"走错路径，已拒绝当前 approve（请稍后重试）。"
+                    ),
+                    "voice_id": vid,
+                }
+
+            if is_cosyvoice_voice and not is_public_preset:
+                # 这里 voice **不是** public preset（或我们无法确认它是）
+                if routing_lookup_failed:
+                    # P1 #1 fix：DB 异常 + 非 preset cosyvoice → 503 fail-closed，
+                    # 禁止 fall-open 让 clone voice 漂到 legacy
+                    return None, {
+                        "code": "voice_clone_routing_lookup_failed",
+                        "message": (
+                            f"voice_id={vid!r} 是 CosyVoice 非预设音色，"
+                            f"但用户音色库暂时无法查询（请稍后重试）。"
+                            f"为防止 clone voice 走错路径，已拒绝当前 approve。"
+                        ),
+                        "voice_id": vid,
+                    }
+                if public_catalog_lookup_failed:
+                    # public catalog 查询失败 → 无法确认是预设 → 当作 orphan 处理
+                    return None, {
+                        "code": "voice_clone_metadata_missing",
+                        "message": (
+                            f"voice_id={vid!r} 看似 CosyVoice 克隆音色但公开音色库"
+                            f"暂时无法查询，无法确认是否为合法预设。请稍后重试。"
+                        ),
+                        "voice_id": vid,
+                    }
+                # routing + public catalog 都查得到 → voice 确实是 orphan clone
+                return None, {
+                    "code": "voice_clone_metadata_missing",
+                    "message": (
+                        f"voice_id={vid!r} 看似 CosyVoice 克隆音色但在用户音色库中"
+                        f"找不到对应记录（已过期 / 删除 / 跨账户）。请重新选择音色。"
+                    ),
+                    "voice_id": vid,
+                }
+            # 公开预设 / MiniMax / VolcEngine / legacy → 不加 routing，保持原状
+        enriched.append(new_sp)
+
+    return enriched, None
+
+
 async def _approve_voice_selection_with_quality_sync(
     request: Request,
     job_id: str,
@@ -2522,6 +2896,60 @@ async def _approve_voice_selection_with_quality_sync(
     speakers = payload.get("speakers") if isinstance(payload, dict) else None
     if not isinstance(speakers, list):
         speakers = []
+
+    # ===========================================================================
+    # Phase 4.1 E.2 (Codex 2026-05-25 E 三轮 review 后)：CosyVoice clone routing
+    # 元数据丰富。
+    #
+    # 在 preflight calibration + proxy 之前，根据 ``speakers[i].voice_id`` 批量
+    # 查 ``user_voices`` 表（strict filter），把命中 row 的 ``requires_worker`` /
+    # ``worker_target_model`` 添加到 speaker 条目上。Pipeline 在
+    # ``process.py:3310`` 读 approved payload 时即取得这些字段，传给
+    # ``_apply_runtime_voice_overrides`` 设到 ``DubbingSegment``，最终路由到
+    # 武汉 mainland worker（Phase 4.1 D）。
+    #
+    # 三条硬约束（Codex E v2 HC#1/2/3）+ 二轮 P1 修正：
+    #
+    #   1. body **必须重新序列化** 再 proxy，否则 upstream Job API 写到
+    #      review_state.json 里看不到 routing 字段。
+    #   2. 若 ``voice_id`` 命中 clone row 但 payload ``tts_provider != "cosyvoice"``
+    #      → 400 ``voice_clone_provider_mismatch``（数据不一致，绝不静默改写）。
+    #   3. ``voice_id`` 不在 user_voices 但形似 CosyVoice clone（``tts_provider==
+    #      "cosyvoice"`` 且不在 public catalog）→ 400 ``voice_clone_metadata_missing``。
+    #
+    # 异常处理（E 二轮 P1 #1 fail-closed 修正后）：
+    #
+    #   - ``lookup_clone_voice_routing_metadata`` 抛异常（DB 短暂不可用） +
+    #     voice 是 ``tts_provider="cosyvoice"`` 非 public preset →
+    #     **503 ``voice_clone_routing_lookup_failed``**（让用户稍后重试），
+    #     **不允许** degrade 让 clone voice 漂到 legacy 国际 DashScope endpoint。
+    #   - 公开 catalog 查询异常 + 未确认 voice 为预设 → 400 metadata_missing
+    #     (fail-closed，宁愿误判 preset 为 orphan，也不让 orphan 漂走)。
+    #   - 公开预设 / MiniMax / VolcEngine / legacy → 允许 degrade（这些 voice
+    #     本就不走 worker，没有路由漂移风险）。
+    # ===========================================================================
+    enriched_speakers, enrichment_error = await _enrich_speakers_with_clone_routing(
+        db, job_id=job_id, speakers=speakers,
+    )
+    if enrichment_error is not None:
+        # Phase 4.1 E 三轮 review (Codex 2026-05-25 P2 #1)：错误码→HTTP status 映射。
+        # ``voice_clone_routing_lookup_failed`` 是 DB / 路由查询临时不可用——
+        # **服务端**问题（用户应稍后重试），返 503；其它（``provider_mismatch`` /
+        # ``metadata_missing``）是用户数据状态错误，返 400 让前端引导用户改选。
+        error_code = enrichment_error.get("code", "")
+        if error_code == "voice_clone_routing_lookup_failed":
+            error_status = 503
+        else:
+            error_status = 400
+        return JSONResponse(
+            status_code=error_status,
+            content={"detail": enrichment_error},
+        )
+    if enriched_speakers is not None and isinstance(payload, dict):
+        payload["speakers"] = enriched_speakers
+        speakers = enriched_speakers
+        # HC#1: body 必须重新序列化让 upstream / preflight 看到 routing 字段
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     # Plan v4.3 §3.2 T2 — voice CPS preflight calibration BEFORE proxy.
     # Hard requirement: this must run before proxy_request so that when
@@ -2591,8 +3019,11 @@ async def _approve_voice_selection_with_quality_sync(
             job_id,
         )
 
-    # Forward upstream with the ORIGINAL body unchanged. Upstream doesn't
-    # know about `minimax_model` but doesn't mind extra fields either.
+    # Forward upstream with the possibly enriched body (Phase 4.1 E.2
+    # re-serializes after adding worker routing fields). Upstream doesn't
+    # need to understand `minimax_model` / `requires_worker` / `worker_target_model`
+    # itself —— it writes the body verbatim into review_state.json, and the
+    # pipeline reads those fields back when constructing DubbingSegment.
     response = await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,

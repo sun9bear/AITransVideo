@@ -671,7 +671,15 @@ class CreditsLedger(Base):
 
 
 class UserVoice(Base):
-    """Per-user personal voice library entry (MiniMax cloned voices)."""
+    """Per-user personal voice library entry.
+
+    Originally MiniMax-only; Phase 4.1 added CosyVoice clone routing
+    fields (``region_constraint`` / ``requires_worker`` / ``target_model`` /
+    ``worker_provider`` / ``worker_region``) plus billing audit anchors
+    (``clone_api_model`` / ``billing_sku`` / ``clone_provider_request_id`` /
+    ``clone_worker_request_id``). See migration 030 + plan §User Voice
+    Library Schema.
+    """
 
     __tablename__ = "user_voices"
     __table_args__ = (
@@ -679,6 +687,15 @@ class UserVoice(Base):
         Index("idx_user_voices_source_hash_speaker_id", "user_id", "source_content_hash", "source_speaker_id"),
         Index("idx_user_voices_source_hash_speaker_name", "user_id", "source_content_hash", "source_speaker_name_key"),
         Index("idx_user_voices_source_ref", "user_id", "source_ref"),
+        Index("idx_user_voices_phase4_region", "user_id", "region_constraint"),
+        # Partial index — Codex 2026-05-25 三轮 finding：跳过 NULL 行
+        # （大多数 MiniMax / VolcEngine 旧 row）。仅 CosyVoice clone 写入
+        # ``clone_provider_request_id`` 才进索引。
+        Index(
+            "idx_user_voices_clone_provider_request_id",
+            "clone_provider_request_id",
+            postgresql_where=text("clone_provider_request_id IS NOT NULL"),
+        ),
         UniqueConstraint("user_id", "voice_id", name="uq_user_voices_user_voice"),
     )
 
@@ -718,6 +735,35 @@ class UserVoice(Base):
     chars_per_second: Mapped[float | None] = mapped_column(Float, nullable=True)
     chars_per_second_by_model: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     speed_calibrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- Phase 4.1 (migration 030): CosyVoice worker routing + billing audit ---
+    # Worker dispatch fields — server-side defaults so existing MiniMax /
+    # VolcEngine rows backfill to "overseas_ok / requires_worker=False".
+    region_constraint: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="overseas_ok"
+    )
+    requires_worker: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # TTS model lock — CosyVoice clone binds voice_id to one target_model
+    # (flash / plus); cross-model TTS calls are rejected by tts_generator
+    # guard (plan §Phase 4.1 §F Open Q #4).
+    target_model: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    worker_provider: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    worker_region: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # Clone API model vs accounting SKU split (Codex 2026-05-24 P0):
+    # ``clone_api_model="voice-enrollment"`` is the SDK param; ``billing_sku``
+    # is the Alibaba billing line item, **nullable until first real bill
+    # confirms** (Codex 2026-05-25 finding — voice enrollment may not
+    # produce its own bill line at all).
+    clone_api_model: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    billing_sku: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Audit anchors. ``clone_worker_request_id`` is the worker-side UUID
+    # required for every audit trail. ``clone_provider_request_id`` is the
+    # DashScope SDK request id — kept for support traceability but **not**
+    # used to join Alibaba billing (the CSV doesn't expose this field).
+    clone_provider_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    clone_worker_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)

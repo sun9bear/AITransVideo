@@ -3307,6 +3307,11 @@ class ProcessPipeline:
                 VOICE_SELECTION_REVIEW_STAGE,
             )
             _speaker_providers: dict[str, str] = {}
+            # Phase 4.1 E.4 (Codex 2026-05-25 三签字版本)：从 approved payload
+            # 提取 worker routing 元数据（由 gateway/job_intercept.py 的
+            # _enrich_speakers_with_clone_routing 在 approve 时注入）。
+            # Schema: {speaker_id: {requires_worker, worker_target_model}}
+            _speaker_voice_routing: dict[str, dict[str, object]] = {}
             if approved_voice_selection is not None:
                 sel_speakers = approved_voice_selection.get("speakers")
                 if isinstance(sel_speakers, list):
@@ -3318,11 +3323,26 @@ class ProcessPipeline:
                             _speaker_voices[sp_id] = sp_voice
                         if sp_id and sp_prov:
                             _speaker_providers[sp_id] = sp_prov
+                        # E.4: 提取 routing 字段（仅当存在 + requires_worker=True）
+                        if sp_id and sp.get("requires_worker") is True:
+                            target_model = str(
+                                sp.get("worker_target_model", "") or ""
+                            ).strip()
+                            if target_model:
+                                _speaker_voice_routing[sp_id] = {
+                                    "requires_worker": True,
+                                    "worker_target_model": target_model,
+                                }
                     voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
                     voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
                     print(f"[S2.5] 用户确认音色：{_speaker_voices}")
                     if _speaker_providers:
                         print(f"[S2.5] 用户选择引擎：{_speaker_providers}")
+                    if _speaker_voice_routing:
+                        print(
+                            f"[S2.5] worker routing：{list(_speaker_voice_routing.keys())} "
+                            f"→ mainland CosyVoice worker (Phase 4.1 D + E)"
+                        )
 
                     # Lazy migration: legacy approved payloads (created before
                     # review_actions.py merge-instead-of-replace fix) lack the
@@ -5059,6 +5079,8 @@ class ProcessPipeline:
                             display_name_b=speaker_name_b,
                             speaker_voices=_speaker_voices if effective_speakers > 2 else None,
                             speaker_providers=_speaker_providers or None,
+                            # Phase 4.1 E.5: probe TTS 也走 worker routing
+                            speaker_voice_routing=_speaker_voice_routing or None,
                         )
                     )
                     # Persist probe result so the next pipeline entry (cache-hit
@@ -5117,6 +5139,8 @@ class ProcessPipeline:
                     display_name_b=speaker_name_b,
                     speaker_voices=_speaker_voices if effective_speakers > 2 else None,
                     speaker_providers=_speaker_providers or None,
+                    # Phase 4.1 E.5: cache-hit 路径也透传 worker routing
+                    speaker_voice_routing=_speaker_voice_routing or None,
                 )
             else:
                 print("[S3] 翻译文本...")
@@ -5134,12 +5158,25 @@ class ProcessPipeline:
                     chars_per_second=_probe_chars_per_second,
                     chars_per_second_by_speaker=_probe_chars_per_second_by_speaker or None,
                 )
-                # translate() creates fresh DubbingSegments without tts_provider;
-                # apply per-speaker TTS provider overrides from voice selection
-                if _speaker_providers:
-                    for seg in translation_result.segments:
-                        if seg.speaker_id in _speaker_providers:
-                            seg.tts_provider = _speaker_providers[seg.speaker_id]
+                # Phase 4.1 E.5 (Codex 2026-05-25 三签字版本 HC#5)：translate()
+                # 创建的 fresh DubbingSegment 没有 tts_provider / worker routing
+                # 字段。原 manual loop 只设了 tts_provider，**不覆盖** worker
+                # routing → cloned voice fresh path 会漂到国际 DashScope endpoint
+                # 而非武汉 worker。
+                #
+                # 统一改成 ``_apply_runtime_voice_overrides()`` 调用，让
+                # ``tts_provider`` + ``requires_worker`` + ``worker_target_model``
+                # 三字段一次性按 routing dict 落到 segment 上。
+                self._apply_runtime_voice_overrides(
+                    translation_result.segments,
+                    voice_id_a=voice_id_a,
+                    display_name_a=speaker_name_a,
+                    voice_id_b=voice_id_b,
+                    display_name_b=speaker_name_b,
+                    speaker_voices=_speaker_voices if effective_speakers > 2 else None,
+                    speaker_providers=_speaker_providers or None,
+                    speaker_voice_routing=_speaker_voice_routing or None,
+                )
                 print(f"[S3] 完成：共 {translation_result.total_segments} 段")
 
             # Phase 2 Task 0 — stamp catalog_hit per segment for downstream metering.
@@ -8024,7 +8061,32 @@ class ProcessPipeline:
         display_name_b: str,
         speaker_voices: dict[str, str] | None = None,
         speaker_providers: dict[str, str] | None = None,
+        speaker_voice_routing: dict[str, dict[str, object]] | None = None,
     ) -> None:
+        """Apply user-confirmed voice / provider / worker-routing overrides
+        onto runtime segments.
+
+        Phase 4.1 E.3 (Codex 2026-05-25 三签字版本) 加 ``speaker_voice_routing``
+        kwarg。每个条目 schema：
+
+        ::
+
+            {
+                speaker_id: {
+                    "requires_worker": True,
+                    "worker_target_model": "cosyvoice-v3.5-flash",
+                }
+            }
+
+        若条目存在 → 对该 speaker 的 segment 设
+        ``requires_worker / worker_target_model / tts_provider="cosyvoice"``
+        三字段。``tts_provider`` 是 defense-in-depth：Gateway E.2 已经强制写入
+        approved payload，这里再写一次防 routing 字典与 ``speaker_providers``
+        漂移。
+
+        缺 routing 条目的 speaker → segment 字段保持默认（``False / ""``），
+        legacy 任务向后兼容。
+        """
         for segment in segments:
             # N-speaker: use speaker_voices dict if available
             if speaker_voices and segment.speaker_id in speaker_voices:
@@ -8041,6 +8103,24 @@ class ProcessPipeline:
             # Per-speaker TTS provider override (three-engine voice selection)
             if speaker_providers and segment.speaker_id in speaker_providers:
                 segment.tts_provider = speaker_providers[segment.speaker_id]
+
+            # Phase 4.1 E.3: worker routing (CosyVoice clone path)
+            # PR #7 Codex review (2026-05-25): reset first. Segments restored
+            # from cached snapshots may already carry requires_worker=True from
+            # a previous approve; if the user later switches this speaker to a
+            # non-worker voice, stale flags must not survive.
+            segment.requires_worker = False
+            segment.worker_target_model = ""
+            if speaker_voice_routing and segment.speaker_id in speaker_voice_routing:
+                routing = speaker_voice_routing[segment.speaker_id]
+                segment.requires_worker = bool(routing.get("requires_worker", False))
+                segment.worker_target_model = str(
+                    routing.get("worker_target_model", "") or ""
+                )
+                # Defense-in-depth：worker 路径必须搭配 cosyvoice provider；
+                # D.4 P1 fix 会兜底，这里显式 set 让 segment snapshot 也一致
+                if segment.requires_worker:
+                    segment.tts_provider = "cosyvoice"
 
     def _hydrate_cached_tts_segments(
         self,
@@ -11545,11 +11625,14 @@ class ProcessPipeline:
         display_name_b: str = "",
         speaker_voices: dict[str, str] | None = None,
         speaker_providers: dict[str, str] | None = None,
+        speaker_voice_routing: dict[str, dict[str, object]] | None = None,
     ) -> tuple[float, dict[str, float]]:
         """Phase 2: Run TTS on translated probe segments, then calibrate.
 
-        Applies user-confirmed voice_id + tts_provider before TTS so that
-        calibration runs on the exact voices the user selected.
+        Applies user-confirmed voice_id + tts_provider + worker routing before
+        TTS so that calibration runs on the exact voices the user selected.
+        Phase 4.1 E.5 (Codex 2026-05-25)：probe path 也必须接 ``speaker_voice_routing``
+        否则 cloned voice 的 probe TTS 漂到国际 endpoint，与主 TTS 不一致。
 
         Returns (global_chars_per_second, {speaker_id: chars_per_second}).
         Falls back to DEFAULT 4.5 on any failure.
@@ -11565,6 +11648,7 @@ class ProcessPipeline:
             display_name_b=display_name_b,
             speaker_voices=speaker_voices,
             speaker_providers=speaker_providers,
+            speaker_voice_routing=speaker_voice_routing,
         )
 
         # Probe TTS — output to _probe subdirectory to avoid collision with main TTS

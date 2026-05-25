@@ -193,6 +193,36 @@ class GatewaySettings(BaseSettings):
     # See design spec §13: backup primary in 1Password + physical paper.
     pan_token_encryption_key: str = ""
 
+    # --- Mainland Voice Worker（plan 2026-05-24 Phase 1.5 接 Gateway 配置层）---
+    # 武汉 ECS 上 mainland_worker 的对外入口。Gateway 通过 HMAC 调用，
+    # secret 仅在 env 中存活，不进 admin settings、不进 API response、不进日志。
+    #
+    # 启用条件：``enabled=true`` 且 url / hmac_key_id / hmac_secret 三者齐备。
+    # 任一缺失：``validate_mainland_voice_worker_config()`` 会 CRITICAL log
+    # 并把 ``enabled`` 降级为 False（fail-graceful，不阻塞 gateway 启动）。
+    #
+    # ``hmac_secret`` 用 pydantic SecretStr 让 repr / 序列化时自动 mask；
+    # 但当前 pydantic 版本（2.11）的 BaseSettings + env_prefix + SecretStr 组合
+    # 在测试 monkeypatch 下行为有 corner case，所以这里仍用 str 但
+    # 通过 ``__repr__`` 永远不直接打印整个 settings 对象 +
+    # ``test_gateway_logs_redaction``（已有）覆盖兜底；新增守卫专门确保
+    # secret 不进 admin endpoint response。
+    mainland_voice_worker_enabled: bool = False
+    mainland_voice_worker_url: str = ""
+    mainland_voice_worker_hmac_key_id: str = ""
+    mainland_voice_worker_hmac_secret: str = ""
+
+    # --- Phase 4.1 CosyVoice clone sample uploader backend ---
+    # 决定 sample bytes 上传到哪个对象存储拿 short-TTL URL 给 DashScope。
+    # 默认 ``local_fs_stub`` 仅用于本地开发（写 file:// URL，DashScope 跨境
+    # 不可达）。Codex 2026-05-25 C.2 二轮 review 要求 endpoint 在
+    # ``cosyvoice_clone_worker_enabled=True`` 且 backend 仍是 stub 时直接 503，
+    # **不读样本 / 不转码 / 不调付费 worker**。生产部署前必须改 env
+    # ``AVT_COSYVOICE_SAMPLE_UPLOADER=aliyun_oss``（实现 Phase 4.1.x 补）。
+    cosyvoice_sample_uploader: Literal["local_fs_stub", "aliyun_oss"] = "local_fs_stub"
+    # 本地 stub 写入目录（仅 ``local_fs_stub`` backend 用）；生产部署可忽略。
+    cosyvoice_sample_local_dir: str = ""
+
     model_config = {"env_prefix": "AVT_", "populate_by_name": True}
 
 

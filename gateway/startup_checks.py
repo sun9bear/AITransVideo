@@ -150,6 +150,55 @@ def validate_r2_backend(
     return "r2"
 
 
+def validate_mainland_voice_worker_config(
+    enabled: bool,
+    url: str,
+    hmac_key_id: str,
+    hmac_secret: str,
+) -> bool:
+    """检查 mainland_voice_worker 配置一致性，返回 effective ``enabled``。
+
+    plan 2026-05-24 Phase 1.5 — 接 Gateway 配置层。语义对齐 R2 backend：
+
+    - ``enabled=False``（默认）：直接返 False，无需任何 secret。
+    - ``enabled=True`` 且 url / hmac_key_id / hmac_secret **三者齐备**：
+      返 True，gateway 可以构造 ``MainlandWorkerClient``。
+    - ``enabled=True`` 但任一 secret 缺失：CRITICAL log + **降级返 False**，
+      不抛异常。理由：mainland_voice_worker 是子能力，gateway 主路径
+      不应该因为可选 worker 配错就启动失败。
+
+    日志安全：CRITICAL 消息只打 url + hmac_key_id 的存在性，**永远不打
+    secret 实体**。
+    """
+    if not enabled:
+        return False
+
+    missing: list[str] = []
+    if not url:
+        missing.append("AVT_MAINLAND_VOICE_WORKER_URL")
+    if not hmac_key_id:
+        missing.append("AVT_MAINLAND_VOICE_WORKER_HMAC_KEY_ID")
+    if not hmac_secret:
+        missing.append("AVT_MAINLAND_VOICE_WORKER_HMAC_SECRET")
+
+    if missing:
+        logger.critical(
+            "AVT_MAINLAND_VOICE_WORKER_ENABLED=true but required config missing: %s. "
+            "Downgrading mainland_voice_worker to DISABLED. "
+            "Set the missing env var(s) and recreate the gateway container to enable.",
+            ", ".join(missing),
+        )
+        return False
+
+    logger.info(
+        "Mainland voice worker ENABLED (url=%s, key_id=%s)",
+        url,
+        hmac_key_id,
+        # 注意：故意不传 hmac_secret，避免任何日志路径打印 secret
+    )
+    return True
+
+
 def validate_pan_backup_config(settings) -> None:
     """Validate pan backup env if feature enabled. CRITICAL at startup.
 
