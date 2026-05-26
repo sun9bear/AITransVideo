@@ -256,12 +256,16 @@ class AliyunOssUploader:
             ContentType=content_type,
             Metadata={"sha256": digest},
         )
+        # 2026-05-26: 不要在 presign 里加 ``ResponseContentType``——阿里云 OSS 对
+        # 重写响应 Content-Type 返回 400 ``Can not override response header on
+        # content-type`` (EC 0017-00000902)。Object 的 Content-Type 在 PUT 时
+        # 已经写好（``ContentType=content_type``），DashScope 拉取时按 metadata
+        # 拿到正确头即可，无需 query-string 覆盖。
         signed_url = client.generate_presigned_url(
             "get_object",
             Params={
                 "Bucket": self.bucket,
                 "Key": key,
-                "ResponseContentType": content_type,
             },
             ExpiresIn=ttl,
             HttpMethod="GET",

@@ -81,7 +81,12 @@ def test_upload_and_sign_puts_object_then_returns_presigned_get_url() -> None:
     assert presign["method"] == "get_object"
     assert presign["Params"]["Bucket"] == "avt-cosyvoice-test"
     assert presign["Params"]["Key"] == put["Key"]
-    assert presign["Params"]["ResponseContentType"] == "audio/wav"
+    # 2026-05-26: Aliyun OSS rejects ``response-content-type`` query-string
+    # override (400 InvalidRequest / EC 0017-00000902 "Can not override
+    # response header on content-type"). Object Content-Type is set on PUT
+    # via ``ContentType=audio/wav`` (asserted above) and OSS serves it from
+    # metadata, so the presign override is unnecessary AND breaks GETs.
+    assert "ResponseContentType" not in presign["Params"]
     assert presign["ExpiresIn"] == 1800
     assert presign["HttpMethod"] == "GET"
 
