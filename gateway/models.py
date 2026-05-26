@@ -696,6 +696,15 @@ class UserVoice(Base):
             "clone_provider_request_id",
             postgresql_where=text("clone_provider_request_id IS NOT NULL"),
         ),
+        # Phase 4.2 A.1（migration 031）partial index for 临时音色清理 sweeper.
+        # 仅索引"是临时音色 + 尚未软删"的行；WHERE 条件与清理任务 SELECT
+        # 完全对齐（plan v4-followup §12.3 / §12.4）。sweeper 成功删 DashScope
+        # voice 后写 ``expired_at=now()`` → 该行从此 index 自动剔除（幂等）。
+        Index(
+            "idx_user_voices_temp_expires_pending",
+            "temporary_expires_at",
+            postgresql_where=text("is_temporary = TRUE AND expired_at IS NULL"),
+        ),
         UniqueConstraint("user_id", "voice_id", name="uq_user_voices_user_voice"),
     )
 
@@ -764,6 +773,32 @@ class UserVoice(Base):
     # used to join Alibaba billing (the CSV doesn't expose this field).
     clone_provider_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     clone_worker_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # --- Phase 4.2 A.1 (migration 031): CosyVoice 临时音色生命周期 ---
+    # ``is_temporary``：用户克隆时未勾"保存到我的音色库"则 TRUE（默认行为）。
+    # 旧 row（Phase 4.1 之前所有 voice）默认 FALSE，行为不变。
+    is_temporary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # ``temporary_expires_at``：临时音色计划过期时间（仅 ``is_temporary=TRUE``
+    # 才填，默认 ``now()+7d``，应用层填）。
+    #
+    # ⚠️ **绝不**改名为 ``expires_at`` —— 同表 ``expired_at`` 已是软删时间戳
+    # （migration 010 落，本表 active 判据是 ``WHERE expired_at IS NULL``）。
+    # 字面太近 → query 大概率写错。Codex 2026-05-26 v4-followup review 重点。
+    #
+    # ⚠️ **绝不**用本字段判断 active —— 它只是清理 sweeper 的入选条件之一。
+    # active 仍以现有 ``expired_at IS NULL`` 为唯一标准。
+    #
+    # 清理 sweeper 选行 SQL（与 partial index ``idx_user_voices_temp_expires_pending``
+    # 完全对齐）：
+    #     WHERE provider = 'cosyvoice_voice_clone'
+    #       AND is_temporary = TRUE
+    #       AND temporary_expires_at < now()
+    #       AND expired_at IS NULL
+    temporary_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
