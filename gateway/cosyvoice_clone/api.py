@@ -875,7 +875,17 @@ def _bounded_best_effort_delete(
 
 
 def _parse_source_segments(raw: str | None) -> list[int]:
-    """``source_segments`` 可空 / 是 ``"[1, 2, 3]"`` 形态的 JSON。"""
+    """``source_segments`` 可空 / 是 ``"[1, 2, 3]"`` 形态的 JSON array of int。
+
+    **严格 int 校验**（Codex PR #11 v2 review P2）：Phase 4.1 时
+    ``source_segments`` 是 audit hint，``int(x)`` 宽松转 OK。Phase 4.2 A.2b
+    起 ``source_segments`` 是**主输入**，决定 transcript lookup 命中 /
+    speaker ownership 检查范围；宽松转会让 ``true``、``1.9``、``"1"`` 静默
+    变成 ``1``，可能绕过 ownership 检查访问意料外的段。
+
+    用 ``type(x) is int`` 严格判（**不是** ``isinstance``）—— ``isinstance(True, int)``
+    是 True 因为 ``bool`` 是 ``int`` 子类，``[True, 2]`` 会被当成 ``[1, 2]``。
+    """
     if not raw:
         return []
     raw = raw.strip()
@@ -896,16 +906,20 @@ def _parse_source_segments(raw: str | None) -> list[int]:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_source_segments", "message": "must be JSON array"},
         )
-    try:
-        return [int(x) for x in parsed]
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "invalid_source_segments",
-                "message": f"source_segments items must be int: {exc}",
-            },
-        ) from exc
+    # 严格类型校验：拒 bool / float / str / None 等
+    for x in parsed:
+        if type(x) is not int:  # noqa: E721 — 故意用 ``type is``，不允许 bool
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "invalid_source_segments",
+                    "message": (
+                        f"source_segments must be JSON array of int, got "
+                        f"element of type {type(x).__name__}: {x!r}"
+                    ),
+                },
+            )
+    return list(parsed)
 
 
 def _utc_now_iso() -> str:

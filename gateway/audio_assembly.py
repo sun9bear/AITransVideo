@@ -76,21 +76,36 @@ def concat_segments_to_wav(
         RuntimeError: ffmpeg subprocess 失败（returncode != 0），消息含
             stderr 前 500 字符
     """
-    # Path traversal protection (Codex 2026-05-26 A.2a + A.2b review follow-up):
-    # 原 ``startswith(resolve())`` 容易被边界 case 绕过；A.2a 改成
-    # ``relative_to(project_dir)`` 但**校验仍在 mkdir 之后**——A.2b
-    # Codex review #3 指出：恶意 ``speaker_id`` 可能在 raise 之前已经
-    # 创建了 project_dir 之外的目录。
+    # Path traversal protection (Codex review iterations):
+    # - A.2a: 原 ``startswith(resolve())`` 容易被边界 case 绕过
+    # - A.2b 第 1 轮: 改 ``relative_to(speaker_audio_root)`` + 移 check 到 mkdir 前
+    # - A.2b 第 2 轮 (本次，Codex PR #11 v2 review)：补 3 条边界
+    #   1) speaker_id 含 ``/`` 或 ``\`` 直接拒（speaker_id 不该是路径片段）
+    #   2) ``project_dir/speaker_audio`` 自身若是符号链接指外 → 拒（防 symlink 绕开）
+    #   3) speaker_id 解析后等于 speaker_audio 根 → 拒（防 per-speaker 隔离失效）
     #
-    # A.2b 收紧两点：
-    #   1) 校验**先于** mkdir —— 任何 traversal 都不会写盘
-    #   2) 校验范围从 ``project_dir`` 收紧到 ``project_dir/speaker_audio`` ——
-    #      ``speaker_id="."`` 等 degenerate case 也被拒（保证 cache_dir
-    #      严格在每个 speaker 自己的子目录里）
-    #
-    # ``Path.resolve()`` 对不存在路径也能用：仅做 ``.`` / ``..`` / 符号链接
-    # normalize，不要求物理存在。
+    # 这 3 条都在 mkdir **之前**完成，任何攻击向量都不写盘。
+
+    # 1) speaker_id 不允许含路径分隔符（双平台）
+    if "/" in speaker_id or "\\" in speaker_id:
+        raise ValueError(
+            f"路径验证失败：speaker_id={speaker_id!r} 含路径分隔符 "
+            f"(/ 或 \\)，禁止用作目录名"
+        )
+
     speaker_audio_root = project_dir / "speaker_audio"
+
+    # 2) speaker_audio_root 解析后必须仍在 project_dir 之下 —— 防有人把
+    # ``project_dir/speaker_audio`` 整体指向外部目录的 symlink 攻击
+    try:
+        speaker_audio_root.resolve().relative_to(project_dir.resolve())
+    except ValueError as exc:
+        raise ValueError(
+            f"路径验证失败：speaker_audio_root={speaker_audio_root!r} "
+            f"解析后越出 project_dir={project_dir!r}（symlink 绕过攻击）"
+        ) from exc
+
+    # 3) cache_dir 必须在 speaker_audio_root 严格子树之下
     cache_dir = speaker_audio_root / speaker_id
     try:
         rel = cache_dir.resolve().relative_to(speaker_audio_root.resolve())
@@ -99,15 +114,13 @@ def concat_segments_to_wav(
             f"路径验证失败：cache_dir={cache_dir!r} 不在 "
             f"{speaker_audio_root!r} 之下（speaker_id={speaker_id!r}）"
         ) from exc
-    # 严限：speaker_id 不能为空 / "."，否则 cache_dir 等于 speaker_audio_root
-    # 自身，无法做 per-speaker 隔离
     if rel == Path("."):
         raise ValueError(
             f"路径验证失败：speaker_id={speaker_id!r} 解析后等于 "
             f"speaker_audio 根目录自身，无法做 per-speaker 隔离"
         )
 
-    # 校验通过后再 mkdir
+    # 全部边界过了再 mkdir
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Build ffmpeg filter for segment extraction + concat

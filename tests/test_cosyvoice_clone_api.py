@@ -715,6 +715,42 @@ def test_source_segments_invalid_json_returns_400(test_client) -> None:
     assert resp.json()["detail"]["code"] == "invalid_source_segments"
 
 
+# ---------------------------------------------------------------------------
+# Codex PR #11 v2 review P2：``_parse_source_segments`` 严格 int 校验
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", [
+    "[true, 2, 3]",         # bool 是 int 子类，``isinstance(True, int)==True``
+    "[1, 1.9, 3]",          # float
+    '["1", 2, 3]',          # string
+    "[null, 2]",            # None
+    "[1, {\"x\": 1}]",     # dict
+    "[1, [2]]",             # nested list
+])
+def test_source_segments_rejects_non_strict_int_elements(test_client, raw) -> None:
+    """Phase 4.2 A.2b v2 review P2：``source_segments`` 是主输入，必须严格
+    JSON array of int。``true / 1.9 / "1" / null / dict / nested`` 全拒。
+
+    用 ``type(x) is int`` 严格判 —— ``isinstance`` 不行因为 ``isinstance(True, int)``
+    是 True（``bool`` 是 ``int`` 子类），``[True, 2]`` 会被宽松转 ``[1, 2]``
+    并悄悄通过下游的 ownership / transcript-lookup。
+    """
+    resp = _post_clone(test_client, form={"source_segments": raw})
+    assert resp.status_code == 400, f"unexpected status={resp.status_code} body={resp.text}"
+    assert resp.json()["detail"]["code"] == "invalid_source_segments"
+
+
+def test_source_segments_accepts_pure_int_array_then_hits_mutex(test_client) -> None:
+    """合法 ``[1, 2, 3]`` 通过 parser 后走 sample+segments 互斥检查
+    （依然 400 但 code = ``invalid_input_mode``，不是 ``invalid_source_segments``）。
+    证明 parser 不会误拒纯 int 数组。
+    """
+    resp = _post_clone(test_client, form={"source_segments": "[1, 2, 3]"})
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "invalid_input_mode"
+
+
 def test_source_segments_omitted_means_empty_list(test_client, fake_db_add) -> None:
     """``source_segments`` 字段省略时落库为 None（不是 []）。"""
     _post_clone(test_client)

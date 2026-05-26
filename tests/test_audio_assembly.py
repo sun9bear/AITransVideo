@@ -359,23 +359,27 @@ def test_only_audio_assembly_defines_concat_segments_to_wav() -> None:
 
 
 @pytest.mark.parametrize("malicious_speaker_id", [
-    # cache_dir = project_dir/speaker_audio/{spk_id}
-    # 要真正逃出 project_dir，至少需要 2 个 ``..``（speaker_audio 占 1 层）
-    "../../etc/passwd",          # 双 .. 真出去
-    "../../../../etc/passwd",    # 多重 .. 更稳
-    "..\\..\\windows\\system32", # Windows 反斜杠
-    "/absolute/escape/path",     # Unix 绝对路径会重置 Path 拼接
+    # Phase 4.2 A.2b v2 (Codex PR #11 second-round review)：``speaker_id``
+    # 含 ``/`` 或 ``\`` 直接拒 —— 在 ``.resolve()`` 之前就早 fail，**双平台**
+    # 一致行为，不再依赖 ``Path`` 对反斜杠的平台语义差异。
+    "../../etc/passwd",                 # POSIX traversal（含 /）
+    "../../../../etc/passwd",           # 多重 .. （含 /）
+    "..\\..\\windows\\system32",        # Windows-style traversal（含 \）
+    "/absolute/escape/path",            # Unix 绝对路径（含 /）
+    "/etc/passwd",                      # 直接 / 开头
+    "evil/subdir",                      # 任意子路径
+    "evil\\subdir",                     # 任意 backslash 子路径
 ])
 def test_path_traversal_in_speaker_id_is_rejected(tmp_path, monkeypatch, malicious_speaker_id):
-    """``speaker_id`` 含**真正**逃出 project_dir 的 traversal → ValueError，
-    **不调** subprocess.
+    r"""``speaker_id`` 含 ``/`` 或 ``\`` → ValueError，**不调** subprocess。
 
-    A.2a 原实现 ``startswith(resolve())`` 边界 case 会漏；A.2b 改
-    ``Path.relative_to()`` 后逃出 project_dir 的 case 全部明确 raise。
+    v1（A.2b 第 1 轮）依赖 ``Path.relative_to(project_dir)``，但反斜杠在
+    POSIX/Linux 不是路径分隔符 —— Linux 上 ``"..\\..\\system32"`` 解析为
+    单文件名落在 speaker_audio 之下，不算 traversal，Linux CI 会红
+    （Codex PR #11 v2 review）。
 
-    注意：``speaker_id="../etc"`` 只逃了 1 层 ``speaker_audio``，落在
-    ``project_dir/etc`` 仍是 project_dir 子路径 —— **不算越权**。要至少
-    ``../../`` 才真出 project_dir。这是 ``Path.relative_to()`` 的正确语义。
+    v2（本次修复）：在 ``resolve()`` 之前先拒 ``/`` 和 ``\``。
+    speaker_id 语义上是说话人 ID，**不该**是路径片段。双平台都明确拒绝。
     """
     from audio_assembly import concat_segments_to_wav
 
@@ -459,6 +463,53 @@ def test_dot_speaker_id_rejected_to_avoid_root_collision(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="路径验证失败"):
         concat_segments_to_wav(source, SAMPLE_SEGMENTS, project_dir, ".")
+
+
+def test_speaker_audio_symlink_to_outside_rejected(tmp_path, monkeypatch):
+    """**Codex PR #11 v2 review P1 #1**：``project_dir/speaker_audio`` 自身
+    若是指向 project_dir 之外的符号链接，旧校验 ``cache_dir.resolve().relative_to
+    (speaker_audio_root.resolve())`` 会**返 True**（cache_dir 解析后仍在
+    symlink 目标下，与 symlink 目标 ``relative_to`` 自然成立），ffmpeg
+    最终把 WAV 写到 project tree 之外。
+
+    新增校验：``speaker_audio_root.resolve()`` 必须仍 ``relative_to`` 在
+    ``project_dir.resolve()`` 之下 —— symlink 攻击直接 raise。
+    """
+    import os
+
+    if not hasattr(os, "symlink"):
+        pytest.skip("OS does not support symlink")
+
+    project_dir, source = _make_temp_project(tmp_path)
+
+    # 攻击者预先在 project_dir 下创建一个 symlink，指向 project 外
+    outside = tmp_path / "evil_outside"
+    outside.mkdir()
+    symlink_path = project_dir / "speaker_audio"
+    try:
+        os.symlink(outside, symlink_path, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink not permitted in this test environment "
+                    "(Windows non-admin?)")
+
+    subprocess_called = {"v": False}
+    monkeypatch.setattr(
+        "audio_assembly.subprocess.run",
+        lambda cmd, **kw: (subprocess_called.update({"v": True}), _FakeCompletedProcess())[1],
+    )
+
+    from audio_assembly import concat_segments_to_wav
+    with pytest.raises(ValueError, match="路径验证失败"):
+        concat_segments_to_wav(
+            source, SAMPLE_SEGMENTS, project_dir, "spk_legit",
+        )
+
+    # 攻击未能让 ffmpeg 跑起来 → 没有越权写文件
+    assert not subprocess_called["v"]
+    # 攻击目标目录依然空（没被 mkdir 写过任何子目录）
+    assert list(outside.iterdir()) == [], (
+        f"speaker_audio symlink 被接受会导致 mkdir 在 {outside} 下创建子目录"
+    )
 
 
 def test_legitimate_speaker_id_passes(tmp_path, monkeypatch):
