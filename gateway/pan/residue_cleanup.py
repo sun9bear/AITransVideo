@@ -124,6 +124,16 @@ async def _execute_pan_residue_cleanup_impl(
             )
             return
 
+        # ``pg_try_advisory_lock`` runs SELECT which auto-begins a SQLAlchemy
+        # transaction on the connection. The subsequent ``async with conn.begin()``
+        # below would raise InvalidRequestError ("connection has already
+        # initialized a SQLAlchemy Transaction()") unless we commit the
+        # implicit txn first. Mirror the fix applied to backup_executor /
+        # restore_executor (commit 3df56605 era). Gate on dialect.name=='postgresql'
+        # because SQLite test fakes don't have the auto-begin semantics.
+        if conn.dialect.name == 'postgresql':
+            await conn.commit()
+
         try:
             # --- state verification (CodeX P2: query by backup_id +
             # generation match instead of "latest uploaded") ---
