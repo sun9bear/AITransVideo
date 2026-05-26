@@ -76,25 +76,39 @@ def concat_segments_to_wav(
         RuntimeError: ffmpeg subprocess 失败（returncode != 0），消息含
             stderr 前 500 字符
     """
-    # Create temp dir for intermediate files
-    cache_dir = project_dir / "speaker_audio" / speaker_id
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Path traversal protection (Codex 2026-05-26 A.2a review follow-up):
-    # 原 ``startswith(resolve())`` 容易被边界 case 绕过 —— 例如
-    # ``project_dir=/tmp/abc`` + ``speaker_id="../abc_evil"`` 解析后会变
-    # ``/tmp/abc_evil``，``str.startswith(/tmp/abc)`` 命中 True（公共前缀
-    # 匹配，不是路径父子关系）。
+    # Path traversal protection (Codex 2026-05-26 A.2a + A.2b review follow-up):
+    # 原 ``startswith(resolve())`` 容易被边界 case 绕过；A.2a 改成
+    # ``relative_to(project_dir)`` 但**校验仍在 mkdir 之后**——A.2b
+    # Codex review #3 指出：恶意 ``speaker_id`` 可能在 raise 之前已经
+    # 创建了 project_dir 之外的目录。
     #
-    # ``Path.relative_to(project_dir)`` 是 ``pathlib`` 提供的严格语义：仅当
-    # ``cache_dir`` 是 ``project_dir`` 的**真子路径**才成立，否则抛
-    # ``ValueError``。这才是正确的"越权检查"。
+    # A.2b 收紧两点：
+    #   1) 校验**先于** mkdir —— 任何 traversal 都不会写盘
+    #   2) 校验范围从 ``project_dir`` 收紧到 ``project_dir/speaker_audio`` ——
+    #      ``speaker_id="."`` 等 degenerate case 也被拒（保证 cache_dir
+    #      严格在每个 speaker 自己的子目录里）
+    #
+    # ``Path.resolve()`` 对不存在路径也能用：仅做 ``.`` / ``..`` / 符号链接
+    # normalize，不要求物理存在。
+    speaker_audio_root = project_dir / "speaker_audio"
+    cache_dir = speaker_audio_root / speaker_id
     try:
-        cache_dir.resolve().relative_to(project_dir.resolve())
+        rel = cache_dir.resolve().relative_to(speaker_audio_root.resolve())
     except ValueError as exc:
         raise ValueError(
-            f"路径验证失败：cache_dir={cache_dir!r} 不在 project_dir={project_dir!r} 之下"
+            f"路径验证失败：cache_dir={cache_dir!r} 不在 "
+            f"{speaker_audio_root!r} 之下（speaker_id={speaker_id!r}）"
         ) from exc
+    # 严限：speaker_id 不能为空 / "."，否则 cache_dir 等于 speaker_audio_root
+    # 自身，无法做 per-speaker 隔离
+    if rel == Path("."):
+        raise ValueError(
+            f"路径验证失败：speaker_id={speaker_id!r} 解析后等于 "
+            f"speaker_audio 根目录自身，无法做 per-speaker 隔离"
+        )
+
+    # 校验通过后再 mkdir
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Build ffmpeg filter for segment extraction + concat
     filter_parts = []

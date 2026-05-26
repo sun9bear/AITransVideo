@@ -73,6 +73,14 @@ def _make_app() -> FastAPI:
     return app
 
 
+def _async_return(value):
+    """Build an async callable that returns ``value`` —— 给 monkeypatch
+    异步函数用（如 ``assemble_sample_from_job_segments``）。"""
+    async def _f(*args, **kwargs):
+        return value
+    return _f
+
+
 def _consent_form_fields() -> dict:
     """合法 consent 三件套（happy path）。"""
     return {
@@ -712,6 +720,124 @@ def test_source_segments_omitted_means_empty_list(test_client, fake_db_add) -> N
     _post_clone(test_client)
     # _default_form 没传 source_segments
     assert fake_db_add[0]["clone_sample_segment_ids"] is None
+
+
+# ---------------------------------------------------------------------------
+# Codex PR #11 review fix P2：``source_segments="[]"`` 不能被当成"没传"，
+# 必须按 segments 模式跑完互斥契约
+# ---------------------------------------------------------------------------
+
+
+def test_sample_plus_empty_source_segments_still_returns_400_invalid_input_mode(
+    test_client,
+) -> None:
+    """``sample + source_segments="[]"`` 是"显式传了 segments 字段（即使空）+
+    上传了 sample"，必须 400 ``invalid_input_mode``。
+
+    Codex PR #11 P2 review：旧实现用 ``bool(parsed_segments)`` 判断模式，
+    空数组被当成"没传"→ 走 sample mode → 绕过互斥契约。修复后用原始
+    form 字段是否非空判定，``"[]"`` 也算"显式提供"。
+    """
+    resp = _post_clone(test_client, form={"source_segments": "[]"})
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "invalid_input_mode"
+
+
+def test_empty_source_segments_alone_returns_400_empty_segments(
+    test_client, fake_worker_client,
+) -> None:
+    """只传 ``source_segments="[]"`` 不传 sample → 400 ``empty_segments``。
+    **不 fallback** 到 sample mode；**不** 上传 OSS；**不** 调 worker。
+    """
+    # 把 sample multipart 字段去掉，只走 form fields
+    form = {**_default_form(), "source_segments": "[]", "source_job_id": "job-xyz"}
+    resp = test_client.post("/api/voice/cosyvoice/clone", data=form)
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "empty_segments"
+    # 关键：worker 必须没被调用（empty_segments 早 fail）
+    assert fake_worker_client.calls == []
+
+
+def test_source_segments_without_source_job_id_returns_400(
+    test_client, fake_worker_client,
+) -> None:
+    """只传 source_segments 列表 + 不传 source_job_id → 400 source_job_id_required。"""
+    form = {**_default_form(), "source_segments": "[1, 2, 3]"}
+    # 故意不带 source_job_id
+    resp = test_client.post("/api/voice/cosyvoice/clone", data=form)
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "source_job_id_required"
+    assert fake_worker_client.calls == []
+
+
+def test_neither_sample_nor_source_segments_returns_400_invalid_input_mode(
+    test_client,
+) -> None:
+    """两个都不给 → 400 invalid_input_mode。"""
+    form = _default_form()  # 不传 source_segments，不传 sample
+    resp = test_client.post("/api/voice/cosyvoice/clone", data=form)
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "invalid_input_mode"
+
+
+# ---------------------------------------------------------------------------
+# Codex PR #11 review fix P1：segments-only mode 不能访问 ``sample.filename``
+# ---------------------------------------------------------------------------
+
+
+def test_segments_only_mode_does_not_access_sample_filename(
+    test_client, monkeypatch, fake_uploader, fake_worker_client, fake_db_add,
+) -> None:
+    """**关键回归**：segments-only 模式下 ``sample is None``，旧代码会在
+    ``sample_url = upload_and_sign(..., filename_hint=sample.filename or ...)``
+    抛 ``AttributeError`` → 500。修复后用合成 hint，不访问 ``sample.filename``。
+    """
+    # mock assembler 返字节，跳过真 DB / transcript / ffmpeg
+    monkeypatch.setattr(
+        clone_api,
+        "assemble_sample_from_job_segments",
+        _async_return(b"FAKE-CONCAT-WAV"),
+    )
+
+    form = {
+        **_default_form(),
+        "source_segments": "[1, 2, 3]",
+        "source_job_id": "job-abc",
+    }
+    resp = test_client.post("/api/voice/cosyvoice/clone", data=form)
+    assert resp.status_code == 201, resp.json()
+    # 验证 hint 用了合成形态而不是 sample.filename（sample is None）
+    assert fake_uploader.calls, "should have uploaded the assembled sample"
+    used_hint = fake_uploader.calls[-1]["filename_hint"]
+    assert "segments_" in used_hint
+    assert "job-abc" in used_hint
+    # 验证 DB 行落了 segment_ids
+    assert fake_db_add[0]["clone_sample_segment_ids"] == [1, 2, 3]
+    # 验证 worker 真被调用（happy path）
+    assert len(fake_worker_client.calls) == 1
+
+
+def test_segments_only_mode_synthetic_filename_hint_format(
+    test_client, monkeypatch, fake_uploader, fake_worker_client,
+) -> None:
+    """合成 filename_hint 必须包含 source_job_id 和 speaker_id，方便排障。"""
+    monkeypatch.setattr(
+        clone_api,
+        "assemble_sample_from_job_segments",
+        _async_return(b"FAKE"),
+    )
+    form = {
+        **_default_form(),
+        "speaker_id": "spk_alpha",
+        "source_segments": "[5]",
+        "source_job_id": "job-zeta",
+    }
+    resp = test_client.post("/api/voice/cosyvoice/clone", data=form)
+    assert resp.status_code == 201
+    hint = fake_uploader.calls[-1]["filename_hint"]
+    assert "job-zeta" in hint
+    assert "spk_alpha" in hint
+    assert hint.endswith(".wav")
 
 
 # ---------------------------------------------------------------------------

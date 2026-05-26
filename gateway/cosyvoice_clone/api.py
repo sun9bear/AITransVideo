@@ -368,21 +368,19 @@ async def cosyvoice_clone(
                 },
             )
 
-    # === Layer 7.5 (NEW, Phase 4.2 A.2b)：sample / source_segments 二选一互斥 + segments-mode dispatch ===
-    # 既保留旧的"前端上传字节"路径（``sample`` UploadFile），又支持新的
-    # "传 source_segments 让后端拼"路径（前端只发段号 + speaker_id，省
-    # Web Audio API 拼接）。两者**互斥**：
+    # === Layer 7.5 (NEW, Phase 4.2 A.2b + Codex PR #11 review fix)：
+    # sample / source_segments 二选一互斥 + segments-mode dispatch ===
     #
-    #   - 都给 / 都不给 → 400 invalid_input_mode
-    #   - 只给 source_segments 但缺 source_job_id → 400 source_job_id_required
-    #
-    # 进 segments mode 时调 ``sample_assembler.assemble_sample_from_job_segments``
-    # 跑 4 层 ownership 检查（user/job/transcript/speaker），任一不过 →
-    # 403/404/400，**绝不调** worker / OSS。
+    # 模式判定**基于原始 form 字段是否出现**，**不是** ``parsed_segments`` 的
+    # truthiness（Codex P2 review）：``source_segments="[]"`` 是"显式传了
+    # 空数组"，必须按 segments 模式继续走到 ``empty_segments`` 错误，**绝不**
+    # fallback 到 sample mode（否则就绕过了互斥契约）。
     sample_provided = sample is not None
-    segments_provided = bool(parsed_segments)
-    if sample_provided == segments_provided:
-        # 都给 或 都不给
+    segments_field_provided = (
+        source_segments is not None and source_segments.strip() != ""
+    )
+    if sample_provided == segments_field_provided:
+        # 都给 / 都不给
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -394,8 +392,11 @@ async def cosyvoice_clone(
             },
         )
 
-    if segments_provided:
-        # 段号模式必须配 source_job_id
+    # Codex PR #11 P1 review fix：sample mode 才能取 ``sample.filename``。
+    # segments mode 用合成 hint（OSS object key 含 sha256 + uuid，filename_hint
+    # 只是给 ``audio/...`` content-type 推导用，不构成键唯一性）。
+    if segments_field_provided:
+        # 段号模式必须配 source_job_id（在调 assembler 之前 fail）
         normalized_source_job_id = (source_job_id or "").strip()
         if not normalized_source_job_id:
             raise HTTPException(
@@ -403,6 +404,19 @@ async def cosyvoice_clone(
                 detail={
                     "code": "source_job_id_required",
                     "message": "``source_segments`` 模式必须传 ``source_job_id``。",
+                },
+            )
+
+        # 显式空数组 ``"[]"`` → 直接 400 empty_segments，**不**fallback
+        # 到 sample mode（Codex PR #11 P2 review fix）。
+        if not parsed_segments:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "empty_segments",
+                    "message": (
+                        "``source_segments`` 是空列表 ``[]``。至少需要 1 个段。"
+                    ),
                 },
             )
 
@@ -444,9 +458,17 @@ async def cosyvoice_clone(
                     "message": f"音频拼接失败：{str(exc)[:300]}",
                 },
             ) from exc
+
+        # segments mode 合成 filename_hint（**绝不**访问 ``sample.filename``）
+        upload_filename_hint = (
+            f"segments_{normalized_source_job_id}_{speaker_id}.wav"
+        )
     else:
         # 旧路径：用户直传字节
         sample_bytes = await _read_upload_file(sample)
+        # sample mode 才能取 ``sample.filename``（``sample is not None``
+        # 已由 Layer 7.5 mutex 保证）
+        upload_filename_hint = sample.filename or "sample.wav"
 
     # === Layer 8：sample 5 维硬校验（本地 CPU）===
     validation = validate_sample_bytes(sample_bytes)
@@ -494,7 +516,10 @@ async def cosyvoice_clone(
         uploader: SampleUploader = build_sample_uploader_from_settings(gw_settings)
         sample_url = uploader.upload_and_sign(
             transcoded,
-            filename_hint=sample.filename or "sample.wav",
+            # Codex PR #11 P1 review fix：segments mode 下 ``sample is None``，
+            # 不能再访问 ``sample.filename``。Layer 7.5 已根据模式预计算
+            # 好 ``upload_filename_hint``。
+            filename_hint=upload_filename_hint,
             ttl_seconds=DEFAULT_SAMPLE_TTL_SECONDS,
         )
     except Exception as exc:  # noqa: BLE001 — uploader 实现可能抛任意异常

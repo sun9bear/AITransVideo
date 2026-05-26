@@ -399,8 +399,16 @@ def test_path_traversal_in_speaker_id_is_rejected(tmp_path, monkeypatch, malicio
 
 
 def test_path_traversal_does_not_leave_orphan_directories(tmp_path, monkeypatch):
-    """traversal 检查 raise 后，**已经创建**的 cache_dir 留下来无所谓，但
-    必须不会创建到 project_dir 之外的位置。这里验证 mkdir 不会越权。
+    """**关键回归（Codex PR #11 review #3）**：traversal 拒绝必须发生在
+    ``mkdir`` 之前，否则恶意 ``speaker_id`` 已经在 project_dir 之外创建了
+    目录后才报错，留下越权产物。
+
+    本测试断言：
+    1. ``project_dir.parent/sibling_evil/abc`` 在调用前**不存在**
+    2. 抛 ValueError
+    3. ``project_dir.parent/sibling_evil/abc`` 在调用后**仍不存在**
+       （未被 mkdir 创建出来）
+    4. sibling_evil 自己的预存 marker 不变（防 mkdir 误删除）
     """
     from audio_assembly import concat_segments_to_wav
 
@@ -410,21 +418,47 @@ def test_path_traversal_does_not_leave_orphan_directories(tmp_path, monkeypatch)
         lambda cmd, **kw: _FakeCompletedProcess(),
     )
 
-    # Sibling dir outside project_dir — pre-create to detect "did we write here"
+    # Sibling dir outside project_dir — pre-create with marker file
     sibling = tmp_path / "sibling_evil"
     sibling.mkdir()
     sibling_marker = sibling / "untouched.marker"
     sibling_marker.write_text("untouched", encoding="utf-8")
 
+    # 关键 assert：调用前越权路径不存在
+    malicious_target = sibling / "abc"
+    assert not malicious_target.exists()
+
     # speaker_id 真正越到 sibling（双 ``..`` 出 speaker_audio + 出
-    # project_dir 2 层）— relative_to(project_dir) 必抛 ValueError
+    # project_dir 2 层）— ``Path.relative_to`` 必抛 ValueError
     with pytest.raises(ValueError):
         concat_segments_to_wav(
             source, SAMPLE_SEGMENTS, project_dir, "../../sibling_evil/abc",
         )
 
+    # 关键 assert：调用后**仍不存在**（mkdir 没在校验前执行）
+    assert not malicious_target.exists(), (
+        f"Path-traversal 校验必须在 mkdir 之前。"
+        f"{malicious_target} 不该被创建出来。"
+    )
     # sibling 自己的 marker 文件应该原封不动
     assert sibling_marker.read_text(encoding="utf-8") == "untouched"
+
+
+def test_dot_speaker_id_rejected_to_avoid_root_collision(tmp_path, monkeypatch):
+    """**Codex PR #11 review #3 补强**：``speaker_id="."`` 会让 cache_dir
+    解析后等于 ``speaker_audio`` 根目录自身，破坏 per-speaker 隔离。
+    新校验严限 cache_dir 严格在 ``speaker_audio`` 子树**之下**。
+    """
+    from audio_assembly import concat_segments_to_wav
+
+    project_dir, source = _make_temp_project(tmp_path)
+    monkeypatch.setattr(
+        "audio_assembly.subprocess.run",
+        lambda cmd, **kw: _FakeCompletedProcess(),
+    )
+
+    with pytest.raises(ValueError, match="路径验证失败"):
+        concat_segments_to_wav(source, SAMPLE_SEGMENTS, project_dir, ".")
 
 
 def test_legitimate_speaker_id_passes(tmp_path, monkeypatch):
