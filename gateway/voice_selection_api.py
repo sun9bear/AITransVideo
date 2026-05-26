@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 import json
 import logging
 import re
-import subprocess
 import uuid
 from pathlib import Path
 
@@ -19,6 +18,7 @@ from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from audio_assembly import concat_segments_to_wav
 from auth import require_auth
 from config import settings
 from user_voice_service import (
@@ -721,9 +721,13 @@ async def voice_clone_for_selection(
         # Concat selected segments via ffmpeg (run in executor to avoid blocking)
         loop = asyncio.get_event_loop()
         try:
+            # Phase 4.2 A.2a: 抽到 gateway/audio_assembly.py 的公共 helper。
+            # MiniMax 路径不传 ``target_sample_rate_hz`` → 默认 24000，与
+            # 原 ``_concat_segments_ffmpeg`` 字节级一致（守卫见
+            # ``tests/test_audio_assembly.py``）。
             concat_path = await loop.run_in_executor(
                 None,
-                _concat_segments_ffmpeg,
+                concat_segments_to_wav,
                 source_audio,
                 selected_segments,
                 project_dir,
@@ -882,56 +886,6 @@ async def voice_clone_for_selection(
     finally:
         if lock_acquired:
             _clear_clone_lock(project_dir, speaker_id)
-
-
-def _concat_segments_ffmpeg(
-    source_audio: Path,
-    segments: list[dict],
-    project_dir: Path,
-    speaker_id: str,
-) -> Path:
-    """Concat selected segments into a single WAV file (24kHz, mono, 16-bit PCM)."""
-    # Create temp dir for intermediate files
-    cache_dir = project_dir / "speaker_audio" / speaker_id
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    # Verify path is within project dir
-    if not str(cache_dir.resolve()).startswith(str(project_dir.resolve())):
-        raise ValueError("路径验证失败")
-
-    # Build ffmpeg filter for segment extraction + concat
-    filter_parts = []
-    inputs = []
-    for i, seg in enumerate(segments):
-        start_s = int(seg["start_ms"]) / 1000.0
-        end_s = int(seg["end_ms"]) / 1000.0
-        filter_parts.append(
-            f"[0:a]atrim=start={start_s}:end={end_s},asetpts=PTS-STARTPTS[s{i}]"
-        )
-        inputs.append(f"[s{i}]")
-
-    concat_filter = ";".join(filter_parts) + ";"
-    concat_filter += "".join(inputs) + f"concat=n={len(segments)}:v=0:a=1[out]"
-
-    output_path = cache_dir / "clone_sample.wav"
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(source_audio),
-        "-filter_complex", concat_filter,
-        "-map", "[out]",
-        "-acodec", "pcm_s16le",
-        "-ar", "24000",
-        "-ac", "1",
-        str(output_path),
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg concat failed: {result.stderr.decode('utf-8', errors='replace')[:500]}"
-        )
-
-    return output_path
 
 
 def _clone_via_minimax(concat_path: Path, speaker_id: str) -> str:
