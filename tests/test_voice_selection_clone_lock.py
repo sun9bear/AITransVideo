@@ -282,7 +282,11 @@ class TestVoiceCloneEndpointCloneLock:
         monkeypatch.setattr(voice_selection_api.settings, "auth_required", False)
 
         with patch("httpx.AsyncClient", return_value=_FakeAsyncClient(project_dir)):
-            with patch.object(voice_selection_api, "_concat_segments_ffmpeg", return_value=project_dir / "speaker_audio" / "speaker_a" / "clone_sample.wav"):
+            # Phase 4.2 A.2a: ``_concat_segments_ffmpeg`` 抽到
+            # ``gateway/audio_assembly.py::concat_segments_to_wav``。
+            # voice_selection_api 用 ``from audio_assembly import ...`` 把
+            # 符号绑到本 module 命名空间，所以 patch 点跟着改名即可。
+            with patch.object(voice_selection_api, "concat_segments_to_wav", return_value=project_dir / "speaker_audio" / "speaker_a" / "clone_sample.wav"):
                 with patch.object(voice_selection_api, "_clone_via_minimax", side_effect=RuntimeError("clone boom")):
                     response = _run(voice_selection_api.voice_clone_for_selection(request, "job-2", db, None))
 
@@ -306,7 +310,11 @@ class TestVoiceCloneEndpointCloneLock:
         monkeypatch.setattr(voice_selection_api.settings, "auth_required", False)
 
         with patch("httpx.AsyncClient", return_value=_FakeAsyncClient(project_dir)):
-            with patch.object(voice_selection_api, "_concat_segments_ffmpeg", return_value=project_dir / "speaker_audio" / "speaker_a" / "clone_sample.wav"):
+            # Phase 4.2 A.2a: ``_concat_segments_ffmpeg`` 抽到
+            # ``gateway/audio_assembly.py::concat_segments_to_wav``。
+            # voice_selection_api 用 ``from audio_assembly import ...`` 把
+            # 符号绑到本 module 命名空间，所以 patch 点跟着改名即可。
+            with patch.object(voice_selection_api, "concat_segments_to_wav", return_value=project_dir / "speaker_audio" / "speaker_a" / "clone_sample.wav"):
                 with patch.object(voice_selection_api, "_clone_via_minimax", return_value="vt_speaker_a_123"):
                     response = _run(voice_selection_api.voice_clone_for_selection(request, "job-3", db, None))
 
