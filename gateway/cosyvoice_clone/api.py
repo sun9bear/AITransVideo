@@ -90,6 +90,12 @@ from cosyvoice_clone.sample_uploader import (
     build_sample_uploader_from_settings,
     missing_aliyun_oss_settings,
 )
+from cosyvoice_clone.sample_assembler import (  # type: ignore[import-not-found]
+    SampleAssemblyError,
+    SegmentNotFoundError,
+    SpeakerOwnershipViolation,
+    assemble_sample_from_job_segments,
+)
 from cosyvoice_clone.sample_validator import (
     SampleValidationResult,
     validate_sample_bytes,
@@ -185,7 +191,9 @@ async def cosyvoice_clone(
     consent_voice_clone_confirmed: str = Form(...),
     consent_modal_version: str = Form(...),
     consent_confirmed_at: str = Form(...),
-    sample: UploadFile = File(...),
+    # Phase 4.2 A.2b：``sample`` 改 Optional —— 与 ``source_segments`` 二选一互斥。
+    # 见 Layer 6.5 dispatch。
+    sample: UploadFile | None = File(None),
     source_segments: str | None = Form(None),  # JSON array string
     source_job_id: str | None = Form(None),
     user: User | None = Depends(get_current_user),
@@ -360,8 +368,87 @@ async def cosyvoice_clone(
                 },
             )
 
+    # === Layer 7.5 (NEW, Phase 4.2 A.2b)：sample / source_segments 二选一互斥 + segments-mode dispatch ===
+    # 既保留旧的"前端上传字节"路径（``sample`` UploadFile），又支持新的
+    # "传 source_segments 让后端拼"路径（前端只发段号 + speaker_id，省
+    # Web Audio API 拼接）。两者**互斥**：
+    #
+    #   - 都给 / 都不给 → 400 invalid_input_mode
+    #   - 只给 source_segments 但缺 source_job_id → 400 source_job_id_required
+    #
+    # 进 segments mode 时调 ``sample_assembler.assemble_sample_from_job_segments``
+    # 跑 4 层 ownership 检查（user/job/transcript/speaker），任一不过 →
+    # 403/404/400，**绝不调** worker / OSS。
+    sample_provided = sample is not None
+    segments_provided = bool(parsed_segments)
+    if sample_provided == segments_provided:
+        # 都给 或 都不给
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "invalid_input_mode",
+                "message": (
+                    "必须二选一：``sample`` (multipart 字节) 或 ``source_segments`` "
+                    "(任务段号列表 + source_job_id)。"
+                ),
+            },
+        )
+
+    if segments_provided:
+        # 段号模式必须配 source_job_id
+        normalized_source_job_id = (source_job_id or "").strip()
+        if not normalized_source_job_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "source_job_id_required",
+                    "message": "``source_segments`` 模式必须传 ``source_job_id``。",
+                },
+            )
+
+        try:
+            sample_bytes = await assemble_sample_from_job_segments(
+                db=db,
+                user=auth_user,
+                source_job_id=normalized_source_job_id,
+                speaker_id=speaker_id,
+                segment_ids=parsed_segments,
+            )
+        except SampleAssemblyError as exc:
+            # endpoint 层把 typed exception 转 HTTP 错误码，把 ``exc.code``
+            # 原样透传给前端做 i18n / UX。
+            detail: dict[str, Any] = {
+                "code": exc.code,
+                "message": str(exc),
+            }
+            if isinstance(exc, SegmentNotFoundError):
+                detail["offending_segment_id"] = exc.offending_segment_id
+            elif isinstance(exc, SpeakerOwnershipViolation):
+                detail["offending_segment_id"] = exc.offending_segment_id
+                detail["expected_speaker"] = exc.expected_speaker
+                detail["actual_speaker"] = exc.actual_speaker
+            logger.warning(
+                "[cosyvoice_clone] sample assembly failed: code=%s msg=%s",
+                exc.code, str(exc)[:300],
+            )
+            raise HTTPException(
+                status_code=exc.http_status, detail=detail,
+            ) from exc
+        except RuntimeError as exc:
+            # audio_assembly.concat_segments_to_wav -> ffmpeg failure
+            logger.exception("[cosyvoice_clone] ffmpeg concat failed")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": "ffmpeg_concat_failed",
+                    "message": f"音频拼接失败：{str(exc)[:300]}",
+                },
+            ) from exc
+    else:
+        # 旧路径：用户直传字节
+        sample_bytes = await _read_upload_file(sample)
+
     # === Layer 8：sample 5 维硬校验（本地 CPU）===
-    sample_bytes = await _read_upload_file(sample)
     validation = validate_sample_bytes(sample_bytes)
     if not validation.is_valid:
         # B 模块已经返了稳定 error_code，原样透传到前端

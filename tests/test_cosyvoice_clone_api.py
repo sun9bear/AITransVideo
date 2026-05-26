@@ -683,9 +683,22 @@ def test_audit_log_emitted_on_success(test_client, caplog) -> None:
 # source_segments JSON 解析
 # ---------------------------------------------------------------------------
 
-def test_source_segments_parsed_as_int_list(test_client, fake_db_add) -> None:
-    _post_clone(test_client, form={"source_segments": "[1, 2, 3]"})
-    assert fake_db_add[0]["clone_sample_segment_ids"] == [1, 2, 3]
+def test_sample_and_source_segments_both_given_returns_400_invalid_input_mode(
+    test_client,
+) -> None:
+    """Phase 4.2 A.2b：``sample`` 与 ``source_segments`` 二选一互斥。
+
+    Phase 4.1 时 ``source_segments`` 仅作为 audit hint，允许与 ``sample`` 并存
+    （上面这个测试的旧名 ``test_source_segments_parsed_as_int_list`` 验证此点）。
+    Phase 4.2 A.2b 升级 ``source_segments`` 为主输入模式，与 ``sample`` 互斥。
+
+    JSON 解析 + DB ``clone_sample_segment_ids`` 落库的覆盖移到
+    ``tests/test_cosyvoice_clone_source_segments_dispatch.py``（用 segments-only
+    路径 + assembler mock 覆盖）。
+    """
+    resp = _post_clone(test_client, form={"source_segments": "[1, 2, 3]"})
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "invalid_input_mode"
 
 
 def test_source_segments_invalid_json_returns_400(test_client) -> None:
