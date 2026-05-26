@@ -353,13 +353,44 @@ def test_uservoice_orm_temp_expires_pending_index_is_partial() -> None:
 # ----------------------------------------------------------------------
 
 
+def _extract_column_name_from_ast(col_node: ast.Call) -> str | None:
+    """从 ``sa.Column(...)`` AST 节点提取列名，覆盖 4 种形态：
+
+    1. ``Column("expires_at", ...)``      —— 位置参数
+    2. ``Column(name="expires_at", ...)`` —— kwarg ``name=``（Codex P2 #2 补）
+
+    返回 column 名字符串，或 None（提取不出来）。
+    """
+    if not (isinstance(col_node, ast.Call)
+            and isinstance(col_node.func, ast.Attribute)
+            and col_node.func.attr == "Column"):
+        return None
+
+    # 形态 1：位置参数
+    if col_node.args:
+        first = col_node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return first.value
+
+    # 形态 2：``name=`` kwarg（Codex 2026-05-26 P2 #2）
+    for kw in col_node.keywords:
+        if kw.arg == "name" and isinstance(kw.value, ast.Constant) \
+                and isinstance(kw.value.value, str):
+            return kw.value.value
+
+    return None
+
+
 def test_guard_no_alembic_migration_adds_bare_expires_at_to_user_voices() -> None:
     """**字段命名守卫 #1**：禁止任何 alembic migration 给 ``user_voices`` 加
-    裸 ``expires_at`` 列。
+    裸 ``expires_at`` 列（含 positional 与 ``name=`` kwarg 两种形态）。
 
     历史教训：Phase 4.2 v4 草案差点把 ``expires_at`` 加到 user_voices，
     与同表现有 ``expired_at``（软删时间戳）字面冲突。v4-followup §12.3
     改为 ``temporary_expires_at``。本守卫确保后续不会有人改回去。
+
+    Codex 2026-05-26 PR #9 review P2 #2 补：原版本只抓 ``Column("expires_at",
+    ...)``（位置参数），漏抓 ``Column(name="expires_at", ...)`` kwarg 形态。
     """
     versions_dir = REPO_ROOT / "gateway" / "alembic" / "versions"
     offenders: list[str] = []
@@ -381,15 +412,8 @@ def test_guard_no_alembic_migration_adds_bare_expires_at_to_user_voices() -> Non
                     and tbl_node.value == "user_voices"):
                 continue
             col_node = node.args[1]
-            if not (isinstance(col_node, ast.Call)
-                    and isinstance(col_node.func, ast.Attribute)
-                    and col_node.func.attr == "Column"):
-                continue
-            if not col_node.args:
-                continue
-            name_node = col_node.args[0]
-            if (isinstance(name_node, ast.Constant)
-                    and name_node.value == "expires_at"):
+            col_name = _extract_column_name_from_ast(col_node)
+            if col_name == "expires_at":
                 offenders.append(f"{mig_path.name}:{node.lineno}")
 
     assert not offenders, (
@@ -433,71 +457,382 @@ def test_guard_uservoice_orm_does_not_declare_bare_expires_at() -> None:
     )
 
 
+# ----------------------------------------------------------------------
+# G3 AST 辅助函数 — Codex 2026-05-26 PR #9 review P2 #1 + #2 重写
+# ----------------------------------------------------------------------
+
+# 节点判定函数 ----------------------------------------------------------
+
+
+def _is_temp_expires_attr(node: ast.AST) -> bool:
+    """判断 AST 节点是否是 ``<anything>.temporary_expires_at`` 属性访问。
+
+    覆盖 ``UserVoice.temporary_expires_at`` / ``self.temporary_expires_at``
+    / 多级链 ``UserVoice.something.temporary_expires_at`` 等所有 Attribute
+    形态。
+    """
+    return isinstance(node, ast.Attribute) and node.attr == "temporary_expires_at"
+
+
+def _is_none_or_null_arg(node: ast.AST) -> bool:
+    """判断 AST 节点是否表达 "NULL" 语义。涵盖：
+
+    - ``None`` 字面量
+    - ``null()``（裸函数调用 —— sqlalchemy.null）
+    - ``sa.null()`` / ``sqlalchemy.null()``（带 module 前缀的函数调用）
+    """
+    # ``None`` 字面量
+    if isinstance(node, ast.Constant) and node.value is None:
+        return True
+    # 函数调用：``null()`` / ``sa.null()`` / ``sqlalchemy.null()``
+    if isinstance(node, ast.Call):
+        f = node.func
+        if isinstance(f, ast.Name) and f.id == "null":
+            return True
+        if isinstance(f, ast.Attribute) and f.attr == "null":
+            return True
+    return False
+
+
+# G3 主测试 ------------------------------------------------------------
+
+
 def test_guard_active_row_queries_use_expired_at_not_temporary_expires_at() -> None:
     """**字段命名守卫 #3**：gateway/ 目录里所有 ``user_voices`` 的 active
-    判断必须用 ``expired_at IS NULL`` （或 SQLAlchemy 等价表达），**禁止**
+    判断必须用 ``expired_at IS NULL``（或 SQLAlchemy 等价表达），**禁止**
     用 ``temporary_expires_at`` 做 active 判断。
-
-    扫 gateway/ 所有 .py 文件，找：
-    - 字符串字面量 ``temporary_expires_at IS NULL`` 或
-      ``temporary_expires_at IS NOT NULL``（裸字符串 SQL）→ red
-    - ``UserVoice.temporary_expires_at.is_(None)`` 或 ``.isnot(None)``
-      （SQLAlchemy 表达式）→ red
 
     plan v4-followup §12.3 强制 ``expired_at IS NULL`` 是唯一 active 判据；
     ``temporary_expires_at`` 只能作为清理 sweeper 入选条件（``< now()``）
     和 UI 剩余时间展示（``> now()`` 兜底过滤），不得用于 active。
 
-    例外：本测试文件本身、partial index 的 WHERE 子句（``is_temporary = TRUE
-    AND expired_at IS NULL`` 整体），以及 docstring / 注释 不算 active 判据。
+    **Codex 2026-05-26 PR #9 review P2 #1 重写**：
+    原版本用 raw text 扫整个文件，会被 **docstring / 注释 / 字符串字面量**
+    误报（GitHub Codex 已自动捕获这条 finding）。本版本改为 **AST 扫描**
+    Compare 节点和 Call 节点，docstring / 注释天然不会出现在这两种 AST
+    节点里，从源头消除误报。
+
+    覆盖以下所有 SQLAlchemy 写法（Codex 2026-05-26 P2 #1 列出 + 通配）：
+
+    Compare 形态（``ast.Compare``）：
+    - ``UserVoice.temporary_expires_at == None``
+    - ``UserVoice.temporary_expires_at != None``
+    - ``UserVoice.temporary_expires_at == sa.null()``
+    - ``UserVoice.temporary_expires_at != null()``
+
+    Call 形态（``ast.Call``，方法 ``is_`` / ``is_not`` / ``isnot``）：
+    - ``UserVoice.temporary_expires_at.is_(None)``
+    - ``UserVoice.temporary_expires_at.is_(null())``
+    - ``UserVoice.temporary_expires_at.is_(sa.null())``
+    - ``UserVoice.temporary_expires_at.is_not(None)``
+    - ``UserVoice.temporary_expires_at.is_not(null())``
+    - ``UserVoice.temporary_expires_at.isnot(None)``  # 旧 SA 写法
+    - ``UserVoice.temporary_expires_at.isnot(sa.null())``
+
+    Raw SQL 形态（``text()`` 调用中的字符串字面量）：
+    - ``text("temporary_expires_at IS NULL")``
+    - ``text("... temporary_expires_at IS NOT NULL ...")``
+
+    **排除**：alembic migrations（自身定义 partial WHERE 不算 active 判据）+
+    本测试文件（声明被禁止模式作为反例字符串）。
     """
     gateway_root = REPO_ROOT / "gateway"
-
-    bad_string_patterns = [
-        "temporary_expires_at IS NULL",
-        "temporary_expires_at IS NOT NULL",
-        "temporary_expires_at is null",
-        "temporary_expires_at is not null",
-    ]
-    # SQLAlchemy 形态：obj.temporary_expires_at.is_(None) / .is_not(None) / .isnot(None)
-    bad_sqla_attrs = (".is_(None)", ".isnot(None)", ".is_not(None)")
-
+    self_path = Path(__file__).resolve()
     offenders: list[str] = []
 
     for py_path in gateway_root.rglob("*.py"):
-        if "alembic/versions" in str(py_path).replace("\\", "/"):
-            # alembic migrations 自己加列时会用 partial WHERE，不算 active 判据
+        norm = str(py_path).replace("\\", "/")
+        # 排除 alembic migrations：partial index 的 WHERE 不算 active 判据
+        if "alembic/versions" in norm:
             continue
+        # 排除本测试文件：例外可省略（test 在 tests/ 不在 gateway/）
+        if py_path.resolve() == self_path:
+            continue
+
         try:
-            src = py_path.read_text(encoding="utf-8")
+            tree = ast.parse(py_path.read_text(encoding="utf-8"))
         except Exception:
             continue
 
-        # 字符串字面量
-        for pat in bad_string_patterns:
-            if pat in src:
-                # 排除：本 partial index 的合法 WHERE
-                # ``is_temporary = TRUE AND expired_at IS NULL``
-                # 这是 sweeper 入选条件，不是 active 判据，但字符串
-                # 不含 ``temporary_expires_at IS NULL``。所以裸串 hit 即违规。
-                idx = src.find(pat)
-                line = src.count("\n", 0, idx) + 1
-                offenders.append(
-                    f"{py_path.relative_to(REPO_ROOT)}:{line} 含 {pat!r}"
-                )
+        rel = py_path.relative_to(REPO_ROOT)
 
-        # SQLAlchemy 表达式
-        for sqla_attr in bad_sqla_attrs:
-            needle = f"temporary_expires_at{sqla_attr}"
-            if needle in src:
-                idx = src.find(needle)
-                line = src.count("\n", 0, idx) + 1
-                offenders.append(
-                    f"{py_path.relative_to(REPO_ROOT)}:{line} 含 {needle!r}"
-                )
+        for node in ast.walk(tree):
+            # --- Compare 形态：``temp_expires.X == None`` / `!= None` 等 ---
+            if isinstance(node, ast.Compare):
+                # Compare.left + Compare.comparators 形成一串：left op0 c0 op1 c1 ...
+                # 同时检查 left 和每个 comparator 是否对 temporary_expires_at
+                # 与 None/null 做比较
+                operands = [node.left] + list(node.comparators)
+                ops = node.ops
+                # 遍历相邻配对
+                for i, op in enumerate(ops):
+                    if not isinstance(op, (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)):
+                        continue
+                    left_node = operands[i]
+                    right_node = operands[i + 1]
+                    # 两侧任一是 temp_expires，另一侧是 None/null → 违规
+                    if (
+                        (_is_temp_expires_attr(left_node)
+                         and _is_none_or_null_arg(right_node))
+                        or
+                        (_is_temp_expires_attr(right_node)
+                         and _is_none_or_null_arg(left_node))
+                    ):
+                        offenders.append(
+                            f"{rel}:{node.lineno} Compare 形态 "
+                            f"(temporary_expires_at == / != / is / is not None|null)"
+                        )
+
+            # --- Call 形态：``temp_expires.is_(...)`` / .is_not / .isnot ---
+            elif isinstance(node, ast.Call):
+                f = node.func
+                # f 必须是 ``<expr>.is_`` / ``.is_not`` / ``.isnot``
+                if not (isinstance(f, ast.Attribute)
+                        and f.attr in ("is_", "is_not", "isnot")):
+                    # ---- raw SQL via text("...") ----
+                    # text("temporary_expires_at IS [NOT] NULL ...")
+                    is_text_call = (
+                        (isinstance(f, ast.Name) and f.id == "text")
+                        or (isinstance(f, ast.Attribute) and f.attr == "text")
+                    )
+                    if is_text_call and node.args:
+                        first = node.args[0]
+                        if (isinstance(first, ast.Constant)
+                                and isinstance(first.value, str)):
+                            up = first.value.upper()
+                            if ("TEMPORARY_EXPIRES_AT" in up
+                                    and (" IS NULL" in up or " IS NOT NULL" in up)):
+                                offenders.append(
+                                    f"{rel}:{node.lineno} text() raw SQL "
+                                    f"(temporary_expires_at IS [NOT] NULL)"
+                                )
+                    continue
+
+                # f.value 是被调用方法的接收者；必须指向 temp_expires
+                if not _is_temp_expires_attr(f.value):
+                    continue
+
+                # 参数必须是 None / null() / sa.null() — 否则不算 active 判断
+                if not node.args:
+                    continue
+                arg = node.args[0]
+                if _is_none_or_null_arg(arg):
+                    offenders.append(
+                        f"{rel}:{node.lineno} Call 形态 "
+                        f"(temporary_expires_at.{f.attr}(None|null))"
+                    )
 
     assert not offenders, (
         f"`temporary_expires_at` 禁止用于 active 判断。active 判据是 "
         f"`expired_at IS NULL`（plan v4-followup §12.3）。\n"
         f"违规位置:\n  " + "\n  ".join(offenders)
+    )
+
+
+# ----------------------------------------------------------------------
+# 负向验证：G3 AST 守卫必须真能抓住 Codex 2026-05-26 PR #9 列出的
+# 全部攻击向量。把已知违规 source 灌进 AST，跑 helper，断言 hit。
+# ----------------------------------------------------------------------
+
+
+def _g3_scan_source(src: str) -> list[str]:
+    """对内嵌 Python 源码跑与 G3 主守卫相同的 AST 扫描，返回违规节点描述。
+    用于参数化负向测试 —— 验证 G3 真能抓到 Codex 列出的每个模式。
+    """
+    tree = ast.parse(src)
+    hits: list[str] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            operands = [node.left] + list(node.comparators)
+            for i, op in enumerate(node.ops):
+                if not isinstance(op, (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)):
+                    continue
+                left_node = operands[i]
+                right_node = operands[i + 1]
+                if (
+                    (_is_temp_expires_attr(left_node)
+                     and _is_none_or_null_arg(right_node))
+                    or
+                    (_is_temp_expires_attr(right_node)
+                     and _is_none_or_null_arg(left_node))
+                ):
+                    hits.append(f"Compare:line{node.lineno}")
+        elif isinstance(node, ast.Call):
+            f = node.func
+            if (isinstance(f, ast.Attribute)
+                    and f.attr in ("is_", "is_not", "isnot")
+                    and _is_temp_expires_attr(f.value)
+                    and node.args
+                    and _is_none_or_null_arg(node.args[0])):
+                hits.append(f"Call.{f.attr}:line{node.lineno}")
+                continue
+            # text("...") raw SQL
+            is_text_call = (
+                (isinstance(f, ast.Name) and f.id == "text")
+                or (isinstance(f, ast.Attribute) and f.attr == "text")
+            )
+            if is_text_call and node.args:
+                first = node.args[0]
+                if (isinstance(first, ast.Constant)
+                        and isinstance(first.value, str)):
+                    up = first.value.upper()
+                    if ("TEMPORARY_EXPIRES_AT" in up
+                            and (" IS NULL" in up or " IS NOT NULL" in up)):
+                        hits.append(f"text():line{node.lineno}")
+    return hits
+
+
+# 所有 Codex 2026-05-26 PR #9 review P2 #1 显式列出的攻击向量 +
+# 通配补充。每条都包成最小可解析 Python 模块。
+_G3_BAD_PATTERNS_THAT_MUST_BE_DETECTED: list[tuple[str, str]] = [
+    # --- Compare 形态 ---
+    ("compare_eq_none",
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at == None)\n"),
+    ("compare_neq_none",
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at != None)\n"),
+    ("compare_eq_sa_null",
+     "import sqlalchemy as sa\nfrom models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at == sa.null())\n"),
+    ("compare_neq_bare_null",
+     "from sqlalchemy import null\nfrom models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at != null())\n"),
+    # --- Call .is_ / .is_not / .isnot 形态 ---
+    ("call_is_none",
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at.is_(None))\n"),
+    ("call_is_bare_null",
+     "from sqlalchemy import null\nfrom models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at.is_(null()))\n"),
+    ("call_is_sa_null",
+     "import sqlalchemy as sa\nfrom models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at.is_(sa.null()))\n"),
+    ("call_is_not_none",
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at.is_not(None))\n"),
+    ("call_is_not_null",
+     "from sqlalchemy import null\nfrom models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at.is_not(null()))\n"),
+    ("call_isnot_none_legacy",
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at.isnot(None))\n"),
+    ("call_isnot_sa_null_legacy",
+     "import sqlalchemy as sa\nfrom models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at.isnot(sa.null()))\n"),
+    # --- Raw SQL via text() ---
+    ("text_is_null",
+     "from sqlalchemy import text\n"
+     "q = session.execute(text('SELECT 1 FROM user_voices WHERE "
+     "temporary_expires_at IS NULL'))\n"),
+    ("text_is_not_null",
+     "from sqlalchemy import text\n"
+     "q = session.execute(text('temporary_expires_at IS NOT NULL'))\n"),
+    ("sa_text_is_null",
+     "import sqlalchemy as sa\n"
+     "q = session.execute(sa.text('temporary_expires_at IS NULL'))\n"),
+    # --- self.temporary_expires_at 形态（receiver 不是 UserVoice 而是 self）---
+    ("self_compare_eq_none",
+     "class Foo:\n"
+     "    def is_active(self):\n"
+     "        return self.temporary_expires_at == None\n"),
+]
+
+
+@pytest.mark.parametrize(
+    "case_name, src", _G3_BAD_PATTERNS_THAT_MUST_BE_DETECTED,
+    ids=[c[0] for c in _G3_BAD_PATTERNS_THAT_MUST_BE_DETECTED],
+)
+def test_g3_negative_detects_all_codex_listed_offending_patterns(
+    case_name: str, src: str,
+) -> None:
+    """**G3 负向验证**：保证 AST 守卫真能抓 Codex 2026-05-26 PR #9 review
+    P2 #1 列出的全部攻击向量。
+
+    每个 case 是一段最小可解析 Python 源，模拟"未来某人在 gateway/ 里写
+    了 active 查询用 temporary_expires_at"的违规。``_g3_scan_source`` 用与
+    G3 主测试相同的 AST 逻辑扫描，必须命中。
+    """
+    hits = _g3_scan_source(src)
+    assert hits, (
+        f"G3 守卫 AST 扫描未抓到 case={case_name!r}；该攻击向量会绕过 CI。"
+        f"\n源码:\n{src}"
+    )
+
+
+# ----------------------------------------------------------------------
+# 负向验证 #2：G3 不能误报合法 use case。
+# ----------------------------------------------------------------------
+
+
+_G3_GOOD_PATTERNS_THAT_MUST_NOT_BE_DETECTED: list[tuple[str, str]] = [
+    # 允许：作 sweeper 入选条件（``< now()``）
+    ("sweeper_lt_now",
+     "from datetime import datetime, timezone\n"
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at < datetime.now(timezone.utc))\n"),
+    # 允许：作 UI 兜底过滤（``> now()``）
+    ("ui_gt_now",
+     "from datetime import datetime, timezone\n"
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter("
+     "UserVoice.temporary_expires_at > datetime.now(timezone.utc))\n"),
+    # 允许：``expired_at IS NULL``（正确的 active 判据）
+    ("expired_at_is_null_compare",
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter(UserVoice.expired_at == None)\n"),
+    ("expired_at_is_null_call",
+     "from models import UserVoice\n"
+     "q = session.query(UserVoice).filter(UserVoice.expired_at.is_(None))\n"),
+    # 允许：text() raw SQL 但只引用 ``expired_at``，不引用 temporary_expires_at
+    ("text_only_expired_at",
+     "from sqlalchemy import text\n"
+     "q = session.execute(text('expired_at IS NULL'))\n"),
+    # 允许：docstring / 注释 提到 ``temporary_expires_at IS NULL``（**关键**
+    # —— 这正是原 raw-text 版本的误报场景，AST 不应抓）
+    ("docstring_mentions_pattern",
+     "'''Notes: never use temporary_expires_at IS NULL as active check.'''\n"
+     "x = 1\n"),
+    # 允许：字符串字面量但不在 text() 中
+    ("plain_string_literal",
+     "msg = 'temporary_expires_at IS NULL is forbidden in active queries'\n"),
+    # 允许：UPDATE 写 temporary_expires_at（sweeper 续命场景，§12.5）
+    ("update_assign_value",
+     "from models import UserVoice\n"
+     "from datetime import datetime, timezone, timedelta\n"
+     "voice.temporary_expires_at = datetime.now(timezone.utc) + "
+     "timedelta(days=7)\n"),
+]
+
+
+@pytest.mark.parametrize(
+    "case_name, src", _G3_GOOD_PATTERNS_THAT_MUST_NOT_BE_DETECTED,
+    ids=[c[0] for c in _G3_GOOD_PATTERNS_THAT_MUST_NOT_BE_DETECTED],
+)
+def test_g3_does_not_false_positive_on_legitimate_uses(
+    case_name: str, src: str,
+) -> None:
+    """**G3 误报防护**：合法用法必须不被守卫抓。
+
+    覆盖 plan §12 / §12.4 / §12.5 允许的 temporary_expires_at 用法：
+    sweeper ``< now()``、UI ``> now()`` 兜底、UPDATE 续命、注释 / docstring
+    引用、不在 text() 上下文的字符串等。
+    """
+    hits = _g3_scan_source(src)
+    assert not hits, (
+        f"G3 守卫误报合法用法 case={case_name!r}；hits={hits}"
+        f"\n源码:\n{src}"
     )
