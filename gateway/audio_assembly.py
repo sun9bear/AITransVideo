@@ -80,9 +80,21 @@ def concat_segments_to_wav(
     cache_dir = project_dir / "speaker_audio" / speaker_id
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # Verify path is within project dir
-    if not str(cache_dir.resolve()).startswith(str(project_dir.resolve())):
-        raise ValueError("路径验证失败")
+    # Path traversal protection (Codex 2026-05-26 A.2a review follow-up):
+    # 原 ``startswith(resolve())`` 容易被边界 case 绕过 —— 例如
+    # ``project_dir=/tmp/abc`` + ``speaker_id="../abc_evil"`` 解析后会变
+    # ``/tmp/abc_evil``，``str.startswith(/tmp/abc)`` 命中 True（公共前缀
+    # 匹配，不是路径父子关系）。
+    #
+    # ``Path.relative_to(project_dir)`` 是 ``pathlib`` 提供的严格语义：仅当
+    # ``cache_dir`` 是 ``project_dir`` 的**真子路径**才成立，否则抛
+    # ``ValueError``。这才是正确的"越权检查"。
+    try:
+        cache_dir.resolve().relative_to(project_dir.resolve())
+    except ValueError as exc:
+        raise ValueError(
+            f"路径验证失败：cache_dir={cache_dir!r} 不在 project_dir={project_dir!r} 之下"
+        ) from exc
 
     # Build ffmpeg filter for segment extraction + concat
     filter_parts = []

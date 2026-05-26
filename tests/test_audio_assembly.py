@@ -352,6 +352,98 @@ def test_only_audio_assembly_defines_concat_segments_to_wav() -> None:
     )
 
 
+# ---------------------------------------------------------------------
+# Path-traversal safety — Codex 2026-05-26 A.2a review follow-up,
+# tightened by A.2b: replaced startswith(resolve()) with Path.relative_to()
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("malicious_speaker_id", [
+    # cache_dir = project_dir/speaker_audio/{spk_id}
+    # 要真正逃出 project_dir，至少需要 2 个 ``..``（speaker_audio 占 1 层）
+    "../../etc/passwd",          # 双 .. 真出去
+    "../../../../etc/passwd",    # 多重 .. 更稳
+    "..\\..\\windows\\system32", # Windows 反斜杠
+    "/absolute/escape/path",     # Unix 绝对路径会重置 Path 拼接
+])
+def test_path_traversal_in_speaker_id_is_rejected(tmp_path, monkeypatch, malicious_speaker_id):
+    """``speaker_id`` 含**真正**逃出 project_dir 的 traversal → ValueError，
+    **不调** subprocess.
+
+    A.2a 原实现 ``startswith(resolve())`` 边界 case 会漏；A.2b 改
+    ``Path.relative_to()`` 后逃出 project_dir 的 case 全部明确 raise。
+
+    注意：``speaker_id="../etc"`` 只逃了 1 层 ``speaker_audio``，落在
+    ``project_dir/etc`` 仍是 project_dir 子路径 —— **不算越权**。要至少
+    ``../../`` 才真出 project_dir。这是 ``Path.relative_to()`` 的正确语义。
+    """
+    from audio_assembly import concat_segments_to_wav
+
+    project_dir, source = _make_temp_project(tmp_path)
+    subprocess_called = {"v": False}
+
+    def fake_run(cmd, **kwargs):
+        subprocess_called["v"] = True
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr("audio_assembly.subprocess.run", fake_run)
+
+    with pytest.raises(ValueError, match="路径验证失败"):
+        concat_segments_to_wav(
+            source, SAMPLE_SEGMENTS, project_dir, malicious_speaker_id,
+        )
+
+    assert not subprocess_called["v"], (
+        f"speaker_id={malicious_speaker_id!r} 越权检查必须在 subprocess 之前 raise"
+    )
+
+
+def test_path_traversal_does_not_leave_orphan_directories(tmp_path, monkeypatch):
+    """traversal 检查 raise 后，**已经创建**的 cache_dir 留下来无所谓，但
+    必须不会创建到 project_dir 之外的位置。这里验证 mkdir 不会越权。
+    """
+    from audio_assembly import concat_segments_to_wav
+
+    project_dir, source = _make_temp_project(tmp_path)
+    monkeypatch.setattr(
+        "audio_assembly.subprocess.run",
+        lambda cmd, **kw: _FakeCompletedProcess(),
+    )
+
+    # Sibling dir outside project_dir — pre-create to detect "did we write here"
+    sibling = tmp_path / "sibling_evil"
+    sibling.mkdir()
+    sibling_marker = sibling / "untouched.marker"
+    sibling_marker.write_text("untouched", encoding="utf-8")
+
+    # speaker_id 真正越到 sibling（双 ``..`` 出 speaker_audio + 出
+    # project_dir 2 层）— relative_to(project_dir) 必抛 ValueError
+    with pytest.raises(ValueError):
+        concat_segments_to_wav(
+            source, SAMPLE_SEGMENTS, project_dir, "../../sibling_evil/abc",
+        )
+
+    # sibling 自己的 marker 文件应该原封不动
+    assert sibling_marker.read_text(encoding="utf-8") == "untouched"
+
+
+def test_legitimate_speaker_id_passes(tmp_path, monkeypatch):
+    """合法 speaker_id（无 traversal）正常通过路径校验。"""
+    from audio_assembly import concat_segments_to_wav
+
+    project_dir, source = _make_temp_project(tmp_path)
+    monkeypatch.setattr(
+        "audio_assembly.subprocess.run",
+        lambda cmd, **kw: _FakeCompletedProcess(),
+    )
+
+    # 不应 raise
+    result = concat_segments_to_wav(
+        source, SAMPLE_SEGMENTS, project_dir, "speaker_abc_123",
+    )
+    assert result == project_dir / "speaker_audio" / "speaker_abc_123" / "clone_sample.wav"
+
+
 def test_audio_assembly_module_does_not_import_minimax_or_cosyvoice() -> None:
     """**层级守卫**：``audio_assembly.py`` 是底层 helper，不能依赖任何
     provider-specific 模块（MiniMax 客户端、CosyVoice clone API 等）。
