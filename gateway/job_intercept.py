@@ -3911,6 +3911,84 @@ async def _post_edit_mutation_with_policy(
     )
 
 
+async def _enrich_voice_preview_routing(
+    db: AsyncSession,
+    *,
+    user_id: object,
+    payload: dict,
+) -> tuple[dict | None, dict | None]:
+    """Inject worker routing into review voice preview for CosyVoice clones.
+
+    The frontend sends only ``voice_id`` + ``tts_provider``.  For cloned
+    CosyVoice voices, the target model is stored in ``user_voices`` and must
+    be resolved by Gateway, not trusted from the client.
+
+    Returns ``(enriched_payload, error_detail)``. ``enriched_payload`` is
+    ``None`` when the original body can pass through unchanged.
+    """
+    new_payload = dict(payload)
+    had_client_routing = (
+        "requires_worker" in new_payload or "worker_target_model" in new_payload
+    )
+    new_payload.pop("requires_worker", None)
+    new_payload.pop("worker_target_model", None)
+
+    voice_id = str(new_payload.get("voice_id", "") or "").strip()
+    if not voice_id:
+        return (new_payload if had_client_routing else None), None
+
+    tts_provider = str(new_payload.get("tts_provider", "") or "").strip().lower()
+    if user_id is None:
+        return (new_payload if had_client_routing else None), None
+
+    from user_voice_service import lookup_clone_voice_routing_metadata
+
+    try:
+        routing_map = await lookup_clone_voice_routing_metadata(
+            db,
+            user_id=user_id,
+            voice_ids=[voice_id],
+        )
+    except Exception as exc:
+        if tts_provider == "cosyvoice":
+            return None, {
+                "code": "voice_clone_routing_lookup_failed",
+                "message": (
+                    "Could not verify CosyVoice clone routing metadata for "
+                    f"voice_id={voice_id!r}; refusing to preview via legacy path."
+                ),
+                "voice_id": voice_id,
+            }
+        logger.warning(
+            "voice preview: clone routing lookup failed for voice_id=%s: %s",
+            voice_id,
+            exc,
+        )
+        return (new_payload if had_client_routing else None), None
+
+    routing = routing_map.get(voice_id)
+    if not routing:
+        return (new_payload if had_client_routing else None), None
+
+    if tts_provider and tts_provider != "cosyvoice":
+        return None, {
+            "code": "voice_clone_provider_mismatch",
+            "message": (
+                f"voice_id={voice_id!r} is a CosyVoice clone voice, but "
+                f"submitted tts_provider={tts_provider!r}."
+            ),
+            "voice_id": voice_id,
+            "submitted_tts_provider": tts_provider,
+        }
+
+    new_payload["tts_provider"] = "cosyvoice"
+    new_payload["requires_worker"] = True
+    target_model = str(routing.get("worker_target_model") or "").strip()
+    if target_model:
+        new_payload["worker_target_model"] = target_model
+    return new_payload, None
+
+
 async def _post_edit_voice_preview_with_policy(
     request: Request,
     job_id: str,
@@ -3919,9 +3997,41 @@ async def _post_edit_voice_preview_with_policy(
 ) -> Response:
     result = await db.execute(select(Job).where(Job.job_id == job_id).with_for_update())
     job = result.scalar_one_or_none()
+    forwarded_body: bytes | None = None
+    if job is not None:
+        try:
+            payload = await _read_json_body(request)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            user_id_for_lookup = getattr(job, "user_id", None) or (
+                getattr(user, "id", None) if user else None
+            )
+            enriched, error = await _enrich_voice_preview_routing(
+                db, user_id=user_id_for_lookup, payload=payload,
+            )
+            if error is not None:
+                error_status = (
+                    503
+                    if error.get("code") == "voice_clone_routing_lookup_failed"
+                    else 400
+                )
+                return JSONResponse(
+                    status_code=error_status,
+                    content={"detail": error},
+                )
+            if enriched is not None:
+                forwarded_body = json.dumps(enriched, ensure_ascii=False).encode("utf-8")
     if job is not None and job.status == "editing":
         await _consume_post_edit_preview_usage(db, job, user, now_utc=_utc_now())
         await db.commit()
+    if forwarded_body is not None:
+        return await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+            override_body=forwarded_body,
+        )
     return await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,

@@ -264,6 +264,9 @@ def preview_voice(
     config_path: Path,
     tts_provider: str | None = None,
     sample_text: str | None = None,
+    requires_worker: bool = False,
+    worker_target_model: str | None = None,
+    job_id: str | None = None,
 ) -> dict[str, object]:
     """Preview a voice by synthesizing test text.
 
@@ -285,6 +288,13 @@ def preview_voice(
 
     # --- Route 2: CosyVoice ---
     if tts_provider == "cosyvoice":
+        if requires_worker:
+            return _preview_cosyvoice_worker_voice(
+                voice_id,
+                text=effective_text,
+                target_model=worker_target_model,
+                job_id=job_id,
+            )
         return _preview_cosyvoice_voice(voice_id, text=effective_text)
     if not tts_provider:
         from services.tts.cosyvoice_voice_catalog import is_cosyvoice_v3_flash_builtin_voice
@@ -375,6 +385,99 @@ def _preview_cosyvoice_voice(voice_id: str, *, text: str = _PREVIEW_SAMPLE_TEXT)
             "audio_base64": "", "format": "wav", "expired": False,
             "error": "该音色在当前端点不可用，请切换端点或选择其他音色" if is_unavailable else f"试听失败: {str(exc)[:200]}",
         }
+
+
+def _preview_cosyvoice_worker_voice(
+    voice_id: str,
+    *,
+    text: str = _PREVIEW_SAMPLE_TEXT,
+    target_model: str | None,
+    job_id: str | None = None,
+) -> dict[str, object]:
+    """Preview a CosyVoice clone through the mainland worker."""
+    import base64
+
+    target_model = str(target_model or "").strip()
+    if not target_model:
+        return {
+            "audio_base64": "",
+            "format": "wav",
+            "expired": False,
+            "error": "试听失败: CosyVoice clone missing worker_target_model",
+        }
+
+    client = None
+    try:
+        from services.mainland_worker.client_factory import build_client_from_env
+        from services.mainland_worker.types import (
+            WorkerSegmentRequest,
+            WorkerSynthesizeBatchRequest,
+        )
+
+        client = build_client_from_env()
+        if client is None:
+            return {
+                "audio_base64": "",
+                "format": "wav",
+                "expired": False,
+                "error": "试听失败: CosyVoice mainland worker unavailable",
+            }
+
+        response = client.synthesize_batch(
+            WorkerSynthesizeBatchRequest(
+                job_id=str(job_id or "voice-preview"),
+                target_model=target_model,
+                audio_format="wav",
+                segments=(
+                    WorkerSegmentRequest(
+                        segment_id=1,
+                        speaker_id="preview",
+                        voice_id=voice_id,
+                        text=text,
+                        speech_rate=1.0,
+                    ),
+                ),
+            )
+        )
+        if response.target_model != target_model:
+            return {
+                "audio_base64": "",
+                "format": "wav",
+                "expired": False,
+                "error": (
+                    "试听失败: CosyVoice worker target_model mismatch "
+                    f"(requested {target_model}, got {response.target_model})"
+                ),
+            }
+        audio_map = client.extract_artifact_segments(response)
+        first_segment = response.segments[0]
+        wav_bytes = audio_map.get(first_segment.audio_path) or b""
+        if wav_bytes and len(wav_bytes) > 100:
+            return {
+                "audio_base64": base64.b64encode(wav_bytes).decode("ascii"),
+                "format": "wav",
+                "expired": False,
+                "error": None,
+            }
+        return {
+            "audio_base64": "",
+            "format": "wav",
+            "expired": False,
+            "error": "生成的音频为空",
+        }
+    except Exception as exc:
+        return {
+            "audio_base64": "",
+            "format": "wav",
+            "expired": False,
+            "error": f"试听失败: {type(exc).__name__}: {str(exc)[:180]}",
+        }
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 def _validate_voice_provider_compat(

@@ -1517,12 +1517,21 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         payload = self._read_json_payload()
                         from services.jobs.review_actions import preview_voice
                         from services import config_loader
-                        result = preview_voice(
-                            voice_id=str(payload.get("voice_id", "")).strip(),
-                            config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
-                            tts_provider=str(payload.get("tts_provider", "")).strip() or None,
-                            sample_text=str(payload.get("sample_text", "")).strip() or None,
-                        )
+                        preview_kwargs = {
+                            "voice_id": str(payload.get("voice_id", "")).strip(),
+                            "config_path": config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
+                            "tts_provider": str(payload.get("tts_provider", "")).strip() or None,
+                            "sample_text": str(payload.get("sample_text", "")).strip() or None,
+                        }
+                        if payload.get("requires_worker") is True:
+                            preview_kwargs.update({
+                                "requires_worker": True,
+                                "worker_target_model": str(
+                                    payload.get("worker_target_model", "")
+                                ).strip() or None,
+                                "job_id": job_id,
+                            })
+                        result = preview_voice(**preview_kwargs)
                         self._write_json(HTTPStatus.OK, result)
                         return
 
