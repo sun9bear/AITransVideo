@@ -297,9 +297,35 @@ async def _execute_pan_backup_impl(
                     r2_artifacts=list(r2_artifacts),
                 )
 
-                tar_path = Path(
-                    os.environ.get('TMPDIR', '/tmp')
-                ).joinpath(
+                # 2026-05-26 postmortem P0c (Codex 2nd-round). Tar staging
+                # dir: prefer settings.pan_tmp_dir (data-disk bind mount)
+                # over container TMPDIR. Falling back to /tmp inside the
+                # gateway container puts the GB-scale tar on the host
+                # overlay → host root partition — exactly the disk-full
+                # vector that triggered this postmortem.
+                #
+                # If pan_tmp_dir is set BUT doesn't exist yet, create it.
+                # The docker-compose bind mount makes the path exist on
+                # fresh container; this mkdir is for dev/test runs where
+                # the path is local.
+                from config import settings as _settings  # noqa: PLC0415 — lazy
+                tar_dir = (
+                    Path(_settings.pan_tmp_dir)
+                    if _settings.pan_tmp_dir
+                    else Path(os.environ.get('TMPDIR', '/tmp'))
+                )
+                tar_dir.mkdir(parents=True, exist_ok=True)
+
+                # Preflight: refuse to start tar build if the tmp filesystem
+                # cannot hold project_dir × ratio. Fails localized to one
+                # job — peers queued behind the global slot keep waiting.
+                _preflight_tar_disk_space(
+                    project_dir=project_dir,
+                    tar_dir=tar_dir,
+                    ratio=_settings.pan_tmp_free_space_ratio,
+                )
+
+                tar_path = tar_dir / (
                     f'pan_backup_{job_id}_{int(time.time())}.tar.gz'
                 )
                 await asyncio.to_thread(
@@ -887,6 +913,71 @@ def _compute_tar_checksums(tar_path: Path) -> tuple[str, str]:
             sha.update(chunk)
             md5.update(chunk)
     return sha.hexdigest(), md5.hexdigest()
+
+
+def _preflight_tar_disk_space(
+    *,
+    project_dir: Path,
+    tar_dir: Path,
+    ratio: float,
+) -> None:
+    """Raise RuntimeError if ``tar_dir``'s filesystem cannot hold
+    ``project_dir`` * ``ratio`` bytes.
+
+    Used to short-circuit before ``write_tar_with_manifest`` so the disk
+    never reaches 100% from a tar build that can never finish.
+
+    Uses ``shutil.disk_usage`` (cross-platform: Windows + POSIX) rather
+    than ``os.statvfs`` (POSIX-only) so unit tests on the Windows dev
+    workstation can drive this path too.
+
+    Source bytes = sum of regular-file sizes under project_dir (symlinks
+    and special files skipped — they don't materially affect tar size).
+    Missing project_dir is a programmer error (caller should have
+    validated), so we raise FileNotFoundError straight through.
+
+    Edge cases:
+    - Empty project_dir → required_bytes=0 → check always passes.
+    - tar_dir doesn't exist → caller must mkdir first; we raise.
+    - Permission errors during walk → propagate (loudly fail rather than
+      under-estimate required space).
+    """
+    if not project_dir.exists():
+        raise FileNotFoundError(
+            f'project_dir does not exist: {project_dir}'
+        )
+    if not tar_dir.exists():
+        raise FileNotFoundError(
+            f'tar_dir does not exist (caller should mkdir): {tar_dir}'
+        )
+
+    source_bytes = 0
+    for root, _dirs, files in os.walk(project_dir):
+        for name in files:
+            p = Path(root) / name
+            try:
+                if p.is_symlink():
+                    continue
+                source_bytes += p.stat().st_size
+            except (FileNotFoundError, PermissionError):
+                # Concurrent removal between walk and stat — small enough
+                # that ignoring it does not break the preflight intent.
+                continue
+
+    required_bytes = int(source_bytes * ratio)
+    usage = shutil.disk_usage(tar_dir)
+    free_bytes = usage.free
+
+    if free_bytes < required_bytes:
+        raise RuntimeError(
+            'pan_backup preflight: insufficient free space on tar staging '
+            f'filesystem. project_dir={project_dir} source={source_bytes} '
+            f'bytes; ratio={ratio} → required={required_bytes} bytes; '
+            f'tar_dir={tar_dir} free={free_bytes} bytes. Configure '
+            'AVT_PAN_TMP_DIR to point at a bind mount with sufficient '
+            'data-disk free space, or wait for in-flight backups to '
+            'release space.'
+        )
 
 
 async def _heartbeat_loop(

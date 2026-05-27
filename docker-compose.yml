@@ -211,6 +211,18 @@ services:
         source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
         target: /opt/aivideotrans/data/runtime_logs
         read_only: true
+      # 2026-05-26 postmortem P0c. Pan backup tar staging directory.
+      # MUST be a bind mount on the data partition rather than the
+      # container overlay so multi-GB tar.gz builds during pan backups
+      # do not fill the host root partition (the 2026-05-26 disk-full
+      # incident vector). Empty path → executor falls back to /tmp =
+      # container overlay = host root; configure AVT_PAN_TMP_DIR to
+      # land here. Writable: tar is written and then unlinked. The
+      # SSD partition sized for project data instead. AVT_PAN_TMP_DIR
+      # env (also set on the gateway service environment) points here.
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/_pan_tmp
+        target: /opt/aivideotrans/data/_pan_tmp
     depends_on:
       app:
         condition: service_healthy
@@ -349,6 +361,11 @@ services:
       AVT_PAN_ORPHAN_CLEANUP_WEEKDAY: "${AVT_PAN_ORPHAN_CLEANUP_WEEKDAY:-5}"
       AVT_PAN_UPLOAD_CHUNK_BYTES: "${AVT_PAN_UPLOAD_CHUNK_BYTES:-4194304}"
       AVT_PAN_TASK_STALE_HOURS: "${AVT_PAN_TASK_STALE_HOURS:-4}"
+      # 2026-05-26 postmortem P0b/P0c. Global serialization timeout +
+      # tar staging dir off the container overlay.
+      AVT_PAN_BACKUP_GLOBAL_LOCK_TIMEOUT_S: "${AVT_PAN_BACKUP_GLOBAL_LOCK_TIMEOUT_S:-14400}"
+      AVT_PAN_TMP_DIR: "${AVT_PAN_TMP_DIR:-/opt/aivideotrans/data/_pan_tmp}"
+      AVT_PAN_TMP_FREE_SPACE_RATIO: "${AVT_PAN_TMP_FREE_SPACE_RATIO:-1.5}"
       AVT_BAIDU_PAN_APPKEY: "${AVT_BAIDU_PAN_APPKEY:-}"
       AVT_BAIDU_PAN_APPSECRET: "${AVT_BAIDU_PAN_APPSECRET:-}"
       AVT_BAIDU_PAN_REDIRECT_URI: "${AVT_BAIDU_PAN_REDIRECT_URI:-}"

@@ -1556,3 +1556,208 @@ def test_release_failure_invalidates_conn(monkeypatch, tmp_path):
         f"the stuck-locked conn would return to the pool and poison "
         f"future callers."
     )
+
+
+# =========================================================================
+# 2026-05-26 postmortem P0c — tar staging dir + free-space preflight
+# =========================================================================
+#
+# Container /tmp lives on the docker overlay → host root partition. Real
+# backup tarballs are 1-15 GB. Running 7 parallel backups stacked their
+# tars on the host root and crashed the host (5.78.122.220 hit 100% disk
+# 2026-05-26). Fix: stage tar in AVT_PAN_TMP_DIR on the data partition,
+# and refuse to start tar if free space < project_dir * ratio.
+#
+# Note on ratio: tar.gz tends to be 50-80% of project_dir (compressed
+# video + WAV + JSON) so 1.5x default is generous headroom. The test
+# uses ratio=1e15 because the Windows dev workstation that runs the
+# unit tests has tens of GB free, and we need a number large enough
+# that even a 1 KB project_dir exceeds the available free space. The
+# math: required = source_bytes * 1e15 → for any nonzero project_dir,
+# required >> any plausible free disk.
+
+
+def test_preflight_helper_rejects_insufficient_space(tmp_path):
+    """Direct unit test of _preflight_tar_disk_space — fails when
+    source_bytes * ratio > free_bytes."""
+    from pan.backup_executor import _preflight_tar_disk_space
+
+    project_dir = tmp_path / 'p'
+    project_dir.mkdir()
+    (project_dir / 'a.bin').write_bytes(b'x' * 1024)  # 1 KB source
+
+    tar_dir = tmp_path / 'tar'
+    tar_dir.mkdir()
+
+    # ratio=1e15 ensures required >> free, no matter the dev box.
+    with pytest.raises(RuntimeError, match='insufficient free space'):
+        _preflight_tar_disk_space(
+            project_dir=project_dir, tar_dir=tar_dir, ratio=1e15,
+        )
+
+
+def test_preflight_helper_passes_empty_project_dir(tmp_path):
+    """Edge case: empty project_dir → required_bytes=0 → check
+    always passes regardless of ratio."""
+    from pan.backup_executor import _preflight_tar_disk_space
+
+    project_dir = tmp_path / 'p_empty'
+    project_dir.mkdir()
+    # no files inside
+
+    tar_dir = tmp_path / 'tar'
+    tar_dir.mkdir()
+
+    # Even huge ratio passes when source_bytes=0.
+    _preflight_tar_disk_space(
+        project_dir=project_dir, tar_dir=tar_dir, ratio=1e15,
+    )
+
+
+def test_preflight_helper_skips_symlinks_and_missing(tmp_path):
+    """Symlinks shouldn't be counted (their target isn't packed by
+    write_tar_with_manifest in a way we care about for free-space
+    sizing); files deleted mid-walk shouldn't crash the helper."""
+    from pan.backup_executor import _preflight_tar_disk_space
+
+    project_dir = tmp_path / 'p'
+    project_dir.mkdir()
+    (project_dir / 'a.bin').write_bytes(b'x' * 1024)
+
+    # Symlink to a 1 MB file outside project_dir. Should NOT count.
+    outside = tmp_path / 'huge.bin'
+    outside.write_bytes(b'y' * (1024 * 1024))
+    link = project_dir / 'huge_link'
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this filesystem")
+
+    tar_dir = tmp_path / 'tar'
+    tar_dir.mkdir()
+
+    # 1 KB source × 1.5 = 1.5 KB required. Should pass on any
+    # filesystem with > 1.5 KB free. If symlink was counted,
+    # required would be ~1.5 MB which still passes — so the only
+    # real assertion is "doesn't raise".
+    _preflight_tar_disk_space(
+        project_dir=project_dir, tar_dir=tar_dir, ratio=1.5,
+    )
+
+
+def test_executor_rejects_when_preflight_insufficient(monkeypatch, tmp_path):
+    """End-to-end: when settings.pan_tmp_free_space_ratio is set
+    impossibly high, executor MUST raise before tar build (so the
+    BackupRecord is rolled back to status='failed' and Job goes
+    back to 'succeeded'). The whole point of the preflight is to
+    catch this case before the disk fills up."""
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_preflight_fail'
+
+    # Force preflight to fail by cranking ratio absurdly.
+    from config import settings as _settings
+    monkeypatch.setattr(_settings, 'pan_tmp_dir', '', raising=False)
+    monkeypatch.setattr(
+        _settings, 'pan_tmp_free_space_ratio', 1e15, raising=False,
+    )
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+            client = FakeBaiduPanClient()
+
+            # Preflight is pre-COMMIT-POINT, so executor re-raises after
+            # rolling BackupRecord to 'failed' + Job back to 'succeeded'
+            # (same contract as gate_size_mismatch et al).
+            from models import Job, BackupRecord
+            with pytest.raises(RuntimeError, match='insufficient free space'):
+                await _run_executor(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                )
+
+            # Verify rollback occurred.
+            async with engine.connect() as conn:
+                row = (await conn.execute(
+                    select(Job.status).where(Job.job_id == job_id)
+                )).scalar_one()
+                assert row == 'succeeded', (
+                    f"Expected Job back to 'succeeded' after preflight "
+                    f"abort; got status={row!r}"
+                )
+                br_status = (await conn.execute(
+                    select(BackupRecord.status).where(
+                        BackupRecord.job_id == job_id
+                    )
+                )).scalar_one()
+                assert br_status == 'failed', (
+                    f"Expected BackupRecord.status='failed' after "
+                    f"preflight abort; got {br_status!r}"
+                )
+
+    run_async(_go())
+
+
+def test_executor_uses_pan_tmp_dir_setting(monkeypatch, tmp_path):
+    """When settings.pan_tmp_dir is set, tar is written there (not /tmp).
+    Verifies the production wiring that keeps the tar OFF the container
+    overlay."""
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_pan_tmp_dir'
+
+    pan_tmp = tmp_path / 'pan_tmp_staging'
+    pan_tmp.mkdir()
+
+    from config import settings as _settings
+    monkeypatch.setattr(_settings, 'pan_tmp_dir', str(pan_tmp), raising=False)
+    monkeypatch.setattr(
+        _settings, 'pan_tmp_free_space_ratio', 0.001, raising=False,
+    )
+
+    # Capture the tar path the executor actually uses by monkeypatching
+    # write_tar_with_manifest to record its first arg.
+    captured_paths = []
+    from pan import manifest as manifest_mod
+
+    real_write = manifest_mod.write_tar_with_manifest
+
+    def spy_write(tar_path, *args, **kwargs):
+        captured_paths.append(Path(tar_path))
+        return real_write(tar_path, *args, **kwargs)
+
+    monkeypatch.setattr(manifest_mod, 'write_tar_with_manifest', spy_write)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+            client = FakeBaiduPanClient()
+            await _run_executor(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client,
+            )
+
+    run_async(_go())
+
+    assert captured_paths, "executor never invoked write_tar_with_manifest"
+    tar_path = captured_paths[0]
+    assert tar_path.parent == pan_tmp, (
+        f"Expected tar in pan_tmp_dir ({pan_tmp}); got parent "
+        f"{tar_path.parent}. If the executor falls back to /tmp here, "
+        f"the disk-full bug returns in production."
+    )

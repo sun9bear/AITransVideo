@@ -193,13 +193,41 @@ class GatewaySettings(BaseSettings):
     # Codex P0b v3 raised this from 1800s (30 min) — too short:
     # realistic backups are 10-30 min and a 15-job batch under serial
     # execution stretches to 2-7 hours of total queue time. With 4h
-    # cap, ~8-12 queued backups complete before tail timeout. If a
-    # single backup hangs >4h, stale_reaper reaps it and unblocks
-    # the queue automatically. Long-term: queue-layer serial consumer
-    # (one worker pulling from a queue) instead of N parallel waiters.
+    # cap, ~8-12 queued backups complete before tail timeout.
+    #
+    # Codex P0c nit on the previous wording: if a single backup hangs
+    # >4h, stale_reaper reaps the BackupRecord row (status='failed')
+    # so the user-facing row is unstuck, but the PG session holding
+    # the global advisory lock belongs to the wedged executor and
+    # only releases when that connection itself dies (server-side
+    # idle timeout or container restart). Waiters do NOT immediately
+    # get a slot — they keep polling until the dead session is gone.
+    # Operationally a permanently-wedged executor still needs a
+    # ``docker restart aivideotrans-gateway`` to free the lock fast.
+    # Long-term: queue-layer serial consumer (one worker pulling
+    # from a queue) instead of N parallel waiters.
     pan_backup_global_lock_timeout_s: int = 14400    # 4 hours max wait
     pan_backup_global_lock_poll_base_s: float = 2.0  # initial poll interval
     pan_backup_global_lock_poll_max_s: float = 30.0  # capped exponential
+
+    # 2026-05-26 postmortem P0c (Codex 2nd-round). Pan backup tar staging.
+    # Empty default → falls back to tempfile.gettempdir() → /tmp inside
+    # gateway container → host overlay → host root partition. That was
+    # the direct vector for the 2026-05-26 disk-full incident.
+    # Production sets AVT_PAN_TMP_DIR to a data-disk bind-mount path
+    # (e.g. /opt/aivideotrans/data/_pan_tmp); docker-compose volumes
+    # block mounts the host path so tar lives on the SSD partition
+    # sized for project data, NOT the container overlay.
+    pan_tmp_dir: str = ""
+
+    # Free-space preflight ratio: tar.gz needs at least this multiple
+    # of project_dir size in the tmp filesystem before tar build starts.
+    # 1.5: tar.gz is typically 50-80% of project_dir (compressed video +
+    # WAV + JSON), plus headroom for concurrent writes. Operators with
+    # WAV-heavy projects (which gzip poorly) might tune higher. Check
+    # runs INSIDE the per-job slot lock, so failure localizes to one
+    # job — others queued behind keep waiting.
+    pan_tmp_free_space_ratio: float = 1.5
 
     # Baidu Pan OAuth credentials (env names automatically prefixed AVT_).
     baidu_pan_appkey: str = ""
