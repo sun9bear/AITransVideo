@@ -959,9 +959,14 @@ def _preflight_tar_disk_space(
                 if p.is_symlink():
                     continue
                 source_bytes += p.stat().st_size
-            except (FileNotFoundError, PermissionError):
+            except FileNotFoundError:
                 # Concurrent removal between walk and stat — small enough
                 # that ignoring it does not break the preflight intent.
+                # PermissionError is NOT swallowed (Codex P0c nit:
+                # docstring promises "permission errors propagate"); if
+                # build_manifest can't read a file the tar build would
+                # blow up anyway, so let the loudly-visible exception
+                # bubble up here too.
                 continue
 
     required_bytes = int(source_bytes * ratio)
