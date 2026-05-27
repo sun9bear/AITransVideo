@@ -679,6 +679,22 @@ async def _acquire_pan_backup_slot(
         # Open fresh conn for this attempt.
         cm = engine.connect()
         conn = await cm.__aenter__()
+
+        # 2026-05-26 postmortem P0b v3 (Codex 3rd-round). Track exactly
+        # what was acquired so EVERY exit path (success, fail, exception,
+        # CancelledError) can release the right subset. SQLAlchemy's
+        # connection pool reuses underlying DBAPI sessions; pg_advisory_lock
+        # is SESSION-level, so a leaked lock survives `cm.__aexit__()`
+        # (which just returns the conn to the pool). The next pool grab
+        # might get THAT VERY conn still holding the lock → infinite
+        # waiter chain. We must:
+        #   1. Track acquired locks via local flags.
+        #   2. Release on every exit path including BaseException.
+        #   3. If release itself fails, INVALIDATE the conn so SQLAlchemy
+        #      discards it from the pool (instead of poisoning future
+        #      callers).
+        got_global = False
+        got_per_job = False
         try:
             got_global = await _try_advisory_lock(
                 conn, PAN_BACKUP_GLOBAL_LOCK_KEY,
@@ -690,47 +706,62 @@ async def _acquire_pan_backup_slot(
                     # explicit conn.begin() works.
                     if conn.dialect.name == 'postgresql':
                         await conn.commit()
+                    body_raised: BaseException | None = None
                     try:
                         yield conn
+                    except BaseException as body_exc:
+                        body_raised = body_exc
+                        # Don't `raise` here — finally needs to run the
+                        # full leak-proof release path. Re-raise AFTER.
                     finally:
-                        # Release in reverse acquire order. SAME conn,
-                        # SAME session — guaranteed valid.
-                        try:
-                            await _release_advisory_lock(conn, per_job_key)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "pan_backup release per-job lock failed: %s",
-                                exc,
-                            )
-                        try:
-                            await _release_advisory_lock(
-                                conn, PAN_BACKUP_GLOBAL_LOCK_KEY,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "pan_backup release global lock failed: %s",
-                                exc,
-                            )
+                        # Body completed (cleanly or via exception).
+                        # Release locks reverse acquire order; on any
+                        # release failure invalidate the conn so it
+                        # never returns to the pool stuck-locked.
+                        await _release_lock_or_invalidate(
+                            conn, per_job_key, label='per-job',
+                        )
+                        await _release_lock_or_invalidate(
+                            conn, PAN_BACKUP_GLOBAL_LOCK_KEY, label='global',
+                        )
                         await cm.__aexit__(None, None, None)
+                    if body_raised is not None:
+                        raise body_raised
                     return
-                # Got global but NOT per-job. Release global before sleep.
-                try:
-                    await _release_advisory_lock(
-                        conn, PAN_BACKUP_GLOBAL_LOCK_KEY,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-            # Didn't get both — close conn before sleeping. This is the
-            # entire point of P0b v2: no conn held while waiting.
-            await cm.__aexit__(None, None, None)
         except BaseException:
-            # Defensive: any exception, close conn before propagating
-            # so we don't leak a pool slot.
+            # Acquire path raised (CancelledError between get_global and
+            # get_per_job, or asyncpg blip, etc.) OR the per-job try-call
+            # raised. Whatever's been acquired so far must be released
+            # before we propagate.
+            if got_per_job:
+                await _release_lock_or_invalidate(
+                    conn, per_job_key, label='per-job',
+                )
+            if got_global:
+                await _release_lock_or_invalidate(
+                    conn, PAN_BACKUP_GLOBAL_LOCK_KEY, label='global',
+                )
             try:
                 await cm.__aexit__(None, None, None)
             except Exception:  # noqa: BLE001
                 pass
             raise
+
+        # Contention path: didn't acquire both. Release what we did get
+        # in reverse order. If got_global=True but per_job try-call
+        # returned False (not raised), we must release global.
+        if got_per_job:
+            await _release_lock_or_invalidate(
+                conn, per_job_key, label='per-job',
+            )
+        if got_global:
+            await _release_lock_or_invalidate(
+                conn, PAN_BACKUP_GLOBAL_LOCK_KEY, label='global',
+            )
+        # Now close conn back to pool. This is the entire point of
+        # P0b v2: no conn held while waiting. If invalidate() above
+        # marked the conn bad, __aexit__ discards it instead of pooling.
+        await cm.__aexit__(None, None, None)
 
         # Timeout check.
         elapsed = time.monotonic() - start
@@ -788,6 +819,55 @@ async def _release_advisory_lock(conn: AsyncConnection, key: int) -> None:
         await conn.execute(
             text("SELECT pg_advisory_unlock(:k)"), {'k': key},
         )
+
+
+async def _release_lock_or_invalidate(
+    conn: AsyncConnection, key: int, *, label: str,
+) -> bool:
+    """Best-effort release of a session advisory lock; invalidate the
+    conn if release fails.
+
+    2026-05-26 postmortem P0b v3 (Codex 3rd-round). SQLAlchemy returns
+    physical DBAPI connections to the pool on ``__aexit__()`` — that
+    does NOT close the PostgreSQL backend session. ``pg_advisory_lock``
+    is session-level: a lock leaked here persists on whatever pool
+    member next checks the conn out. Subsequent ``pg_try_advisory_lock``
+    on the SAME key from the SAME conn would actually succeed (re-entrant
+    behavior in PG), but from a DIFFERENT conn (different session) it
+    fails → indefinite contention.
+
+    To prevent pool poisoning when the release SQL itself fails (network
+    blip, server timeout, asyncpg error mid-roundtrip), we invalidate
+    the conn so SQLAlchemy disposes it on the next ``__aexit__()`` rather
+    than returning it to the pool stuck-locked.
+
+    Returns True if release SQL succeeded; False if release raised and
+    conn was invalidated.
+    """
+    try:
+        await _release_advisory_lock(conn, key)
+        return True
+    except BaseException as exc:  # noqa: BLE001 — catch CancelledError too
+        logger.warning(
+            "pan_backup: release of %s advisory lock %d failed (%s); "
+            "invalidating connection to prevent pool poisoning",
+            label, key, exc,
+        )
+        try:
+            # invalidate() marks the conn as no-good. The subsequent
+            # __aexit__ will then discard the underlying DBAPI conn
+            # instead of returning it to the pool.
+            await conn.invalidate()
+        except Exception as inv_exc:  # noqa: BLE001
+            # If invalidate ALSO fails, log loudly — operator may need
+            # to manually restart Gateway to clear the lock.
+            logger.error(
+                "pan_backup: CRITICAL — release of %s lock %d failed AND "
+                "conn.invalidate() also failed (%s). Lock may persist on "
+                "pool conn until Gateway restart. Original release err: %s",
+                label, key, inv_exc, exc,
+            )
+        return False
 
 
 # NOTE: _verify_project_dir_safety was removed in favor of

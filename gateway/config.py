@@ -189,9 +189,15 @@ class GatewaySettings(BaseSettings):
     # batch API accepting up to 100 jobs, 14 waiters could starve the
     # entire pool. Poll-based waits release the conn between attempts.
     #
-    # Defaults below are sized for: 5-30 min per backup × ~5-10 waiters
-    # in queue under heavy batch use. Operators can tune via env vars.
-    pan_backup_global_lock_timeout_s: int = 1800     # 30 min max wait for slot
+    # Default 14400s = 4 hours, MATCHING ``pan_task_stale_hours``.
+    # Codex P0b v3 raised this from 1800s (30 min) — too short:
+    # realistic backups are 10-30 min and a 15-job batch under serial
+    # execution stretches to 2-7 hours of total queue time. With 4h
+    # cap, ~8-12 queued backups complete before tail timeout. If a
+    # single backup hangs >4h, stale_reaper reaps it and unblocks
+    # the queue automatically. Long-term: queue-layer serial consumer
+    # (one worker pulling from a queue) instead of N parallel waiters.
+    pan_backup_global_lock_timeout_s: int = 14400    # 4 hours max wait
     pan_backup_global_lock_poll_base_s: float = 2.0  # initial poll interval
     pan_backup_global_lock_poll_max_s: float = 30.0  # capped exponential
 

@@ -10,6 +10,7 @@ because we don't want 60s waits in unit tests.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import tarfile
 import uuid
@@ -1345,3 +1346,213 @@ def test_acquire_pan_backup_slot_times_out(monkeypatch, tmp_path):
                 )
 
     run_async(_go())
+
+
+# =========================================================================
+# P0b v3 — exception-path lock leak prevention (Codex 3rd-round on 4c13716a)
+# =========================================================================
+
+
+def test_global_released_when_per_job_try_raises(monkeypatch, tmp_path):
+    """If _try_advisory_lock(per_job) RAISES after _try_advisory_lock(global)
+    succeeded, the global lock MUST be released before the exception
+    propagates. Otherwise the global key stays held on a conn that's
+    returned to the pool → all subsequent backups starve forever.
+
+    Test: monkeypatch _try_advisory_lock to grant GLOBAL, then raise on
+    per-job the first attempt only. Assert GLOBAL release was called.
+    """
+    from pan import backup_executor as be_mod
+    from pan._lock_keys import PAN_BACKUP_GLOBAL_LOCK_KEY
+    from config import settings
+
+    setup_pan_token_env(monkeypatch)
+    monkeypatch.setattr(settings, "pan_backup_global_lock_poll_base_s", 0.01)
+    monkeypatch.setattr(settings, "pan_backup_global_lock_poll_max_s", 0.05)
+
+    user_id = uuid.uuid4()
+    job_id = 'job_per_job_raises'
+
+    released_keys: list[int] = []
+    real_release = be_mod._release_advisory_lock
+
+    async def spy_release(conn, key):
+        released_keys.append(key)
+        return await real_release(conn, key)
+
+    monkeypatch.setattr(be_mod, '_release_advisory_lock', spy_release)
+
+    async def try_then_raise(conn, key):
+        if key == PAN_BACKUP_GLOBAL_LOCK_KEY:
+            return True
+        # per_job: always raise. This forces the acquire path's
+        # except-BaseException branch in _acquire_pan_backup_slot which
+        # must release GLOBAL before propagating.
+        raise RuntimeError("simulated per-job try-lock failure")
+
+    monkeypatch.setattr(be_mod, '_try_advisory_lock', try_then_raise)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+            client = FakeBaiduPanClient()
+
+            with pytest.raises(RuntimeError, match='per-job try-lock'):
+                await _run_executor(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                )
+
+    run_async(_go())
+
+    # Critical: GLOBAL release must have happened at least once before
+    # the eventual retry succeeded. Otherwise the first attempt would
+    # have leaked the global lock on a returned-to-pool conn.
+    assert PAN_BACKUP_GLOBAL_LOCK_KEY in released_keys, (
+        f"GLOBAL lock not released after per-job try raised. "
+        f"Releases: {released_keys}. This would leak the global lock "
+        f"on the returned-to-pool conn → pool poisoning."
+    )
+
+
+def test_global_released_on_cancelled_error_mid_body(monkeypatch, tmp_path):
+    """If the executor's body is CancelledError'd mid-way (e.g. gateway
+    shutdown, task.cancel()), BOTH global and per-job locks MUST be
+    released before propagating the cancellation.
+
+    Without this, gateway restart leaves stuck-locked conns in the pool.
+    On restart, the reconciler relaunches the cancelled task but it
+    can never acquire the locks → indefinite contention.
+    """
+    from pan import backup_executor as be_mod
+    from pan._lock_keys import (
+        pan_lock_key, PAN_BACKUP_GLOBAL_LOCK_KEY,
+    )
+
+    setup_pan_token_env(monkeypatch)
+
+    user_id = uuid.uuid4()
+    job_id = 'job_cancel_mid_body'
+    per_job_key = pan_lock_key(user_id, job_id)
+
+    released_keys: list[int] = []
+    real_release = be_mod._release_advisory_lock
+
+    async def spy_release(conn, key):
+        released_keys.append(key)
+        return await real_release(conn, key)
+
+    monkeypatch.setattr(be_mod, '_release_advisory_lock', spy_release)
+
+    # Inject CancelledError once the executor enters the slot body.
+    # The cleanest hook: monkeypatch the manifest builder (called early
+    # inside the body after both locks are acquired) to raise.
+    from pan import manifest as manifest_mod
+
+    def raise_cancelled(*args, **kwargs):
+        raise asyncio.CancelledError("simulated mid-body cancellation")
+
+    monkeypatch.setattr(manifest_mod, 'build_manifest', raise_cancelled)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+            client = FakeBaiduPanClient()
+
+            with pytest.raises(asyncio.CancelledError):
+                await _run_executor(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                )
+
+    run_async(_go())
+
+    # BOTH locks must have been released before CancelledError propagated.
+    assert per_job_key in released_keys, (
+        f"per-job lock not released on CancelledError. "
+        f"Releases: {released_keys}"
+    )
+    assert PAN_BACKUP_GLOBAL_LOCK_KEY in released_keys, (
+        f"GLOBAL lock not released on CancelledError. "
+        f"Releases: {released_keys}"
+    )
+
+
+def test_release_failure_invalidates_conn(monkeypatch, tmp_path):
+    """If _release_advisory_lock SQL itself fails (network blip, asyncpg
+    error mid-roundtrip), the conn MUST be invalidated. Otherwise it
+    returns to the pool with a still-held PG session lock — next
+    backup grabs the same physical conn and the lock looks free
+    via pg_try_advisory_lock on the SAME session (PG re-entrant
+    locking quirk) but actually blocks any OTHER conn.
+
+    Test: monkeypatch _release_advisory_lock to raise. Assert
+    conn.invalidate() was called.
+    """
+    from pan import backup_executor as be_mod
+
+    setup_pan_token_env(monkeypatch)
+
+    user_id = uuid.uuid4()
+    job_id = 'job_release_fails'
+
+    invalidate_called = {'count': 0}
+
+    # Patch the AsyncConnection class to instrument invalidate().
+    from sqlalchemy.ext.asyncio import AsyncConnection
+    real_invalidate = AsyncConnection.invalidate
+
+    async def spy_invalidate(self, *args, **kwargs):
+        invalidate_called['count'] += 1
+        return await real_invalidate(self, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncConnection, 'invalidate', spy_invalidate)
+
+    # Force release SQL to raise.
+    async def failing_release(conn, key):
+        raise RuntimeError("simulated release SQL failure")
+
+    monkeypatch.setattr(be_mod, '_release_advisory_lock', failing_release)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+            client = FakeBaiduPanClient()
+
+            await _run_executor(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client,
+            )
+
+    run_async(_go())
+
+    # Both releases failed (per-job + global), each triggering
+    # invalidate(). So invalidate count should be >= 2 (could be more
+    # if any other lock paths also failed).
+    assert invalidate_called['count'] >= 2, (
+        f"conn.invalidate() called {invalidate_called['count']} times; "
+        f"expected >= 2 (one per failing release). Without invalidation, "
+        f"the stuck-locked conn would return to the pool and poison "
+        f"future callers."
+    )
