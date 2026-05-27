@@ -1,7 +1,7 @@
 # Phase 4.2 F — Deployment & Canary Rollout Spec
 
 **作者：** Claude Code
-**版本：** v0.15（Codex 自审三轮：§16 全部决策落档 + app import sanity + OSS round-trip）
+**版本：** v0.16（F.0 实测修正：jobs.current_stage 生产列名）
 **日期：** 2026-05-27
 **前置：** E.2 已合并（PR #16，commit `29991ccd`）
 **目的：** 把 Phase 4.2 全套代码（A.1/A.2a/A.2b/A.2c/D.1/D.2/E.1/E.2）+ 2 个 migration（030/031）上 US prod，按"admin-only 烟测 → GA flip"两步灰度。
@@ -243,17 +243,17 @@ PowerShell 调用整段范例：
 
 ```sql
 -- 1. 查所有 active job
-SELECT id, user_id, status, current_step, updated_at, created_at
+SELECT id, user_id, status, current_stage, updated_at, created_at
 FROM jobs
 WHERE status IN ('pending', 'running', 'editing', 'paused', 'awaiting_review')
 ORDER BY updated_at DESC
 LIMIT 50;
 
 -- 2. 查 worker_active 状态的 job（pipeline 在跑）
-SELECT id, status, current_step, started_at
+SELECT id, status, current_stage, started_at
 FROM jobs
 WHERE status IN ('running')
-  AND current_step IS NOT NULL
+  AND current_stage IS NOT NULL
 ORDER BY started_at DESC;
 
 -- 3. 查最近 30 分钟有日志写入的 job（间接判断活跃度）
@@ -275,7 +275,7 @@ ORDER BY last_event DESC;
 
 ```sql
 -- Blocker check (must be empty)
-SELECT id, user_id, status, current_step, updated_at
+SELECT id, user_id, status, current_stage, updated_at
 FROM jobs
 WHERE status IN ('running', 'pending', 'awaiting_review')
 ORDER BY updated_at DESC
@@ -2407,6 +2407,12 @@ v0.9 已有的 10 个 + v0.10 新增 6 个 = **共 16 个临时脚本**。所有
 | P1-1 | §16 Layer 2 hard kill 是否必须先做 admin UI | F 阶段接受 CLI hard kill；UI toggle 拆到 F 后专项，不阻塞 deploy |
 | P1-2 | §6.2 只做 uploader factory/config probe，不实际 PUT/GET | §6.2 强制真实 OSS round-trip：5 秒 WAV PUT、signed GET sha256、delete、删除后 403/404 |
 | P1-3 | §6.8 cleanup 依赖 app 容器 import `src.services...client_factory`，但 F.0 未验证 | 新增 §2.4b app 容器 import sanity，失败则不进 F.1 |
+
+## §15.17 v0.15 → v0.16 修订记录（F.0 实测修正）
+
+| # | v0.15 问题 | v0.16 修复 |
+|---|---|---|
+| P1-1 | F.0 in-flight SQL 使用 `jobs.current_step`，生产 DB 报 `column "current_step" does not exist`，提示真实列为 `jobs.current_stage` | §2.1 全部 in-flight SQL 改用 `current_stage`，包括 blocker 列表、running worker query 和示例查询 |
 
 ## §16 v0.15 部署前结论（Codex 自审三轮）
 
