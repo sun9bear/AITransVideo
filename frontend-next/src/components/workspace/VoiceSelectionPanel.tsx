@@ -979,6 +979,40 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                             </optgroup>
                           )
                         })()}
+                        {/* Phase 4.2 E.1 PR #15 Codex P2² fix (2026-05-27):
+                            CosyVoice personal clones. After a successful
+                            CosyVoice clone the new voice lives in
+                            `personalVoices` but the prior code only
+                            rendered MiniMax optgroups → select had a
+                            voiceId without a matching <option> → user
+                            saw an empty dropdown after closing the modal.
+                            Filter on multiple acceptable shapes:
+                              - provider === 'cosyvoice_voice_clone' (canonical
+                                value gateway writes on clone success)
+                              - ttsProvider === 'cosyvoice' (UserVoiceEntry
+                                lowercased flavour)
+                            so we don't accidentally exclude rows from old
+                            test fixtures or upcoming backend renames. */}
+                        {(() => {
+                          if (currentProvider !== 'cosyvoice') return null
+                          const cosyClones = personalVoices.filter((v) => {
+                            if (expiredVoiceIds.includes(v.voiceId)) return false
+                            return (
+                              v.provider === 'cosyvoice_voice_clone'
+                              || v.ttsProvider === 'cosyvoice'
+                            )
+                          })
+                          if (cosyClones.length === 0) return null
+                          return (
+                            <optgroup label="我的 CosyVoice 克隆音色">
+                              {cosyClones.map((v) => (
+                                <option key={`cosy-clone-${v.voiceId}`} value={v.voiceId}>
+                                  {v.label || v.voiceId}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )
+                        })()}
                         {/* Smart recommendations (Task 2): top match + backups, pinned to top */}
                         {(() => {
                           const provMatch = sp.autoMatchedByProvider[currentProvider]

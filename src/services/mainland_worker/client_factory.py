@@ -27,8 +27,28 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING
 
-from services.mainland_worker.client import MainlandWorkerClient, WorkerCredentials
+# **NO** top-level import of ``services.mainland_worker.client`` here. That
+# module pulls in ``httpx``, which is a Gateway-side dependency (not in the
+# core app/CLI ``requirements.txt``). Pipeline subprocesses import this
+# module to call ``is_worker_enabled_in_env()`` even when ``httpx`` isn't
+# installed — top-level ``MainlandWorkerClient`` import would fail in those
+# environments with ``ModuleNotFoundError: No module named 'httpx'``.
+#
+# E.1 PR #15 Codex P1 二轮 fix (2026-05-27): keep ``is_worker_enabled_in_env``
+# completely dependency-free. ``build_client_from_env`` lazily imports the
+# client classes inside its function body, so only callers that actually
+# want a built client need ``httpx`` available.
+#
+# Guard: ``tests/test_phase42_e1_cosyvoice_supports_clone_factory.py::
+# test_a0b_probe_module_import_does_not_pull_httpx`` locks this contract.
+if TYPE_CHECKING:
+    # Type-only import — stripped at runtime, so it doesn't pull `httpx`.
+    from services.mainland_worker.client import (
+        MainlandWorkerClient,
+        WorkerCredentials,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -70,13 +90,25 @@ def is_worker_enabled_in_env() -> bool:
     return _env_truthy(os.environ.get(ENV_ENABLED))
 
 
-def build_client_from_env() -> MainlandWorkerClient | None:
+def build_client_from_env() -> "MainlandWorkerClient | None":
     """从 ``os.environ`` 构造 ``MainlandWorkerClient`` 或返 ``None``。
 
     **不读任何参数 / 任何文件**——secret 单一来源是 env。
 
     返非 None 的 client 实例在调用方负责 ``close()``，或者用 ``with`` 语法
     （MainlandWorkerClient 支持 context manager）。
+
+    **Lazy import of MainlandWorkerClient** (E.1 PR #15 P1 二轮 fix): the
+    client class lives in ``services.mainland_worker.client`` which depends
+    on ``httpx``. ``httpx`` is a Gateway-side dependency not always present
+    in the core app/CLI environment. Lazy-importing inside the function
+    body keeps ``is_worker_enabled_in_env`` (and bare module import)
+    dependency-free; only callers that actually want a constructed client
+    need ``httpx`` available. The lazy import does NOT change behavior —
+    if a caller actually invokes ``build_client_from_env`` in an
+    env without ``httpx``, the ``ImportError`` surfaces at that call
+    (not at module import time), which is the intended fail-loud point
+    for actual clone code paths.
     """
     if not _env_truthy(os.environ.get(ENV_ENABLED)):
         # enabled=False 是预期常态（dev / CI / 国际部署），不打 warning
@@ -96,6 +128,12 @@ def build_client_from_env() -> MainlandWorkerClient | None:
             ENV_ENABLED, url, bool(key_id), bool(secret),
         )
         return None
+
+    # Lazy import — `httpx` only needed when actually constructing a client.
+    from services.mainland_worker.client import (
+        MainlandWorkerClient,
+        WorkerCredentials,
+    )
 
     return MainlandWorkerClient(
         base_url=url,
