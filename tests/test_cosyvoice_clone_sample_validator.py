@@ -540,16 +540,18 @@ def test_format_check_runs_before_ffprobe(monkeypatch) -> None:
     assert calls == [], "格式校验失败时不该调用 ffprobe"
 
 
-def test_ffprobe_command_uses_pipe_stdin(monkeypatch) -> None:
-    """通过 stdin 喂数据（``-i pipe:0``），不写临时文件。"""
+def test_ffprobe_command_uses_temp_file_path(monkeypatch) -> None:
+    """通过临时文件喂给 ffprobe，避免 pipe 输入拿不到 duration。"""
     calls = _install_ffprobe_mock(monkeypatch)
     wav = generate_silent_wav(2000)
     validate_sample_bytes(wav)
     assert len(calls) == 1
     cmd_args = calls[0]["args"][0]
     assert "-i" in cmd_args
-    assert "pipe:0" in cmd_args
-    assert calls[0]["kwargs"]["input"] == wav
+    input_path = cmd_args[cmd_args.index("-i") + 1]
+    assert input_path != "pipe:0"
+    assert input_path
+    assert calls[0]["kwargs"].get("input") is None
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -353,22 +355,31 @@ def _probe_with_ffprobe(
     ::
 
         ffprobe -v error -print_format json -show_format -show_streams \\
-            -read_intervals "%+#5" -i pipe:0
+            -i <temporary-sample-file>
 
     输出 JSON，第一个 audio stream 的 sample_rate / channels / duration 即可。
     """
-    cmd = [
-        ffprobe_path,
-        "-v", "error",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        "-i", "pipe:0",
-    ]
+    tmp_path: str | None = None
     try:
+        with tempfile.NamedTemporaryFile(
+            prefix="cosyvoice_clone_sample_",
+            suffix=".bin",
+            delete=False,
+        ) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            tmp_path = tmp.name
+
+        cmd = [
+            ffprobe_path,
+            "-v", "error",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            "-i", tmp_path,
+        ]
         proc = subprocess.run(
             cmd,
-            input=data,
             capture_output=True,
             timeout=timeout_s,
             check=False,
@@ -379,6 +390,16 @@ def _probe_with_ffprobe(
         ) from exc
     except FileNotFoundError as exc:  # pragma: no cover — 部署环境 always 有 ffprobe
         raise _ProbeError(f"ffprobe not found in PATH ({ffprobe_path!r})") from exc
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                logger.warning(
+                    "failed to remove temporary cosyvoice sample probe file: %s",
+                    tmp_path,
+                    exc_info=True,
+                )
 
     if proc.returncode != 0:
         stderr_snippet = proc.stderr.decode("utf-8", errors="replace")[:500]
