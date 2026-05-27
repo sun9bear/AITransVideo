@@ -1,7 +1,7 @@
 # Phase 4.2 F — Deployment & Canary Rollout Spec
 
 **作者：** Claude Code
-**版本：** v0.16（F.0 实测修正：jobs.current_stage 生产列名）
+**版本：** v0.19（F.0 实测修正：tar exclude 使用 POSIX glob）
 **日期：** 2026-05-27
 **前置：** E.2 已合并（PR #16，commit `29991ccd`）
 **目的：** 把 Phase 4.2 全套代码（A.1/A.2a/A.2b/A.2c/D.1/D.2/E.1/E.2）+ 2 个 migration（030/031）上 US prod，按"admin-only 烟测 → GA flip"两步灰度。
@@ -69,8 +69,8 @@
 ### 0.3 F 部署目标
 
 1. **F.0**：部署前检查（in-flight / DB 状态 / 当前 hash / env 完整性）—— **必须全绿**才进 F.1
-2. **F.1**：alembic 030 + 031 一次性 upgrade
-3. **F.2**：镜像 rebuild + 容器 recreate（gateway → app → next.js 顺序）
+2. **F.1**：同步代码到 build context，build 新 gateway image（不 recreate），用 one-off gateway container 跑 031 migration
+3. **F.2**：容器 recreate（gateway → app → next.js 顺序）
 4. **F.3**：admin-only 初始状态验证（`general_availability_enabled=false`）
 5. **F.4**：admin 账号真烟测（含 1 次真 clone + 真 TTS）—— **必须全绿**才进 F.5
 6. **F.5**：GA flip（`general_availability_enabled=true`）+ rollback 开关
@@ -294,7 +294,7 @@ GROUP BY status;
 # 期望输出：029_pan_backup (head)
 ```
 
-通过标准：head 是 **029**。若已经是 030 / 031 → 说明有人提前部署过；停下来调查。
+通过标准：head 是 **030_cosyvoice_clone_metadata**。F.0 实测生产当前就是 030：Phase 4.1 的 clone metadata schema 已经部署；F 只需要补 031 `user_voices` temporary expiry migration。若已经是 031 → 说明有人提前部署过，停下来调查 schema/data；若仍是 029 → 说明 030 未部署，必须回到 Phase 4.1 migration 复核。
 
 ### 2.3 当前各 container 镜像 hash + 版本
 
@@ -411,7 +411,7 @@ Remove-Item D:\Claude\temp\f_step24_env_audit.py
 # f_step24b_app_import_sanity.sh — F.0 app 容器 import + worker client factory sanity
 set -euo pipefail
 
-docker exec aivideotrans-app python3 <<'PYEOF'
+docker exec -i aivideotrans-app python3 <<'PYEOF'
 from src.services.mainland_worker.client_factory import build_client_from_env
 
 client = build_client_from_env()
@@ -465,10 +465,10 @@ cp /opt/aivideotrans/docker-compose.yml \
 cd /opt/aivideotrans && tar \
   --exclude='./data' --exclude='./backups' \
   --exclude='./staging' \
-  --exclude='./node_modules' --exclude='*/node_modules' \
-  --exclude='./frontend-next/.next' --exclude='*/.next' \
-  --exclude='./.pytest_cache' --exclude='*/.pytest_cache' \
-  --exclude='./__pycache__' --exclude='*/__pycache__' \
+  --exclude='*/node_modules' --exclude='*/node_modules/*' \
+  --exclude='*/.next' --exclude='*/.next/*' \
+  --exclude='*/.pytest_cache' --exclude='*/.pytest_cache/*' \
+  --exclude='*/__pycache__' --exclude='*/__pycache__/*' \
   --exclude='./.git' \
   -czf /opt/aivideotrans/backups/app_pre_phase42_${DEPLOY_TS}.tar.gz ./app
 
@@ -508,7 +508,7 @@ FROM user_voices;
 
 ---
 
-## §3 F.1 Migration 执行
+## §3 F.1 Migration 执行（v0.19：生产当前 030，只补 031）
 
 ### 3.1 030 + 031 都是普通 `op.create_index`（**非 CONCURRENTLY**）—— Codex 已确认
 
@@ -529,7 +529,14 @@ SELECT count(*) AS user_voices_rows FROM user_voices;
 
 US prod 当前 user_voices 行数预期在 **几百 ~ 几千**（Phase 4.1 上线后累积），属于 <10k 区间。F.0 必须实测一遍。
 
-### 3.2 030 + 031 一次性 upgrade 流程
+### 3.2 031 upgrade 流程（先同步代码 / 构建 gateway image，但不 recreate）
+
+**F.0 实测事实：** US prod 当前 gateway build context 与运行中 gateway image 都只到 `030_cosyvoice_clone_metadata`；本地 main 才有 `031_user_voice_temp_expiry.py`。因此不能在旧 gateway container 内直接 `alembic upgrade head`，否则旧 image 的 `head` 仍是 030。正确顺序：
+
+1. 先执行 §4.3 代码同步，把 main HEAD 发布到 `/opt/aivideotrans/app` build context。
+2. 只执行 `docker compose --env-file /opt/aivideotrans/config/.env build gateway`，**不** `up -d gateway`，不替换运行中 gateway。
+3. 用新 gateway image 开 one-off container 跑 `alembic upgrade head`，此时 head 才是 031。
+4. 031 成功后，再进入 §4.4/§4.5/§4.6 recreate gateway/app/next。
 
 **Review checklist（pre-flight）：**
 - [ ] §3.1 行数 precheck 落在 <10k（或与处置规则一致）
@@ -549,21 +556,26 @@ cd /opt/aivideotrans
 echo "=== alembic current (before) ==="
 docker compose --env-file /opt/aivideotrans/config/.env exec -T gateway alembic current
 
-echo "=== dry-run SQL 029 -> 031 ==="
-docker compose --env-file /opt/aivideotrans/config/.env exec -T gateway \
-  alembic upgrade --sql 029_pan_backup:031_user_voice_temp_expiry > /tmp/migration_030_031.sql
+echo "=== build gateway image with new migration files (no recreate) ==="
+docker compose --env-file /opt/aivideotrans/config/.env build gateway
 
-if grep -Eiq 'DROP TABLE|DROP COLUMN|ALTER COLUMN .* TYPE' /tmp/migration_030_031.sql; then
+echo "=== dry-run SQL 030 -> 031 ==="
+docker compose --env-file /opt/aivideotrans/config/.env run --rm --no-deps gateway \
+  alembic upgrade --sql 030_cosyvoice_clone_metadata:031_user_voice_temp_expiry > /tmp/migration_031.sql
+
+if grep -Eiq 'DROP TABLE|DROP COLUMN|ALTER COLUMN .* TYPE' /tmp/migration_031.sql; then
     echo "ERROR: migration dry-run contains destructive SQL; stop before upgrade"
-    grep -Ein 'DROP TABLE|DROP COLUMN|ALTER COLUMN .* TYPE' /tmp/migration_030_031.sql
+    grep -Ein 'DROP TABLE|DROP COLUMN|ALTER COLUMN .* TYPE' /tmp/migration_031.sql
     exit 1
 fi
 
+tee /opt/aivideotrans/data/runtime_logs/deploy_$(cat /opt/aivideotrans/data/runtime_logs/current_phase42_deploy_ts)/migration_031.sql < /tmp/migration_031.sql >/dev/null
+
 echo "=== applying alembic head ==="
-docker compose --env-file /opt/aivideotrans/config/.env exec -T gateway alembic upgrade head
+docker compose --env-file /opt/aivideotrans/config/.env run --rm --no-deps gateway alembic upgrade head
 
 echo "=== alembic current (after) ==="
-docker compose --env-file /opt/aivideotrans/config/.env exec -T gateway alembic current
+docker compose --env-file /opt/aivideotrans/config/.env run --rm --no-deps gateway alembic current
 # 期望输出含：031_user_voice_temp_expiry (head)
 ```
 
@@ -1076,7 +1088,7 @@ Remove-Item D:\Claude\temp\f_step61_clone_gate.sh
 # gateway container WORKDIR=/opt/gateway → 包路径无 `gateway.` 前缀
 set -euo pipefail
 
-docker exec aivideotrans-gateway python3 <<'PYEOF'
+docker exec -i aivideotrans-gateway python3 <<'PYEOF'
 import hashlib
 import io
 import urllib.error
@@ -2413,6 +2425,19 @@ v0.9 已有的 10 个 + v0.10 新增 6 个 = **共 16 个临时脚本**。所有
 | # | v0.15 问题 | v0.16 修复 |
 |---|---|---|
 | P1-1 | F.0 in-flight SQL 使用 `jobs.current_step`，生产 DB 报 `column "current_step" does not exist`，提示真实列为 `jobs.current_stage` | §2.1 全部 in-flight SQL 改用 `current_stage`，包括 blocker 列表、running worker query 和示例查询 |
+
+## §15.18 v0.16 → v0.18 修订记录（F.0 实测修正）
+
+| # | 问题 | 修复 |
+|---|---|---|
+| P1-1 | 生产当前 alembic 已是 `030_cosyvoice_clone_metadata`，不是早期 runbook 假设的 029；031 migration 文件也不在当前旧 gateway image/build context 中 | §2.2 改为期望 030；F.1 实施时先完成代码同步/新 gateway image 构建，再用 one-off gateway container 跑 031 migration，最后 recreate 服务 |
+| P1-2 | `docker exec aivideotrans-app python3 <<'PYEOF'` / `docker exec aivideotrans-gateway python3 <<'PYEOF'` 没有 `-i`，heredoc 不会送进容器，脚本可能空跑 | §2.4b 和 §6.2 全部改为 `docker exec -i ... python3 <<'PYEOF'` |
+
+## §15.19 v0.18 → v0.19 修订记录（F.0 实测修正）
+
+| # | 问题 | 修复 |
+|---|---|---|
+| P1-1 | app 树备份 tar 使用 `**/__pycache__` 风格排除，生产 tar 实测仍打入 `gateway/__pycache__` / `gateway/pan/__pycache__` | §2.5 改为 tar 兼容的 `*/__pycache__` + `*/__pycache__/*`，并对 `node_modules` / `.next` / `.pytest_cache` 使用同款目录+内容双排除 |
 
 ## §16 v0.15 部署前结论（Codex 自审三轮）
 
