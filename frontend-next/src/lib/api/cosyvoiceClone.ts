@@ -149,10 +149,19 @@ export interface CosyvoiceCloneRequest {
   /** Required when `sampleMode === "segments"`. Job id to pull segments from. */
   sourceJobId?: string
   /**
-   * Required when `sampleMode === "segments"`. Array of segment ids from the
-   * job's transcript. Backend rejects empty array.
+   * Required when `sampleMode === "segments"`. Array of integer segment ids
+   * from the job's transcript.
+   *
+   * **Type MUST be `number[]`** — Phase 4.2 A.2b backend
+   * `_parse_source_segments` enforces strict `type(x) is int` (rejects
+   * `bool` / `float` / `"1"` string / `null`). Source segments is the
+   * primary input that drives transcript lookup + speaker ownership checks;
+   * type drift here lets `"1"` strings silently bypass ownership boundaries.
+   * Backend also rejects empty array. Static guard:
+   * `tests/test_phase42_d2_cosyvoice_frontend_components.py::
+   * test_d2_source_segment_ids_typed_as_number_array`.
    */
-  sourceSegmentIds?: string[]
+  sourceSegmentIds?: number[]
 }
 
 /**
@@ -312,9 +321,13 @@ export async function submitCosyvoiceClone(
     form.append("sample", request.sampleFile)
   } else if (request.sampleMode === "segments") {
     form.append("source_job_id", request.sourceJobId as string)
+    // Stringified JSON array of int — backend `_parse_source_segments` uses
+    // `type(x) is int` strict check (rejects bool / float / string). The
+    // type system catches misuse at compile time, but the runtime conversion
+    // here keeps the contract explicit for reviewers.
     form.append(
       "source_segments",
-      JSON.stringify(request.sourceSegmentIds as string[]),
+      JSON.stringify(request.sourceSegmentIds as number[]),
     )
   }
 

@@ -366,3 +366,121 @@ def test_d2_api_client_enforces_sample_source_mutex():
     assert "client_missing_sample_file" in src
     assert "client_missing_source_segments" in src
     assert "client_missing_source_job_id" in src
+
+
+# ---------------------------------------------------------------------------
+# 11. sourceSegmentIds type must be number[] (NOT string[])
+#     PR #14 Codex P2 二轮 (discussion 2026-05-27)
+# ---------------------------------------------------------------------------
+
+
+def test_d2_source_segment_ids_typed_as_number_array():
+    """**D.2 守卫 11（PR #14 Codex P2 二轮）**：``sourceSegmentIds`` 必须是
+    ``number[]``，**不能**是 ``string[]``。
+
+    后端 Phase 4.2 A.2b ``_parse_source_segments`` 严格 ``type(x) is int``
+    校验，拒收 bool / float / str / None。``"1"`` 会被静默拒绝，``true``
+    也会（即使 Python ``isinstance(True, int)`` 为真）。前端类型必须 ``number[]``
+    才能让 TS 编译器在 caller 侧拦下 ``string[]`` 误用，不让坏值到达 API。
+    """
+    src = API_CLIENT.read_text(encoding="utf-8")
+    code = _strip_comments(src)
+    # 必须存在 ``sourceSegmentIds?: number[]`` 或 ``sourceSegmentIds: number[]``
+    assert re.search(r"sourceSegmentIds\??:\s*number\[\]", code), (
+        "API client 缺 sourceSegmentIds?: number[] 类型声明。"
+        "后端严格 int[] 校验，frontend 必须 number[]。"
+    )
+    # 禁止 ``sourceSegmentIds: string[]`` / ``?: string[]``
+    forbidden = re.search(r"sourceSegmentIds\??:\s*string\[\]", code)
+    assert forbidden is None, (
+        "API client 不允许把 sourceSegmentIds 声明为 string[] —— "
+        "后端 _parse_source_segments 严格 type(x) is int 校验，"
+        "string[] 会让所有调用失败。详见 PR #14 Codex P2 二轮。"
+    )
+
+    # CloneModal 也必须 number[]
+    modal_src = CLONE_MODAL.read_text(encoding="utf-8")
+    modal_code = _strip_comments(modal_src)
+    assert re.search(r"sourceSegmentIds\??:\s*number\[\]", modal_code), (
+        "CloneModal 的 sourceSegmentIds prop 也必须声明为 number[]"
+    )
+    assert (
+        re.search(r"sourceSegmentIds\??:\s*string\[\]", modal_code) is None
+    ), "CloneModal 不允许 sourceSegmentIds: string[]"
+
+
+# ---------------------------------------------------------------------------
+# 12. CloneModal: no placeholder segment id literal
+#     PR #14 Codex P2 二轮 (discussion 2026-05-27)
+# ---------------------------------------------------------------------------
+
+
+def test_d2_clone_modal_no_placeholder_segment_id():
+    """**D.2 守卫 12（PR #14 Codex P2 二轮）**：CloneModal **不允许**在
+    segments 模式提交时传任何占位 segment id。后端 strict int 校验会拒收
+    ``"__d2_placeholder__"`` / 0 / -1 / 同类 sentinel，让用户看到不明
+    400 错误。
+
+    实现约束：segments 模式 radio 只在父组件传入真实非空 ``sourceSegmentIds``
+    时才放出；任何"占位 id"字符串都被禁。
+    """
+    src = CLONE_MODAL.read_text(encoding="utf-8")
+    code = _strip_comments(src)
+    # 禁止字面量 placeholder
+    for forbidden in ("__d2_placeholder__", "__placeholder__"):
+        assert forbidden not in code, (
+            f"CloneModal 代码里出现 placeholder id '{forbidden}' —— "
+            f"segments 模式必须用父组件传入的真实 number[]，不能提交占位 id。"
+        )
+    # 必须有 segmentsModeAvailable / 等价闸，禁止仅依赖 defaultSourceJobId
+    assert (
+        "segmentsModeAvailable" in code
+    ), "CloneModal 必须用 segmentsModeAvailable 闸控（同时检查 jobId + 非空 array）"
+
+
+# ---------------------------------------------------------------------------
+# 13. ConsentModal: Cancel button must NOT call onClose directly —
+#     must go through resetAndClose (PR #14 Codex P2 二轮)
+# ---------------------------------------------------------------------------
+
+
+def test_d2_consent_modal_cancel_button_uses_reset_path():
+    """**D.2 守卫 13（PR #14 Codex P2 二轮）**：ConsentModal 的取消按钮
+    必须经过 ``resetAndClose`` 路径，不允许直接 ``onClick={onClose}``。
+
+    背景：用户勾选三个 checkbox 后点取消，如果不 reset，重开 modal 仍是
+    已勾选状态 —— 削弱 "每次显式确认" 安全带。安全的 dismissal 必须从
+    单一入口走（reset state + notify parent）。
+    """
+    src = CONSENT_MODAL.read_text(encoding="utf-8")
+    code = _strip_comments(src)
+
+    # 1. 必须存在 resetAndClose 函数
+    assert (
+        re.search(r"const\s+resetAndClose\s*=\s*\(\)\s*=>", code) is not None
+    ), "ConsentModal 必须定义 resetAndClose helper"
+
+    # 2. 找 "取消" Button —— 抓含它的 JSX 节点（开 Button 标签 → 文案 → 闭标签）
+    # 取消 button 一定含 ``取消`` literal，向前回溯找 onClick 属性
+    cancel_idx = code.find("取消\n          </Button>")
+    if cancel_idx < 0:
+        # 兼容紧凑写法 / 单行
+        cancel_idx = code.find("取消")
+    assert cancel_idx >= 0, "ConsentModal 找不到 '取消' button"
+
+    # 向前 600 字符窗口里看 onClick 属性
+    window = code[max(0, cancel_idx - 600) : cancel_idx]
+    # 必须含 onClick={resetAndClose}
+    assert (
+        re.search(r"onClick=\{\s*resetAndClose\s*\}", window) is not None
+    ), (
+        "ConsentModal 取消按钮必须 onClick={resetAndClose} —— "
+        "不允许直接 onClick={onClose}（会绕过 checkbox reset）。"
+    )
+    # 必须**不**含 onClick={onClose}（防止漏改）
+    assert (
+        re.search(r"onClick=\{\s*onClose\s*\}", window) is None
+    ), (
+        "ConsentModal 取消按钮不允许 onClick={onClose} —— "
+        "必须经 resetAndClose 路径。详见 PR #14 Codex P2 二轮。"
+    )

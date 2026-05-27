@@ -107,6 +107,24 @@ export function CosyVoiceConsentModal({
 
   const allChecked = CHECKBOX_IDS.every((id) => checked[id])
 
+  /**
+   * **Single dismissal entry point** (PR #14 Codex P2 二轮 fix —
+   * discussion_rXXXXXXXXX). Reset checkbox state + notify parent.
+   *
+   * ALL dismissal paths must funnel through this:
+   *   - Cancel button (`onClick={resetAndClose}`)
+   *   - Esc key / overlay click / X icon (`handleOpenChange(false)`)
+   *
+   * 之前 Cancel button 直接 ``onClick={onClose}`` 绕过 reset，导致用户勾选
+   * 三项后取消，重开时仍显示已勾选 —— 削弱"每次显式确认"安全带。
+   * 静态守卫 ``test_d2_consent_modal_cancel_button_uses_reset_path``
+   * 锁住此契约。
+   */
+  const resetAndClose = () => {
+    setChecked({ source: false, data_flow: false, consequences: false })
+    onClose()
+  }
+
   const handleConfirm = () => {
     if (!allChecked) return // defensive — button disabled state already covers
     const payload: CosyvoiceConsentPayload = {
@@ -124,8 +142,7 @@ export function CosyVoiceConsentModal({
     if (!next) {
       // User dismissed (Esc / overlay click / close button). Reset state and
       // notify parent — do NOT call onConfirm.
-      setChecked({ source: false, data_flow: false, consequences: false })
-      onClose()
+      resetAndClose()
     }
   }
 
@@ -178,7 +195,10 @@ export function CosyVoiceConsentModal({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          {/* Cancel MUST go through resetAndClose to wipe checkbox state.
+              Direct `onClick={onClose}` is forbidden by static guard
+              `test_d2_consent_modal_cancel_button_uses_reset_path`. */}
+          <Button variant="outline" onClick={resetAndClose}>
             取消
           </Button>
           <Button
