@@ -58,9 +58,10 @@ import json
 import logging
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 # Reuse the same src/ injection pattern as mainland_voice_worker.py
 for _candidate in [
@@ -153,6 +154,97 @@ router = APIRouter(
 # Authorization
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class CloneGateDecision:
+    """``_resolve_clone_gate`` 的返回值。Phase 4.2 D.1 review P1.2：
+    两侧授权逻辑（GET ``/clone-gate`` + POST ``/clone`` 的 ``_check_authorized``）
+    必须共用同一函数避免漂移。
+
+    ``can_access_clone`` 仅代表 **policy authorization 可见性**，**不**代表
+    完整运行时可用性。E 阶段前端按钮显示**必须**是
+    ``provider.supportsClone && gate.can_access_clone``（两者 AND）—— worker
+    是否启用 / sample uploader 是否配齐等其它层的可用性由 ``supports_clone``
+    单独决定。
+    """
+
+    can_access_clone: bool
+    """policy 授权可见性。前端按钮显示需 AND ``provider.supportsClone``。"""
+
+    reason: Literal["admin", "allowlist", "general_availability", "none"]
+    """触发授权的具体规则 —— 给运维 / 排障用；前端可读，但**不**应据此重写
+    授权 OR 逻辑。"""
+
+    user_is_admin: bool
+    """当前 user 是否 admin（独立于授权决策的事实陈述）。"""
+
+    user_in_allowlist: bool
+    """当前 user 是否在 ``cosyvoice_clone_user_allowlist`` 中。"""
+
+
+def _resolve_clone_gate(
+    user: User | None,
+    allowlist: list[str],
+    general_availability_enabled: bool,
+) -> CloneGateDecision:
+    """**Single source of truth** for cosyvoice clone 授权决策。
+
+    Phase 4.2 D.1 review P1.2（Codex）：避免 GET ``/clone-gate`` 与 POST
+    ``/clone`` 两侧各自实现 admin / allowlist / GA OR 逻辑——任何漂移都会
+    让前端展示 (``can_access_clone=true``) 与后端实际拒绝 (403) 不一致。
+    本函数是唯一计算点，两个调用方都基于它决策：
+
+    - GET ``/clone-gate``：把返回值序列化给前端
+    - POST ``/clone`` (``_check_authorized``)：根据 ``can_access_clone`` 决定
+      allow 还是 raise 403
+
+    ``user is None`` 情况：returns ``can_access_clone=False, reason="none"``。
+    caller 决定是否抛 401（GET 抛，POST 抛）。
+
+    规则优先级（admin 先于 allowlist 先于 GA）：
+
+    ::
+
+        if is_admin → admin
+        elif in allowlist → allowlist
+        elif general_availability_enabled → general_availability
+        else → none (denied)
+
+    一致性守卫：``tests/test_cosyvoice_clone_gate_api.py::
+    test_gate_api_and_check_authorized_always_agree`` 锁住两侧行为一致。
+    """
+    if user is None:
+        return CloneGateDecision(
+            can_access_clone=False,
+            reason="none",
+            user_is_admin=False,
+            user_in_allowlist=False,
+        )
+
+    is_admin = _is_admin(user)
+    user_id_str = str(getattr(user, "id", "") or "")
+    in_allowlist = bool(user_id_str) and user_id_str in allowlist
+
+    if is_admin:
+        return CloneGateDecision(
+            can_access_clone=True, reason="admin",
+            user_is_admin=True, user_in_allowlist=in_allowlist,
+        )
+    if in_allowlist:
+        return CloneGateDecision(
+            can_access_clone=True, reason="allowlist",
+            user_is_admin=False, user_in_allowlist=True,
+        )
+    if general_availability_enabled:
+        return CloneGateDecision(
+            can_access_clone=True, reason="general_availability",
+            user_is_admin=False, user_in_allowlist=in_allowlist,
+        )
+    return CloneGateDecision(
+        can_access_clone=False, reason="none",
+        user_is_admin=False, user_in_allowlist=in_allowlist,
+    )
+
+
 def _check_authorized(
     user: User | None,
     allowlist: list[str],
@@ -161,40 +253,28 @@ def _check_authorized(
 ) -> User:
     """安全边界 Layer 1。**任何**绕过都不能让 endpoint 触付费 API。
 
-    Phase 4.2 A.2c 收紧后的授权规则：
+    Phase 4.2 D.1 review P1.2 重构：内部委托给 ``_resolve_clone_gate``——
+    避免与 GET ``/clone-gate`` 两侧 OR 逻辑漂移。本函数仍负责：
 
-    ::
-
-        authorized =
-            is_admin(user)
-            OR (user.id in cosyvoice_clone_user_allowlist)         # beta 灰度
-            OR general_availability_enabled                        # 全用户 GA
-
-    参数：
-        user: ``Depends(get_current_user)`` 注入的当前用户；``None`` 表示未登录
-        allowlist: ``admin_settings.cosyvoice_clone_user_allowlist`` 的 user_id 列表
-        general_availability_enabled:
-            ``admin_settings.cosyvoice_clone_general_availability_enabled``。
-            ``True`` 时**任意已登录用户**通过本 Layer（其它 Layer 仍生效：
-            worker_enabled 在 Layer 2、配额在 Layer 7、ownership 在 sample
-            assembler 内部）。**默认 False** —— deploy 后保持 admin-only。
+    - ``user is None`` → 401 unauthenticated（GET 也用同样规则，但 endpoint
+      包装不同）
+    - decision.can_access_clone == False → 403 forbidden_not_in_allowlist
+    - decision.can_access_clone == True → 返 ``user`` 让 caller 继续
 
     本函数**必须**在 endpoint 第一道层执行（任何 I/O / DB 写之前），
     出 401/403 时**绝不读** sample、**绝不**调 assembler、**绝不**上 OSS、
-    **绝不**调 worker。守卫：``tests/test_cosyvoice_clone_a2c_admin_gate.py``。
+    **绝不**调 worker。守卫：``tests/test_cosyvoice_clone_a2c_admin_gate.py`` +
+    ``tests/test_cosyvoice_clone_gate_api.py`` 一致性测试。
     """
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "unauthenticated", "message": "请先登录"},
         )
-    if _is_admin(user):
-        return user
-    user_id_str = str(getattr(user, "id", "") or "")
-    if user_id_str and user_id_str in allowlist:
-        return user
-    if general_availability_enabled:
-        # 全用户 GA：admin 后台显式翻 True 之后才走到这里
+    decision = _resolve_clone_gate(
+        user, allowlist, general_availability_enabled,
+    )
+    if decision.can_access_clone:
         return user
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -208,6 +288,65 @@ def _check_authorized(
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
+
+@router.get("/clone-gate")
+async def cosyvoice_clone_gate(
+    user: User | None = Depends(get_current_user),
+) -> JSONResponse:
+    """``GET /api/voice/cosyvoice/clone-gate`` —— 前端展示层 gate 读取点。
+
+    Phase 4.2 D.1（plan v4-followup §8.1 + Codex 2026-05-27 review）。
+
+    **Auth**：要求登录（``user is None`` → 401）。**不**要求 admin —— 普通
+    用户也要能拿到自己的 gate 状态来决定 UI 可见性。
+
+    Response 200 schema：
+
+    ::
+
+        {
+            "can_access_clone": bool,
+            # ↑ **仅 policy 授权可见性**。E 阶段前端按钮显示必须 AND
+            #   ``provider.supportsClone``（后者由 worker_enabled / OSS 配
+            #   置等 runtime 可用性决定，由 supports_clone 在 process.py 中
+            #   单独计算）。
+            "authorization_reason":
+                "admin" | "allowlist" | "general_availability" | "none",
+            # ↑ 给运维 / 排障用；前端可显示但**不要**据此重写授权 OR 逻辑。
+            "general_availability_enabled": bool,
+            "user_is_admin": bool,
+            "user_in_allowlist": bool,
+        }
+
+    与 POST ``/clone`` 的 Layer 1 ``_check_authorized`` 共用
+    ``_resolve_clone_gate`` 纯函数 —— 两侧授权决策永远一致。一致性守卫：
+    ``tests/test_cosyvoice_clone_gate_api.py::
+    test_gate_api_and_check_authorized_always_agree``。
+    """
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "unauthenticated", "message": "请先登录"},
+        )
+    admin_settings = load_settings()
+    decision = _resolve_clone_gate(
+        user,
+        admin_settings.cosyvoice_clone_user_allowlist,
+        admin_settings.cosyvoice_clone_general_availability_enabled,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "can_access_clone": decision.can_access_clone,
+            "authorization_reason": decision.reason,
+            "general_availability_enabled": (
+                admin_settings.cosyvoice_clone_general_availability_enabled
+            ),
+            "user_is_admin": decision.user_is_admin,
+            "user_in_allowlist": decision.user_in_allowlist,
+        },
+    )
+
 
 @router.post("/clone")
 async def cosyvoice_clone(
