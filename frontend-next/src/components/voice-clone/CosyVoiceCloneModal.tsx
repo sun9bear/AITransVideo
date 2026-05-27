@@ -44,6 +44,7 @@ import {
 } from "@/lib/api/cosyvoiceClone"
 
 import { CosyVoiceConsentModal } from "./CosyVoiceConsentModal"
+import { CosyVoiceSegmentPicker } from "./CosyVoiceSegmentPicker"
 
 interface CosyVoiceCloneModalProps {
   open: boolean
@@ -113,15 +114,20 @@ export function CosyVoiceCloneModal({
   onSuccess,
 }: CosyVoiceCloneModalProps) {
   // -------------------------------------------------------------------------
-  // segments-mode 可用性闸（PR #14 Codex P2 二轮 fix —— 不允许提交占位 id）
+  // segments-mode 可用性闸
   // -------------------------------------------------------------------------
-  // segments 模式仅在父组件**同时**传入 job id 和**非空** integer segment 数组
-  // 时才放出。任何 placeholder / 占位字符串会被 backend strict int 校验拒收
-  // (`type(x) is int`)，提前在 UI 上禁用比让用户提交后看 400 错误友好。
-  const segmentsModeAvailable =
-    Boolean(defaultSourceJobId) &&
-    Array.isArray(sourceSegmentIds) &&
-    sourceSegmentIds.length > 0
+  // E.2 spec v2.1 §0 决策 3：modal 接受 `sourceSegmentIds?: number[]` prop
+  // 作为外部注入初始值，但**内部** picker 通过 `getSpeakerAudioSegments`
+  // 加载段全集；E.1 时代"prop 非空才启用 segments mode"的条件改为只看
+  // `defaultSourceJobId` 是否传入。
+  //
+  // VoiceModifyTab E.2 阶段不传 `defaultSourceJobId`（§0 决策 1），让 modal
+  // 自然回落 file-only。VoiceSelectionPanel 传 `defaultSourceJobId={jobId}`
+  // 启用 picker。
+  //
+  // 占位 id 守护：D.2 的 `sourceSegmentIds` placeholder 拒绝在 `cosyvoiceClone.ts`
+  // 的 client-side mutex + backend strict `type(x) is int` 处仍生效；E.2 不削弱。
+  const segmentsModeAvailable = Boolean(defaultSourceJobId)
 
   // -------------------------------------------------------------------------
   // Local form state
@@ -136,8 +142,26 @@ export function CosyVoiceCloneModal({
   const [sampleMode, setSampleMode] = useState<CosyvoiceSampleMode>("file")
   const [sampleFile, setSampleFile] = useState<File | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
+  // E.2 v2.1：picker 持有的内部状态。`selectedSegmentIds` 是提交时透传到
+  // API client 的真实选段；`availableSegmentIds` 是 picker 加载完后回传的
+  // 段全集（包成 Set 用于子集 assert）；`selectedDurationSeconds` 是 picker
+  // 计算并回传的总时长（用于 3.0-60.0 秒区间校验，spec §4 E.2.4 L1）。
+  const [selectedSegmentIds, setSelectedSegmentIds] = useState<number[]>([])
+  const [availableSegmentIds, setAvailableSegmentIds] = useState<Set<number>>(
+    new Set(),
+  )
+  const [selectedDurationSeconds, setSelectedDurationSeconds] = useState(0)
   const [submitState, setSubmitState] = useState<SubmitState>({ kind: "idle" })
   const [consentOpen, setConsentOpen] = useState(false)
+
+  // E.2 v2.1 §0 决策 3：打开 modal 时，把 prop sourceSegmentIds 作为外部注入
+  // 的初始值拷入内部 state。此 prop 在 E.2 调用点都不传或传 undefined（picker
+  // 自己加载），但契约保留为 D.2 公开接口的一部分。
+  useEffect(() => {
+    if (open && sourceSegmentIds && sourceSegmentIds.length > 0) {
+      setSelectedSegmentIds([...sourceSegmentIds])
+    }
+  }, [open, sourceSegmentIds])
 
   // -------------------------------------------------------------------------
   // clone-gate fetch (display-layer authorization visibility)
@@ -180,6 +204,11 @@ export function CosyVoiceCloneModal({
       setSampleMode("file")
       setSampleFile(null)
       setFileError(null)
+      // E.2 v2.1：modal 关闭时重置 picker 相关 state（避免下次打开 / 切换
+      // speaker 时残留旧选段——R3 / R6 互斥状态机防御）。
+      setSelectedSegmentIds([])
+      setAvailableSegmentIds(new Set())
+      setSelectedDurationSeconds(0)
       setSubmitState({ kind: "idle" })
       setConsentOpen(false)
     }
@@ -222,10 +251,15 @@ export function CosyVoiceCloneModal({
     if (editableSpeakerName.trim() === "") return false
     if (sampleMode === "file") return sampleFile !== null
     if (sampleMode === "segments") {
-      // segmentsModeAvailable already encodes the
-      // `defaultSourceJobId && sourceSegmentIds && length > 0` gate.
-      // No placeholders accepted — backend strict int check would reject.
-      return segmentsModeAvailable
+      // E.2 v2.1 §0 决策 2：客户端阈值固定 3.0-60.0 秒，与后端
+      // `sample_validator.MIN_DURATION_MS = 3_000` /
+      // `MAX_DURATION_MS = 60_000` 一致（守卫 #11 做 ×1000 换算 cross-check）。
+      // 子集 assert 在 handleSubmitClick 中做（spec §4 E.2.4 L1.5）。
+      if (!segmentsModeAvailable) return false
+      if (selectedSegmentIds.length === 0) return false
+      if (selectedDurationSeconds < 3) return false
+      if (selectedDurationSeconds > 60) return false
+      return true
     }
     return false
   }, [
@@ -234,6 +268,8 @@ export function CosyVoiceCloneModal({
     sampleMode,
     sampleFile,
     segmentsModeAvailable,
+    selectedSegmentIds,
+    selectedDurationSeconds,
   ])
 
   const handleConsentConfirmed = useCallback(
@@ -250,12 +286,13 @@ export function CosyVoiceCloneModal({
           sampleFile: sampleMode === "file" ? sampleFile ?? undefined : undefined,
           sourceJobId:
             sampleMode === "segments" ? defaultSourceJobId : undefined,
-          // segments mode is gated by `segmentsModeAvailable` above which
-          // requires non-empty `sourceSegmentIds` from the parent. PR #14
-          // Codex P2 二轮 fix: NO placeholder ids — backend strict
-          // `type(x) is int` would reject `"__d2_placeholder__"` immediately.
+          // E.2 v2.1 §0 决策 3：提交永远读 modal 内部 `selectedSegmentIds`
+          // 而不是 prop `sourceSegmentIds`（prop 已经在 open 时被拷入 internal
+          // state，picker 操作 mutate 的也是 internal state）。
+          // 守卫：D.2 strict `number[]` 类型 + 客户端 mutex（cosyvoiceClone.ts）
+          // + 后端 `_parse_source_segments` strict int 三层兜底。
           sourceSegmentIds:
-            sampleMode === "segments" ? sourceSegmentIds : undefined,
+            sampleMode === "segments" ? selectedSegmentIds : undefined,
         })
         toast.success("克隆成功，已加入个人音色库")
         setSubmitState({ kind: "idle" })
@@ -280,13 +317,29 @@ export function CosyVoiceCloneModal({
       sampleMode,
       sampleFile,
       defaultSourceJobId,
-      sourceSegmentIds,
+      selectedSegmentIds,
       onSuccess,
     ],
   )
 
   const handleSubmitClick = () => {
     if (!canRequestConsent) return
+    // E.2 v2.1 §0 决策 4 / spec §4 E.2.4 L1.5：提交前子集 assert。
+    // 防御 picker 状态因用户切换 speaker / 网络重排泄漏旧选段的场景。
+    // 后端 A.2b 4 层 ownership 仍是最终防线；此处把状态错误提前到点击瞬间。
+    if (sampleMode === "segments") {
+      const allOwned = selectedSegmentIds.every((id) =>
+        availableSegmentIds.has(id),
+      )
+      if (!allOwned) {
+        setSubmitState({
+          kind: "error",
+          message: "选段不属于当前说话人，请重新选择",
+          code: "client_segments_not_subset",
+        })
+        return
+      }
+    }
     setConsentOpen(true)
   }
 
@@ -395,7 +448,13 @@ export function CosyVoiceCloneModal({
                       type="radio"
                       name="cosyvoice-sample-mode"
                       checked={sampleMode === "file"}
-                      onChange={() => setSampleMode("file")}
+                      onChange={() => {
+                        setSampleMode("file")
+                        // E.2 v2.1 §0 决策 5b：切到 file 必须清 segments 选段
+                        // 状态（XOR 一致性，对侧不残留）。守卫 #8。
+                        setSelectedSegmentIds([])
+                        setSelectedDurationSeconds(0)
+                      }}
                       className="mt-1 h-4 w-4"
                       disabled={isLoading}
                     />
@@ -434,35 +493,11 @@ export function CosyVoiceCloneModal({
                     </div>
                   </label>
 
-                  {/* segments 模式：仅在父组件**同时**传入 defaultSourceJobId
-                      和非空 sourceSegmentIds 时才放出可选 radio。D.2 standalone
-                      不传 sourceSegmentIds，所以这一块默认不出现 —— file 上传
-                      是唯一可用路径。E 阶段 VoiceSelectionPanel 会先调出选段
-                      UI 收集真实 segment id 再渲染本组件。 */}
-                  {defaultSourceJobId && !segmentsModeAvailable && (
-                    <div
-                      data-sample-mode="segments-disabled"
-                      className="flex items-start gap-3 rounded-xl border border-border bg-muted/10 p-3 opacity-60"
-                    >
-                      <input
-                        type="radio"
-                        name="cosyvoice-sample-mode"
-                        checked={false}
-                        disabled
-                        className="mt-1 h-4 w-4"
-                      />
-                      <div className="flex-1">
-                        <p className="text-sm font-medium text-foreground">
-                          从当前任务转写选段
-                        </p>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          任务 {defaultSourceJobId} 可选，但还未选择具体段落。
-                          下一阶段接入选段 UI 后启用；目前请先用文件上传。
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
+                  {/* segments 模式：E.2 v2.1 修改——只看 defaultSourceJobId
+                      是否传入。Picker 内部加载段并通过 onAvailableSegmentIdsChange
+                      回传段全集供子集 assert 使用。VoiceModifyTab 不传
+                      defaultSourceJobId（§0 决策 1），所以 editing 路径
+                      还是 file-only。 */}
                   {segmentsModeAvailable && (
                     <label
                       data-sample-mode="segments"
@@ -472,7 +507,13 @@ export function CosyVoiceCloneModal({
                         type="radio"
                         name="cosyvoice-sample-mode"
                         checked={sampleMode === "segments"}
-                        onChange={() => setSampleMode("segments")}
+                        onChange={() => {
+                          setSampleMode("segments")
+                          // E.2 v2.1 §0 决策 5b：切到 segments 必须清 file
+                          // 状态（XOR 一致性，对侧不残留）。守卫 #9。
+                          setSampleFile(null)
+                          setFileError(null)
+                        }}
                         className="mt-1 h-4 w-4"
                         disabled={isLoading}
                       />
@@ -481,9 +522,23 @@ export function CosyVoiceCloneModal({
                           从当前任务转写选段
                         </p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          基于任务 {defaultSourceJobId} 的 transcript 选中的{" "}
-                          {sourceSegmentIds?.length ?? 0} 个段落拼接为样本。
+                          勾选 3-60 秒的段，由后端自动拼成样本（推荐 10-20 秒）。
                         </p>
+                        {sampleMode === "segments" && (
+                          <div className="mt-2">
+                            <CosyVoiceSegmentPicker
+                              speakerId={speakerId}
+                              jobId={defaultSourceJobId as string}
+                              selectedSegmentIds={selectedSegmentIds}
+                              onChange={setSelectedSegmentIds}
+                              onAvailableSegmentIdsChange={(ids) =>
+                                setAvailableSegmentIds(new Set(ids))
+                              }
+                              onSelectedDurationChange={setSelectedDurationSeconds}
+                              disabled={isLoading}
+                            />
+                          </div>
+                        )}
                       </div>
                     </label>
                   )}

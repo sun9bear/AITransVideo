@@ -1198,13 +1198,11 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         />
       ) : null}
 
-      {/* Phase 4.2 E.1: CosyVoice clone modal — separate component from
-          @/components/voice-clone/ (D.2). File-upload sample only in E.1;
-          source_segments selector deferred to E.2 (sourceSegmentIds left
-          undefined here so the modal renders the disabled-segments
-          placeholder + file-upload widget). On success, mirror the
-          MiniMax handleCloneComplete reuse=false semantics so voiceStates
-          gets the new voice_id selected for the speaker. */}
+      {/* Phase 4.2 E.2: CosyVoice clone modal — file upload + source_segments
+          picker. `defaultSourceJobId={jobId}` enables the segments radio;
+          modal renders `<CosyVoiceSegmentPicker>` internally when user
+          switches to that mode. `sourceSegmentIds` prop (D.2 公开契约保留)
+          intentionally not passed —— modal's internal state takes over. */}
       {cosyvoiceCloneModalSpeaker ? (
         <CosyVoiceCloneModal
           open={true}
@@ -1215,9 +1213,6 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
               ?.speakerName ?? cosyvoiceCloneModalSpeaker
           }
           defaultSourceJobId={jobId}
-          // E.1: leaving undefined → modal shows file-upload-only path.
-          // E.2 will pass real number[] from a segment picker UI.
-          sourceSegmentIds={undefined}
           onSuccess={(voice) => {
             handleCloneComplete(cosyvoiceCloneModalSpeaker, voice.voice_id, {
               reused: false,

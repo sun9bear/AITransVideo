@@ -79,6 +79,16 @@ export interface CosyVoiceSegmentPickerProps {
    */
   onAvailableSegmentIdsChange: (ids: number[]) => void
   /**
+   * 已选段总时长（秒）变化回调。每当 selectedSegmentIds 或 segments 列表变化，
+   * picker 重新计算并回传当前选段的总时长（durationS 之和）。父 modal 用此值
+   * 在 `canRequestConsent` 中校验 3.0–60.0 秒区间（spec v2.1 §4 E.2.4 L1）。
+   *
+   * 之所以由 picker 计算：segments 列表（含 durationS）是 picker 持有的，
+   * 让 modal 二次拿一遍冗余。这是 picker → modal 的派生数据通道，不是新增
+   * 用户可见概念。
+   */
+  onSelectedDurationChange: (seconds: number) => void
+  /**
    * 可选 —— editing 模式下父组件可以传入预加载的段列表，跳过网络请求。
    *
    * **注意：E.2 阶段 editing 路径不接 picker（spec v2.1 §0 决策 1），此 prop
@@ -116,6 +126,7 @@ export function CosyVoiceSegmentPicker({
   selectedSegmentIds,
   onChange,
   onAvailableSegmentIdsChange,
+  onSelectedDurationChange,
   preloadedSegments,
   disabled = false,
 }: CosyVoiceSegmentPickerProps) {
@@ -214,6 +225,16 @@ export function CosyVoiceSegmentPicker({
     }
     return total
   }, [segments, selectedSet])
+
+  // 总时长回传给父 modal（派生数据通道）。每当 selected ids 或 segments 变化
+  // 都报一次。父 modal 用此值校验 3.0-60.0 秒区间（spec §4 E.2.4 L1）。
+  const onDurationRef = useRef(onSelectedDurationChange)
+  useEffect(() => {
+    onDurationRef.current = onSelectedDurationChange
+  }, [onSelectedDurationChange])
+  useEffect(() => {
+    onDurationRef.current(totalSelectedSeconds)
+  }, [totalSelectedSeconds])
 
   // 客户端阈值：< MIN_SECONDS 红色 + 还需 X 秒；> MAX_SECONDS 红色 + 超出 X 秒；
   // 推荐范围内绿色 + ✓。注意常量字面量 3 / 60 必须出现在本文件，守卫扫。
