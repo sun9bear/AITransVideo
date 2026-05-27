@@ -546,6 +546,20 @@ def test_routing_applies_to_segment_uniformly_via_overrides_helper():
             assert seg.tts_provider == "cosyvoice", f"{tag} path tts_provider"
 
 
+def test_approved_translation_snapshot_reapplies_worker_routing_before_tts():
+    """Regression: approved translation snapshots can predate the worker
+    routing fields. Resume must re-apply the full voice override helper, not
+    only ``tts_provider``, before the TTS stage reads segments."""
+    src = (SRC_PATH / "pipeline" / "process.py").read_text(encoding="utf-8")
+    marker = 'print("[S3] Applied approved translation review snapshot.")'
+    idx = src.index(marker)
+    block = src[max(0, idx - 2200):idx]
+
+    assert "self._apply_runtime_voice_overrides(" in block
+    assert "speaker_voice_routing=_speaker_voice_routing or None" in block
+    assert "self._write_segments_snapshot(translation_result)" in block
+
+
 # ===========================================================================
 # Section E: AST + serialization guards (invariant #4)
 # ===========================================================================

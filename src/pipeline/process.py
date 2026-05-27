@@ -5258,17 +5258,25 @@ class ProcessPipeline:
                     translation_result.segments,
                     transcript_result.lines,
                 )
-                # Re-apply per-speaker TTS provider: snapshot may predate the
-                # tts_provider field, or was written before voice selection.
-                if _speaker_providers:
-                    for seg in translation_result.segments:
-                        if seg.speaker_id in _speaker_providers:
-                            seg.tts_provider = _speaker_providers[seg.speaker_id]
+                # Re-apply the full voice-selection override set. Older
+                # snapshots may predate tts_provider and CosyVoice worker
+                # routing fields, or may have been written before voice
+                # selection was approved.
+                self._apply_runtime_voice_overrides(
+                    translation_result.segments,
+                    voice_id_a=voice_id_a,
+                    display_name_a=speaker_name_a,
+                    voice_id_b=voice_id_b,
+                    display_name_b=speaker_name_b,
+                    speaker_voices=_speaker_voices if effective_speakers > 2 else None,
+                    speaker_providers=_speaker_providers or None,
+                    speaker_voice_routing=_speaker_voice_routing or None,
+                )
                 self._apply_speaker_structure_profiles_to_segments(
                     translation_result.segments,
                     _speaker_structure_profiles,
                 )
-                if dubbing_modes_synced:
+                if dubbing_modes_synced or _speaker_providers or _speaker_voice_routing:
                     self._write_segments_snapshot(translation_result)
                 print("[S3] Applied approved translation review snapshot.")
             elif config.wait_for_review:
@@ -10675,6 +10683,8 @@ class ProcessPipeline:
                             "match_confidence": segment.match_confidence,
                             "tts_provider": segment.tts_provider,
                             "tts_model_key": segment.tts_model_key,
+                            "requires_worker": segment.requires_worker,
+                            "worker_target_model": segment.worker_target_model,
                             "first_pass_cn_text": segment.first_pass_cn_text,
                             "tts_input_cn_text": segment.tts_input_cn_text,
                             # T7: fallback provider when primary failed (None if

@@ -2145,6 +2145,9 @@ def test_process_pipeline_preserves_voice_metadata_in_segments_snapshot(tmp_path
                 age_group="middle",
                 persona_style="serious",
                 energy_level="low",
+                tts_provider="cosyvoice",
+                requires_worker=True,
+                worker_target_model="cosyvoice-v3.5-flash",
             )
         ],
         total_segments=1,
@@ -2162,6 +2165,9 @@ def test_process_pipeline_preserves_voice_metadata_in_segments_snapshot(tmp_path
     assert cached_segment.persona_style == "serious"
     assert cached_segment.energy_level == "low"
     assert cached_segment.tts_input_cn_text == "tts snapshot"
+    assert cached_segment.tts_provider == "cosyvoice"
+    assert cached_segment.requires_worker is True
+    assert cached_segment.worker_target_model == "cosyvoice-v3.5-flash"
 
 
 def test_tts_text_audio_sync_publish_backfills_missing_witness() -> None:
