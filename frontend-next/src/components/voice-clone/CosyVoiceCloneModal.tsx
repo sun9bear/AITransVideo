@@ -58,24 +58,34 @@ interface CosyVoiceCloneModalProps {
    * source when sampleMode === "segments". Without this, segments mode is
    * **disabled entirely** (only file upload is available).
    *
-   * Provided alone (without `sourceSegmentIds`) is not enough: D.2 does not
-   * ship a segment picker UI, so parent must supply both pieces in E phase.
-   * See PR #14 Codex P2 二轮 (discussion 2026-05-27).
+   * **E.2 语义（spec v2.2 §0 决策 1）**：传入此 prop 单独即启用 segments
+   * 模式 —— modal 内嵌的 `CosyVoiceSegmentPicker` 会用 `(jobId, speakerId)`
+   * 调 `getSpeakerAudioSegments` 自加载段全集。
+   *
+   * 调用点策略：
+   *   - VoiceSelectionPanel（approve 流）传 `jobId` 启用 picker
+   *   - VoiceModifyTab（editing 流）E.2 阶段**不传**此 prop 让 modal 自然
+   *     回落 file-only（避免 baseline vs editing 段语义混淆，等 edit-aware
+   *     endpoint 再开放）
    */
   defaultSourceJobId?: string
   /**
-   * Optional — real, non-empty array of integer segment ids from
-   * `defaultSourceJobId`'s transcript. Type matches backend strict
-   * `int[]` contract (Phase 4.2 A.2b `_parse_source_segments`).
+   * Optional — initial selection of integer segment ids. Strict `number[]`
+   * matches backend `_parse_source_segments` (`type(x) is int`).
    *
-   * **D.2 安全契约**：segments 模式只在
-   * ``defaultSourceJobId && sourceSegmentIds && sourceSegmentIds.length > 0``
-   * 全部满足时才放出选项。任何 placeholder / 占位 id 都被静态守卫拒绝
-   * (``test_d2_clone_modal_no_placeholder_segment_id``)。
+   * **E.2 语义（spec v2.2 §0 决策 3）**：D.2 把此 prop 锁定为公开契约
+   * （严格 `number[]`，拒绝 placeholder），E.2 保留接口但语义升级为
+   * "外部注入的初始值" —— modal 在 open 时 `useEffect` 把它拷入内部
+   * `selectedSegmentIds` state，picker 操作 mutate 的是 internal state，
+   * 提交时**永远**读 internal state、不读此 prop。
    *
-   * E 阶段父组件（VoiceSelectionPanel 等）从转写选段 UI 收集真实 segment
-   * 编号后传入；D.2 standalone 使用时不传此 prop，CloneModal 只走 file
-   * 上传路径。
+   * 当前 E.2 两个调用点（VoiceSelectionPanel / VoiceModifyTab）都**不**
+   * 显式传入；prop 保留是为了不破坏 D.2 公开接口 + 允许 future external
+   * preselect 场景（admin replay / E2E test 注入等）。
+   *
+   * D.2 锁定的 placeholder 拒绝守卫
+   * (`test_d2_clone_modal_no_placeholder_segment_id`) + backend strict int
+   * 校验仍生效，E.2 不削弱。
    */
   sourceSegmentIds?: number[]
   /** Called with the backend's voice metadata after a successful clone. */
