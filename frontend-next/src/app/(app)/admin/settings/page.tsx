@@ -56,6 +56,12 @@ interface AdminSettings {
   // even if env-level AVT_ENABLE_SMART_MODE=true. Hot-reloadable (no
   // gateway restart needed).
   smart_mode_enabled: boolean
+  // --- Phase 4.2 A.2c / D.1: CosyVoice clone GA (general availability) ---
+  // 全用户开放 CosyVoice 克隆。**默认 false** = admin-only / allowlist 灰度。
+  // admin 烟测通过后翻 true → 任意已登录用户可触发 CosyVoice 克隆付费 API。
+  // 后端 ``StrictBool``（Codex PR #12 review）+ 后端 ``_resolve_clone_gate``
+  // 是唯一安全边界；前端 toggle 只是运维入口。
+  cosyvoice_clone_general_availability_enabled: boolean
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -84,6 +90,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   smart_pause_on_possible_user_voice_match: false,
   smart_auto_reuse_on_possible_user_voice_match: true,
   smart_mode_enabled: false,
+  cosyvoice_clone_general_availability_enabled: false,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [
@@ -776,6 +783,41 @@ export default function AdminSettingsPage() {
             />
           </div>
         </div>
+      </SettingSection>
+
+      {/* Phase 4.2 D.1 (plan 2026-05-19): CosyVoice 克隆 General Availability gate.
+          ⚠️ 付费 API 硬约束：CosyVoice clone 是按调用计费的外部 API（DashScope 阿里云）。
+          默认关闭 → 只有 admin / allowlist 用户能触发克隆；打开后所有已登录用户都能看到
+          克隆入口（仍需用户显式点击触发，不会自动调用）。
+          Gateway 后端用 Pydantic StrictBool 字段防止 admin UI 误传字符串 "1"/"on"/"yes"
+          被当成 true。保存仍是整体 JSON.stringify(settings)，不会丢字段。*/}
+      <SettingSection
+        title="CosyVoice 克隆全用户开放"
+        description="控制是否对所有已登录用户开放 CosyVoice 音色克隆入口。关闭时仅 admin 和 allowlist 用户可见；打开后任何登录用户都可显式点击克隆按钮（仍需用户主动触发，不会被自动调用）。"
+      >
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.cosyvoice_clone_general_availability_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, cosyvoice_clone_general_availability_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              CosyVoice 克隆全用户开放
+              <span className="ml-2 inline-block rounded bg-[color:var(--cinnabar)]/20 px-1.5 py-0.5 text-[10px] text-[color:var(--cinnabar)]">
+                付费 API · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              <strong className="text-[color:var(--cinnabar)]">⚠️ 打开后所有已登录用户都可触发付费 API</strong>
+              （CosyVoice 克隆调用 DashScope 阿里云，按次计费）。
+              关闭时仅 <code className="font-mono">admin</code> + allowlist 用户能看到克隆按钮。
+              保存后 gateway 每次调用重读 admin_settings 立即生效，已在跑的克隆任务不会被中断。
+              此开关只控制<strong>授权可见性</strong>，前端按钮还会再 AND <code className="font-mono">provider.supportsClone</code>。
+            </p>
+          </div>
+        </label>
       </SettingSection>
 
       {/* Save button */}
