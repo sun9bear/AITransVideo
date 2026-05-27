@@ -94,12 +94,17 @@ export interface CosyvoiceCloneGateResponse {
   runtime_ready: boolean
   /** Specific reason for `runtime_ready=false`. Frontend can use this to
    *  show ops messages ("worker disabled", "uploader not configured",
-   *  etc.). `null` when runtime_ready=true. */
+   *  etc.). `null` when runtime_ready=true.
+   *
+   *  Codes map 1:1 to POST `/clone` 503 failure layers — adding a new
+   *  code here requires extending backend `CloneRuntimeReadiness` Literal
+   *  + `_resolve_runtime_ready` ladder + matching layer in POST `/clone`. */
   runtime_unavailable_code:
     | "clone_feature_disabled"
     | "sample_uploader_not_configured"
     | "sample_uploader_not_implemented"
     | "sample_uploader_config_missing"
+    | "worker_disabled"
     | null
   /** Convenience: `can_access_clone && runtime_ready`. Frontend can use
    *  this directly; explicit AND is also encouraged for transparency.
