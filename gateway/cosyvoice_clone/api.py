@@ -153,9 +153,35 @@ router = APIRouter(
 # Authorization
 # ---------------------------------------------------------------------------
 
-def _check_authorized(user: User | None, allowlist: list[str]) -> User:
-    """plan §Phase 4.1 §Schema + Backend 接通：
-    ``authorized = is_admin(user) OR (user.id in cosyvoice_clone_user_allowlist)``。
+def _check_authorized(
+    user: User | None,
+    allowlist: list[str],
+    *,
+    general_availability_enabled: bool = False,
+) -> User:
+    """安全边界 Layer 1。**任何**绕过都不能让 endpoint 触付费 API。
+
+    Phase 4.2 A.2c 收紧后的授权规则：
+
+    ::
+
+        authorized =
+            is_admin(user)
+            OR (user.id in cosyvoice_clone_user_allowlist)         # beta 灰度
+            OR general_availability_enabled                        # 全用户 GA
+
+    参数：
+        user: ``Depends(get_current_user)`` 注入的当前用户；``None`` 表示未登录
+        allowlist: ``admin_settings.cosyvoice_clone_user_allowlist`` 的 user_id 列表
+        general_availability_enabled:
+            ``admin_settings.cosyvoice_clone_general_availability_enabled``。
+            ``True`` 时**任意已登录用户**通过本 Layer（其它 Layer 仍生效：
+            worker_enabled 在 Layer 2、配额在 Layer 7、ownership 在 sample
+            assembler 内部）。**默认 False** —— deploy 后保持 admin-only。
+
+    本函数**必须**在 endpoint 第一道层执行（任何 I/O / DB 写之前），
+    出 401/403 时**绝不读** sample、**绝不**调 assembler、**绝不**上 OSS、
+    **绝不**调 worker。守卫：``tests/test_cosyvoice_clone_a2c_admin_gate.py``。
     """
     if user is None:
         raise HTTPException(
@@ -166,6 +192,9 @@ def _check_authorized(user: User | None, allowlist: list[str]) -> User:
         return user
     user_id_str = str(getattr(user, "id", "") or "")
     if user_id_str and user_id_str in allowlist:
+        return user
+    if general_availability_enabled:
+        # 全用户 GA：admin 后台显式翻 True 之后才走到这里
         return user
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
@@ -214,7 +243,15 @@ async def cosyvoice_clone(
     admin_settings = load_settings()
 
     # === Layer 1：认证 + 授权（无 cost）===
-    auth_user = _check_authorized(user, admin_settings.cosyvoice_clone_user_allowlist)
+    # Phase 4.2 A.2c：admin / allowlist / GA 三态。GA=True 时全用户放行；
+    # GA=False（默认）时仅 admin 或 beta allowlist 用户通过。
+    auth_user = _check_authorized(
+        user,
+        admin_settings.cosyvoice_clone_user_allowlist,
+        general_availability_enabled=(
+            admin_settings.cosyvoice_clone_general_availability_enabled
+        ),
+    )
 
     # === Layer 2：feature flag（无 cost）===
     if not admin_settings.cosyvoice_clone_worker_enabled:
