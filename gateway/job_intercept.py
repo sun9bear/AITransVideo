@@ -3658,6 +3658,152 @@ async def _consume_post_edit_preview_usage(
     _save_post_edit_usage(root_job, usage)
 
 
+async def _enrich_editing_voice_map_routing(
+    db: AsyncSession,
+    *,
+    user_id: object,
+    payload: dict,
+) -> tuple[dict | None, dict | None]:
+    """Phase 4.2 E.1 PR #15 P1 三轮 fix (Codex 2026-05-27): mirror of
+    ``_enrich_speakers_with_clone_routing`` but for the editing/voice-map
+    POST single-segment override path.
+
+    The frontend ``setVoiceOverride`` only sends
+    ``{segment_id, provider, voice_id, tts_model_key?, voice_reuse?}``.
+    For a CosyVoice user clone voice this would persist into
+    voice_map.json without ``requires_worker`` / ``worker_target_model``,
+    causing the editor commit / regenerate-tts paths to fall back to
+    legacy CosyVoice (builtin catalog) and the clone voice silently
+    doesn't take effect.
+
+    This enrichment intercepts the payload before forwarding to the
+    upstream Job API:
+
+    - Always strips client-supplied ``requires_worker`` /
+      ``worker_target_model`` (defense in depth — server is the only
+      authority).
+    - For non-cosyvoice / non-clone paths: passes through unchanged.
+    - For CosyVoice clone voice (matches user_voices row): injects
+      ``requires_worker=True`` + ``worker_target_model=<target_model>``.
+    - For voice_id that looks like a CosyVoice clone (cosyvoice provider
+      but not in public catalog) but no user_voices match: 400
+      ``voice_clone_metadata_missing`` fail-closed (don't let an orphan
+      clone id drift through and downgrade to legacy CosyVoice).
+    - DB lookup transient failure for cosyvoice path: 503
+      ``voice_clone_routing_lookup_failed``.
+
+    Args
+    ----
+    user_id: caller's user_id (used for the user_voices ownership filter).
+    payload: parsed editing/voice-map POST body. Mutated in place is OK
+        but we return a fresh dict to make the caller's re-serialize
+        explicit.
+
+    Returns
+    -------
+    (enriched_payload, error_detail)
+        - ``(new_dict, None)``: payload was mutated (or strip-only); caller
+          MUST re-serialize body.
+        - ``(None, None)``: no enrichment needed (clear action, no
+          provider, MiniMax / VolcEngine).
+        - ``(None, {code, message})``: fail-closed; caller returns 400/503.
+    """
+    from user_voice_service import lookup_clone_voice_routing_metadata
+
+    if not isinstance(payload, dict):
+        return None, None
+
+    # ``clear`` actions don't write a voice_id, no enrichment needed.
+    action = str(payload.get("action") or "set").strip()
+    if action == "clear":
+        return None, None
+
+    # Always strip client-supplied routing fields BEFORE doing our own
+    # lookup. Even if we return early below, the upstream Job API must
+    # never see a forged ``requires_worker``.
+    new_payload = dict(payload)
+    new_payload.pop("requires_worker", None)
+    new_payload.pop("worker_target_model", None)
+
+    provider = str(new_payload.get("provider") or "").strip()
+    # ``tts_provider`` is a synonym older callers sometimes use; we accept
+    # either but treat absence as "unspecified" rather than auto-routing.
+    tts_provider = str(
+        new_payload.get("tts_provider") or new_payload.get("provider") or ""
+    ).strip()
+    voice_id = str(new_payload.get("voice_id") or "").strip()
+
+    if not voice_id:
+        # Storage layer will reject this with a 400; nothing to enrich.
+        return new_payload, None
+
+    # Only CosyVoice-flavoured overrides need enrichment. MiniMax /
+    # VolcEngine paths leave the stripped payload alone.
+    if provider != "cosyvoice" and tts_provider != "cosyvoice":
+        return new_payload, None
+
+    # Cosyvoice path — do the DB lookups.
+    try:
+        routing_map = await lookup_clone_voice_routing_metadata(
+            db, user_id=user_id, voice_ids=[voice_id],
+        )
+    except Exception as exc:
+        logger.warning(
+            "editing/voice-map: clone routing lookup failed for "
+            "user=%s voice=%s: %s",
+            user_id, voice_id, exc,
+        )
+        return None, {
+            "code": "voice_clone_routing_lookup_failed",
+            "message": (
+                "音色路由查询暂时不可用，请稍后重试。"
+                "（CosyVoice 克隆音色需要查证后才能写入编辑覆盖）"
+            ),
+            "voice_id": voice_id,
+        }
+
+    if voice_id in routing_map:
+        new_payload["requires_worker"] = True
+        target_model = str(routing_map[voice_id].get("worker_target_model") or "").strip()
+        if target_model:
+            new_payload["worker_target_model"] = target_model
+        # Force tts_provider canonical value for downstream sanity (storage
+        # layer + voice_map.json normalisation).
+        new_payload["provider"] = "cosyvoice"
+        return new_payload, None
+
+    # Not in user_voices. Could be a public builtin → allow; otherwise
+    # fail-closed (don't let an orphan clone-shaped id drift to legacy).
+    try:
+        public_voice_ids = await _fetch_cosyvoice_public_voice_ids(db)
+    except Exception as exc:
+        logger.warning(
+            "editing/voice-map: public catalog lookup failed for voice=%s: %s",
+            voice_id, exc,
+        )
+        return None, {
+            "code": "voice_clone_routing_lookup_failed",
+            "message": (
+                "音色路由查询暂时不可用，请稍后重试。"
+                "（无法核对 CosyVoice 是否为公开预设）"
+            ),
+            "voice_id": voice_id,
+        }
+
+    if voice_id in public_voice_ids:
+        # Builtin / public preset — no routing needed.
+        return new_payload, None
+
+    return None, {
+        "code": "voice_clone_metadata_missing",
+        "message": (
+            f"voice_id={voice_id!r} 是 CosyVoice 但既不在公开音色库，"
+            f"也不在你的克隆音色库中。请重新选择音色。"
+        ),
+        "voice_id": voice_id,
+    }
+
+
 async def _post_edit_mutation_with_policy(
     request: Request,
     job_id: str,
@@ -3715,7 +3861,49 @@ async def _post_edit_mutation_with_policy(
             db, job, user, segments=segments, chars=chars, batch_start=True, now_utc=now_utc,
         )
 
+    # Phase 4.2 E.1 PR #15 P1 三轮 fix (Codex 2026-05-27): editing/voice-map
+    # CosyVoice clone routing enrichment. We intercept ONLY the voice-map
+    # POST (not GET, not other editing subpaths) and ONLY when the body
+    # carries a cosyvoice voice. Other paths fall through unchanged.
+    forwarded_body: bytes | None = None
+    if subpath == "editing/voice-map" or subpath == "voice-map":
+        # Note: subpath here comes from the call site which already
+        # stripped the ``editing/`` prefix in some routes. Be tolerant
+        # of either shape so future routing refactors don't break the
+        # enrichment. The actual subpath used by the existing tests is
+        # ``editing/voice-map`` (full path under /job-api/jobs/{id}/).
+        try:
+            payload = await _read_json_body(request)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            user_id_for_lookup = getattr(user, "id", None) if user else None
+            enriched, error = await _enrich_editing_voice_map_routing(
+                db, user_id=user_id_for_lookup, payload=payload,
+            )
+            if error is not None:
+                error_status = (
+                    503
+                    if error.get("code") == "voice_clone_routing_lookup_failed"
+                    else 400
+                )
+                return JSONResponse(
+                    status_code=error_status,
+                    content={"detail": error},
+                )
+            if enriched is not None:
+                # Re-serialize so upstream Job API sees the routing
+                # fields (and the stripped-client-supplied state).
+                forwarded_body = json.dumps(enriched, ensure_ascii=False).encode("utf-8")
+
     await db.commit()
+    if forwarded_body is not None:
+        return await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+            override_body=forwarded_body,
+        )
     return await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
