@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import re
 import sys
 from pathlib import Path
@@ -481,3 +482,379 @@ def test_post_edit_mutation_branch_calls_enrich_for_voice_map():
         "editing/voice-map subpath. Without the dispatch the helper is "
         "never invoked."
     )
+
+
+# ---------------------------------------------------------------------------
+# Integration: drive _post_edit_mutation_with_policy through real route
+# (Codex 2026-05-27 P1 四轮 — static scan alone isn't enough, need to
+# observe the actual override_body that reaches proxy_request)
+# ---------------------------------------------------------------------------
+
+
+class _MockJob:
+    """Minimal Job stand-in matching the attributes
+    ``_post_edit_mutation_with_policy`` touches."""
+
+    def __init__(self, job_id: str = "test-job-id", status: str = "editing",
+                 project_dir: str = "/tmp/proj", user_id: str = "u-test"):
+        self.job_id = job_id
+        self.status = status
+        self.project_dir = project_dir
+        self.user_id = user_id
+
+
+class _MockExecuteResult:
+    def __init__(self, scalar_value):
+        self._scalar = scalar_value
+
+    def scalar_one_or_none(self):
+        return self._scalar
+
+
+class _MockDb:
+    """Stub AsyncSession that returns a Job row + supports commit / rollback."""
+
+    def __init__(self, job: _MockJob | None):
+        self.job = job
+        self.commit_called = False
+
+    async def execute(self, _stmt):
+        return _MockExecuteResult(self.job)
+
+    async def commit(self):
+        self.commit_called = True
+
+    async def rollback(self):
+        pass
+
+
+class _MockRequest:
+    """Minimal Starlette-Request-shaped object. We control ``body()`` so
+    re-reads return the same cached bytes, and ``method`` / ``headers`` so
+    ``proxy_request`` doesn't blow up if it falls through to the real
+    path (we monkeypatch it though)."""
+
+    def __init__(self, body_bytes: bytes, *, method: str = "POST"):
+        self._body = body_bytes
+        self.method = method
+        self.headers = {"content-type": "application/json"}
+        self.query_params: dict[str, str] = {}
+        self.url = type("U", (), {"path": "/job-api/jobs/test-job-id/editing/voice-map"})()
+        # For starlette compatibility (not used by our code path):
+        self.client = None
+
+    async def body(self) -> bytes:
+        return self._body
+
+
+@pytest.fixture
+def drive_route(monkeypatch):
+    """Returns a callable that drives ``_post_edit_mutation_with_policy``
+    with controllable mocks. Captures the body that would reach
+    ``proxy_request`` and returns it for assertion.
+    """
+    import job_intercept
+    import user_voice_service
+
+    async def _drive(
+        *,
+        request_body: dict,
+        lookup_map: dict[str, dict[str, Any]] | None = None,
+        public_ids: set[str] | None = None,
+        lookup_raises: type[BaseException] | None = None,
+        public_raises: type[BaseException] | None = None,
+        enable_post_edit: bool = True,
+        job_status: str = "editing",
+        subpath: str = "editing/voice-map",
+        user_id: str = "u-test",
+    ) -> dict[str, Any]:
+        """Returns dict with keys:
+          - ``status``: HTTP status from the response
+          - ``upstream_body``: dict | None — body that reached proxy
+          - ``upstream_called``: bool
+          - ``response_json``: dict | None — JSONResponse body if no proxy
+        """
+        captured: dict[str, Any] = {
+            "upstream_called": False,
+            "override_body": None,
+            "request_body_fallback": None,
+        }
+
+        # Mock DB lookups
+        async def fake_lookup(db, *, user_id, voice_ids):
+            if lookup_raises:
+                raise lookup_raises("simulated transient DB failure")
+            return dict(lookup_map or {})
+
+        async def fake_public(db):
+            if public_raises:
+                raise public_raises("simulated catalog failure")
+            return set(public_ids or [])
+
+        monkeypatch.setattr(
+            user_voice_service,
+            "lookup_clone_voice_routing_metadata",
+            fake_lookup,
+        )
+        monkeypatch.setattr(
+            job_intercept,
+            "_fetch_cosyvoice_public_voice_ids",
+            fake_public,
+        )
+
+        # Mock job ownership / access enforcement — no-op
+        async def _fake_enforce(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(
+            job_intercept, "_enforce_post_edit_access", _fake_enforce,
+        )
+
+        # Mock the policy flag
+        monkeypatch.setattr(
+            job_intercept.settings, "enable_post_edit", enable_post_edit,
+        )
+
+        # Mock proxy_request — capture the override_body (or the request
+        # body fallback) and return a fake 200 success Response.
+        async def _fake_proxy(*, request, upstream_base, strip_prefix,
+                              override_body=None, **kwargs):
+            from starlette.responses import Response as _R
+            captured["upstream_called"] = True
+            if override_body is not None:
+                captured["override_body"] = override_body
+            else:
+                captured["request_body_fallback"] = await request.body()
+            return _R(
+                content=b'{"success": true, "stub_proxy": true}',
+                status_code=200,
+                media_type="application/json",
+            )
+
+        monkeypatch.setattr(job_intercept, "proxy_request", _fake_proxy)
+
+        # Construct mock request + job
+        body_bytes = json.dumps(request_body).encode("utf-8")
+        request = _MockRequest(body_bytes)
+        mock_user = type("MockUser", (), {"id": user_id})()
+        mock_db = _MockDb(_MockJob(status=job_status, user_id=user_id))
+
+        try:
+            response = await job_intercept._post_edit_mutation_with_policy(
+                request, "test-job-id", mock_db, mock_user, subpath=subpath,
+            )
+            status_code = response.status_code
+            body = response.body
+            try:
+                response_json = json.loads(body) if body else None
+            except Exception:
+                response_json = None
+        except job_intercept.HTTPException as exc:
+            status_code = exc.status_code
+            response_json = {"detail": exc.detail}
+
+        # Parse override_body if captured
+        upstream_body: dict | None = None
+        if captured["override_body"]:
+            upstream_body = json.loads(captured["override_body"])
+        elif captured["request_body_fallback"]:
+            upstream_body = json.loads(captured["request_body_fallback"])
+
+        return {
+            "status": status_code,
+            "upstream_body": upstream_body,
+            "upstream_called": captured["upstream_called"],
+            "override_body_used": captured["override_body"] is not None,
+            "response_json": response_json,
+        }
+
+    def run(**kwargs):
+        return asyncio.run(_drive(**kwargs))
+
+    return run
+
+
+# Section: integration — REAL ROUTE → enrichment → proxy receives override
+
+
+def test_integration_real_payload_injects_routing_before_proxy(drive_route):
+    """**Codex 2026-05-27 P1 四轮 (integration)**: when the frontend
+    sends the REAL payload shape (only segment_id / provider / voice_id),
+    by the time proxy_request is invoked the body MUST already contain
+    `requires_worker=True` + `worker_target_model`.
+
+    This is the contract that static scans can't prove:
+    1. subpath ``editing/voice-map`` triggers the enrichment branch
+    2. enrichment runs the lookup
+    3. enriched payload is re-serialized into ``override_body``
+    4. proxy_request receives that override_body (NOT the original)
+    """
+    result = drive_route(
+        request_body={
+            "segment_id": "segment_int_001",
+            "provider": "cosyvoice",
+            "voice_id": "voice-cosy-flash-clone-uuid",
+            # NO requires_worker, NO worker_target_model — real shape
+        },
+        lookup_map={
+            "voice-cosy-flash-clone-uuid": {
+                "requires_worker": True,
+                "worker_target_model": "cosyvoice-v3.5-flash",
+            },
+        },
+    )
+    assert result["status"] == 200
+    assert result["upstream_called"] is True
+    assert result["override_body_used"] is True, (
+        "proxy_request was called WITHOUT override_body — the enrichment "
+        "ran but the re-serialized payload didn't reach upstream. Real "
+        "Job API would see the original client body and persist a "
+        "downgraded voice_map entry."
+    )
+    assert result["upstream_body"] is not None
+    body = result["upstream_body"]
+    assert body["requires_worker"] is True, (
+        "upstream body missing requires_worker=True. The enrichment "
+        "either didn't run or didn't merge into override_body."
+    )
+    assert body["worker_target_model"] == "cosyvoice-v3.5-flash"
+    assert body["provider"] == "cosyvoice"
+    assert body["voice_id"] == "voice-cosy-flash-clone-uuid"
+    assert body["segment_id"] == "segment_int_001"
+
+
+def test_integration_builtin_cosyvoice_no_routing_injected(drive_route):
+    """**Codex P1 四轮 (integration)**: builtin CosyVoice voice → enrichment
+    runs but DOESN'T inject routing. upstream body should NOT carry
+    requires_worker, but the body MUST still be the (stripped) version
+    via override_body (not the raw client body) — because we stripped
+    client-supplied fields defensively.
+    """
+    result = drive_route(
+        request_body={
+            "segment_id": "segment_int_002",
+            "provider": "cosyvoice",
+            "voice_id": "cosyvoice-v3.5-flash-builtin-A",
+        },
+        lookup_map={},
+        public_ids={"cosyvoice-v3.5-flash-builtin-A"},
+    )
+    assert result["status"] == 200
+    assert result["upstream_called"] is True
+    assert result["override_body_used"] is True
+    body = result["upstream_body"]
+    assert "requires_worker" not in body
+    assert "worker_target_model" not in body
+
+
+def test_integration_orphan_clone_returns_400_no_proxy(drive_route):
+    """**Codex P1 四轮 (integration)**: orphan CosyVoice clone-shaped id →
+    400 voice_clone_metadata_missing AND proxy_request is NEVER called.
+    """
+    result = drive_route(
+        request_body={
+            "segment_id": "segment_int_003",
+            "provider": "cosyvoice",
+            "voice_id": "voice-cosy-orphan-uuid",
+        },
+        lookup_map={},
+        public_ids=set(),
+    )
+    assert result["status"] == 400
+    assert result["upstream_called"] is False, (
+        "proxy_request was called even though enrichment returned 400. "
+        "Orphan clone voices must fail-closed at the gateway BEFORE "
+        "the upstream Job API touches them."
+    )
+    detail = result["response_json"]["detail"]
+    assert detail["code"] == "voice_clone_metadata_missing"
+
+
+def test_integration_db_failure_returns_503_no_proxy(drive_route):
+    """**Codex P1 四轮 (integration)**: transient DB failure → 503 AND
+    proxy_request never invoked. Don't let an upstream Job API write
+    happen while we have an inconsistent view of user_voices.
+    """
+
+    class _DbFail(RuntimeError):
+        pass
+
+    result = drive_route(
+        request_body={
+            "segment_id": "segment_int_004",
+            "provider": "cosyvoice",
+            "voice_id": "voice-cosy-anything",
+        },
+        lookup_raises=_DbFail,
+    )
+    assert result["status"] == 503
+    assert result["upstream_called"] is False
+    assert result["response_json"]["detail"]["code"] == "voice_clone_routing_lookup_failed"
+
+
+def test_integration_client_forged_routing_does_not_leak_to_upstream(drive_route):
+    """**Codex P1 四轮 (security integration)**: client sends forged
+    `requires_worker` + `worker_target_model` for a BUILTIN voice
+    (would force the worker path). Gateway must strip both before
+    proxying. Upstream body must NOT contain forged fields.
+    """
+    result = drive_route(
+        request_body={
+            "segment_id": "segment_int_005",
+            "provider": "cosyvoice",
+            "voice_id": "cosyvoice-v3.5-flash-builtin-B",
+            "requires_worker": True,  # forged
+            "worker_target_model": "cosyvoice-v3.5-plus",  # forged
+        },
+        lookup_map={},
+        public_ids={"cosyvoice-v3.5-flash-builtin-B"},
+    )
+    assert result["status"] == 200
+    assert result["override_body_used"] is True
+    body = result["upstream_body"]
+    assert "requires_worker" not in body
+    assert "worker_target_model" not in body
+
+
+def test_integration_clear_action_pass_through_no_enrichment(drive_route):
+    """**Codex P1 四轮 (integration)**: clear action doesn't trigger
+    enrichment but still proxies through. upstream body is the original
+    client payload (no override_body used).
+    """
+    result = drive_route(
+        request_body={
+            "segment_id": "segment_int_006",
+            "action": "clear",
+        },
+        lookup_map={},
+    )
+    assert result["status"] == 200
+    assert result["upstream_called"] is True
+    # clear path returns (None, None) → no override_body, raw forward
+    assert result["override_body_used"] is False
+    # Original body still reaches upstream
+    body = result["upstream_body"]
+    assert body["action"] == "clear"
+    assert body["segment_id"] == "segment_int_006"
+
+
+def test_integration_minimax_path_strips_forged_routing(drive_route):
+    """**Codex P1 四轮 (integration)**: MiniMax path with forged
+    requires_worker → strip + forward stripped body via override_body.
+    """
+    result = drive_route(
+        request_body={
+            "segment_id": "segment_int_007",
+            "provider": "minimax",
+            "voice_id": "Chinese (Mandarin)_Wise_Woman",
+            "requires_worker": True,  # forged
+        },
+    )
+    assert result["status"] == 200
+    assert result["upstream_called"] is True
+    # MiniMax path triggers strip-only branch → override_body used
+    # (carries the stripped version) so upstream cannot see the forged flag.
+    assert result["override_body_used"] is True
+    body = result["upstream_body"]
+    assert body["provider"] == "minimax"
+    assert "requires_worker" not in body
