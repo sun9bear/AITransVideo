@@ -357,6 +357,19 @@ def _apply_voice_map_to_segments(
     editing_tts / γ loader contract). segment_id lookup normalises
     via ``str()`` so int-typed legacy ids still match voice_map keys
     (which are always str per ``load_voice_map``).
+
+    Phase 4.2 E.1 PR #15 P1 五轮 fix (Codex 2026-05-27): propagate
+    CosyVoice clone worker routing (``requires_worker`` /
+    ``worker_target_model``) so copy_as_new targets carry the routing
+    through. Without this, copy_as_new would write a target
+    segments.json with the clone voice_id but no routing fields →
+    pipeline re-TTS falls back to legacy CosyVoice → clone voice
+    silently doesn't take effect in the copied project.
+
+    Stale routing cleanup: any segment with an override has its old
+    routing fields popped first, then re-added only for clone overrides.
+    This handles voice swap clone→builtin (stale flag must not stick)
+    AND clone→different-clone (new target_model takes effect).
     """
     out: list[dict[str, Any]] = []
     for seg in segments:
@@ -372,6 +385,15 @@ def _apply_voice_map_to_segments(
             if override.get("tts_model_key"):
                 new_seg["tts_model_key"] = override["tts_model_key"]
             new_seg.pop("provider", None)  # scrub legacy misspelling
+            # E.1 P1 五轮 fix: clear stale routing first, then re-add
+            # only for clone overrides. Mirror of editing_commit._apply_voice_map.
+            new_seg.pop("requires_worker", None)
+            new_seg.pop("worker_target_model", None)
+            if override.get("requires_worker") is True:
+                new_seg["requires_worker"] = True
+                target_model = override.get("worker_target_model")
+                if isinstance(target_model, str) and target_model.strip():
+                    new_seg["worker_target_model"] = target_model.strip()
             out.append(new_seg)
         else:
             out.append(seg)
@@ -503,7 +525,7 @@ def prepare_copy_project_dir(
             if isinstance(raw, dict):
                 for sid, entry in raw.items():
                     if isinstance(entry, dict):
-                        normalized = {
+                        normalized: dict[str, Any] = {
                             "provider": str(entry.get("provider", "")).strip(),
                             "voice_id": str(entry.get("voice_id", "")).strip(),
                         }
@@ -515,6 +537,16 @@ def prepare_copy_project_dir(
                         ).strip()
                         if model_key:
                             normalized["tts_model_key"] = model_key
+                        # E.1 P1 五轮 fix (Codex 2026-05-27): preserve
+                        # CosyVoice clone worker routing through copy_as_new
+                        # so target segments.json carries
+                        # ``requires_worker`` / ``worker_target_model``.
+                        # Same strict ``is True`` defense as editing_commit.
+                        if entry.get("requires_worker") is True:
+                            normalized["requires_worker"] = True
+                            target_model = entry.get("worker_target_model")
+                            if isinstance(target_model, str) and target_model.strip():
+                                normalized["worker_target_model"] = target_model.strip()
                         voice_map[str(sid)] = normalized
         if voice_map:
             segments = _apply_voice_map_to_segments(segments, voice_map)
