@@ -617,3 +617,217 @@ def test_e1_p2_minimax_optgroups_unchanged_by_cosyvoice_addition():
             f"gated by `currentProvider !== 'minimax'`. The MiniMax "
             f"optgroups must remain MiniMax-only after E.1 P2² fix."
         )
+
+
+# ---------------------------------------------------------------------------
+# G_E1_P1²_APPROVAL — approval validator accepts CosyVoice clone voice_id
+#                    when speaker carries requires_worker=true
+#                    (Codex 2026-05-27 P1 二轮)
+# ---------------------------------------------------------------------------
+
+
+def test_e1_p1_approval_validator_accepts_cosyvoice_clone_when_requires_worker():
+    """**Codex 2026-05-27 PR #15 P1 二轮 fix #1**:
+    ``_validate_voice_provider_compat`` must accept CosyVoice voice_id
+    that doesn't match the builtin catalog when the speaker carries
+    ``requires_worker=True`` (gateway-side enriched signal that the
+    voice was DB-resolved + ownership-checked).
+
+    Without this, ``approve_voice_selection`` rejects clone voice_ids
+    and E.1's file-upload flow can't complete the approval.
+    """
+    from pathlib import Path as _P
+    import sys as _sys
+
+    repo = _P(__file__).resolve().parents[1]
+    src = repo / "src"
+    if str(src) not in _sys.path:
+        _sys.path.insert(0, str(src))
+
+    from services.jobs.review_actions import _validate_voice_provider_compat
+
+    clone_voice = "voice-cosy-v3-flash-deadbeef-1234-5678-uuid"
+
+    # Without requires_worker → must raise (legacy behavior preserved)
+    try:
+        _validate_voice_provider_compat(
+            clone_voice, "cosyvoice", requires_worker=False
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            "validator should reject CosyVoice clone voice_id without "
+            "requires_worker=True (forward compat)"
+        )
+
+    # With requires_worker=True → must accept (clone path)
+    _validate_voice_provider_compat(
+        clone_voice, "cosyvoice", requires_worker=True
+    )
+
+    # Sanity: VolcEngine path still strict
+    try:
+        _validate_voice_provider_compat(
+            clone_voice, "volcengine", requires_worker=True
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            "validator should still reject non-volcengine voice_id "
+            "with tts_provider=volcengine — requires_worker only affects "
+            "CosyVoice clone path."
+        )
+
+
+def test_e1_p1_approval_persists_requires_worker_in_merged_payload():
+    """**Codex 2026-05-27 PR #15 P1 二轮**: source-level guard that the
+    approval merge loop propagates ``requires_worker`` /
+    ``worker_target_model`` from the incoming gateway-enriched speaker
+    into the merged_speakers payload (so downstream pipeline +
+    voice_map.json see them).
+
+    Static text scan — full behavioral integration test would need
+    project_dir fixture + filesystem; this is the cheap structural lock.
+    """
+    src_path = (
+        REPO_ROOT / "src" / "services" / "jobs" / "review_actions.py"
+    )
+    src = src_path.read_text(encoding="utf-8")
+    # The merge loop must touch requires_worker on the merged base.
+    assert 'base["requires_worker"]' in src, (
+        "approve_voice_selection merge loop missing "
+        "`base[\"requires_worker\"] = ...` propagation — downstream "
+        "pipeline / voice_map won't know the speaker needs the worker."
+    )
+    assert 'base["worker_target_model"]' in src, (
+        "approve_voice_selection merge loop missing "
+        "`base[\"worker_target_model\"] = ...` propagation."
+    )
+    # And it must CLEAR stale flags when the new sp is not a clone, so
+    # re-approving with a builtin voice doesn't leak previous routing.
+    assert 'base.pop("requires_worker"' in src, (
+        "merge loop must pop requires_worker when the incoming speaker "
+        "doesn't carry the flag (re-approve with builtin voice should "
+        "clear previous clone routing)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# G_E1_P1²_VOICE_MAP — editing voice_map persists CosyVoice clone routing
+#                    (Codex 2026-05-27 P1 二轮 #2)
+# ---------------------------------------------------------------------------
+
+
+def test_e1_p1_set_voice_override_accepts_requires_worker_kwarg():
+    """**Codex 2026-05-27 PR #15 P1 二轮 fix #2**: edit-flow voice_map
+    persistence must accept ``requires_worker`` + ``worker_target_model``.
+
+    Inspects the function signature via inspect — caller has to be able
+    to pass these without TypeError, otherwise re-TTS in Studio edit
+    won't route to the worker and the clone voice silently doesn't
+    take effect.
+    """
+    import inspect as _inspect
+
+    from services.jobs.editing_voice_map import set_voice_override
+
+    sig = _inspect.signature(set_voice_override)
+    assert "requires_worker" in sig.parameters, (
+        "set_voice_override missing `requires_worker` kwarg — editing "
+        "flow can't persist CosyVoice clone worker routing."
+    )
+    assert "worker_target_model" in sig.parameters, (
+        "set_voice_override missing `worker_target_model` kwarg."
+    )
+
+
+def test_e1_p1_set_voice_override_writes_routing_into_voice_map(tmp_path):
+    """**Codex 2026-05-27 PR #15 P1 二轮**: behavioral test —
+    set_voice_override with ``requires_worker=True`` persists both flags
+    into the voice_map.json entry. Re-TTS readers (services.jobs.copy_service,
+    pipeline editor commit) check `entry.get("requires_worker")`."""
+    import json as _json
+    from services.jobs.editing_voice_map import (
+        set_voice_override,
+        load_voice_map,
+    )
+    from services.jobs.editing import EDITING_SUBDIR
+
+    project = tmp_path / "proj"
+    editing_dir = project / EDITING_SUBDIR
+    editing_dir.mkdir(parents=True)
+    # set_voice_override side-effects also call mark_segment_status which
+    # requires segment_status.json — pre-seed empty.
+    (editing_dir / "segment_status.json").write_text("{}", encoding="utf-8")
+    # Pre-seed an empty voice_map.json so load doesn't crash.
+    (editing_dir / "voice_map.json").write_text("{}", encoding="utf-8")
+
+    result = set_voice_override(
+        project,
+        "segment_001",
+        provider="cosyvoice",
+        voice_id="voice-cosy-v3-flash-uuid-test",
+        requires_worker=True,
+        worker_target_model="cosyvoice-v3.5-flash",
+    )
+    assert result["requires_worker"] is True
+    assert result["worker_target_model"] == "cosyvoice-v3.5-flash"
+
+    persisted = load_voice_map(project)
+    entry = persisted.get("segment_001")
+    assert entry is not None, "voice_map.json did not get segment entry"
+    assert entry.get("requires_worker") is True, (
+        "voice_map.json entry missing requires_worker=True — re-TTS "
+        "path will fall back to legacy CosyVoice and clone voice "
+        "silently won't take effect."
+    )
+    assert entry.get("worker_target_model") == "cosyvoice-v3.5-flash"
+
+
+def test_e1_p1_set_voice_override_omits_routing_when_not_clone(tmp_path):
+    """**Codex 2026-05-27 PR #15 P1 二轮**: when caller does NOT pass
+    requires_worker (or passes False / None), the persisted entry must
+    NOT contain these fields. MiniMax / builtin CosyVoice / VolcEngine
+    paths stay unchanged.
+    """
+    from services.jobs.editing_voice_map import (
+        set_voice_override,
+        load_voice_map,
+    )
+    from services.jobs.editing import EDITING_SUBDIR
+
+    project = tmp_path / "proj_nonclone"
+    editing_dir = project / EDITING_SUBDIR
+    editing_dir.mkdir(parents=True)
+    (editing_dir / "segment_status.json").write_text("{}", encoding="utf-8")
+    (editing_dir / "voice_map.json").write_text("{}", encoding="utf-8")
+
+    # MiniMax legacy path — no requires_worker kwarg
+    set_voice_override(
+        project,
+        "segment_002",
+        provider="minimax",
+        voice_id="Chinese (Mandarin)_Wise_Woman",
+    )
+    entry = load_voice_map(project).get("segment_002") or {}
+    assert "requires_worker" not in entry, (
+        "voice_map.json entry should NOT carry requires_worker for "
+        "MiniMax voice — only CosyVoice clones need worker routing."
+    )
+    assert "worker_target_model" not in entry
+
+    # Explicit False also stays absent
+    set_voice_override(
+        project,
+        "segment_003",
+        provider="cosyvoice",
+        voice_id="cosyvoice-v3.5-flash-zh-female-builtin01",
+        requires_worker=False,
+    )
+    entry = load_voice_map(project).get("segment_003") or {}
+    assert "requires_worker" not in entry, (
+        "voice_map.json entry should NOT carry requires_worker=False — "
+        "absence is the canonical 'not a clone' encoding."
+    )

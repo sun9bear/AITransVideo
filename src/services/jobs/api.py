@@ -1248,12 +1248,33 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                             or payload.get("tts_model")
                             or ""
                         ).strip() or None
+                        # Phase 4.2 E.1 PR #15 P1 二轮 fix (Codex 2026-05-27):
+                        # extract CosyVoice clone worker routing if present.
+                        # Gateway editing/voice-map intercept enriches the
+                        # payload from a user_voices DB lookup before
+                        # forwarding here; pipeline subprocess trusts the
+                        # gateway-enriched values (same trust model as the
+                        # approve flow's `requires_worker` propagation).
+                        raw_requires_worker = payload.get("requires_worker")
+                        if raw_requires_worker is True:
+                            requires_worker_val: bool | None = True
+                        elif raw_requires_worker is False:
+                            requires_worker_val = False
+                        else:
+                            requires_worker_val = None
+                        raw_target_model = payload.get("worker_target_model")
+                        if isinstance(raw_target_model, str) and raw_target_model.strip():
+                            worker_target_model_val: str | None = raw_target_model.strip()
+                        else:
+                            worker_target_model_val = None
                         result = service.set_editing_voice_override(
                             path_parts[1], segment_id,
                             provider=provider,
                             voice_id=voice_id,
                             tts_model_key=tts_model_key,
                             voice_reuse=payload.get("voice_reuse") is True,
+                            requires_worker=requires_worker_val,
+                            worker_target_model=worker_target_model_val,
                         )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return

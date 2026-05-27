@@ -377,14 +377,45 @@ def _preview_cosyvoice_voice(voice_id: str, *, text: str = _PREVIEW_SAMPLE_TEXT)
         }
 
 
-def _validate_voice_provider_compat(voice_id: str, tts_provider: str) -> None:
+def _validate_voice_provider_compat(
+    voice_id: str,
+    tts_provider: str,
+    *,
+    requires_worker: bool = False,
+) -> None:
     """Reject obvious voice_id / tts_provider mismatches at approval time.
 
     CosyVoice and VolcEngine have recognisable voice_id patterns.
     MiniMax accepts any ID (cloned voices, official catalog with mixed
     formats like ``Wise_Woman``, ``moss_audio_xxx``, ``Chinese (Mandarin)_xxx``).
+
+    Phase 4.2 E.1 PR #15 Codex P1 二轮 fix (2026-05-27): CosyVoice
+    **user clone** voice_ids are UUID-shaped (e.g.
+    ``voice-cosy-v3-flash-<uuid>``) and DO NOT match the builtin catalog.
+    Strict ``is_cosyvoice_v3_flash_builtin_voice`` would reject them and
+    block the E.1 file-upload clone flow at approval time.
+
+    The ``requires_worker`` parameter carries the gateway-side
+    enrichment signal (Phase 4.1 E ``enrich_speakers_with_worker_routing``)
+    — when True, the speaker has been validated against ``user_voices``
+    via DB lookup + ownership check on the gateway side, and the
+    voice_id is a known clone row. We accept it as-is; the builtin
+    pattern check is skipped because it would always fail for clones.
+
+    Security note: ``requires_worker`` is set by gateway intercept
+    BEFORE this function runs (see ``gateway/job_intercept.py::
+    _approve_voice_selection_with_quality_sync`` →
+    ``enrich_speakers_with_worker_routing``). The pipeline subprocess
+    cannot fabricate this flag — gateway strips any client-supplied
+    ``requires_worker`` before re-injecting from the DB lookup
+    (``new_sp.pop("requires_worker", None)`` in job_intercept).
     """
     if tts_provider == "cosyvoice":
+        if requires_worker:
+            # User clone voice (gateway-side routed via DB ownership
+            # check). Skip the builtin pattern check — it's by design
+            # NOT a builtin voice_id.
+            return
         from services.tts.cosyvoice_voice_catalog import is_cosyvoice_v3_flash_builtin_voice
         if not is_cosyvoice_v3_flash_builtin_voice(voice_id):
             raise ValueError(
@@ -427,8 +458,17 @@ def approve_voice_selection(
         # CosyVoice and VolcEngine have deterministic voice_id patterns;
         # MiniMax is the default fallback (cloned voices + official catalog
         # with heterogeneous ID formats — no strict pattern check).
+        #
+        # Phase 4.2 E.1 PR #15 P1 fix: pass `requires_worker` so CosyVoice
+        # user clone voice_ids (gateway-routed via user_voices DB lookup +
+        # ownership check) skip the builtin pattern check. Gateway strips
+        # any client-supplied `requires_worker` before injecting from the
+        # DB lookup, so this flag is trustworthy here.
         if sp_prov and vid:
-            _validate_voice_provider_compat(vid, sp_prov)
+            requires_worker = bool(sp.get("requires_worker") or False)
+            _validate_voice_provider_compat(
+                vid, sp_prov, requires_worker=requires_worker
+            )
 
     # Check no speaker is still cloning
     review_state_path = Path(project_dir) / "review_state.json"
@@ -475,6 +515,22 @@ def approve_voice_selection(
             base["minimax_model"] = "hd" if minimax_model in {"hd", MINIMAX_TTS_MODEL_HD} else "turbo"
         else:
             base.pop("minimax_model", None)
+        # Phase 4.2 E.1 PR #15 P1 fix: propagate CosyVoice worker routing
+        # from the incoming (gateway-enriched) sp into the approved
+        # payload. If user switches between voices in successive approves,
+        # the freshly-enriched flags reflect the NEW voice_id, not stale
+        # routing from a previous payload. When the voice is NOT a clone,
+        # clear any stale flags so they don't leak across voice changes.
+        if sp.get("requires_worker"):
+            base["requires_worker"] = bool(sp["requires_worker"])
+            target_model = sp.get("worker_target_model")
+            if isinstance(target_model, str) and target_model.strip():
+                base["worker_target_model"] = target_model.strip()
+            else:
+                base.pop("worker_target_model", None)
+        else:
+            base.pop("requires_worker", None)
+            base.pop("worker_target_model", None)
         # Drop any in-progress clone marker now that the user has approved.
         base.pop("cloning", None)
         merged_speakers.append(base)
