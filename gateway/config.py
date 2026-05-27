@@ -182,6 +182,19 @@ class GatewaySettings(BaseSettings):
     pan_upload_chunk_bytes: int = 4 * 1024 * 1024    # Baidu Pan 4MB chunk size
     pan_task_stale_hours: int = 4                    # heartbeat staleness threshold
 
+    # 2026-05-26 postmortem P0b v2 (Codex 2nd-round). Global serialization
+    # of pan_backup uses pg_try_advisory_lock + backoff polling, NOT
+    # blocking pg_advisory_lock. Reason: blocking holds a DB conn during
+    # the wait; with pool_size=5 + max_overflow=10 = 15 max conns and the
+    # batch API accepting up to 100 jobs, 14 waiters could starve the
+    # entire pool. Poll-based waits release the conn between attempts.
+    #
+    # Defaults below are sized for: 5-30 min per backup × ~5-10 waiters
+    # in queue under heavy batch use. Operators can tune via env vars.
+    pan_backup_global_lock_timeout_s: int = 1800     # 30 min max wait for slot
+    pan_backup_global_lock_poll_base_s: float = 2.0  # initial poll interval
+    pan_backup_global_lock_poll_max_s: float = 30.0  # capped exponential
+
     # Baidu Pan OAuth credentials (env names automatically prefixed AVT_).
     baidu_pan_appkey: str = ""
     baidu_pan_appsecret: str = ""

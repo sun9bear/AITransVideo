@@ -52,16 +52,23 @@ import asyncio
 import hashlib
 import logging
 import os
+import random
 import shutil
 import sys
 import time
 import uuid as _uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+# Module-level imports needed by _acquire_pan_backup_slot (defined below).
+# The lock-key helpers live in a tiny sibling module so multiple executors
+# can share the canonical key derivations.
+from pan._lock_keys import pan_lock_key, PAN_BACKUP_GLOBAL_LOCK_KEY
 
 
 # sys.path bootstrap so we can `from models import ...` (mirrors other
@@ -130,65 +137,38 @@ async def _execute_pan_backup_impl(
     lock_key = pan_lock_key(user_id, job_id)
 
     # === Single-connection long-hold ===
-    async with engine.connect() as conn:
-        # --- 2026-05-26 postmortem P0b (Codex 2nd-round) — GLOBAL lock FIRST ---
-        # Acquire the process-wide pan_backup serialization lock BEFORE the
-        # per-job lock. Reasoning:
-        #
-        #   1. Disk-pressure containment: every backup_executor stages a
-        #      multi-GB tar in gateway-container /tmp. The 2026-05-26
-        #      incident triggered when 9 concurrent backup_executors
-        #      stacked 20 GB of tars in /tmp = host overlay layer =
-        #      host root partition → 100% full → cascading writes failed.
-        #
-        #   2. Why blocking (pg_advisory_lock, not pg_try_advisory_lock):
-        #      we WANT subsequent backup_executors to queue and wait.
-        #      The asyncio event loop yields during the await, so the
-        #      gateway stays responsive (other HTTP requests / heartbeats
-        #      / cleanup tasks keep ticking). Only same-keyed waiters block.
-        #
-        #   3. Lock ORDER (global → per-job, never reverse) prevents
-        #      deadlock between concurrent backup_executors for different
-        #      jobs. Two executors A and B both go for global first;
-        #      whichever wins proceeds, the other waits at global. After
-        #      the winner releases, no per-job key conflicts because
-        #      different jobs have different per-job keys.
-        #
-        #   4. Reconciler-relaunch path is covered: backup_executor is
-        #      the SAME function whether dispatched via _enqueue.py
-        #      (HTTP entry) or relaunched by background_task_reconciler
-        #      after gateway restart. Both go through this lock acquire.
-        #      P0a v2 (reconciler gate) closes the additional concern
-        #      "reconciler shouldn't even try pan_* when flag off".
-        #
-        # Release is implicit on `async with engine.connect()` close — both
-        # locks are session-scoped; conn.close() releases them in reverse
-        # acquire order (per-job first, then global). The explicit
-        # _release_advisory_lock(conn, lock_key) in finally is for the
-        # per-job lock; global is freed alongside it via conn closure.
-        await _acquire_advisory_lock(conn, PAN_BACKUP_GLOBAL_LOCK_KEY)
-        # Flush auto-begin txn before next explicit begin() block
-        # (same pattern as below).
-        if conn.dialect.name == 'postgresql':
-            await conn.commit()
-
-        # --- Step a: advisory lock FIRST (PG only; SQLite no-op) ---
-        # CodeX P0-2: take the lock BEFORE reading Job state. The previous
-        # ordering (read → lock → use stale snapshot) allowed a concurrent
-        # worker to archive the same job between read and lock; the failure
-        # path would then "roll back" an already-archived Job from
-        # 'archived' to 'succeeded'. Lock-then-read closes the TOCTOU window.
-        await _acquire_advisory_lock(conn, lock_key)
-        # Production 2026-05-19 hotfix: `SELECT pg_advisory_lock(...)`
-        # auto-begins a txn under SQLAlchemy. The first `async with
-        # conn.begin()` below would then raise
-        # "This connection has already initialized a SQLAlchemy
-        # Transaction() object via begin() or autobegin". Flush the
-        # auto-begin txn now — the advisory lock itself is session-scoped
-        # (pg_advisory_lock without _xact_), so commit doesn't release it.
-        # Same fix pattern as stale_reaper Phase 8 CodeX P1-3.
-        if conn.dialect.name == 'postgresql':
-            await conn.commit()
+    #
+    # 2026-05-26 postmortem P0b v2 (Codex 2nd-round on commit dd370d63):
+    #
+    # Original P0b used blocking pg_advisory_lock to claim the global slot.
+    # That serializes the heavy work correctly BUT each waiter holds a DB
+    # connection while waiting. With pool_size=5 + max_overflow=10 = 15
+    # max conns and the batch API accepting up to 100 jobs, 14 waiters
+    # could starve the entire Gateway pool — heartbeats, reconciler,
+    # status queries, all HTTP endpoints unable to acquire any conn.
+    # The asyncio event loop yielded during the wait, but the pool was
+    # exhausted regardless.
+    #
+    # Fix: replace blocking pg_advisory_lock with pg_try_advisory_lock +
+    # exponential-backoff polling implemented in _acquire_pan_backup_slot
+    # below. Each attempt opens a fresh conn, tries BOTH global + per-job,
+    # and releases everything (incl. the conn back to the pool) if either
+    # try fails. Successful attempt holds the conn for the entire executor
+    # body, releases both locks + conn on exit. No conn is held during
+    # sleep windows → pool stays available to all other Gateway workloads.
+    #
+    # Lock ORDER (global → per-job, never reverse) prevents deadlock —
+    # see _acquire_pan_backup_slot docstring for details.
+    #
+    # Reconciler-relaunch path is covered: backup_executor is the SAME
+    # function whether dispatched via _enqueue.py (HTTP entry) or
+    # relaunched by background_task_reconciler after gateway restart.
+    # Both go through this lock loop. P0a v2 (reconciler gate) closes
+    # the additional concern "reconciler shouldn't even try pan_* when
+    # flag off".
+    async with _acquire_pan_backup_slot(
+        engine, user_id=user_id, job_id=job_id,
+    ) as conn:
 
         br_id: _uuid.UUID | None = None
         tar_path: Path | None = None
@@ -623,26 +603,184 @@ async def _execute_pan_backup_impl(
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("pan_backup tar cleanup failed: %s", exc)
         finally:
-            # Release locks in REVERSE acquire order (per-job first, then
-            # global). Both are session-scoped on the same conn, so
-            # `engine.connect()` ctx-exit would free them anyway, but
-            # explicit release narrows the held window — important when
-            # other backup_executor instances are blocked on the global
-            # key. Per 2026-05-26 P0b.
-            await _release_advisory_lock(conn, lock_key)
-            await _release_advisory_lock(conn, PAN_BACKUP_GLOBAL_LOCK_KEY)
+            # P0b v2: release of BOTH locks + conn close handled by the
+            # _acquire_pan_backup_slot context manager exit. The outer
+            # try is kept (even as a near-pass) so the existing inner
+            # cleanup (heartbeat cancel, tar unlink at line ~591) keeps
+            # its lexical scope unchanged.
+            pass
 
 
 # --- helpers ---
 
 
+@asynccontextmanager
+async def _acquire_pan_backup_slot(
+    engine: AsyncEngine,
+    *,
+    user_id: _uuid.UUID,
+    job_id: str,
+):
+    """Acquire (PAN_BACKUP_GLOBAL_LOCK_KEY, pan_lock_key(user, job)) without
+    holding a DB connection during waits.
+
+    Plan 2026-05-26 postmortem P0b v2 (Codex 2nd-round feedback).
+
+    ## Why polling, not blocking pg_advisory_lock
+
+    Blocking pg_advisory_lock keeps the SQLAlchemy AsyncConnection
+    occupied for the full wait. Production pool is pool_size=5 +
+    max_overflow=10 = 15 max. The batch API accepts 100 jobs. With 14+
+    waiters all parked in pg_advisory_lock, the entire Gateway pool is
+    exhausted: heartbeats, reconciler, status queries, /healthz, none
+    can acquire a connection. Magnitude of the bug: instead of just
+    serializing backup_executors (correct), it starves the whole app.
+
+    ## Loop structure
+
+    Each iteration:
+      1. Open a fresh conn.
+      2. ``pg_try_advisory_lock(GLOBAL)`` — non-blocking. If failed, close
+         conn and sleep.
+      3. ``pg_try_advisory_lock(per_job)`` — non-blocking. If failed,
+         release GLOBAL, close conn, sleep.
+      4. Both acquired: commit auto-begin txn (so caller's
+         ``async with conn.begin():`` works), yield conn, then on
+         body exit release both + close conn.
+
+    Per-job lock contention is rare in production (would mean two
+    concurrent attempts on the same job, or a stale_reaper / restore
+    holding the same key). But making it polling too means a stuck
+    restore can't deadlock the entire backup queue — backups for
+    OTHER jobs keep progressing.
+
+    ## Backoff parameters
+
+    Configurable via settings.pan_backup_global_lock_{timeout,poll_base,poll_max}_s.
+    Defaults: 30 min total wait, 2s → 30s exponential with jitter.
+    Operators tune via env if batch sizes change.
+
+    ## SQLite no-op note
+
+    Both _try_advisory_lock and _release_advisory_lock are no-ops on
+    SQLite (return True / do nothing). Tests can monkeypatch these to
+    simulate contention without a real PG.
+    """
+    from config import settings  # noqa: PLC0415 — lazy
+
+    per_job_key = pan_lock_key(user_id, job_id)
+    timeout_s = float(settings.pan_backup_global_lock_timeout_s)
+    base_s = float(settings.pan_backup_global_lock_poll_base_s)
+    max_s = float(settings.pan_backup_global_lock_poll_max_s)
+
+    start = time.monotonic()
+    attempt = 0
+    while True:
+        # Open fresh conn for this attempt.
+        cm = engine.connect()
+        conn = await cm.__aenter__()
+        try:
+            got_global = await _try_advisory_lock(
+                conn, PAN_BACKUP_GLOBAL_LOCK_KEY,
+            )
+            if got_global:
+                got_per_job = await _try_advisory_lock(conn, per_job_key)
+                if got_per_job:
+                    # Both acquired. Flush auto-begin txn so caller's
+                    # explicit conn.begin() works.
+                    if conn.dialect.name == 'postgresql':
+                        await conn.commit()
+                    try:
+                        yield conn
+                    finally:
+                        # Release in reverse acquire order. SAME conn,
+                        # SAME session — guaranteed valid.
+                        try:
+                            await _release_advisory_lock(conn, per_job_key)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "pan_backup release per-job lock failed: %s",
+                                exc,
+                            )
+                        try:
+                            await _release_advisory_lock(
+                                conn, PAN_BACKUP_GLOBAL_LOCK_KEY,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "pan_backup release global lock failed: %s",
+                                exc,
+                            )
+                        await cm.__aexit__(None, None, None)
+                    return
+                # Got global but NOT per-job. Release global before sleep.
+                try:
+                    await _release_advisory_lock(
+                        conn, PAN_BACKUP_GLOBAL_LOCK_KEY,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            # Didn't get both — close conn before sleeping. This is the
+            # entire point of P0b v2: no conn held while waiting.
+            await cm.__aexit__(None, None, None)
+        except BaseException:
+            # Defensive: any exception, close conn before propagating
+            # so we don't leak a pool slot.
+            try:
+                await cm.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+        # Timeout check.
+        elapsed = time.monotonic() - start
+        if elapsed > timeout_s:
+            raise TimeoutError(
+                f"pan_backup global slot acquisition timed out after "
+                f"{elapsed:.1f}s (limit={timeout_s}s, attempts={attempt+1}). "
+                f"Another backup or restore appears to be holding the "
+                f"lock indefinitely. user={user_id} job={job_id}"
+            )
+
+        # Exponential backoff with jitter.
+        sleep_s = min(base_s * (2 ** min(attempt, 5)), max_s)
+        sleep_s += random.uniform(0, base_s)
+        attempt += 1
+        logger.info(
+            "pan_backup: slot contended (attempt=%d, elapsed=%.1fs), "
+            "sleeping %.1fs before retry. user=%s job=%s",
+            attempt, elapsed, sleep_s, user_id, job_id,
+        )
+        await asyncio.sleep(sleep_s)
+
+
 async def _acquire_advisory_lock(conn: AsyncConnection, key: int) -> None:
     """PG session-level advisory lock. No-op on non-PG dialects (SQLite
-    in unit tests). Production always runs PG."""
+    in unit tests). Production always runs PG.
+
+    Note (2026-05-26 P0b v2): kept for backward compat / tests that
+    monkeypatch this name. The production path now uses
+    _try_advisory_lock + backoff polling via _acquire_pan_backup_slot
+    so the conn isn't held during contention waits."""
     if conn.dialect.name == 'postgresql':
         await conn.execute(
             text("SELECT pg_advisory_lock(:k)"), {'k': key},
         )
+
+
+async def _try_advisory_lock(conn: AsyncConnection, key: int) -> bool:
+    """Non-blocking try-acquire. Returns True if the lock is now held by
+    this session, False if held by someone else.
+
+    No-op on SQLite (always True). 2026-05-26 postmortem P0b v2 — the
+    backup_executor uses this instead of blocking pg_advisory_lock to
+    avoid holding a DB conn during contention waits."""
+    if conn.dialect.name != 'postgresql':
+        return True
+    result = await conn.execute(
+        text("SELECT pg_try_advisory_lock(:k)"), {'k': key},
+    )
+    return bool(result.scalar())
 
 
 async def _release_advisory_lock(conn: AsyncConnection, key: int) -> None:
