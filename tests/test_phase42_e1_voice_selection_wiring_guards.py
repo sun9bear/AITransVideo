@@ -474,3 +474,62 @@ def test_e1_clone_gate_fetched_in_both_components():
             f"{path.name} doesn't have a cosyvoiceCloneGate state — "
             f"can_access_clone won't be consulted."
         )
+
+
+# ---------------------------------------------------------------------------
+# G_E1_P2 — frontend gate must AND runtime_ready (Codex 2026-05-27 PR #15 P2)
+# ---------------------------------------------------------------------------
+
+
+def test_e1_p2_frontend_gate_ands_runtime_ready_via_can_show_clone_button():
+    """**E.1 P2 fix guard (Codex 2026-05-27)**: both entry points must read
+    ``can_show_clone_button`` (joint policy + runtime field) — NOT just
+    ``can_access_clone`` (policy alone).
+
+    Why: ``can_access_clone`` = "admin / allowlist / GA grants visibility"
+    but does NOT mean the backend is configured to serve a clone. The
+    backend Layers 2-3 (``cosyvoice_clone_worker_enabled`` +
+    ``cosyvoice_sample_uploader`` is production-ready + config complete)
+    are separate. Frontend must consult both before showing the button.
+
+    The D.1 endpoint was extended in PR #15 to compute
+    ``can_show_clone_button = can_access_clone && runtime_ready`` server-
+    side; frontend referencing it directly stays in lockstep.
+
+    Detection: in both VoiceSelectionPanel + VoiceModifyTab the
+    cosyvoice-branch of ``canSpeakerClone`` must reference
+    ``can_show_clone_button``, NOT ``can_access_clone`` alone.
+    """
+    for path in (VOICE_SELECTION_PANEL, VOICE_MODIFY_TAB):
+        src = _strip_comments(path.read_text(encoding="utf-8"))
+        # The cosyvoice branch must read `can_show_clone_button` from the gate.
+        assert "can_show_clone_button" in src, (
+            f"{path.name} must reference `can_show_clone_button` (joint "
+            f"policy + runtime field added in D.1 PR #15 P2 fix). Using "
+            f"`can_access_clone` alone lets admin/allowlist users see a "
+            f"button that 503s on submit."
+        )
+
+        # Defensive: the cosyvoice branch in canSpeakerClone should NOT
+        # short-circuit on `can_access_clone === true` (policy alone).
+        # Locate the cosyvoice branch via the `provider === 'cosyvoice'`
+        # or `provider === "cosyvoice"` literal + scan the next ~300 chars
+        # for the comparison. Be tolerant of formatting.
+        for pat in (
+            r"provider\s*===\s*['\"]cosyvoice['\"]",
+        ):
+            for m in re.finditer(pat, src):
+                window = src[m.start(): m.start() + 400]
+                # If this window contains a `can_access_clone === true`
+                # check, it must ALSO contain `can_show_clone_button` —
+                # otherwise the gate skips the runtime layer.
+                if (
+                    "can_access_clone === true" in window
+                    and "can_show_clone_button" not in window
+                ):
+                    raise AssertionError(
+                        f"{path.name} cosyvoice branch of canSpeakerClone "
+                        f"reads only `can_access_clone === true` without "
+                        f"ANDing `can_show_clone_button`. Window:\n"
+                        f"{window}"
+                    )
