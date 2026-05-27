@@ -184,15 +184,25 @@ class AdminSettings(BaseModel):
     phase1b_whisper_quality_gate_enabled: bool = False
 
     # --- Phase 4.1 CosyVoice clone (Codex 2026-05-25 决策落地) ---
-    # 与 GatewaySettings.mainland_voice_worker_* 字段不同：这里的 5 项是
-    # **业务策略**（功能开关 / 默认模型 / allowlist），可由 admin 后台
-    # 修改并持久化到 admin_settings.json；secret / worker URL 仍在 env。
+    # 与 GatewaySettings.mainland_voice_worker_* 字段不同：这里的 6 项是
+    # **业务策略**（功能开关 / 默认模型 / allowlist / GA 灰度），可由 admin
+    # 后台修改并持久化到 admin_settings.json；secret / worker URL 仍在 env。
     #
-    # 授权规则（plan §Phase 4.1 §Schema + Backend 接通）：
-    #   authorized = is_admin(user) OR (user.id in cosyvoice_clone_user_allowlist)
+    # 授权规则（Phase 4.2 A.2c review 收紧）：
+    #   authorized =
+    #       is_admin(user)
+    #       OR (user.id in cosyvoice_clone_user_allowlist)         # beta 灰度
+    #       OR cosyvoice_clone_general_availability_enabled        # 全用户 GA
     cosyvoice_clone_worker_enabled: bool = False
     cosyvoice_clone_default_target_model: str = "cosyvoice-v3.5-flash"
-    cosyvoice_clone_user_allowlist: list[str] = []      # user_id 字符串数组
+    cosyvoice_clone_user_allowlist: list[str] = []      # user_id 字符串数组（beta）
+    # Phase 4.2 A.2c：全用户 GA 灰度开关。**默认 False** —— deploy 后保持
+    # admin-only，直到 admin 在 admin 后台手动翻 True。
+    # 这是**唯一**安全边界（plan v4-followup §8.1 + Codex 2026-05-26
+    # PR #11 wrap-up）；前端展示层只是 UX 便利，不是 gate。
+    # 翻 True 后 endpoint Layer 1 ``_check_authorized`` 对**任何**已登录用户
+    # 放行（仍保留 401 拒未登录、worker_enabled / quota / ownership 等其它层）。
+    cosyvoice_clone_general_availability_enabled: bool = False
     cosyvoice_clone_max_voices_per_user: int = 3        # 灰度期严控（C.2 已生效）
     # ⚠️ Phase 4.2 占位字段 —— 尚未实现 ⚠️
     # Codex 2026-05-25 C.2 二轮 review 部署前项 #B：此字段定义了"全局
