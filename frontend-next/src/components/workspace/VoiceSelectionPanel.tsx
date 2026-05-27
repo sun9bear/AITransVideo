@@ -28,6 +28,17 @@ import {
   updateSpeakerAudioDubbingMode,
 } from '@/lib/api/voiceSelection'
 import { apiClient } from '@/lib/api/client'
+// Phase 4.2 E.1 — CosyVoice clone wiring (file-upload only; source_segments
+// UI deferred to E.2). The button onClick below splits by provider:
+// MiniMax keeps using the legacy VoiceCloneModal in this file (function
+// body untouched, locked by G_MX.2 / G6.1.5 guards); CosyVoice routes to
+// the dedicated CosyVoiceCloneModal from voice-clone/ which talks to the
+// /api/voice/cosyvoice/clone endpoint via cosyvoiceClone.ts.
+import { CosyVoiceCloneModal } from '@/components/voice-clone/CosyVoiceCloneModal'
+import {
+  getCosyvoiceCloneGate,
+  type CosyvoiceCloneGateResponse,
+} from '@/lib/api/cosyvoiceClone'
 import type { ApiWebUiStateResponse } from '@/types/api'
 import type { JobSummary } from '@/types/jobs'
 
@@ -201,6 +212,19 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cloneModalSpeaker, setCloneModalSpeaker] = useState<string | null>(null)
+  // Phase 4.2 E.1: separate state for CosyVoice clone — different modal,
+  // different endpoint, different consent flow. Keeping it disjoint from
+  // `cloneModalSpeaker` ensures dispatching the wrong modal is impossible
+  // (only one of the two states is non-null at any time per the onClick
+  // handler below).
+  const [cosyvoiceCloneModalSpeaker, setCosyvoiceCloneModalSpeaker] =
+    useState<string | null>(null)
+  // Phase 4.2 E.1: clone-gate visibility cache. Fetched once on first mount
+  // and re-fetched if the user becomes authenticated (component remount).
+  // null = not yet loaded / fetch failed (treat as denied so we don't show
+  // a button that the backend will 403).
+  const [cosyvoiceCloneGate, setCosyvoiceCloneGate] =
+    useState<CosyvoiceCloneGateResponse | null>(null)
   const [auditModalSpeaker, setAuditModalSpeaker] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({})
   const [previewError, setPreviewError] = useState<Record<string, string | null>>({})
@@ -642,6 +666,27 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     }
   }, [])
 
+  // Phase 4.2 E.1: fetch CosyVoice clone-gate once on mount. Failure is
+  // treated as "denied" (state stays null) so we don't render a button the
+  // backend will 403. The gate is per-user policy state (D.1 endpoint);
+  // does not need to be re-polled.
+  useEffect(() => {
+    let cancelled = false
+    getCosyvoiceCloneGate()
+      .then((data) => {
+        if (cancelled) return
+        setCosyvoiceCloneGate(data)
+      })
+      .catch(() => {
+        // Silent fail → null state → button hidden for CosyVoice provider.
+        // Common reasons: user unauthenticated (401), gateway down. The
+        // visible "no clone available" state matches the safe default.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const allSelected = useMemo(() => {
     return speakers.some((sp) => sp.segmentCount > 0)
       && speakers.every((sp) => sp.segmentCount <= 0 || voiceStates[sp.speakerId]?.voiceId)
@@ -727,10 +772,22 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     if (!sp?.canClone) return false
     const state = voiceStates[speakerId]
     if (!state) return false
-    if (hasMultiProvider) {
-      return providerMap[state.selectedProvider]?.supportsClone ?? false
+    const provider = hasMultiProvider
+      ? state.selectedProvider
+      : defaultProvider
+    // Runtime availability (A0b): worker enabled? OSS configured? DashScope
+    // key in env? Computed in pipeline.process._build_voice_selection_review.
+    const supportsClone = hasMultiProvider
+      ? providerMap[state.selectedProvider]?.supportsClone ?? false
+      : defaultProvider === 'minimax'
+    if (!supportsClone) return false
+    // Phase 4.2 E.1: CosyVoice provider adds a second gate — policy-level
+    // authorization visibility (admin / allowlist / GA). MiniMax is
+    // unaffected (legacy behavior preserved).
+    if (provider === 'cosyvoice') {
+      return cosyvoiceCloneGate?.can_access_clone === true
     }
-    return defaultProvider === 'minimax'
+    return true
   }
 
   if (isLoading) {
@@ -995,7 +1052,20 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         <button
                           className="h-8 rounded px-3 text-xs font-medium transition border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20 disabled:opacity-50"
                           disabled={state?.isCloning}
-                          onClick={() => setCloneModalSpeaker(sp.speakerId)}
+                          onClick={() => {
+                            // Phase 4.2 E.1 — provider-aware dispatch.
+                            // MiniMax: keeps legacy in-file VoiceCloneModal
+                            // (function body untouched, hits
+                            // /jobs/${id}/voice-clone). CosyVoice: opens
+                            // the dedicated CosyVoiceCloneModal which hits
+                            // /api/voice/cosyvoice/clone. Mutual exclusion
+                            // is locked by G6.5.3 URL-set guard.
+                            if (currentProvider === 'cosyvoice') {
+                              setCosyvoiceCloneModalSpeaker(sp.speakerId)
+                            } else {
+                              setCloneModalSpeaker(sp.speakerId)
+                            }
+                          }}
                           type="button"
                         >
                           {state?.isCloning ? '克隆中...' : '克隆音色'}
@@ -1072,7 +1142,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         </div>
       </section>
 
-      {/* Clone Modal */}
+      {/* Clone Modal — MiniMax legacy path (function body in this file at
+          line ≈1334, locked unchanged by G6.1.5 / G_MX.2 guards). */}
       {cloneModalSpeaker && selectedCloneSpeaker ? (
         <VoiceCloneModal
           cloneCostCredits={cloneCostCredits}
@@ -1081,6 +1152,35 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           onComplete={handleCloneComplete}
           selectedProvider={voiceStates[selectedCloneSpeaker.speakerId]?.selectedProvider ?? defaultProvider}
           speaker={selectedCloneSpeaker}
+        />
+      ) : null}
+
+      {/* Phase 4.2 E.1: CosyVoice clone modal — separate component from
+          @/components/voice-clone/ (D.2). File-upload sample only in E.1;
+          source_segments selector deferred to E.2 (sourceSegmentIds left
+          undefined here so the modal renders the disabled-segments
+          placeholder + file-upload widget). On success, mirror the
+          MiniMax handleCloneComplete reuse=false semantics so voiceStates
+          gets the new voice_id selected for the speaker. */}
+      {cosyvoiceCloneModalSpeaker ? (
+        <CosyVoiceCloneModal
+          open={true}
+          onClose={() => setCosyvoiceCloneModalSpeaker(null)}
+          speakerId={cosyvoiceCloneModalSpeaker}
+          speakerName={
+            speakers.find((s) => s.speakerId === cosyvoiceCloneModalSpeaker)
+              ?.speakerName ?? cosyvoiceCloneModalSpeaker
+          }
+          defaultSourceJobId={jobId}
+          // E.1: leaving undefined → modal shows file-upload-only path.
+          // E.2 will pass real number[] from a segment picker UI.
+          sourceSegmentIds={undefined}
+          onSuccess={(voice) => {
+            handleCloneComplete(cosyvoiceCloneModalSpeaker, voice.voice_id, {
+              reused: false,
+            })
+            setCosyvoiceCloneModalSpeaker(null)
+          }}
         />
       ) : null}
 

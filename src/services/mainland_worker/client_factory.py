@@ -57,6 +57,19 @@ def _env_truthy(raw: str | None) -> bool:
     return raw.strip().lower() in _TRUTHY_LITERALS
 
 
+def is_worker_enabled_in_env() -> bool:
+    """轻量探针：读 ``AVT_MAINLAND_VOICE_WORKER_ENABLED`` 判断武汉 worker 是否启用。
+
+    不构造 client、不 I/O、不读 url/key_id/secret —— 仅看 enable 开关。
+    调用方（如 ``pipeline.process._build_voice_selection_review`` 决定前端是否
+    渲染 CosyVoice 克隆按钮）需要快速判断"运维是否打开了 mainland 通道"，
+    但不需要真造 client。
+
+    返 True 不代表配置完整。完整路径用 ``build_client_from_env()`` 拿真 client。
+    """
+    return _env_truthy(os.environ.get(ENV_ENABLED))
+
+
 def build_client_from_env() -> MainlandWorkerClient | None:
     """从 ``os.environ`` 构造 ``MainlandWorkerClient`` 或返 ``None``。
 
