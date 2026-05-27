@@ -62,6 +62,34 @@ logger = logging.getLogger(__name__)
 # Factory
 # ---------------------------------------------------------------------------
 
+def is_mainland_voice_worker_config_ready(settings: GatewaySettings) -> bool:
+    """**Pure-read** probe — would ``build_mainland_voice_worker_client``
+    return a non-None client given this ``settings`` snapshot?
+
+    Mirrors the **exact same checks** as
+    ``build_mainland_voice_worker_client`` (enabled flag + url + key_id +
+    secret, all non-empty after strip) — but constructs NO client, opens
+    NO connection, makes NO I/O. Safe to call from GET endpoints.
+
+    Phase 4.2 E.1 PR #15 P2 fix² (Codex 2026-05-27 review²):
+    ``/clone-gate`` needs to report whether the POST ``/clone`` Layer 10
+    (worker config) would pass, without paying the cost of building a
+    real client on every gate fetch. The pure probe lets the GET
+    endpoint compute ``runtime_ready`` for the full POST ladder.
+
+    Sync invariant: if the body of ``build_mainland_voice_worker_client``
+    changes its readiness logic, **this function must move in lockstep**.
+    The shared shape (enabled + non-empty url/key_id/secret) is the
+    "config ready" definition.
+    """
+    if not settings.mainland_voice_worker_enabled:
+        return False
+    url = (settings.mainland_voice_worker_url or "").strip()
+    key_id = (settings.mainland_voice_worker_hmac_key_id or "").strip()
+    secret = settings.mainland_voice_worker_hmac_secret or ""
+    return bool(url and key_id and secret)
+
+
 def build_mainland_voice_worker_client(
     settings: GatewaySettings,
 ) -> MainlandWorkerClient | None:

@@ -387,7 +387,8 @@ from dataclasses import dataclass
 class _FakeGwSettings:
     """Stub Gateway config.Settings — only the fields _resolve_runtime_ready
     reads. Attribute names mirror ``ALIYUN_OSS_REQUIRED_SETTINGS`` in
-    ``gateway/cosyvoice_clone/sample_uploader.py``."""
+    ``gateway/cosyvoice_clone/sample_uploader.py`` and the mainland worker
+    config in ``gateway/mainland_voice_worker.py``."""
 
     cosyvoice_sample_uploader: str = "aliyun_oss"
     # OSS config — match the exact attribute names checked by
@@ -396,6 +397,13 @@ class _FakeGwSettings:
     cosyvoice_oss_bucket: str | None = "avt-cosy-prod"
     cosyvoice_oss_access_key_id: str | None = "AK-test"
     cosyvoice_oss_access_key_secret: str | None = "SK-test"
+    # Mainland voice worker config — match the exact attribute names
+    # checked by `is_mainland_voice_worker_config_ready()` /
+    # `build_mainland_voice_worker_client()`.
+    mainland_voice_worker_enabled: bool = True
+    mainland_voice_worker_url: str | None = "https://worker.example.cn"
+    mainland_voice_worker_hmac_key_id: str | None = "k-test"
+    mainland_voice_worker_hmac_secret: str | None = "s-test"
 
 
 def _build_runtime_client(
@@ -503,20 +511,129 @@ def test_runtime_ready_false_when_uploader_oss_config_missing(monkeypatch):
 
 
 def test_runtime_ready_layer_ordering_worker_disabled_dominates(monkeypatch):
-    """**D5 layer order**: worker_disabled (Layer 2) beats uploader issues
-    (Layer 3). When both are wrong, we report the worker code so admin
-    knows the right thing to fix first."""
+    """**D5 layer order**: Layer 2 (admin `clone_feature_disabled`) beats
+    Layer 3 (uploader) which beats Layer 10 (mainland worker). When all
+    are wrong, we report the highest-priority code so admin knows the
+    right thing to fix first."""
     user = _FakeUser(user_id="u1", role="user")
     client = _build_runtime_client(
         monkeypatch,
         user=user,
         admin_overrides={"cosyvoice_clone_worker_enabled": False},
-        # Uploader is ALSO broken — but worker code should be reported.
-        gw_overrides={"cosyvoice_sample_uploader": "local_fs_stub"},
+        # Uploader AND mainland worker also broken — but Layer 2 wins.
+        gw_overrides={
+            "cosyvoice_sample_uploader": "local_fs_stub",
+            "mainland_voice_worker_enabled": False,
+        },
     )
     resp = client.get("/api/voice/cosyvoice/clone-gate")
     body = resp.json()
     assert body["runtime_unavailable_code"] == "clone_feature_disabled"
+
+
+# ---- Section D 二轮 P2 fix: mainland worker config readiness ----
+
+
+def test_runtime_ready_false_when_mainland_worker_disabled(monkeypatch):
+    """**D7 Layer 10a**: `mainland_voice_worker_enabled=false` →
+    runtime_ready=false, code='worker_disabled'.
+
+    Closes the "/clone-gate said ready but POST 503s on worker_disabled"
+    drift that Codex 2026-05-27 二轮 review caught.
+    """
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        gw_overrides={"mainland_voice_worker_enabled": False},
+    )
+    body = client.get("/api/voice/cosyvoice/clone-gate").json()
+    assert body["runtime_ready"] is False
+    assert body["runtime_unavailable_code"] == "worker_disabled"
+    assert body["can_show_clone_button"] is False
+
+
+def test_runtime_ready_false_when_mainland_worker_url_missing(monkeypatch):
+    """**D8 Layer 10b**: worker enabled but URL empty → worker_disabled.
+
+    Mirrors the defensive check in build_mainland_voice_worker_client
+    (theoretically startup_checks would have flipped enabled=false, but
+    the factory + this probe both double-check)."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        gw_overrides={"mainland_voice_worker_url": ""},
+    )
+    body = client.get("/api/voice/cosyvoice/clone-gate").json()
+    assert body["runtime_ready"] is False
+    assert body["runtime_unavailable_code"] == "worker_disabled"
+
+
+def test_runtime_ready_false_when_mainland_worker_key_id_missing(monkeypatch):
+    """**D9 Layer 10c**: worker enabled + URL set but HMAC key_id empty
+    → worker_disabled."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        gw_overrides={"mainland_voice_worker_hmac_key_id": ""},
+    )
+    body = client.get("/api/voice/cosyvoice/clone-gate").json()
+    assert body["runtime_ready"] is False
+    assert body["runtime_unavailable_code"] == "worker_disabled"
+
+
+def test_runtime_ready_false_when_mainland_worker_secret_missing(monkeypatch):
+    """**D10 Layer 10d**: worker enabled + URL + key_id set but HMAC
+    secret empty → worker_disabled.
+
+    Critical because the factory wouldn't construct a client without all
+    three components; without this gate the frontend would show button
+    and POST would 503 immediately."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        gw_overrides={"mainland_voice_worker_hmac_secret": ""},
+    )
+    body = client.get("/api/voice/cosyvoice/clone-gate").json()
+    assert body["runtime_ready"] is False
+    assert body["runtime_unavailable_code"] == "worker_disabled"
+
+
+def test_runtime_ready_does_not_leak_worker_secrets_to_response(monkeypatch):
+    """**D11 security guard (Codex 2026-05-27 二轮)**: the response body
+    MUST NOT contain raw URL / key_id / secret values from the worker
+    config. Only boolean + enum code can leak to the frontend.
+    """
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        # Use distinctive sentinel values that would obviously appear if
+        # they leaked.
+        gw_overrides={
+            "mainland_voice_worker_url": "https://SECRET-WORKER-URL.example",
+            "mainland_voice_worker_hmac_key_id": "SECRET-KEY-ID-SENTINEL",
+            "mainland_voice_worker_hmac_secret": "SECRET-SECRET-SENTINEL",
+            "cosyvoice_oss_access_key_id": "SECRET-OSS-AK-SENTINEL",
+            "cosyvoice_oss_access_key_secret": "SECRET-OSS-SECRET-SENTINEL",
+        },
+    )
+    body_text = client.get("/api/voice/cosyvoice/clone-gate").text
+    for sentinel in (
+        "SECRET-WORKER-URL",
+        "SECRET-KEY-ID-SENTINEL",
+        "SECRET-SECRET-SENTINEL",
+        "SECRET-OSS-AK-SENTINEL",
+        "SECRET-OSS-SECRET-SENTINEL",
+    ):
+        assert sentinel not in body_text, (
+            f"/clone-gate response leaked sensitive value `{sentinel}` "
+            f"to frontend. Only runtime_ready boolean + enum code may "
+            f"escape; URL / key_id / secret stay server-side."
+        )
 
 
 def test_can_show_clone_button_is_and_of_two_layers(monkeypatch):

@@ -102,7 +102,10 @@ from cosyvoice_clone.sample_validator import (
     validate_sample_bytes,
 )
 from database import get_db
-from mainland_voice_worker import build_mainland_voice_worker_client
+from mainland_voice_worker import (
+    build_mainland_voice_worker_client,
+    is_mainland_voice_worker_config_ready,
+)
 from models import User
 from user_voice_service import add_user_voice, count_active_voices_for_user_and_provider
 
@@ -316,11 +319,16 @@ class CloneRuntimeReadiness:
             "sample_uploader_not_configured",
             "sample_uploader_not_implemented",
             "sample_uploader_config_missing",
+            "worker_disabled",
         ]
         | None
     )
     """``runtime_ready=False`` 时的具体原因码，前端可据此展示运维提示。
-    成功路径下为 ``None``。"""
+    成功路径下为 ``None``。
+
+    ``worker_disabled`` 对应 POST ``/clone`` Layer 10 fail-closed —— mainland
+    worker enabled flag 关或 url/key_id/secret 任一缺失。
+    """
 
 
 def _resolve_runtime_ready(
@@ -328,32 +336,45 @@ def _resolve_runtime_ready(
     gateway_settings: Any,
 ) -> CloneRuntimeReadiness:
     """**Single source of truth** for runtime availability — mirrors POST
-    ``/clone`` Layers 2-3 fail-closed ladder, **read-only**.
+    ``/clone`` Layers 2 / 3 / 10 fail-closed ladder, **read-only**.
 
-    Phase 4.2 E.1 PR #15 Codex P2 fix（2026-05-27）：扩展 D.1
-    ``/clone-gate`` endpoint 以同步 runtime readiness 给前端。该函数与
-    POST ``/clone`` 的 ``cosyvoice_clone_worker_enabled`` + uploader 校验
-    保持一致 —— 任何 future drift 都会让前端按钮显示 vs 后端真实可用性
-    脱节（Codex 2026-05-27 PR #15 P2 核心担忧）。
+    Phase 4.2 E.1 PR #15 Codex P2 fix² (2026-05-27 二轮 review)：扩展
+    D.1 ``/clone-gate`` endpoint 以同步 runtime readiness 给前端。该函数
+    与 POST ``/clone`` 的 ``cosyvoice_clone_worker_enabled`` + uploader
+    校验 + mainland worker config 校验保持一致 —— 任何 future drift 都
+    会让前端按钮显示 vs 后端真实可用性脱节。
 
-    一致性约束（更新 POST 端时**必须**同步更新这里）：
+    Fail-closed ladder (mirrors POST ``/clone`` layer order):
 
-    - admin_settings.cosyvoice_clone_worker_enabled == False
-      → unavailable_code = "clone_feature_disabled"
-    - uploader_backend == "local_fs_stub"
-      → unavailable_code = "sample_uploader_not_configured"
-    - uploader_backend in KNOWN_BACKENDS - PRODUCTION_READY_BACKENDS
-      → unavailable_code = "sample_uploader_not_implemented"
-    - uploader_backend == "aliyun_oss" 但配置缺失
-      → unavailable_code = "sample_uploader_config_missing"
+    1. Layer 2: ``admin_settings.cosyvoice_clone_worker_enabled``
+       → ``clone_feature_disabled``
+    2. Layer 3a: ``cosyvoice_sample_uploader == "local_fs_stub"``
+       → ``sample_uploader_not_configured``
+    3. Layer 3b: uploader_backend ∉ ``PRODUCTION_READY_BACKENDS``
+       → ``sample_uploader_not_implemented``
+    4. Layer 3c: ``aliyun_oss`` 但配置缺失
+       → ``sample_uploader_config_missing``
+    5. Layer 10: mainland_voice_worker config not ready (enabled flag
+       off OR url/key_id/secret 任一缺失)
+       → ``worker_disabled``
 
-    设计约束（Codex P2 fix）：
+    First failure wins (early return). POST ``/clone`` raises 503 at the
+    SAME stage with the SAME code, so a successful "runtime_ready=true"
+    response from this function MUST mean POST will pass Layers 2 / 3 /
+    10 (downstream layers like quota / sample bytes / OSS upload are
+    request-specific and not pre-checkable from GET).
 
-    - **不 I/O / 不调外部服务**：只读 in-memory admin_settings + env
+    设计约束（Codex P2 fix²）：
+
+    - **不 I/O / 不调外部服务**：只读 in-memory admin_settings + env-backed
+      gateway settings. ``is_mainland_voice_worker_config_ready`` is a
+      pure-read probe that does NOT construct a real worker client.
     - **不 raise**：返 dataclass，POST endpoint 仍走自己的 raise ladder
     - **`src/pipeline` 不能 import gateway**：因此 supports_clone 仍用
       env probe；本函数是 gateway-side 真实可用性，通过 GET endpoint
       传到前端
+    - **不泄 secret 给前端**：``runtime_unavailable_code`` 只回 enum，URL /
+      key_id / secret 的具体值由 admin healthz endpoint 单独管理
     """
     # Layer 2: admin_settings worker_enabled
     if not admin_settings.cosyvoice_clone_worker_enabled:
@@ -385,6 +406,14 @@ def _resolve_runtime_ready(
                 runtime_ready=False,
                 runtime_unavailable_code="sample_uploader_config_missing",
             )
+
+    # Layer 10: mainland worker config (Codex 2026-05-27 二轮 — closes
+    # the "/clone-gate says ready but POST 503s on worker_disabled" drift)
+    if not is_mainland_voice_worker_config_ready(gateway_settings):
+        return CloneRuntimeReadiness(
+            runtime_ready=False,
+            runtime_unavailable_code="worker_disabled",
+        )
 
     return CloneRuntimeReadiness(
         runtime_ready=True,
@@ -432,7 +461,7 @@ async def cosyvoice_clone_gate(
             "runtime_unavailable_code":
                 "clone_feature_disabled" | "sample_uploader_not_configured" |
                 "sample_uploader_not_implemented" | "sample_uploader_config_missing" |
-                null,
+                "worker_disabled" | null,
             # ↑ runtime_ready=False 时的具体原因码，前端可据此展示运维提示。
             "can_show_clone_button": bool,
             # ↑ 便利字段 = can_access_clone && runtime_ready。前端可以直接
