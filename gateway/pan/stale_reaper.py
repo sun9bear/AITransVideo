@@ -225,11 +225,22 @@ async def run_stale_reaper_tick(
             # begin() blocks below.
             await conn.commit()
             try:
-                # Forward-resolve to archived.
-                async with conn.begin():
-                    await set_archive_status(
-                        row.user_id, row.job_id, 'archived', conn=conn,
-                    )
+                # 2026-05-26 postmortem P0d (Codex feedback):
+                # PRE-FIX BUG — we used to call set_archive_status('archived')
+                # HERE, then enqueue pan_residue_cleanup. But residue_cleanup
+                # (pan/residue_cleanup.py:153) refuses to act unless
+                # Job.status == 'archiving' — so the cleanup task immediately
+                # no-op'd, leaving R2 artifacts orphaned and r2_artifacts
+                # JSONB stale. Production 2026-05-26 had 3 archived jobs
+                # with 1.98 GB of orphan R2 keys directly caused by this.
+                #
+                # POST-FIX CONTRACT — residue_cleanup owns the archived flip.
+                # stale_reaper only enqueues; residue_cleanup verifies state,
+                # cleans R2 + rmtree, then sets status='archived' +
+                # r2_artifacts=NULL atomically. Job stays at 'archiving' until
+                # cleanup actually succeeds — if residue_cleanup fails
+                # partway, the next stale_reaper tick will re-enqueue (the
+                # enqueue helper is idempotent on (user, job, task_type)).
 
                 # Enqueue residue cleanup via the shared helper that
                 # creates the BackgroundTask row AND launches the
@@ -255,7 +266,9 @@ async def run_stale_reaper_tick(
                 stats['post_commit_forwarded'] += 1
                 stats['residue_cleanup_enqueued'] += 1
                 logger.info(
-                    "pan_stale_reaper: forward-resolved user=%s job=%s br=%s",
+                    "pan_stale_reaper: enqueued residue_cleanup for "
+                    "user=%s job=%s br=%s (status stays 'archiving' "
+                    "until residue_cleanup finalizes)",
                     row.user_id, row.job_id, row.br_id,
                 )
             except Exception as exc:  # noqa: BLE001

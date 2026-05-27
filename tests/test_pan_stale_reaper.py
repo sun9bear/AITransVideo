@@ -321,15 +321,22 @@ def test_reaper_dry_run_does_not_modify(monkeypatch):
 
 def test_reaper_forward_resolves_post_commit_stuck(monkeypatch):
     """Job.status='archiving' + BackupRecord.status='uploaded' +
-    completed_at > 4h ago → forward-resolve to Job.status='archived'
-    and enqueue pan_residue_cleanup."""
+    completed_at > 4h ago → stale_reaper enqueues pan_residue_cleanup
+    and LEAVES status at 'archiving' so residue_cleanup can act.
+
+    2026-05-26 postmortem P0d (Codex feedback): pre-fix, stale_reaper
+    flipped status to 'archived' BEFORE enqueueing residue_cleanup.
+    residue_cleanup then refused to act (its precondition is
+    status=='archiving') → R2 keys leaked. This test now asserts the
+    post-fix contract: status STAYS 'archiving' until residue_cleanup
+    finalizes."""
     from background_task_models import BackgroundTask
     from models import Job
     from pan.stale_reaper import run_stale_reaper_tick
 
     setup_pan_token_env(monkeypatch)
     # CodeX P2: block real residue_cleanup executor from running —
-    # this test only verifies the row was enqueued + status flips.
+    # this test only verifies the row was enqueued + status stays.
     install_no_launch(monkeypatch)
     user_id = uuid.uuid4()
 
@@ -364,7 +371,14 @@ def test_reaper_forward_resolves_post_commit_stuck(monkeypatch):
                     select(BackgroundTask.task_type, BackgroundTask.params)
                     .where(BackgroundTask.job_id == 'post_commit_stuck')
                 )).one_or_none()
-            assert job_status == 'archived'
+            # POST-FIX: status STAYS 'archiving' after stale_reaper.
+            # residue_cleanup is the only one allowed to flip it to
+            # 'archived' (and only after R2 delete + rmtree both succeed).
+            assert job_status == 'archiving', (
+                f"stale_reaper must not pre-flip status; got {job_status!r}. "
+                "Pre-fix bug: flipping to 'archived' here made residue_cleanup "
+                "no-op (its guard requires status='archiving')."
+            )
             assert bt is not None
             assert bt.task_type == 'pan_residue_cleanup'
             params = bt.params
@@ -373,6 +387,59 @@ def test_reaper_forward_resolves_post_commit_stuck(monkeypatch):
                 params = _json.loads(params)
             assert params['backup_id'] == str(br['id'])
             assert params['user_id'] == str(user_id)
+
+    run_async(_go())
+
+
+def test_reaper_leaves_status_archiving_so_residue_cleanup_can_act(monkeypatch):
+    """Regression guard for the 2026-05-26 P0d fix.
+
+    The bug: stale_reaper used to flip Job.status='archived' before
+    enqueueing residue_cleanup. residue_cleanup's precondition check
+    (gateway/pan/residue_cleanup.py:153, ``if status != 'archiving':
+    return``) immediately bailed → R2 orphans accumulated forever.
+
+    This test pins the contract: after stale_reaper enqueues
+    residue_cleanup, status must STILL be 'archiving' so residue_cleanup
+    can pick it up. If anyone re-adds a pre-flip, this test catches it.
+    """
+    from models import Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    install_no_launch(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='residue_chain',
+                status='archiving', edit_generation=0,
+            )
+            br = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='residue_chain',
+                status='uploaded', job_edit_generation=0,
+            )
+            await _set_completed_at(
+                engine, br['id'],
+                datetime.now(timezone.utc) - timedelta(hours=5),
+            )
+
+            stats = await run_stale_reaper_tick(engine)
+            assert stats['residue_cleanup_enqueued'] == 1, stats
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status)
+                    .where(Job.job_id == 'residue_chain')
+                )).scalar_one()
+
+            # The decisive contract: residue_cleanup's precondition
+            # (in residue_cleanup.py:153) compares against 'archiving'.
+            # If this is anything else, the chain is broken.
+            assert job_status == 'archiving'
 
     run_async(_go())
 
