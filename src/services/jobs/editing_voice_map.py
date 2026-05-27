@@ -136,6 +136,15 @@ def _load_voice_map_raw(project_dir: str | Path) -> dict[str, dict[str, Any]]:
         )
         if model_key:
             normalized["tts_model_key"] = model_key
+        # Phase 4.2 E.1 PR #15 P1² fix (Codex 2026-05-27): preserve
+        # CosyVoice clone worker routing across the normalisation pass.
+        # Strict bool check (``is True``) so non-bool junk in a hand-
+        # edited file doesn't get promoted to truthy routing.
+        if entry.get("requires_worker") is True:
+            normalized["requires_worker"] = True
+            target_model = entry.get("worker_target_model")
+            if isinstance(target_model, str) and target_model.strip():
+                normalized["worker_target_model"] = target_model.strip()
         out[str(sid)] = normalized
     return out
 
@@ -147,9 +156,28 @@ def set_voice_override(
     provider: str,
     voice_id: str,
     tts_model_key: str | None = None,
+    requires_worker: bool | None = None,
+    worker_target_model: str | None = None,
 ) -> dict[str, Any]:
     """Record a user's voice change for ``segment_id`` and flag the segment
-    ``voice_dirty``. Returns the updated voice_map entry."""
+    ``voice_dirty``. Returns the updated voice_map entry.
+
+    Phase 4.2 E.1 PR #15 P1² fix (Codex 2026-05-27): for CosyVoice user
+    clone voices, the caller MUST pass ``requires_worker=True`` +
+    ``worker_target_model`` (e.g. ``"cosyvoice-v3.5-flash"``) so the
+    regeneration path can dispatch to the mainland worker. Without these
+    fields the segment falls back to legacy CosyVoice (builtin catalog
+    only) and the clone voice silently doesn't take effect.
+
+    The caller (gateway editing/voice-map endpoint) is responsible for
+    looking up ``user_voices`` and supplying these flags — same pattern
+    as ``enrich_speakers_with_worker_routing`` does for approve flow.
+
+    Both ``requires_worker`` and ``worker_target_model`` are optional
+    here (legacy MiniMax / builtin CosyVoice / VolcEngine paths don't
+    need them). When provided, both are persisted into voice_map.json
+    so re-TTS knows how to route.
+    """
     validate_segment_id(segment_id)
     provider = str(provider).strip()
     voice_id = str(voice_id).strip()
@@ -185,6 +213,14 @@ def set_voice_override(
         model_key = _normalize_tts_model_key(tts_model_key)
         if model_key:
             entry["tts_model_key"] = model_key
+        # E.1 P1²: persist worker routing for CosyVoice user clones.
+        # ``requires_worker`` is a strict bool — only True is meaningful;
+        # None / False are treated as "not a clone" and stay absent from
+        # the entry (downstream readers check `.get("requires_worker")`).
+        if requires_worker is True:
+            entry["requires_worker"] = True
+            if isinstance(worker_target_model, str) and worker_target_model.strip():
+                entry["worker_target_model"] = worker_target_model.strip()
         voice_map[segment_id] = entry
         _atomic_write_json(_voice_map_path(project_dir), voice_map)
         mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)

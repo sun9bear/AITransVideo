@@ -1440,10 +1440,20 @@ class JobService:
         voice_id: str,
         tts_model_key: str | None = None,
         voice_reuse: bool = False,
+        requires_worker: bool | None = None,
+        worker_target_model: str | None = None,
     ) -> dict:
         """Set per-segment voice override + emit
         ``post_edit_voice_override_changed`` audit event (plan 2026-05-04
         §10.4 — feeds the auto voice-recommendation analysis loop).
+
+        Phase 4.2 E.1 PR #15 P1 二轮 fix (Codex 2026-05-27): caller may
+        pass ``requires_worker`` + ``worker_target_model`` so CosyVoice
+        clone voice overrides persist their worker routing. The gateway
+        editing/voice-map endpoint enriches these from a
+        ``user_voices`` lookup (same DB / ownership check as the approve
+        flow uses); the pipeline subprocess cannot fabricate them and
+        does NOT do its own DB lookup here.
         """
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.editing_voice_map import (
@@ -1466,6 +1476,8 @@ class JobService:
             provider=provider,
             voice_id=voice_id,
             tts_model_key=tts_model_key,
+            requires_worker=requires_worker,
+            worker_target_model=worker_target_model,
         )
         _touch_editing(record, self.store)
 
