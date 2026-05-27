@@ -278,28 +278,46 @@ class RealCosyvoiceProvider(CosyvoiceProvider):
         return DeleteOutcome(provider_request_id=provider_request_id)
 
     def _validate_sample_size(self, url: str) -> None:
+        """Validate sample reachability/size using GET, not HEAD.
+
+        Aliyun OSS presigned URLs are signed for a specific HTTP method. The
+        gateway gives DashScope a GET URL, so using HEAD here returns 403 even
+        though the URL is valid for the provider. Use a one-byte Range GET
+        instead; if the server ignores Range, fall back to the response content
+        length.
+        """
         try:
             with httpx.Client(timeout=10.0, follow_redirects=True) as c:
-                resp = c.head(url)
+                resp = c.get(url, headers={"Range": "bytes=0-0"})
         except Exception as exc:
             raise ProviderError(
-                f"sample HEAD failed for url: {exc}",
-                code="sample_head_failed",
+                f"sample GET probe failed for url: {exc}",
+                code="sample_get_failed",
                 retryable=False,
             ) from exc
 
         if resp.status_code >= 400:
             raise ProviderError(
-                f"sample URL HEAD returned {resp.status_code}",
+                f"sample URL GET probe returned {resp.status_code}",
                 code="sample_url_unreachable",
                 retryable=False,
             )
 
-        cl_str = resp.headers.get("content-length", "0")
-        try:
-            cl = int(cl_str)
-        except ValueError:
-            cl = 0
+        cl = 0
+        content_range = resp.headers.get("content-range", "")
+        if "/" in content_range:
+            try:
+                cl = int(content_range.rsplit("/", 1)[1])
+            except ValueError:
+                cl = 0
+        if cl <= 0:
+            cl_str = resp.headers.get("content-length", "0")
+            try:
+                cl = int(cl_str)
+            except ValueError:
+                cl = 0
+        if cl <= 0:
+            cl = len(resp.content or b"")
 
         if cl > self._max_sample_bytes:
             raise ProviderError(
