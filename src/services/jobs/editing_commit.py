@@ -174,6 +174,21 @@ def _apply_voice_map(
     constructor filters unknown keys → tts_provider="" → downstream
     falls back to the global default).
 
+    Phase 4.2 E.1 PR #15 P1 五轮 fix (Codex 2026-05-27): also propagate
+    CosyVoice clone worker routing (``requires_worker`` /
+    ``worker_target_model``) so editor/segments.json — the source of
+    truth for resume / regenerate-all-tts / γ publish — carries the
+    routing through. Without this, gateway intercept correctly
+    persists routing into editing/voice_map.json (per P1 三轮/四轮 fix),
+    but commit applies the map and **drops** the routing fields when
+    materialising editor/segments.json → re-TTS fall back to legacy
+    CosyVoice → clone voice silently doesn't take effect.
+
+    Stale routing cleanup: for any segment that gets an override, we
+    pop the old routing first BEFORE deciding whether to re-add them.
+    Otherwise editing from a clone voice to a builtin would leave
+    stale ``requires_worker=True`` on the segment.
+
     ``segment_id`` in editing/segments.json may be int (legacy lazy-seed
     snapshots). voice_map keys are always str (load_voice_map coerces
     via ``str(sid)``). Normalise the lookup key via ``str()`` instead of
@@ -198,6 +213,18 @@ def _apply_voice_map(
             # Scrub any legacy ``provider`` key so editor/segments.json
             # stays single-source-of-truth on tts_provider.
             new_seg.pop("provider", None)
+            # E.1 P1 五轮 fix: always clear stale routing fields first.
+            # Re-add from the override only when it's a clone (`is True`).
+            # This handles voice swaps clone → builtin (stale flag must
+            # not stick) AND clone → different clone (different
+            # target_model takes effect).
+            new_seg.pop("requires_worker", None)
+            new_seg.pop("worker_target_model", None)
+            if override.get("requires_worker") is True:
+                new_seg["requires_worker"] = True
+                target_model = override.get("worker_target_model")
+                if isinstance(target_model, str) and target_model.strip():
+                    new_seg["worker_target_model"] = target_model.strip()
             out.append(new_seg)
         else:
             out.append(seg)
@@ -243,7 +270,7 @@ def _apply_editing_to_baseline(project_dir: Path) -> dict[str, Any]:
                     p = str(entry.get("provider", "")).strip()
                     v = str(entry.get("voice_id", "")).strip()
                     if p and v:
-                        normalized = {"provider": p, "voice_id": v}
+                        normalized: dict[str, Any] = {"provider": p, "voice_id": v}
                         model_key = str(
                             entry.get("tts_model_key")
                             or entry.get("tts_model")
@@ -252,6 +279,17 @@ def _apply_editing_to_baseline(project_dir: Path) -> dict[str, Any]:
                         ).strip()
                         if model_key:
                             normalized["tts_model_key"] = model_key
+                        # E.1 P1 五轮 fix (Codex 2026-05-27): preserve
+                        # CosyVoice clone worker routing through the
+                        # normalisation step so it reaches
+                        # ``_apply_voice_map`` → editor/segments.json.
+                        # Strict ``is True`` check defends against
+                        # hand-edited voice_map.json with truthy junk.
+                        if entry.get("requires_worker") is True:
+                            normalized["requires_worker"] = True
+                            target_model = entry.get("worker_target_model")
+                            if isinstance(target_model, str) and target_model.strip():
+                                normalized["worker_target_model"] = target_model.strip()
                         voice_map[str(sid)] = normalized
     if voice_map:
         segments = _apply_voice_map(segments, voice_map)
