@@ -318,15 +318,65 @@ def test_admin_settings_default_ga_is_false() -> None:
     )
 
 
-def test_admin_settings_ga_field_is_bool_type() -> None:
-    """字段类型必须严格 bool（不允许 str / int / etc.，防 admin UI 误传）。"""
-    import inspect
+def test_admin_settings_ga_accepts_real_python_bools() -> None:
+    """合法输入：Python ``True`` / ``False`` 必须正常接受。"""
+    # default False
+    s_default = AdminSettings()
+    assert s_default.cosyvoice_clone_general_availability_enabled is False
 
-    # Pydantic v2: AdminSettings.model_fields["cosyvoice_clone_general_availability_enabled"]
+    # explicit False
+    s_false = AdminSettings(cosyvoice_clone_general_availability_enabled=False)
+    assert s_false.cosyvoice_clone_general_availability_enabled is False
+
+    # explicit True
+    s_true = AdminSettings(cosyvoice_clone_general_availability_enabled=True)
+    assert s_true.cosyvoice_clone_general_availability_enabled is True
+
+
+@pytest.mark.parametrize("bad_value", [
+    # 字符串形态 —— 普通 ``bool`` 会宽松解析为 True，``StrictBool`` 拒
+    "true", "True", "TRUE",
+    "1", "0", "yes", "on", "Yes", "On",
+    "false", "False", "no", "off",
+    # int 形态 —— 普通 ``bool`` 会接受，``StrictBool`` 拒
+    1, 0, -1, 2,
+    # 其它类型
+    1.0, 0.0,
+    None,
+    [], [True], {}, {"v": True},
+])
+def test_admin_settings_ga_strict_bool_rejects_non_bool_inputs(bad_value) -> None:
+    """**Codex 2026-05-27 PR #12 review P1**：``StrictBool`` 必须拒绝**所有**
+    非 Python ``bool`` 输入。
+
+    最危险 case 是字符串 ``"1"`` / ``"on"`` / ``"true"`` —— 普通 ``bool`` 字段
+    在 Pydantic 下会乐意转 True，admin UI / JSON marshalling 任何 bug 把"1"
+    传过来就会**意外打开 GA**，全用户立刻可调付费 API。``StrictBool`` 把
+    这个攻击向量在 schema 层关掉。
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AdminSettings(cosyvoice_clone_general_availability_enabled=bad_value)
+
+
+def test_admin_settings_ga_field_uses_strict_bool_metadata() -> None:
+    """**架构守卫**：确认字段实际声明就是 ``StrictBool``，防有人未来把
+    类型还原回普通 ``bool`` 而测试漏抓。
+
+    Pydantic v2 把 ``StrictBool`` 表示为 ``Annotated[bool, Strict()]``，所以
+    annotation 本身仍是 ``bool``，关键标记在 metadata 里。
+    """
+    from pydantic.types import Strict
+
     field = AdminSettings.model_fields["cosyvoice_clone_general_availability_enabled"]
-    assert field.annotation is bool, (
-        f"cosyvoice_clone_general_availability_enabled type must be bool, "
-        f"got {field.annotation}"
+    # metadata 列表里必须含 Strict 标记
+    strict_markers = [m for m in field.metadata if isinstance(m, Strict)]
+    assert strict_markers, (
+        "cosyvoice_clone_general_availability_enabled 必须用 StrictBool（"
+        "防 Pydantic 把 '1' / 'on' / 'yes' 等字符串宽松解析为 True，意外"
+        "打开 GA 全用户付费 API）。当前 metadata: "
+        f"{field.metadata}"
     )
 
 

@@ -21,7 +21,7 @@ for _candidate in [
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, StrictBool, field_validator
 from sqlalchemy import select, delete as sa_delete
 
 from auth import get_current_user
@@ -202,7 +202,14 @@ class AdminSettings(BaseModel):
     # PR #11 wrap-up）；前端展示层只是 UX 便利，不是 gate。
     # 翻 True 后 endpoint Layer 1 ``_check_authorized`` 对**任何**已登录用户
     # 放行（仍保留 401 拒未登录、worker_enabled / quota / ownership 等其它层）。
-    cosyvoice_clone_general_availability_enabled: bool = False
+    #
+    # **类型用 ``StrictBool``**（Codex 2026-05-27 PR #12 review P1）：
+    # 普通 ``bool`` 在 Pydantic 下宽松解析 —— ``"1"`` / ``"on"`` / ``"yes"``
+    # / ``"true"`` 等字符串都会被转 ``True``。Admin UI / JSON marshalling
+    # 任何 bug 把"1"传到这里都会**意外打开 GA → 全用户付费 API**。
+    # ``StrictBool`` 只接受 Python ``True`` / ``False``，所有 string / int
+    # 输入都 raise ValidationError，从 schema 层把这个攻击向量关掉。
+    cosyvoice_clone_general_availability_enabled: StrictBool = False
     cosyvoice_clone_max_voices_per_user: int = 3        # 灰度期严控（C.2 已生效）
     # ⚠️ Phase 4.2 占位字段 —— 尚未实现 ⚠️
     # Codex 2026-05-25 C.2 二轮 review 部署前项 #B：此字段定义了"全局
