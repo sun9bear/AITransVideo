@@ -373,7 +373,7 @@ export function CosyVoiceCloneModal({
           if (!next && !isLoading) onClose()
         }}
       >
-        <DialogContent className="max-w-xl sm:max-w-xl">
+        <DialogContent className="w-[calc(100vw-2rem)] max-w-xl overflow-x-hidden sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>克隆「{speakerName}」的声音</DialogTitle>
             <DialogDescription>
@@ -401,7 +401,7 @@ export function CosyVoiceCloneModal({
           )}
 
           {gate?.can_access_clone && (
-            <div className="space-y-4 py-2">
+            <div className="min-w-0 space-y-4 py-2">
               {/* Speaker name */}
               <div className="space-y-2">
                 <Label htmlFor="cosyvoice-clone-speaker-name">音色名称</Label>
@@ -411,7 +411,7 @@ export function CosyVoiceCloneModal({
                   value={editableSpeakerName}
                   onChange={(e) => setEditableSpeakerName(e.target.value)}
                   placeholder="例如：旁白小李"
-                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  className="w-full min-w-0 rounded-md border border-border bg-background px-3 py-2 text-sm"
                   disabled={isLoading}
                 />
               </div>
@@ -426,7 +426,7 @@ export function CosyVoiceCloneModal({
                       <label
                         key={model}
                         data-target-model={model}
-                        className="flex items-start gap-3 rounded-xl border border-border bg-muted/30 p-3 cursor-pointer hover:bg-muted/50 transition"
+                        className="flex min-w-0 items-start gap-3 rounded-xl border border-border bg-muted/30 p-3 cursor-pointer hover:bg-muted/50 transition"
                       >
                         <input
                           type="radio"
@@ -436,7 +436,7 @@ export function CosyVoiceCloneModal({
                           className="mt-1 h-4 w-4"
                           disabled={isLoading}
                         />
-                        <div>
+                        <div className="min-w-0">
                           <p className="text-sm font-medium text-foreground">
                             {info.label}
                           </p>
@@ -456,7 +456,7 @@ export function CosyVoiceCloneModal({
                 <div className="space-y-2">
                   <label
                     data-sample-mode="file"
-                    className="flex items-start gap-3 rounded-xl border border-border bg-muted/30 p-3 cursor-pointer hover:bg-muted/50 transition"
+                    className="flex min-w-0 items-start gap-3 rounded-xl border border-border bg-muted/30 p-3 cursor-pointer hover:bg-muted/50 transition"
                   >
                     <input
                       type="radio"
@@ -472,7 +472,7 @@ export function CosyVoiceCloneModal({
                       className="mt-1 h-4 w-4"
                       disabled={isLoading}
                     />
-                    <div className="flex-1">
+                    <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium text-foreground">
                         上传音频文件
                       </p>
@@ -515,7 +515,7 @@ export function CosyVoiceCloneModal({
                   {segmentsModeAvailable && (
                     <label
                       data-sample-mode="segments"
-                      className="flex items-start gap-3 rounded-xl border border-border bg-muted/30 p-3 cursor-pointer hover:bg-muted/50 transition"
+                      className="flex min-w-0 items-start gap-3 rounded-xl border border-border bg-muted/30 p-3 cursor-pointer hover:bg-muted/50 transition"
                     >
                       <input
                         type="radio"
@@ -531,7 +531,7 @@ export function CosyVoiceCloneModal({
                         className="mt-1 h-4 w-4"
                         disabled={isLoading}
                       />
-                      <div className="flex-1">
+                      <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-foreground">
                           从当前任务转写选段
                         </p>
@@ -539,7 +539,7 @@ export function CosyVoiceCloneModal({
                           勾选 3-60 秒的段，由后端自动拼成样本（推荐 10-20 秒）。
                         </p>
                         {sampleMode === "segments" && (
-                          <div className="mt-2">
+                          <div className="mt-2 min-w-0 overflow-hidden">
                             <CosyVoiceSegmentPicker
                               speakerId={speakerId}
                               jobId={defaultSourceJobId as string}

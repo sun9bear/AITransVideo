@@ -560,3 +560,45 @@ def test_e2_modal_passes_on_available_segment_ids_change_to_picker():
         "`setAvailableSegmentIds(new Set(...))` 模式 —— 包成 Set<number> "
         "供子集 assert 使用。"
     )
+
+# ---------------------------------------------------------------------------
+# 20. Segment picker text cannot stretch the clone modal horizontally
+# ---------------------------------------------------------------------------
+
+
+def test_e2_segment_picker_text_overflow_is_contained():
+    """Long transcript text must not force the CosyVoice clone modal wider.
+
+    The production UI can receive long English transcript segments. The picker
+    row is a flex layout, so every ancestor on the horizontal chain must allow
+    shrinking (`min-w-0`) and the scroll container must clip x overflow.
+    """
+    picker_src = _strip_ts_comments(PICKER_FILE.read_text(encoding="utf-8"))
+    modal_src = _strip_ts_comments(CLONE_MODAL.read_text(encoding="utf-8"))
+
+    assert "overflow-x-hidden" in modal_src, (
+        "CosyVoiceCloneModal DialogContent must hide x overflow so a long "
+        "segment row cannot stretch the dialog past the viewport."
+    )
+    assert "min-w-0 space-y-4 py-2" in modal_src, (
+        "CosyVoiceCloneModal form body must include min-w-0 so nested flex "
+        "children can shrink instead of widening the modal."
+    )
+    assert (
+        "max-h-72 w-full min-w-0 overflow-x-hidden overflow-y-auto" in picker_src
+    ), (
+        "CosyVoiceSegmentPicker list container must be width-bounded and "
+        "clip horizontal overflow."
+    )
+    assert "flex min-w-0 items-start gap-2" in picker_src, (
+        "CosyVoiceSegmentPicker row must include min-w-0 so the text column "
+        "can wrap or clip inside the row."
+    )
+    assert "overflow-hidden break-words text-xs leading-5" in picker_src, (
+        "CosyVoiceSegmentPicker segment text must wrap/clip long transcript "
+        "content instead of using an unconstrained flex width."
+    )
+    assert "title={seg.sourceText" in picker_src, (
+        "Wrapped/clipped segment text should keep the full transcript in a "
+        "title attribute for inspection."
+    )

@@ -321,7 +321,7 @@ export function CosyVoiceSegmentPicker({
 
   if (isLoading) {
     return (
-      <div className="rounded-lg border border-border bg-muted/20 p-4 text-sm text-muted-foreground">
+      <div className="min-w-0 rounded-lg border border-border bg-muted/20 p-4 text-sm text-muted-foreground">
         加载当前说话人的转写段...
       </div>
     )
@@ -329,7 +329,7 @@ export function CosyVoiceSegmentPicker({
 
   if (loadError) {
     return (
-      <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive space-y-2">
+      <div className="min-w-0 space-y-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
         <p>{loadError}</p>
         <p className="text-muted-foreground">
           可改用「上传音频文件」模式，或稍后重试。
@@ -340,19 +340,19 @@ export function CosyVoiceSegmentPicker({
 
   if (segments.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+      <div className="min-w-0 rounded-lg border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
         当前说话人没有可拼段。请改用「上传音频文件」模式克隆。
       </div>
     )
   }
 
   return (
-    <div className="space-y-2">
+    <div className="min-w-0 space-y-2">
       {/* 总时长指示器 */}
       <div
         data-picker-status={durationStatus.kind}
         className={
-          "rounded-md border px-3 py-2 text-xs " +
+          "min-w-0 break-words rounded-md border px-3 py-2 text-xs " +
           (durationStatus.kind === "ok"
             ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
             : durationStatus.kind === "empty"
@@ -382,8 +382,8 @@ export function CosyVoiceSegmentPicker({
       </div>
 
       {/* 段列表 */}
-      <div className="max-h-72 overflow-y-auto rounded-lg border border-border bg-card/30">
-        <ul className="divide-y divide-border/60">
+      <div className="max-h-72 w-full min-w-0 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-card/30">
+        <ul className="min-w-0 divide-y divide-border/60">
           {segments.map((seg) => {
             const isSelected = selectedSet.has(seg.segmentId)
             const isPlaying = playingSegmentId === seg.segmentId
@@ -394,7 +394,7 @@ export function CosyVoiceSegmentPicker({
               <li
                 key={seg.segmentId}
                 className={
-                  "flex items-center gap-2 px-3 py-2 transition " +
+                  "flex min-w-0 items-start gap-2 px-3 py-2 transition " +
                   (isSelected ? "bg-primary/5" : "hover:bg-muted/30")
                 }
               >
@@ -403,7 +403,7 @@ export function CosyVoiceSegmentPicker({
                   checked={isSelected}
                   onChange={() => toggleSegment(seg.segmentId)}
                   disabled={disabled}
-                  className="h-4 w-4 shrink-0"
+                  className="mt-1 h-4 w-4 shrink-0"
                   aria-label={`选段 ${seg.segmentId}`}
                 />
                 <button
@@ -435,7 +435,10 @@ export function CosyVoiceSegmentPicker({
                 <span className="w-12 shrink-0 text-xs tabular-nums text-slate-400">
                   {formatTimecode(seg.startMs)}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+                <span
+                  className="min-w-0 flex-1 overflow-hidden break-words text-xs leading-5 text-foreground"
+                  title={seg.sourceText || `片段 ${seg.segmentId}`}
+                >
                   {seg.sourceText || `片段 ${seg.segmentId}`}
                 </span>
                 <span
