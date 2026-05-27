@@ -273,3 +273,123 @@ def test_a0b_process_supports_clone_three_branches_correct():
         "legacy hard-coded `\"supports_clone\": prov == \"minimax\"` still "
         "present — A0b refactor incomplete."
     )
+
+
+# ---------------------------------------------------------------------------
+# Section C — Import isolation (PR #15 P1 二轮 fix, Codex 2026-05-27)
+# ---------------------------------------------------------------------------
+#
+# `client_factory` is imported from pipeline.process to probe whether the
+# CosyVoice clone button should render. The probe MUST stay
+# dependency-free — pulling `httpx` (a Gateway-only dependency) into the
+# core app/CLI import path would crash deployments that don't include
+# Gateway requirements.
+#
+# These two cases lock the module-import contract:
+#   1. Bare module import does NOT trigger `httpx` import
+#   2. Calling `is_worker_enabled_in_env()` does NOT trigger `httpx` import
+#
+# `build_client_from_env()` is allowed to trigger httpx — but only when
+# actually called, via lazy in-function import.
+# ---------------------------------------------------------------------------
+
+
+def test_client_factory_module_import_does_not_pull_httpx(monkeypatch):
+    """**C1 import-time isolation**: importing
+    ``services.mainland_worker.client_factory`` in a fresh Python session
+    must NOT load ``httpx`` as a side effect.
+
+    Method: scan ``sys.modules`` for ``httpx`` after a fresh import in
+    a subprocess. (Doing it inline would conflict with the test process
+    which already has ``httpx`` available.)
+    """
+    import subprocess
+    import sys as _sys
+
+    code = (
+        "import sys\n"
+        "# Reach src/\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, r'{REPO_ROOT / 'src'}')\n"
+        "import services.mainland_worker.client_factory as cf\n"
+        "# Module imported cleanly. Now check sys.modules for httpx.\n"
+        "leaked = [m for m in sys.modules if m == 'httpx' or m.startswith('httpx.')]\n"
+        "if leaked:\n"
+        "    raise SystemExit(\n"
+        "        f'client_factory module import pulled httpx: {leaked}'\n"
+        "    )\n"
+        "print('OK: no httpx after client_factory import')\n"
+    )
+    result = subprocess.run(
+        [_sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Subprocess failed:\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+
+
+def test_is_worker_enabled_in_env_call_does_not_pull_httpx(monkeypatch):
+    """**C2 runtime isolation**: calling ``is_worker_enabled_in_env()``
+    must NOT trigger ``httpx`` import either. Even though module import
+    is clean (C1), a probe call could still side-effect.
+
+    Subprocess again so we test against a clean sys.modules.
+    """
+    import subprocess
+    import sys as _sys
+
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, r'{REPO_ROOT / 'src'}')\n"
+        "from services.mainland_worker.client_factory import is_worker_enabled_in_env\n"
+        "# Call it — should be pure env-read.\n"
+        "_ = is_worker_enabled_in_env()\n"
+        "leaked = [m for m in sys.modules if m == 'httpx' or m.startswith('httpx.')]\n"
+        "if leaked:\n"
+        "    raise SystemExit(\n"
+        "        f'is_worker_enabled_in_env() pulled httpx: {leaked}'\n"
+        "    )\n"
+        "print('OK: no httpx after is_worker_enabled_in_env() call')\n"
+    )
+    result = subprocess.run(
+        [_sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"Subprocess failed:\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+
+
+def test_client_factory_top_level_has_no_client_import(monkeypatch):
+    """**C3 source-level guard**: at module top level (outside any
+    function body), ``client_factory.py`` must NOT have an unconditional
+    ``from services.mainland_worker.client import ...`` statement.
+
+    Lazy-import inside a function body is allowed (and is the fix).
+    AST scan locks this so a future refactor can't accidentally re-add
+    a top-level import.
+    """
+    import ast
+
+    src_path = REPO_ROOT / "src" / "services" / "mainland_worker" / "client_factory.py"
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+    for node in tree.body:  # only walk top-level statements
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "services.mainland_worker.client":
+                raise AssertionError(
+                    "client_factory.py has a top-level "
+                    "`from services.mainland_worker.client import ...` "
+                    "statement. That module depends on httpx; importing "
+                    "it at module level breaks pipeline subprocesses in "
+                    "environments without Gateway dependencies. Move the "
+                    "import inside `build_client_from_env()` (see PR #15 "
+                    "P1 二轮 fix)."
+                )

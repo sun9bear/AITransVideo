@@ -1179,6 +1179,31 @@ export function VoiceModifyTab({
                             </optgroup>
                           )
                         })()}
+                        {/* Phase 4.2 E.1 PR #15 Codex P2² fix: CosyVoice
+                            personal clones — mirrored from VoiceSelectionPanel
+                            so Studio edit flow also surfaces newly cloned
+                            voices in the dropdown. See parent file for
+                            full rationale. */}
+                        {(() => {
+                          if (currentProvider !== "cosyvoice") return null
+                          const cosyClones = personalVoices.filter((v) => {
+                            if (expiredVoiceIds.includes(v.voiceId)) return false
+                            return (
+                              v.provider === "cosyvoice_voice_clone"
+                              || v.ttsProvider === "cosyvoice"
+                            )
+                          })
+                          if (cosyClones.length === 0) return null
+                          return (
+                            <optgroup label="我的 CosyVoice 克隆音色">
+                              {cosyClones.map((v) => (
+                                <option key={`cosy-clone-${v.voiceId}`} value={v.voiceId}>
+                                  {v.label || v.voiceId}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )
+                        })()}
                         {/* Smart recommendations */}
                         {(() => {
                           const provMatch = sp.autoMatchedByProvider[currentProvider]

@@ -533,3 +533,87 @@ def test_e1_p2_frontend_gate_ands_runtime_ready_via_can_show_clone_button():
                         f"ANDing `can_show_clone_button`. Window:\n"
                         f"{window}"
                     )
+
+
+# ---------------------------------------------------------------------------
+# G_E1_P2_OPTGROUP — CosyVoice personal-clone optgroup must exist + filter
+#                    correctly (Codex 2026-05-27 PR #15 P2² review)
+# ---------------------------------------------------------------------------
+
+
+def test_e1_p2_cosyvoice_personal_optgroup_present_in_both_selectors():
+    """**Codex 2026-05-27 P2² fix guard**: after a successful CosyVoice
+    clone, the new voice id is stored in ``personalVoices`` but the prior
+    code only rendered MiniMax personal optgroups. The <select> ends up
+    with a value (the new voice id) but no matching <option> — user sees
+    an empty dropdown after closing the modal and can't re-select.
+
+    Lock-in: both VoiceSelectionPanel and VoiceModifyTab must render a
+    CosyVoice personal-clone optgroup. Detected via:
+      1. An optgroup with the "我的 CosyVoice 克隆音色" label
+      2. The gate condition references `currentProvider === 'cosyvoice'`
+      3. The filter accepts the canonical backend value
+         `provider === 'cosyvoice_voice_clone'` OR the lowercased
+         `ttsProvider === 'cosyvoice'` flavour (forward compat).
+    """
+    for path in (VOICE_SELECTION_PANEL, VOICE_MODIFY_TAB):
+        src = _strip_comments(path.read_text(encoding="utf-8"))
+
+        # 1. Label must appear in JSX
+        assert "我的 CosyVoice 克隆音色" in src, (
+            f"{path.name} is missing the `我的 CosyVoice 克隆音色` optgroup "
+            f"label. Without it the new voice id from a successful clone "
+            f"won't surface in the dropdown."
+        )
+
+        # 2. The optgroup must be inside an IIFE gated on cosyvoice provider
+        # Search for the optgroup label region, then check the 600 chars
+        # before it for the provider gate.
+        idx = src.find("我的 CosyVoice 克隆音色")
+        window = src[max(0, idx - 1200): idx]
+        assert re.search(
+            r"currentProvider\s*!==\s*['\"]cosyvoice['\"]\s*\)\s*return\s+null",
+            window,
+        ), (
+            f"{path.name} CosyVoice optgroup is not gated by "
+            f"`currentProvider !== 'cosyvoice'` early-return. Without "
+            f"this guard the optgroup leaks into MiniMax / VolcEngine "
+            f"selectors."
+        )
+
+        # 3. Filter must accept BOTH provider shapes (forward compat)
+        assert "cosyvoice_voice_clone" in window, (
+            f"{path.name} CosyVoice optgroup filter must check "
+            f"`provider === 'cosyvoice_voice_clone'` (canonical backend "
+            f"value gateway writes on clone success)."
+        )
+        assert re.search(
+            r"ttsProvider\s*===\s*['\"]cosyvoice['\"]",
+            window,
+        ), (
+            f"{path.name} CosyVoice optgroup filter must also accept "
+            f"`ttsProvider === 'cosyvoice'` for backward / forward "
+            f"compatibility with row variations."
+        )
+
+
+def test_e1_p2_minimax_optgroups_unchanged_by_cosyvoice_addition():
+    """**Reverse guard (Codex Codex P2²)**: adding the CosyVoice
+    optgroup must not pollute the MiniMax personal-voice optgroups.
+    The existing three "个人音色 · 强匹配" / "个人音色 · 可能匹配" /
+    "其他个人音色" labels still need to be MiniMax-gated.
+    """
+    for path in (VOICE_SELECTION_PANEL, VOICE_MODIFY_TAB):
+        src = _strip_comments(path.read_text(encoding="utf-8"))
+        # "其他个人音色" must still be gated on MiniMax.
+        idx = src.find("其他个人音色")
+        assert idx >= 0, f"{path.name} missing legacy MiniMax `其他个人音色` optgroup"
+        window = src[max(0, idx - 1200): idx]
+        assert re.search(
+            r"currentProvider\s*!==\s*['\"]minimax['\"]\s*\)\s*return\s+null",
+            window,
+        ), (
+            f"{path.name} legacy `其他个人音色` optgroup is no longer "
+            f"gated by `currentProvider !== 'minimax'`. The MiniMax "
+            f"optgroups must remain MiniMax-only after E.1 P2² fix."
+        )
