@@ -142,15 +142,17 @@ export function CosyVoiceCloneModal({
   const [sampleMode, setSampleMode] = useState<CosyvoiceSampleMode>("file")
   const [sampleFile, setSampleFile] = useState<File | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
-  // E.2 v2.1：picker 持有的内部状态。`selectedSegmentIds` 是提交时透传到
+  // E.2 v2.2：picker 持有的内部状态。`selectedSegmentIds` 是提交时透传到
   // API client 的真实选段；`availableSegmentIds` 是 picker 加载完后回传的
-  // 段全集（包成 Set 用于子集 assert）；`selectedDurationSeconds` 是 picker
-  // 计算并回传的总时长（用于 3.0-60.0 秒区间校验，spec §4 E.2.4 L1）。
+  // 段全集（包成 Set 用于子集 assert）；`selectedDurationMs` 是 picker
+  // 用 `endMs - startMs` 精确毫秒计算并回传的总时长，与后端
+  // `MIN_DURATION_MS = 3_000` / `MAX_DURATION_MS = 60_000` **同单位**校验
+  // （v2.2 / spec §4 E.2.4 L1 / Codex PR #16 P2 fix）。
   const [selectedSegmentIds, setSelectedSegmentIds] = useState<number[]>([])
   const [availableSegmentIds, setAvailableSegmentIds] = useState<Set<number>>(
     new Set(),
   )
-  const [selectedDurationSeconds, setSelectedDurationSeconds] = useState(0)
+  const [selectedDurationMs, setSelectedDurationMs] = useState(0)
   const [submitState, setSubmitState] = useState<SubmitState>({ kind: "idle" })
   const [consentOpen, setConsentOpen] = useState(false)
 
@@ -208,7 +210,7 @@ export function CosyVoiceCloneModal({
       // speaker 时残留旧选段——R3 / R6 互斥状态机防御）。
       setSelectedSegmentIds([])
       setAvailableSegmentIds(new Set())
-      setSelectedDurationSeconds(0)
+      setSelectedDurationMs(0)
       setSubmitState({ kind: "idle" })
       setConsentOpen(false)
     }
@@ -251,14 +253,16 @@ export function CosyVoiceCloneModal({
     if (editableSpeakerName.trim() === "") return false
     if (sampleMode === "file") return sampleFile !== null
     if (sampleMode === "segments") {
-      // E.2 v2.1 §0 决策 2：客户端阈值固定 3.0-60.0 秒，与后端
-      // `sample_validator.MIN_DURATION_MS = 3_000` /
-      // `MAX_DURATION_MS = 60_000` 一致（守卫 #11 做 ×1000 换算 cross-check）。
+      // E.2 v2.2 §0 决策 2 / Codex PR #16 P2 fix：客户端阈值用**毫秒**
+      // 与后端 `MIN_DURATION_MS = 3_000` / `MAX_DURATION_MS = 60_000`
+      // 完全同单位校验。v2.1 用 seconds 会被 `durationS` 一位小数 round
+      // 漂移坑：真实 2.96s 显示成 3.0s → 前端放行 → 后端 ms 精度拒收。
+      // v2.2 picker 用 `endMs - startMs` 聚合毫秒数，此处直接 ms 字面量比。
       // 子集 assert 在 handleSubmitClick 中做（spec §4 E.2.4 L1.5）。
       if (!segmentsModeAvailable) return false
       if (selectedSegmentIds.length === 0) return false
-      if (selectedDurationSeconds < 3) return false
-      if (selectedDurationSeconds > 60) return false
+      if (selectedDurationMs < 3000) return false
+      if (selectedDurationMs > 60000) return false
       return true
     }
     return false
@@ -269,7 +273,7 @@ export function CosyVoiceCloneModal({
     sampleFile,
     segmentsModeAvailable,
     selectedSegmentIds,
-    selectedDurationSeconds,
+    selectedDurationMs,
   ])
 
   const handleConsentConfirmed = useCallback(
@@ -453,7 +457,7 @@ export function CosyVoiceCloneModal({
                         // E.2 v2.1 §0 决策 5b：切到 file 必须清 segments 选段
                         // 状态（XOR 一致性，对侧不残留）。守卫 #8。
                         setSelectedSegmentIds([])
-                        setSelectedDurationSeconds(0)
+                        setSelectedDurationMs(0)
                       }}
                       className="mt-1 h-4 w-4"
                       disabled={isLoading}
@@ -534,7 +538,7 @@ export function CosyVoiceCloneModal({
                               onAvailableSegmentIdsChange={(ids) =>
                                 setAvailableSegmentIds(new Set(ids))
                               }
-                              onSelectedDurationChange={setSelectedDurationSeconds}
+                              onSelectedDurationMsChange={setSelectedDurationMs}
                               disabled={isLoading}
                             />
                           </div>
