@@ -1223,15 +1223,23 @@ def test_list_backups_status_filter_is_query_param_not_body():
     assert 'offset' in query_param_names
 
 
-def test_list_backups_status_filter_works_via_test_client():
+def test_list_backups_status_filter_works_via_test_client(monkeypatch):
     """Integration sanity: real FastAPI TestClient with ?status=X&status=Y
     actually filters. The previous bug (status as body) wouldn't have
     been caught by direct-call tests — only HTTP-level integration
-    exercises the query parsing."""
+    exercises the query parsing.
+
+    2026-05-26 P0a addendum: must monkeypatch settings.enable_pan_backup
+    True since the router now has require_pan_enabled as its first
+    dependency. Default False would short-circuit to 503 before the
+    handler runs."""
     from fastapi.testclient import TestClient
     from fastapi import FastAPI
     from pan.admin_api import router
     from pan import admin_api as api_mod
+    from config import settings
+
+    monkeypatch.setattr(settings, "enable_pan_backup", True)
 
     app = FastAPI()
     app.include_router(router)

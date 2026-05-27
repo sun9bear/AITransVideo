@@ -55,6 +55,11 @@ from pan.token_crypto import decrypt_token, encrypt_token
 # Phase 9 §T9.4 (CodeX 2026-05-19 P1b): pan JSONL emitter shared with
 # backup_executor / restore_executor / residue_cleanup.
 from pan._events import emit_pan_event_safe as _emit_pan_event_safe
+# Plan 2026-05-26 postmortem P0a (Codex feedback): same feature gate as
+# admin_api.py — flag must reject OAuth connect / callback when feature
+# is off, otherwise an admin could re-authorize Baidu Pan in a
+# "disabled" state and the system would still hold a valid token.
+from pan._feature_gate import require_pan_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -62,7 +67,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/admin/pan",
     tags=["admin-pan-auth"],
-    dependencies=[Depends(require_same_origin_state_change)],
+    dependencies=[
+        Depends(require_pan_enabled),
+        Depends(require_same_origin_state_change),
+    ],
 )
 
 STATE_TTL_SECONDS = 10 * 60  # plan §6.1

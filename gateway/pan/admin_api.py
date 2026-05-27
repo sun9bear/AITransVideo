@@ -47,6 +47,12 @@ from background_task_executors import TASK_EXECUTORS
 
 from pan.baidu_pan_client import BaiduPanClient
 from pan.token_crypto import decrypt_token
+# Plan 2026-05-26 postmortem P0a (Codex feedback): feature flag must gate
+# the HTTP API too, not just the scheduler. Without this, an admin could
+# still hit "Create backup" while AVT_ENABLE_PAN_BACKUP=false and trigger
+# the buggy concurrent executor path. ``require_pan_enabled`` is the
+# FIRST dependency so the 503 rejection precedes admin / csrf checks.
+from pan._feature_gate import require_pan_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +60,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/admin/pan",
     tags=["admin-pan"],
-    dependencies=[Depends(require_same_origin_state_change)],
+    dependencies=[
+        Depends(require_pan_enabled),
+        Depends(require_same_origin_state_change),
+    ],
 )
 
 
