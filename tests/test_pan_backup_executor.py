@@ -970,3 +970,122 @@ def test_payload_provider_override(monkeypatch, tmp_path):
             )
 
     run_async(_go())
+
+
+# =========================================================================
+# Global serialization lock — 2026-05-26 postmortem P0b (Codex 2nd round)
+# =========================================================================
+
+
+def test_backup_executor_acquires_global_lock_before_per_job_lock(
+        monkeypatch, tmp_path,
+):
+    """Pin the lock acquisition ORDER: global → per-job.
+
+    Reverse order (per-job first, then global) would create a deadlock
+    window between two concurrent backup_executors that pick conflicting
+    per-job + global pairs in opposite orders. The fixed global → per-job
+    order means all waiters block on the SAME first hop (global), so
+    there's a single queue and no deadlock.
+
+    Also verifies that:
+      - Global lock IS acquired (regression guard against accidental removal)
+      - It's acquired exactly once per executor invocation
+    """
+    from pan import backup_executor as be_mod
+    from pan._lock_keys import pan_lock_key, PAN_BACKUP_GLOBAL_LOCK_KEY
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_global_lock_order'
+
+    acquire_order: list[int] = []
+    release_order: list[int] = []
+    real_acquire = be_mod._acquire_advisory_lock
+    real_release = be_mod._release_advisory_lock
+
+    async def spy_acquire(conn, key):
+        acquire_order.append(key)
+        return await real_acquire(conn, key)
+
+    async def spy_release(conn, key):
+        release_order.append(key)
+        return await real_release(conn, key)
+
+    monkeypatch.setattr(be_mod, '_acquire_advisory_lock', spy_acquire)
+    monkeypatch.setattr(be_mod, '_release_advisory_lock', spy_release)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+            client = FakeBaiduPanClient()
+            await _run_executor(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client,
+            )
+
+    run_async(_go())
+
+    per_job_key = pan_lock_key(user_id, job_id)
+
+    # Acquire order: GLOBAL must come before per-job.
+    assert PAN_BACKUP_GLOBAL_LOCK_KEY in acquire_order, (
+        f"expected GLOBAL lock acquired, got {acquire_order}"
+    )
+    assert per_job_key in acquire_order, (
+        f"expected per-job lock acquired, got {acquire_order}"
+    )
+    global_idx = acquire_order.index(PAN_BACKUP_GLOBAL_LOCK_KEY)
+    per_job_idx = acquire_order.index(per_job_key)
+    assert global_idx < per_job_idx, (
+        f"GLOBAL lock must be acquired BEFORE per-job lock to prevent "
+        f"deadlock between concurrent executors. "
+        f"global at index {global_idx}, per-job at {per_job_idx}. "
+        f"Full acquire order: {acquire_order}"
+    )
+
+    # Both locks released. Order of release within finally is per-job
+    # then global (reverse of acquire), but only the SET membership
+    # matters for correctness — both must be released.
+    assert PAN_BACKUP_GLOBAL_LOCK_KEY in release_order, (
+        f"GLOBAL lock not released, would block all subsequent backups. "
+        f"Release order: {release_order}"
+    )
+    assert per_job_key in release_order, (
+        f"per-job lock not released. Release order: {release_order}"
+    )
+
+
+def test_global_lock_key_distinct_from_per_job_keys():
+    """Contract guard: PAN_BACKUP_GLOBAL_LOCK_KEY must not collide with
+    any plausible pan_lock_key(user_id, job_id) output.
+
+    sha256 collisions are astronomically unlikely in theory, but a
+    cheap structural test catches any future refactor that accidentally
+    derives the constant from the same input pattern (e.g. someone
+    defining ``GLOBAL = pan_lock_key(uuid.UUID(int=0), "")`` — sha256
+    still distinct, but the test pins the contract that GLOBAL key is
+    derived from a clearly-distinct fixed string."""
+    from pan._lock_keys import pan_lock_key, PAN_BACKUP_GLOBAL_LOCK_KEY
+
+    # Smoke a few plausible (user, job) pairs.
+    samples = [
+        (uuid.UUID(int=0), ""),
+        (uuid.UUID(int=0), "job_0"),
+        (uuid.uuid4(), "job_typical"),
+        (uuid.uuid4(), "job_88bdca0966ce468fb6af36dc0bf4adeb"),
+    ]
+    for user_id, job_id in samples:
+        derived = pan_lock_key(user_id, job_id)
+        assert derived != PAN_BACKUP_GLOBAL_LOCK_KEY, (
+            f"GLOBAL key {PAN_BACKUP_GLOBAL_LOCK_KEY} collides with "
+            f"pan_lock_key({user_id}, {job_id!r})={derived}. "
+            "GLOBAL must be derived from a clearly-distinct fixed string."
+        )

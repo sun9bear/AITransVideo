@@ -43,3 +43,31 @@ def pan_lock_key(user_id: uuid.UUID, job_id: str) -> int:
     canonical = f"{user_id}:{job_id}".encode('utf-8')
     digest = hashlib.sha256(canonical).digest()
     return struct.unpack('>q', digest[:8])[0]
+
+
+# 2026-05-26 postmortem P0b (Codex 2nd-round feedback). Global serialization
+# key for pan_backup. Acquired by backup_executor BEFORE the per-job key,
+# released after. Forces all pan_backup invocations across the entire
+# Gateway (and across multi-worker deployments) to serialize at the
+# tar-build / chunk-upload phase — exactly the resource (gateway container
+# /tmp = host overlay layer) that the 2026-05-26 disk-full incident
+# exhausted via 9-way parallelism.
+#
+# Distinct constant (not derived from any plausible user_id/job_id input):
+# we use the sha256 prefix of a fixed string "pan_backup:global" so it's
+# deterministic across processes, fits PG bigint, and has negligible
+# collision probability with any pan_lock_key(user, job) output.
+#
+# Why a CONSTANT instead of "per-resource" (e.g. per-tmp-dir) lock?
+#   - Single shared resource: gateway container /tmp / overlay layer
+#   - Lock granularity matches the limiting resource: 1
+#   - Per-job lock (existing pan_lock_key) handles "two attempts on the
+#     SAME job" — orthogonal concern
+#
+# pan_restore / pan_residue_cleanup do NOT take this lock. Restore reads
+# tar from pan → local — same disk pressure, but Codex explicitly scoped
+# P0b to backup since that's what triggered the incident. Restore-vs-
+# backup mutual exclusion is a P1 candidate, not P0.
+PAN_BACKUP_GLOBAL_LOCK_KEY: int = struct.unpack(
+    '>q', hashlib.sha256(b"pan_backup:global").digest()[:8],
+)[0]

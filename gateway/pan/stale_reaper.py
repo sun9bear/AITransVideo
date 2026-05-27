@@ -32,15 +32,18 @@ scan two classes of stuck pan operations and reconcile them:
 ## Pass 2 — post-commit stuck (Job.archiving + BR.uploaded > 4h)
 
   Job hit COMMIT POINT (BackupRecord='uploaded') but the post-commit
-  step l (set Job.status='archived') failed / executor died before it
-  ran. Data is safe (tar in pan, 3-gate verified), just the Job status
-  hasn't caught up.
+  cleanup (rmtree project_dir, R2 delete, set Job.status='archived')
+  failed / executor died before it ran. Data is safe (tar in pan,
+  3-gate verified), just the local + R2 cleanup didn't complete.
 
-  Forward-resolve: set Job.status='archived' + enqueue pan_residue_cleanup
-  to retry rmtree project_dir + R2 delete (idempotent — they may have
-  already happened). This is the same scenario residue_cleanup is
-  designed for; it's just hooked here too because stale_reaper is the
-  detection mechanism.
+  Action (post 2026-05-26 P0d v2): take the per-job advisory lock
+  briefly to PROVE no active executor is holding it, release it
+  IMMEDIATELY, then enqueue ``pan_residue_cleanup``. residue_cleanup
+  owns the archived flip — it cleans R2 + rmtree, then flips status
+  to 'archived' + r2_artifacts=NULL atomically. stale_reaper does NOT
+  pre-flip the status; if it did, residue_cleanup's precondition
+  (``Job.status == 'archiving'``) would fail and the cleanup task
+  would silently no-op (the 2026-05-26 production bug).
 
 ## Concurrency safety
 
@@ -48,6 +51,15 @@ pg_try_advisory_lock is session-level. Reaper opens one connection per
 tick, takes per-row locks, releases each before moving on. If the real
 executor is alive on the same lock, our try_lock returns False and we
 move on — exactly what we want.
+
+Critical handoff ordering (post 2026-05-26 P0d v2): for the post-commit
+Pass-2 case, stale_reaper releases the lock BEFORE enqueueing
+pan_residue_cleanup. Otherwise residue_cleanup's executor (launched
+synchronously via asyncio.create_task in enqueue_pan_task) tries to
+acquire the same lock on its own connection, sees it held by
+stale_reaper, no-ops, and the dispatcher marks the cleanup task
+completed without ever running. The release-before-enqueue ordering
+closes this race.
 
 SQLite test environment: advisory lock is a no-op (returns True). Tests
 exercise the reconciliation logic directly without needing the lock.

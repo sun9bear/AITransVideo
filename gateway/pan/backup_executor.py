@@ -119,7 +119,7 @@ async def _execute_pan_backup_impl(
     from pan.status_mutator import set_archive_status
     from pan.token_crypto import decrypt_token
 
-    from pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key, PAN_BACKUP_GLOBAL_LOCK_KEY
 
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
@@ -131,6 +131,47 @@ async def _execute_pan_backup_impl(
 
     # === Single-connection long-hold ===
     async with engine.connect() as conn:
+        # --- 2026-05-26 postmortem P0b (Codex 2nd-round) — GLOBAL lock FIRST ---
+        # Acquire the process-wide pan_backup serialization lock BEFORE the
+        # per-job lock. Reasoning:
+        #
+        #   1. Disk-pressure containment: every backup_executor stages a
+        #      multi-GB tar in gateway-container /tmp. The 2026-05-26
+        #      incident triggered when 9 concurrent backup_executors
+        #      stacked 20 GB of tars in /tmp = host overlay layer =
+        #      host root partition → 100% full → cascading writes failed.
+        #
+        #   2. Why blocking (pg_advisory_lock, not pg_try_advisory_lock):
+        #      we WANT subsequent backup_executors to queue and wait.
+        #      The asyncio event loop yields during the await, so the
+        #      gateway stays responsive (other HTTP requests / heartbeats
+        #      / cleanup tasks keep ticking). Only same-keyed waiters block.
+        #
+        #   3. Lock ORDER (global → per-job, never reverse) prevents
+        #      deadlock between concurrent backup_executors for different
+        #      jobs. Two executors A and B both go for global first;
+        #      whichever wins proceeds, the other waits at global. After
+        #      the winner releases, no per-job key conflicts because
+        #      different jobs have different per-job keys.
+        #
+        #   4. Reconciler-relaunch path is covered: backup_executor is
+        #      the SAME function whether dispatched via _enqueue.py
+        #      (HTTP entry) or relaunched by background_task_reconciler
+        #      after gateway restart. Both go through this lock acquire.
+        #      P0a v2 (reconciler gate) closes the additional concern
+        #      "reconciler shouldn't even try pan_* when flag off".
+        #
+        # Release is implicit on `async with engine.connect()` close — both
+        # locks are session-scoped; conn.close() releases them in reverse
+        # acquire order (per-job first, then global). The explicit
+        # _release_advisory_lock(conn, lock_key) in finally is for the
+        # per-job lock; global is freed alongside it via conn closure.
+        await _acquire_advisory_lock(conn, PAN_BACKUP_GLOBAL_LOCK_KEY)
+        # Flush auto-begin txn before next explicit begin() block
+        # (same pattern as below).
+        if conn.dialect.name == 'postgresql':
+            await conn.commit()
+
         # --- Step a: advisory lock FIRST (PG only; SQLite no-op) ---
         # CodeX P0-2: take the lock BEFORE reading Job state. The previous
         # ordering (read → lock → use stale snapshot) allowed a concurrent
@@ -582,7 +623,14 @@ async def _execute_pan_backup_impl(
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("pan_backup tar cleanup failed: %s", exc)
         finally:
+            # Release locks in REVERSE acquire order (per-job first, then
+            # global). Both are session-scoped on the same conn, so
+            # `engine.connect()` ctx-exit would free them anyway, but
+            # explicit release narrows the held window — important when
+            # other backup_executor instances are blocked on the global
+            # key. Per 2026-05-26 P0b.
             await _release_advisory_lock(conn, lock_key)
+            await _release_advisory_lock(conn, PAN_BACKUP_GLOBAL_LOCK_KEY)
 
 
 # --- helpers ---
