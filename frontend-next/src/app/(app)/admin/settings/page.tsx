@@ -867,7 +867,24 @@ export default function AdminSettingsPage() {
         </button>
         <button
           className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-sm text-muted-foreground transition hover:bg-muted/50"
-          onClick={() => setSettings(DEFAULT_SETTINGS)}
+          // PR #13 Codex P2 fix（discussion_r3308?? 2026-05-27）：D.1 把全部 6 个
+          // ``cosyvoice_clone_*`` 字段塞进 page state，但只渲染 GA toggle，其它 5
+          // 个字段对 admin 不可见。如果"恢复默认"直接 setSettings(DEFAULT_SETTINGS)，
+          // 就会把当前生产环境里**正在生效**的 worker_enabled / allowlist /
+          // max_voices_per_user / max_concurrent_jobs / default_target_model
+          // 全部覆盖为默认值。下次点 "保存设置" 时 full-body POST 会把这些值
+          // 写回后端 —— 等于"点恢复默认 + 保存"会静默关掉克隆 worker / 擦掉
+          // beta 用户。修复方案：reset 只复位**当前 UI 上可见**的字段，把 6 个
+          // hidden clone 字段从 current state 透传过去。
+          onClick={() => setSettings((s) => ({
+            ...DEFAULT_SETTINGS,
+            cosyvoice_clone_worker_enabled: s.cosyvoice_clone_worker_enabled,
+            cosyvoice_clone_default_target_model: s.cosyvoice_clone_default_target_model,
+            cosyvoice_clone_user_allowlist: s.cosyvoice_clone_user_allowlist,
+            cosyvoice_clone_general_availability_enabled: s.cosyvoice_clone_general_availability_enabled,
+            cosyvoice_clone_max_voices_per_user: s.cosyvoice_clone_max_voices_per_user,
+            cosyvoice_clone_max_concurrent_jobs: s.cosyvoice_clone_max_concurrent_jobs,
+          }))}
           type="button"
         >
           恢复默认
