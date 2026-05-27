@@ -52,13 +52,28 @@ export const DEFAULT_COSYVOICE_TARGET_MODEL: CosyvoiceTargetModel =
  * Backend response shape from `GET /api/voice/cosyvoice/clone-gate`.
  * Mirrors gateway `cosyvoice_clone_gate` endpoint JSON.
  *
- * `can_access_clone` is **policy-authorization visibility only** — the entry
- * point in E phase must additionally AND with `provider.supportsClone`
- * (runtime availability: worker reachable, OSS configured, etc.).
+ * Two separate dimensions:
+ *
+ *   1. `can_access_clone` — **policy authorization visibility** (admin /
+ *      allowlist / GA toggle). D.1 endpoint shape.
+ *   2. `runtime_ready` — **runtime availability** (worker_enabled +
+ *      uploader is production-ready backend + config complete). Added
+ *      in E.1 PR #15 P2 fix (Codex 2026-05-27).
+ *
+ * Frontend MUST AND both before showing the clone button:
+ *
+ *   showCloneButton = provider.supportsClone &&
+ *                     gate.can_access_clone &&
+ *                     gate.runtime_ready
+ *
+ * Or use the convenience field `can_show_clone_button` which the backend
+ * already computes as `can_access_clone && runtime_ready`.
  */
 export interface CosyvoiceCloneGateResponse {
   /** Whether the current authenticated user is authorized to see the
-   *  clone entry. Does NOT reflect provider runtime availability. */
+   *  clone entry. **Policy layer only** — does NOT reflect runtime
+   *  availability. AND with `runtime_ready` for the real "show button"
+   *  decision. */
   can_access_clone: boolean
   /** Which rule granted (or denied) access. Useful for ops / debugging. */
   authorization_reason:
@@ -70,6 +85,26 @@ export interface CosyvoiceCloneGateResponse {
   general_availability_enabled: boolean
   user_is_admin: boolean
   user_in_allowlist: boolean
+
+  // ---- E.1 PR #15 P2 fix: runtime availability ----
+
+  /** Whether the backend is configured to actually serve a clone request
+   *  (worker enabled + uploader is production-ready + config complete).
+   *  Mirrors POST `/clone` Layers 2-3 fail-closed ladder. */
+  runtime_ready: boolean
+  /** Specific reason for `runtime_ready=false`. Frontend can use this to
+   *  show ops messages ("worker disabled", "uploader not configured",
+   *  etc.). `null` when runtime_ready=true. */
+  runtime_unavailable_code:
+    | "clone_feature_disabled"
+    | "sample_uploader_not_configured"
+    | "sample_uploader_not_implemented"
+    | "sample_uploader_config_missing"
+    | null
+  /** Convenience: `can_access_clone && runtime_ready`. Frontend can use
+   *  this directly; explicit AND is also encouraged for transparency.
+   *  Backend-computed so the two layers stay in lockstep. */
+  can_show_clone_button: boolean
 }
 
 /**

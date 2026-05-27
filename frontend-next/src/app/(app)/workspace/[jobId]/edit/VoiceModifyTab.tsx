@@ -876,8 +876,12 @@ export function VoiceModifyTab({
     if (!supportsClone) return false
     // Phase 4.2 E.1: CosyVoice second gate — display-layer authorization
     // visibility (D.1 /clone-gate). MiniMax legacy path unchanged.
+    //
+    // PR #15 P2 fix (Codex 2026-05-27): also AND runtime_ready via the
+    // backend-computed `can_show_clone_button`. See VoiceSelectionPanel
+    // for the full rationale; mirrored here for the editing-state tab.
     if (provider === "cosyvoice") {
-      return cosyvoiceCloneGate?.can_access_clone === true
+      return cosyvoiceCloneGate?.can_show_clone_button === true
     }
     return true
   }, [speakers, draftStates, hasMultiProvider, providerMap, defaultProvider, cosyvoiceCloneGate])

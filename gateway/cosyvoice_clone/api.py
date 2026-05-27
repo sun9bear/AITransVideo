@@ -286,6 +286,113 @@ def _check_authorized(
 
 
 # ---------------------------------------------------------------------------
+# Runtime readiness probe (E.1 P2 follow-up — Codex 2026-05-27)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CloneRuntimeReadiness:
+    """``_resolve_runtime_ready`` 的返回值。Phase 4.2 E.1 PR #15 P2 fix.
+
+    背景：D.1 ``can_access_clone`` 仅表达 *policy authorization visibility*
+    （admin / allowlist / GA），不包括 runtime availability —— 即 worker 是否
+    enabled、uploader 是否是 production-ready backend 等。E.1 前端 supports_clone
+    门只看 ``AVT_MAINLAND_VOICE_WORKER_ENABLED``，仍漏 admin_settings 层 +
+    uploader 配置层。结果：admin/allowlist 用户能看到按钮，提交后 503
+    ``clone_feature_disabled`` / ``sample_uploader_not_configured``。
+
+    这个 dataclass 把 POST ``/clone`` Layers 2-3 的 runtime gate 提取为只读
+    探针，供 GET ``/clone-gate`` 同步给前端。endpoint 调用 ``_resolve_runtime_ready``
+    并把 ``runtime_ready`` + ``runtime_unavailable_code`` 一起返回，前端
+    按钮显示就能 AND 这两层。
+    """
+
+    runtime_ready: bool
+    """worker_enabled + uploader 是 production-ready backend + 配置完整 时为 True."""
+
+    runtime_unavailable_code: (
+        Literal[
+            "clone_feature_disabled",
+            "sample_uploader_not_configured",
+            "sample_uploader_not_implemented",
+            "sample_uploader_config_missing",
+        ]
+        | None
+    )
+    """``runtime_ready=False`` 时的具体原因码，前端可据此展示运维提示。
+    成功路径下为 ``None``。"""
+
+
+def _resolve_runtime_ready(
+    admin_settings: Any,
+    gateway_settings: Any,
+) -> CloneRuntimeReadiness:
+    """**Single source of truth** for runtime availability — mirrors POST
+    ``/clone`` Layers 2-3 fail-closed ladder, **read-only**.
+
+    Phase 4.2 E.1 PR #15 Codex P2 fix（2026-05-27）：扩展 D.1
+    ``/clone-gate`` endpoint 以同步 runtime readiness 给前端。该函数与
+    POST ``/clone`` 的 ``cosyvoice_clone_worker_enabled`` + uploader 校验
+    保持一致 —— 任何 future drift 都会让前端按钮显示 vs 后端真实可用性
+    脱节（Codex 2026-05-27 PR #15 P2 核心担忧）。
+
+    一致性约束（更新 POST 端时**必须**同步更新这里）：
+
+    - admin_settings.cosyvoice_clone_worker_enabled == False
+      → unavailable_code = "clone_feature_disabled"
+    - uploader_backend == "local_fs_stub"
+      → unavailable_code = "sample_uploader_not_configured"
+    - uploader_backend in KNOWN_BACKENDS - PRODUCTION_READY_BACKENDS
+      → unavailable_code = "sample_uploader_not_implemented"
+    - uploader_backend == "aliyun_oss" 但配置缺失
+      → unavailable_code = "sample_uploader_config_missing"
+
+    设计约束（Codex P2 fix）：
+
+    - **不 I/O / 不调外部服务**：只读 in-memory admin_settings + env
+    - **不 raise**：返 dataclass，POST endpoint 仍走自己的 raise ladder
+    - **`src/pipeline` 不能 import gateway**：因此 supports_clone 仍用
+      env probe；本函数是 gateway-side 真实可用性，通过 GET endpoint
+      传到前端
+    """
+    # Layer 2: admin_settings worker_enabled
+    if not admin_settings.cosyvoice_clone_worker_enabled:
+        return CloneRuntimeReadiness(
+            runtime_ready=False,
+            runtime_unavailable_code="clone_feature_disabled",
+        )
+
+    # Layer 3a: sample uploader backend type
+    uploader_backend = getattr(
+        gateway_settings, "cosyvoice_sample_uploader", "local_fs_stub"
+    )
+    if uploader_backend == "local_fs_stub":
+        return CloneRuntimeReadiness(
+            runtime_ready=False,
+            runtime_unavailable_code="sample_uploader_not_configured",
+        )
+    if uploader_backend not in PRODUCTION_READY_BACKENDS:
+        return CloneRuntimeReadiness(
+            runtime_ready=False,
+            runtime_unavailable_code="sample_uploader_not_implemented",
+        )
+
+    # Layer 3b: backend-specific config completeness
+    if uploader_backend == "aliyun_oss":
+        missing = missing_aliyun_oss_settings(gateway_settings)
+        if missing:
+            return CloneRuntimeReadiness(
+                runtime_ready=False,
+                runtime_unavailable_code="sample_uploader_config_missing",
+            )
+
+    return CloneRuntimeReadiness(
+        runtime_ready=True,
+        runtime_unavailable_code=None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
 
@@ -295,7 +402,9 @@ async def cosyvoice_clone_gate(
 ) -> JSONResponse:
     """``GET /api/voice/cosyvoice/clone-gate`` —— 前端展示层 gate 读取点。
 
-    Phase 4.2 D.1（plan v4-followup §8.1 + Codex 2026-05-27 review）。
+    Phase 4.2 D.1（plan v4-followup §8.1 + Codex 2026-05-27 review）+
+    E.1 P2 fix（PR #15 — 加 runtime_ready 字段，避免 admin 看到按钮但后端
+    立即 503 的漂移）。
 
     **Auth**：要求登录（``user is None`` → 401）。**不**要求 admin —— 普通
     用户也要能拿到自己的 gate 状态来决定 UI 可见性。
@@ -305,23 +414,36 @@ async def cosyvoice_clone_gate(
     ::
 
         {
+            # —— D.1 字段（policy authorization visibility）——
             "can_access_clone": bool,
-            # ↑ **仅 policy 授权可见性**。E 阶段前端按钮显示必须 AND
-            #   ``provider.supportsClone``（后者由 worker_enabled / OSS 配
-            #   置等 runtime 可用性决定，由 supports_clone 在 process.py 中
-            #   单独计算）。
+            # ↑ **仅 policy 授权可见性**。E.1 前端按钮显示**还**必须 AND
+            #   ``runtime_ready`` + ``provider.supportsClone``。
             "authorization_reason":
                 "admin" | "allowlist" | "general_availability" | "none",
-            # ↑ 给运维 / 排障用；前端可显示但**不要**据此重写授权 OR 逻辑。
             "general_availability_enabled": bool,
             "user_is_admin": bool,
             "user_in_allowlist": bool,
+
+            # —— E.1 P2 fix 新增字段（runtime availability）——
+            "runtime_ready": bool,
+            # ↑ True 当 worker_enabled + uploader 是 production-ready backend
+            #   + 配置完整。E.1 前端按钮必须 AND 这个，否则 admin/allowlist
+            #   用户会看到按钮但提交后立即 503。
+            "runtime_unavailable_code":
+                "clone_feature_disabled" | "sample_uploader_not_configured" |
+                "sample_uploader_not_implemented" | "sample_uploader_config_missing" |
+                null,
+            # ↑ runtime_ready=False 时的具体原因码，前端可据此展示运维提示。
+            "can_show_clone_button": bool,
+            # ↑ 便利字段 = can_access_clone && runtime_ready。前端可以直接
+            #   引用此字段；但仍鼓励显式 AND 以保持语义透明。
         }
 
     与 POST ``/clone`` 的 Layer 1 ``_check_authorized`` 共用
-    ``_resolve_clone_gate`` 纯函数 —— 两侧授权决策永远一致。一致性守卫：
-    ``tests/test_cosyvoice_clone_gate_api.py::
-    test_gate_api_and_check_authorized_always_agree``。
+    ``_resolve_clone_gate`` 纯函数 —— 两侧授权决策永远一致。
+    与 POST ``/clone`` 的 Layers 2-3 共用 ``_resolve_runtime_ready`` 纯
+    函数 —— 两侧 runtime 判定永远一致。一致性守卫：
+    ``tests/test_cosyvoice_clone_gate_api.py``。
     """
     if user is None:
         raise HTTPException(
@@ -334,6 +456,8 @@ async def cosyvoice_clone_gate(
         admin_settings.cosyvoice_clone_user_allowlist,
         admin_settings.cosyvoice_clone_general_availability_enabled,
     )
+    runtime = _resolve_runtime_ready(admin_settings, gw_settings)
+    can_show_clone_button = decision.can_access_clone and runtime.runtime_ready
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
@@ -344,6 +468,9 @@ async def cosyvoice_clone_gate(
             ),
             "user_is_admin": decision.user_is_admin,
             "user_in_allowlist": decision.user_in_allowlist,
+            "runtime_ready": runtime.runtime_ready,
+            "runtime_unavailable_code": runtime.runtime_unavailable_code,
+            "can_show_clone_button": can_show_clone_button,
         },
     )
 

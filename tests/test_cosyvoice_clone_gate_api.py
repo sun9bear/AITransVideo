@@ -373,3 +373,198 @@ def test_gate_api_and_check_authorized_always_agree(
         f"[{case_id}] GET can_access_clone={get_can_access}, "
         f"expected {gate_should_grant}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Section D — runtime_ready field (PR #15 E.1 P2 fix, Codex 2026-05-27)
+# ---------------------------------------------------------------------------
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class _FakeGwSettings:
+    """Stub Gateway config.Settings — only the fields _resolve_runtime_ready
+    reads. Attribute names mirror ``ALIYUN_OSS_REQUIRED_SETTINGS`` in
+    ``gateway/cosyvoice_clone/sample_uploader.py``."""
+
+    cosyvoice_sample_uploader: str = "aliyun_oss"
+    # OSS config — match the exact attribute names checked by
+    # `missing_aliyun_oss_settings()`.
+    cosyvoice_oss_endpoint: str | None = "https://oss-cn-beijing.aliyuncs.com"
+    cosyvoice_oss_bucket: str | None = "avt-cosy-prod"
+    cosyvoice_oss_access_key_id: str | None = "AK-test"
+    cosyvoice_oss_access_key_secret: str | None = "SK-test"
+
+
+def _build_runtime_client(
+    monkeypatch,
+    *,
+    user: _FakeUser | None,
+    admin_overrides: dict | None = None,
+    gw_overrides: dict | None = None,
+) -> TestClient:
+    """Constructs the FastAPI app with controllable AdminSettings + a stub
+    gateway config, so we can drive ``_resolve_runtime_ready`` from tests
+    without env mutations."""
+    # Merge defaults then overrides so admin_overrides can clobber any default.
+    admin_kwargs: dict = {
+        "cosyvoice_clone_worker_enabled": True,
+        "cosyvoice_clone_user_allowlist": [],
+        "cosyvoice_clone_default_target_model": "cosyvoice-v3.5-flash",
+        "cosyvoice_clone_max_voices_per_user": 3,
+        # Default GA True so authorization doesn't gate runtime tests.
+        "cosyvoice_clone_general_availability_enabled": True,
+    }
+    admin_kwargs.update(admin_overrides or {})
+    admin = AdminSettings(**admin_kwargs)
+    monkeypatch.setattr(clone_api, "load_settings", lambda: admin)
+
+    gw = _FakeGwSettings(**(gw_overrides or {}))
+    monkeypatch.setattr(clone_api, "gw_settings", gw)
+
+    app = _make_app()
+
+    async def _get_current_user_override():
+        return user
+
+    app.dependency_overrides[clone_api.get_current_user] = _get_current_user_override
+    app.dependency_overrides[clone_api.get_db] = lambda: None  # type: ignore[arg-type]
+    return TestClient(app)
+
+
+def test_runtime_ready_true_when_worker_enabled_and_oss_configured(monkeypatch):
+    """**D1 happy path**: worker_enabled + aliyun_oss + 配置完整 →
+    runtime_ready=True, code=None, can_show_clone_button=True (GA also on)."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(monkeypatch, user=user)
+    resp = client.get("/api/voice/cosyvoice/clone-gate")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["runtime_ready"] is True
+    assert body["runtime_unavailable_code"] is None
+    assert body["can_show_clone_button"] is True
+
+
+def test_runtime_ready_false_when_worker_disabled(monkeypatch):
+    """**D2 Layer 2**: cosyvoice_clone_worker_enabled=False →
+    runtime_ready=False, code='clone_feature_disabled'."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        admin_overrides={"cosyvoice_clone_worker_enabled": False},
+    )
+    resp = client.get("/api/voice/cosyvoice/clone-gate")
+    body = resp.json()
+    assert body["runtime_ready"] is False
+    assert body["runtime_unavailable_code"] == "clone_feature_disabled"
+    # can_show_clone_button must AND can_access_clone (true here from GA)
+    # with runtime_ready (false here) → false.
+    assert body["can_show_clone_button"] is False
+    # can_access_clone (policy) should still be True (admin/GA path) —
+    # runtime gate is **separate** from policy gate. This is the whole
+    # point of the P2 fix: don't conflate the two layers.
+    assert body["can_access_clone"] is True
+
+
+def test_runtime_ready_false_when_uploader_is_local_fs_stub(monkeypatch):
+    """**D3 Layer 3a**: uploader=local_fs_stub (dev placeholder) →
+    runtime_ready=False, code='sample_uploader_not_configured'."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        gw_overrides={"cosyvoice_sample_uploader": "local_fs_stub"},
+    )
+    resp = client.get("/api/voice/cosyvoice/clone-gate")
+    body = resp.json()
+    assert body["runtime_ready"] is False
+    assert body["runtime_unavailable_code"] == "sample_uploader_not_configured"
+    assert body["can_show_clone_button"] is False
+
+
+def test_runtime_ready_false_when_uploader_oss_config_missing(monkeypatch):
+    """**D4 Layer 3b**: uploader=aliyun_oss but bucket missing →
+    runtime_ready=False, code='sample_uploader_config_missing'."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        # bucket missing → missing_aliyun_oss_settings returns non-empty
+        gw_overrides={"cosyvoice_oss_bucket": None},
+    )
+    resp = client.get("/api/voice/cosyvoice/clone-gate")
+    body = resp.json()
+    assert body["runtime_ready"] is False
+    assert body["runtime_unavailable_code"] == "sample_uploader_config_missing"
+    assert body["can_show_clone_button"] is False
+
+
+def test_runtime_ready_layer_ordering_worker_disabled_dominates(monkeypatch):
+    """**D5 layer order**: worker_disabled (Layer 2) beats uploader issues
+    (Layer 3). When both are wrong, we report the worker code so admin
+    knows the right thing to fix first."""
+    user = _FakeUser(user_id="u1", role="user")
+    client = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        admin_overrides={"cosyvoice_clone_worker_enabled": False},
+        # Uploader is ALSO broken — but worker code should be reported.
+        gw_overrides={"cosyvoice_sample_uploader": "local_fs_stub"},
+    )
+    resp = client.get("/api/voice/cosyvoice/clone-gate")
+    body = resp.json()
+    assert body["runtime_unavailable_code"] == "clone_feature_disabled"
+
+
+def test_can_show_clone_button_is_and_of_two_layers(monkeypatch):
+    """**D6 joint field**: ``can_show_clone_button = can_access_clone &&
+    runtime_ready``. Test all 4 combinations:
+
+    ============  =============  ==================  ===================
+    can_access     runtime_ready  can_show_button     scenario
+    ============  =============  ==================  ===================
+    True           True            True                happy path
+    True           False           False               policy OK, runtime broken
+    False          True            False               not authorized, runtime OK
+    False          False           False               neither
+    ============  =============  ==================  ===================
+    """
+    user = _FakeUser(user_id="u1", role="user")
+
+    # Case 1: both true (GA on, runtime configured)
+    c = _build_runtime_client(monkeypatch, user=user)
+    body = c.get("/api/voice/cosyvoice/clone-gate").json()
+    assert (body["can_access_clone"], body["runtime_ready"], body["can_show_clone_button"]) == (True, True, True)
+
+    # Case 2: policy True, runtime False (worker disabled)
+    c = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        admin_overrides={"cosyvoice_clone_worker_enabled": False},
+    )
+    body = c.get("/api/voice/cosyvoice/clone-gate").json()
+    assert (body["can_access_clone"], body["runtime_ready"], body["can_show_clone_button"]) == (True, False, False)
+
+    # Case 3: policy False (GA off, no allowlist), runtime True
+    c = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        admin_overrides={"cosyvoice_clone_general_availability_enabled": False},
+    )
+    body = c.get("/api/voice/cosyvoice/clone-gate").json()
+    assert (body["can_access_clone"], body["runtime_ready"], body["can_show_clone_button"]) == (False, True, False)
+
+    # Case 4: both false
+    c = _build_runtime_client(
+        monkeypatch,
+        user=user,
+        admin_overrides={
+            "cosyvoice_clone_general_availability_enabled": False,
+            "cosyvoice_clone_worker_enabled": False,
+        },
+    )
+    body = c.get("/api/voice/cosyvoice/clone-gate").json()
+    assert (body["can_access_clone"], body["runtime_ready"], body["can_show_clone_button"]) == (False, False, False)

@@ -784,8 +784,17 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     // Phase 4.2 E.1: CosyVoice provider adds a second gate — policy-level
     // authorization visibility (admin / allowlist / GA). MiniMax is
     // unaffected (legacy behavior preserved).
+    //
+    // PR #15 P2 fix (Codex 2026-05-27): also AND runtime_ready —
+    // policy authorization alone is not enough; the backend Layers 2-3
+    // (worker_enabled + uploader production-ready) must also be in place.
+    // Without this AND, admin/allowlist users see the button but POST
+    // /clone immediately 503s on `clone_feature_disabled` /
+    // `sample_uploader_not_configured`. The backend computes the joint
+    // result as `can_show_clone_button = can_access_clone && runtime_ready`
+    // — we reference it directly to stay in lockstep with the server.
     if (provider === 'cosyvoice') {
-      return cosyvoiceCloneGate?.can_access_clone === true
+      return cosyvoiceCloneGate?.can_show_clone_button === true
     }
     return true
   }
