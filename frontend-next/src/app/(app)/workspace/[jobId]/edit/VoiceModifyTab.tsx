@@ -1456,10 +1456,11 @@ export function VoiceModifyTab({
         />
       )}
 
-      {/* Phase 4.2 E.1: CosyVoice clone modal — file-upload path only in
-          E.1. sourceSegmentIds left undefined → modal renders the
-          disabled-segments placeholder + file-upload widget. Segment
-          picker UI is E.2 scope. */}
+      {/* Phase 4.2 E.2 §0 决策 1：editing 路径只保留 file upload，不接
+          source_segments picker（避免 baseline 段 vs editing 段语义混淆）。
+          故意**不传** defaultSourceJobId —— modal 自然回落 file-only
+          分支（segmentsModeAvailable === false）。等 edit-aware segment
+          endpoint 出来再开放 source_segments。 */}
       {cosyvoiceCloneModalSpeaker ? (
         <CosyVoiceCloneModal
           open={true}
@@ -1470,8 +1471,6 @@ export function VoiceModifyTab({
               (s) => s.speakerId === cosyvoiceCloneModalSpeaker,
             )?.speakerName ?? cosyvoiceCloneModalSpeaker
           }
-          defaultSourceJobId={jobId}
-          sourceSegmentIds={undefined}
           onSuccess={(voice) => {
             handleCloneComplete(
               cosyvoiceCloneModalSpeaker,
