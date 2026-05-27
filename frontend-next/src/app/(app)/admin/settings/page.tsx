@@ -56,12 +56,33 @@ interface AdminSettings {
   // even if env-level AVT_ENABLE_SMART_MODE=true. Hot-reloadable (no
   // gateway restart needed).
   smart_mode_enabled: boolean
-  // --- Phase 4.2 A.2c / D.1: CosyVoice clone GA (general availability) ---
-  // 全用户开放 CosyVoice 克隆。**默认 false** = admin-only / allowlist 灰度。
-  // admin 烟测通过后翻 true → 任意已登录用户可触发 CosyVoice 克隆付费 API。
-  // 后端 ``StrictBool``（Codex PR #12 review）+ 后端 ``_resolve_clone_gate``
-  // 是唯一安全边界；前端 toggle 只是运维入口。
+  // --- Phase 4.2 A.2c / D.1: CosyVoice clone full admin field set ---
+  // **D.1 PR #13 Codex P1 修订（2026-05-27）**：``POST /api/admin/settings``
+  // 是 full-body replace 语义 —— 用户翻 GA toggle 时整页 settings 会被
+  // ``JSON.stringify(settings)`` 上传。如果其它 5 个 ``cosyvoice_clone_*``
+  // 字段不在前端 state，保存会让 backend Pydantic 走默认值 —— 等于"翻 GA
+  // 顺手关掉 clone worker / 擦掉 beta allowlist"。所以这里必须**显式列出
+  // 全部 6 个**字段，``DEFAULT_SETTINGS`` 也必须和 ``gateway/admin_settings.py``
+  // Pydantic 默认值严格一致（守卫 ``test_phase42_d1_admin_settings_ui_guard.py``）。
+  //
+  // 字段语义（详细注释见 ``gateway/admin_settings.py:194-230``）：
+  // - ``worker_enabled``：runtime 总开关（武汉 worker reachable）。
+  // - ``default_target_model``：DashScope model id（flash / plus）。
+  // - ``user_allowlist``：admin 之外可见 clone 入口的 user_id 列表（beta）。
+  // - ``general_availability_enabled``：D.1 新增 GA toggle，全用户开放。
+  // - ``max_voices_per_user``：每用户克隆数硬上限（C.2 已生效）。
+  // - ``max_concurrent_jobs``：并发上限（Phase 4.2 占位，未生效）。
+  //
+  // 前端 D.1 只渲染 GA toggle UI；其它 5 个字段进 state 但不渲染入口（防止
+  // 误操作 worker_enabled / allowlist 这种核弹按钮；将来需要 admin UI 暴露
+  // 单独的 toggle 再加渲染）。后端 Pydantic ``StrictBool`` /
+  // ``_resolve_clone_gate`` 仍是唯一安全边界。
+  cosyvoice_clone_worker_enabled: boolean
+  cosyvoice_clone_default_target_model: string
+  cosyvoice_clone_user_allowlist: string[]
   cosyvoice_clone_general_availability_enabled: boolean
+  cosyvoice_clone_max_voices_per_user: number
+  cosyvoice_clone_max_concurrent_jobs: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -90,7 +111,21 @@ const DEFAULT_SETTINGS: AdminSettings = {
   smart_pause_on_possible_user_voice_match: false,
   smart_auto_reuse_on_possible_user_voice_match: true,
   smart_mode_enabled: false,
+  // --- Phase 4.2 D.1 — CosyVoice clone 全部 6 个 admin 字段（PR #13 Codex P1）---
+  // 必须与 ``gateway/admin_settings.py`` Pydantic 默认值严格一致：
+  //   worker_enabled                       = False
+  //   default_target_model                 = "cosyvoice-v3.5-flash"
+  //   user_allowlist                       = []
+  //   general_availability_enabled         = False
+  //   max_voices_per_user                  = 3
+  //   max_concurrent_jobs                  = 2
+  // 否则用户翻 GA toggle 时 full-body save 会把后端这些字段重置。
+  cosyvoice_clone_worker_enabled: false,
+  cosyvoice_clone_default_target_model: 'cosyvoice-v3.5-flash',
+  cosyvoice_clone_user_allowlist: [],
   cosyvoice_clone_general_availability_enabled: false,
+  cosyvoice_clone_max_voices_per_user: 3,
+  cosyvoice_clone_max_concurrent_jobs: 2,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [
