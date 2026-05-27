@@ -142,6 +142,40 @@ async def reconcile_pending_tasks(
             failed += 1
             continue
 
+        # 2b. Pan feature gate (2026-05-26 postmortem P0a v2, Codex
+        # 2nd-round finding). The HTTP routers in gateway/pan/admin_api.py
+        # and gateway/pan/auth.py now refuse new requests when
+        # ``AVT_ENABLE_PAN_BACKUP=false`` (via require_pan_enabled).
+        # But the reconciler bypasses the HTTP layer entirely — it walks
+        # ``BackgroundTask`` rows directly and re-launches executors via
+        # TASK_EXECUTORS. So pending pan_backup / pan_restore /
+        # pan_residue_cleanup rows left over from before the flag was
+        # turned off would still re-run on every gateway restart.
+        #
+        # Mark them failed (not skipped/pending) so reconciler doesn't
+        # rescan them every restart. If the operator turns the flag back
+        # on later, those tasks stay failed by design — they need to be
+        # explicitly re-enqueued via the admin UI to reflect a deliberate
+        # decision. Auto-resume after a feature was force-disabled defeats
+        # the safety value of the flag.
+        from config import settings as _settings  # noqa: PLC0415 — lazy
+        if (
+            not _settings.enable_pan_backup
+            and (row.task_type or "").startswith("pan_")
+        ):
+            logger.warning(
+                "reconciler: mark task %s failed — pan feature disabled "
+                "(AVT_ENABLE_PAN_BACKUP=false); task_type=%s job=%s",
+                row.id, row.task_type, row.job_id,
+            )
+            await queue.mark_failed(
+                db, row.id,
+                "网盘备份功能已禁用 (AVT_ENABLE_PAN_BACKUP=false)，"
+                f"重启时跳过 pending {row.task_type}",
+            )
+            failed += 1
+            continue
+
         # 3. Resolve Job → project_dir. Missing Job is fatal; missing
         # project_dir is tolerated (pan executors ignore it; materials_pack
         # / generate_video will mark themselves failed inside the executor

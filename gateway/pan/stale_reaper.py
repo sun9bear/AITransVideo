@@ -224,8 +224,34 @@ async def run_stale_reaper_tick(
             # `SELECT pg_try_advisory_lock(...)` before opening explicit
             # begin() blocks below.
             await conn.commit()
+
+            # 2026-05-26 postmortem P0d v2 (Codex 2nd-round finding):
+            # CRITICAL ORDERING — release the advisory lock BEFORE the
+            # enqueue+launch of pan_residue_cleanup.
+            #
+            # The lock here is a PROOF probe: getting it shows no active
+            # executor is currently holding it for this (user, job). Once
+            # we have that proof, we don't need to KEEP the lock — the
+            # subsequent residue_cleanup needs to acquire the same key on
+            # its own connection. If we hold the lock through the
+            # enqueue+launch path, residue_cleanup will start running
+            # almost immediately (asyncio.create_task is fired inside
+            # enqueue_pan_task), hit pg_try_advisory_lock against our
+            # still-held key, fail, log "lock held by another worker",
+            # return — and the dispatcher will silently mark the task
+            # completed even though no actual cleanup ran.
+            #
+            # Safety after release: Job.status remains 'archiving'.
+            # backup_executor only acquires the lock from inside its
+            # critical section, which is gated by the HTTP enqueue
+            # path that won't create a NEW pan_backup row for a job
+            # already in 'archiving' state. The reconciler path is
+            # gated separately via the pan feature flag (see commit
+            # alongside this one). So the post-release window is safe.
+            await _release_advisory_lock(conn, lock_key)
+
             try:
-                # 2026-05-26 postmortem P0d (Codex feedback):
+                # 2026-05-26 postmortem P0d (Codex 1st-round feedback):
                 # PRE-FIX BUG — we used to call set_archive_status('archived')
                 # HERE, then enqueue pan_residue_cleanup. But residue_cleanup
                 # (pan/residue_cleanup.py:153) refuses to act unless
@@ -280,8 +306,6 @@ async def run_stale_reaper_tick(
                     "pan_stale_reaper: forward-resolve failed job=%s err=%s",
                     row.job_id, exc,
                 )
-            finally:
-                await _release_advisory_lock(conn, lock_key)
 
     return stats
 

@@ -519,8 +519,16 @@ def test_reconciler_protects_launched_rows_from_recover_stale(monkeypatch):
 ])
 def test_reconciler_handles_all_registered_task_types(monkeypatch, task_type):
     """All five task types currently in TASK_EXECUTORS must be launchable
-    via the reconciler — i.e., the dispatch is task-type-agnostic."""
+    via the reconciler — i.e., the dispatch is task-type-agnostic.
+
+    2026-05-26 P0a v2 addendum: pan_* task types now require
+    AVT_ENABLE_PAN_BACKUP=True at reconcile time, otherwise the
+    feature-flag gate marks them failed. This test enables the flag so
+    it can verify the dispatch path stays uniform across task types."""
     from background_task_reconciler import reconcile_pending_tasks
+    from config import settings
+
+    monkeypatch.setattr(settings, "enable_pan_backup", True)
 
     launched = _install_launch_capture(monkeypatch)
 
@@ -546,5 +554,144 @@ def test_reconciler_handles_all_registered_task_types(monkeypatch, task_type):
             assert stats["launched"] == 1
             assert len(launched) == 1
             assert task_type in launched[0]["name"]
+
+    _run(_go())
+
+
+# =========================================================================
+# Pan feature flag gate — 2026-05-26 postmortem P0a v2 (Codex 2nd round)
+# =========================================================================
+
+
+def test_reconciler_marks_pan_tasks_failed_when_flag_off(monkeypatch):
+    """When AVT_ENABLE_PAN_BACKUP=false, reconciler must NOT launch any
+    pending pan_* task — instead mark them failed with a clear message.
+
+    Pre-fix bug: gateway/pan/_feature_gate.py blocked the HTTP API in
+    commit 117e041f, but the reconciler walks BackgroundTask rows
+    directly and re-launches via TASK_EXECUTORS, bypassing the gate.
+    A pending pan_backup left over from a prior session would re-launch
+    on every gateway restart even after the flag was turned off.
+    """
+    from background_task_reconciler import reconcile_pending_tasks
+    from background_task_models import BackgroundTask
+    from config import settings
+
+    monkeypatch.setattr(settings, "enable_pan_backup", False)
+    launched = _install_launch_capture(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with _reconciler_test_engine() as engine:
+            Session = await _new_session(engine)
+
+            await _insert_job(
+                engine, job_id="job_pan_off", user_id=user_id,
+                project_dir="/tmp/project_pan_off",
+            )
+            # Insert one of each pan task type to verify the prefix gate
+            # catches all three.
+            for task_type in ("pan_backup", "pan_restore", "pan_residue_cleanup"):
+                await _insert_bg_task(
+                    engine, task_id=f"t_{task_type}",
+                    job_id="job_pan_off", user_id=user_id,
+                    task_type=task_type,
+                    # Distinct fingerprints so reconciler doesn't dedupe them
+                    params={"task_marker": task_type},
+                )
+
+            async with Session() as db:
+                stats = await reconcile_pending_tasks(db)
+
+            # All three failed, none launched.
+            assert stats["launched"] == 0, stats
+            assert stats["failed"] == 3, stats
+            assert len(launched) == 0, "no pan executor should have launched"
+
+            # Each row is now marked failed with a feature-flag message.
+            async with Session() as db:
+                rows = (await db.execute(
+                    select(BackgroundTask.task_type, BackgroundTask.status,
+                           BackgroundTask.error)
+                    .where(BackgroundTask.job_id == "job_pan_off")
+                )).all()
+            assert len(rows) == 3
+            for r in rows:
+                assert r.status == "failed", f"{r.task_type} not failed"
+                assert "AVT_ENABLE_PAN_BACKUP" in (r.error or ""), (
+                    f"{r.task_type} error msg should mention env var, got {r.error!r}"
+                )
+
+    _run(_go())
+
+
+def test_reconciler_still_launches_pan_tasks_when_flag_on(monkeypatch):
+    """Positive control: when the flag is ON, pan tasks should launch
+    normally. This pins the gate as a NEGATIVE filter only — it must
+    not affect the happy path."""
+    from background_task_reconciler import reconcile_pending_tasks
+    from config import settings
+
+    monkeypatch.setattr(settings, "enable_pan_backup", True)
+    launched = _install_launch_capture(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with _reconciler_test_engine() as engine:
+            Session = await _new_session(engine)
+
+            await _insert_job(
+                engine, job_id="job_pan_on", user_id=user_id,
+                project_dir="/tmp/project_pan_on",
+            )
+            await _insert_bg_task(
+                engine, task_id="t_pan_backup_on",
+                job_id="job_pan_on", user_id=user_id,
+                task_type="pan_backup",
+            )
+
+            async with Session() as db:
+                stats = await reconcile_pending_tasks(db)
+
+            assert stats["launched"] == 1, stats
+            assert stats["failed"] == 0, stats
+            assert len(launched) == 1
+            assert "pan_backup" in launched[0]["name"]
+
+    _run(_go())
+
+
+def test_reconciler_does_not_gate_non_pan_tasks_when_flag_off(monkeypatch):
+    """Negative control: AVT_ENABLE_PAN_BACKUP=false must only affect
+    pan_* task types. Other types (materials_pack, generate_video, etc.)
+    should be unaffected — the flag has zero relevance to them."""
+    from background_task_reconciler import reconcile_pending_tasks
+    from config import settings
+
+    monkeypatch.setattr(settings, "enable_pan_backup", False)
+    launched = _install_launch_capture(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with _reconciler_test_engine() as engine:
+            Session = await _new_session(engine)
+
+            await _insert_job(
+                engine, job_id="job_mpack", user_id=user_id,
+                project_dir="/tmp/project_mpack",
+            )
+            await _insert_bg_task(
+                engine, task_id="t_mpack",
+                job_id="job_mpack", user_id=user_id,
+                task_type="materials_pack",
+            )
+
+            async with Session() as db:
+                stats = await reconcile_pending_tasks(db)
+
+            # materials_pack must launch normally despite pan flag off.
+            assert stats["launched"] == 1, stats
+            assert stats["failed"] == 0, stats
+            assert "materials_pack" in launched[0]["name"]
 
     _run(_go())

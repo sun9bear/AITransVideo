@@ -560,3 +560,122 @@ def test_reaper_handles_mixed_workload(monkeypatch):
             assert stats['residue_cleanup_enqueued'] == 1
 
     run_async(_go())
+
+
+# =========================================================================
+# Advisory-lock handoff sequencing — 2026-05-26 postmortem P0d v2
+# (Codex 2nd-round finding)
+# =========================================================================
+
+
+def test_reaper_releases_lock_before_enqueueing_residue_cleanup(monkeypatch):
+    """White-box test for the lock-handoff race Codex caught in v1 of P0d.
+
+    PRE-FIX SUBTLE BUG: stale_reaper acquired pg_try_advisory_lock(K) on
+    its connection at line 215, then enqueue_pan_task at line 258 fired
+    asyncio.create_task(residue_cleanup_executor). residue_cleanup ran
+    immediately on its OWN connection, called pg_try_advisory_lock(K),
+    got back False (stale_reaper still holds the lock), logged
+    "lock held by another worker", returned. The dispatcher then marked
+    the BackgroundTask 'completed' because residue_cleanup didn't raise.
+    Net effect: residue_cleanup task row marked done but no actual
+    cleanup happened. Next stale_reaper tick (4h later) found the same
+    state, tried again, hit same race — orphan R2 keys forever.
+
+    POST-FIX CONTRACT: stale_reaper must release the lock BEFORE calling
+    enqueue_pan_task. This test pins the call sequence by monkeypatching
+    both helpers to record their invocation order.
+
+    SQLite caveat: real PG advisory locks aren't simulated in our tests,
+    so we can't observe the actual race. But the call-order assertion
+    catches anyone who later moves the release back into a finally
+    block (the previous shape that triggered the bug).
+    """
+    from pan import stale_reaper as mod
+
+    setup_pan_token_env(monkeypatch)
+    install_no_launch(monkeypatch)
+    user_id = uuid.uuid4()
+
+    call_order: list[tuple[str, object]] = []
+    real_try = mod._try_advisory_lock
+    real_release = mod._release_advisory_lock
+
+    async def spy_try(conn, key):
+        call_order.append(("try_lock", key))
+        return await real_try(conn, key)
+
+    async def spy_release(conn, key):
+        call_order.append(("release_lock", key))
+        return await real_release(conn, key)
+
+    monkeypatch.setattr(mod, "_try_advisory_lock", spy_try)
+    monkeypatch.setattr(mod, "_release_advisory_lock", spy_release)
+
+    # Spy on enqueue_pan_task too — it's the trigger for residue_cleanup
+    # launch, so it must come AFTER release_lock for our specific job.
+    import pan._enqueue as enq_mod
+    real_enqueue = enq_mod.enqueue_pan_task
+
+    async def spy_enqueue(*args, **kwargs):
+        call_order.append(("enqueue_pan_task", kwargs.get("task_type")))
+        return await real_enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(enq_mod, "enqueue_pan_task", spy_enqueue)
+    # stale_reaper imports enqueue_pan_task locally inside the loop, so
+    # patching the source module is sufficient.
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='handoff_test',
+                status='archiving', edit_generation=0,
+            )
+            br = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='handoff_test',
+                status='uploaded', job_edit_generation=0,
+            )
+            await _set_completed_at(
+                engine, br['id'],
+                datetime.now(timezone.utc) - timedelta(hours=5),
+            )
+
+            await mod.run_stale_reaper_tick(engine)
+
+    run_async(_go())
+
+    # Extract the sub-sequence relevant to the post-commit job.
+    # _try_advisory_lock is called for in-flight scan AND post-commit
+    # scan; we only care about the post-commit subsequence (the second
+    # try_lock onward in this single-row scenario).
+    # Decisive assertion: in the relevant sub-sequence, release_lock
+    # must come BEFORE enqueue_pan_task('pan_residue_cleanup').
+    try_indices = [
+        i for i, (kind, _) in enumerate(call_order) if kind == "try_lock"
+    ]
+    release_indices = [
+        i for i, (kind, _) in enumerate(call_order) if kind == "release_lock"
+    ]
+    enqueue_indices = [
+        i for i, (kind, val) in enumerate(call_order)
+        if kind == "enqueue_pan_task" and val == "pan_residue_cleanup"
+    ]
+
+    assert try_indices, f"expected try_advisory_lock call, got {call_order}"
+    assert release_indices, f"expected release_advisory_lock call, got {call_order}"
+    assert enqueue_indices, (
+        f"expected enqueue_pan_task('pan_residue_cleanup') call, "
+        f"got {call_order}"
+    )
+
+    # The decisive check: at least one release_lock precedes the
+    # enqueue_pan_task for pan_residue_cleanup. Without this ordering,
+    # the residue executor would hit the locked key and silently no-op.
+    earliest_release = min(release_indices)
+    earliest_residue_enqueue = min(enqueue_indices)
+    assert earliest_release < earliest_residue_enqueue, (
+        f"stale_reaper released lock at step {earliest_release} but "
+        f"enqueued residue_cleanup at step {earliest_residue_enqueue} — "
+        f"lock must be released BEFORE enqueue to avoid handoff race. "
+        f"Full call order: {call_order}"
+    )
