@@ -79,15 +79,20 @@ export interface CosyVoiceSegmentPickerProps {
    */
   onAvailableSegmentIdsChange: (ids: number[]) => void
   /**
-   * 已选段总时长（秒）变化回调。每当 selectedSegmentIds 或 segments 列表变化，
-   * picker 重新计算并回传当前选段的总时长（durationS 之和）。父 modal 用此值
-   * 在 `canRequestConsent` 中校验 3.0–60.0 秒区间（spec v2.1 §4 E.2.4 L1）。
+   * 已选段总时长（**毫秒**）变化回调。每当 selectedSegmentIds 或 segments
+   * 列表变化，picker 重新计算并回传当前选段的总时长——单位严格毫秒，与
+   * backend `MIN_DURATION_MS = 3_000` / `MAX_DURATION_MS = 60_000` 完全同
+   * 精度（spec v2.2 §0 决策 2）。
    *
-   * 之所以由 picker 计算：segments 列表（含 durationS）是 picker 持有的，
-   * 让 modal 二次拿一遍冗余。这是 picker → modal 的派生数据通道，不是新增
-   * 用户可见概念。
+   * **v2.2 关键决策（Codex PR #16 P2 fix）**：聚合源用 `endMs - startMs`
+   * 精确毫秒差值，**不**用 `SpeakerAudioSegment.durationS`（一位小数 round
+   * 值，会让 2.96s → 3.0s 边界漂移，前端放行被后端拒收）。
+   *
+   * 父 modal 用此值在 `canRequestConsent` 中校验 `[3000, 60000]` ms 区间
+   * （spec §4 E.2.4 L1）。UI 展示时可以 `ms / 1000` 后 `toFixed(1)`；
+   * 校验**不读**展示值。
    */
-  onSelectedDurationChange: (seconds: number) => void
+  onSelectedDurationMsChange: (ms: number) => void
   /**
    * 可选 —— editing 模式下父组件可以传入预加载的段列表，跳过网络请求。
    *
@@ -100,18 +105,22 @@ export interface CosyVoiceSegmentPickerProps {
 }
 
 /**
- * 客户端时长阈值，与后端 `gateway/cosyvoice_clone/sample_validator.py`
- * 的 `MIN_DURATION_MS = 3_000` / `MAX_DURATION_MS = 60_000` 一致（注意单位
- * 不同：前端 seconds，后端 ms；守卫做 ×1000 换算后比对）。
+ * 客户端时长阈值（**毫秒**），与后端
+ * `gateway/cosyvoice_clone/sample_validator.py` 的
+ * `MIN_DURATION_MS = 3_000` / `MAX_DURATION_MS = 60_000` **完全同单位**。
  *
- * 这两个字面量必须出现在本文件 + modal 文件中，被守卫 #11 扫到才算合规。
+ * **v2.2 决策（Codex PR #16 P2 fix）**：前端聚合 + 校验全用毫秒，避免
+ * `durationS` 一位小数 round 边界漂移。
+ *
+ * 这些字面量必须出现在本文件 + modal 文件中，被守卫 #11 ms-precision
+ * cross-check 扫到才算合规。
  */
-const MIN_SECONDS = 3.0
-const MAX_SECONDS = 60.0
+const MIN_DURATION_MS = 3000
+const MAX_DURATION_MS = 60000
 
-/** 推荐区间（仅提示，不强制）。后端 `RECOMMENDED_MIN/MAX_DURATION_MS`. */
-const RECOMMENDED_MIN_SECONDS = 10
-const RECOMMENDED_MAX_SECONDS = 20
+/** 推荐区间（毫秒，仅提示，不强制）。后端 `RECOMMENDED_MIN/MAX_DURATION_MS`. */
+const RECOMMENDED_MIN_MS = 10000
+const RECOMMENDED_MAX_MS = 20000
 
 function formatTimecode(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000))
@@ -126,7 +135,7 @@ export function CosyVoiceSegmentPicker({
   selectedSegmentIds,
   onChange,
   onAvailableSegmentIdsChange,
-  onSelectedDurationChange,
+  onSelectedDurationMsChange,
   preloadedSegments,
   disabled = false,
 }: CosyVoiceSegmentPickerProps) {
@@ -216,52 +225,60 @@ export function CosyVoiceSegmentPicker({
   )
 
   // ---------------------------------------------------------------------------
-  // 总时长（已选段）+ 阈值校验（仅展示用；阻断提交在父 modal 做）
+  // 总时长（已选段）+ 阈值校验（毫秒精度，spec v2.2 §0 决策 2）
   // ---------------------------------------------------------------------------
-  const totalSelectedSeconds = useMemo(() => {
+  // **v2.2**：聚合源用 `endMs - startMs` 而非 `durationS`，避免一位小数
+  // round 边界漂移（真实 2.96s 不会显示成 3.0s 并被前端误放行）。
+  const totalSelectedMs = useMemo(() => {
     let total = 0
     for (const seg of segments) {
-      if (selectedSet.has(seg.segmentId)) total += seg.durationS
+      if (selectedSet.has(seg.segmentId)) {
+        total += Math.max(0, seg.endMs - seg.startMs)
+      }
     }
     return total
   }, [segments, selectedSet])
 
-  // 总时长回传给父 modal（派生数据通道）。每当 selected ids 或 segments 变化
-  // 都报一次。父 modal 用此值校验 3.0-60.0 秒区间（spec §4 E.2.4 L1）。
-  const onDurationRef = useRef(onSelectedDurationChange)
+  // 总时长回传给父 modal（派生数据通道，单位严格 ms）。每当 selected ids
+  // 或 segments 变化都报一次。父 modal 用此值校验 [3000, 60000] ms 区间
+  // （spec §4 E.2.4 L1）。
+  const onDurationMsRef = useRef(onSelectedDurationMsChange)
   useEffect(() => {
-    onDurationRef.current = onSelectedDurationChange
-  }, [onSelectedDurationChange])
+    onDurationMsRef.current = onSelectedDurationMsChange
+  }, [onSelectedDurationMsChange])
   useEffect(() => {
-    onDurationRef.current(totalSelectedSeconds)
-  }, [totalSelectedSeconds])
+    onDurationMsRef.current(totalSelectedMs)
+  }, [totalSelectedMs])
 
-  // 客户端阈值：< MIN_SECONDS 红色 + 还需 X 秒；> MAX_SECONDS 红色 + 超出 X 秒；
-  // 推荐范围内绿色 + ✓。注意常量字面量 3 / 60 必须出现在本文件，守卫扫。
+  // 客户端阈值：< MIN_DURATION_MS 红色 + 还需 X 秒；> MAX_DURATION_MS 红色 +
+  // 超出 X 秒；推荐范围内绿色 + ✓。展示层除 1000 后 toFixed(1)；校验不读
+  // 展示值。常量字面量 3000 / 60000 必须出现在本文件，守卫 #11 ms-cross-check 扫。
   const durationStatus = useMemo(() => {
     if (selectedSegmentIds.length === 0) {
       return { kind: "empty" as const }
     }
-    if (totalSelectedSeconds < MIN_SECONDS) {
+    if (totalSelectedMs < MIN_DURATION_MS) {
+      const needSec = (MIN_DURATION_MS - totalSelectedMs) / 1000
       return {
         kind: "too_short" as const,
-        message: `还需 ${(MIN_SECONDS - totalSelectedSeconds).toFixed(1)}s 才能克隆（最少 ${MIN_SECONDS}s）`,
+        message: `还需 ${needSec.toFixed(1)}s 才能克隆（最少 ${MIN_DURATION_MS / 1000}s）`,
       }
     }
-    if (totalSelectedSeconds > MAX_SECONDS) {
+    if (totalSelectedMs > MAX_DURATION_MS) {
+      const overSec = (totalSelectedMs - MAX_DURATION_MS) / 1000
       return {
         kind: "too_long" as const,
-        message: `已超出 ${(totalSelectedSeconds - MAX_SECONDS).toFixed(1)}s（最多 ${MAX_SECONDS}s）`,
+        message: `已超出 ${overSec.toFixed(1)}s（最多 ${MAX_DURATION_MS / 1000}s）`,
       }
     }
     const inRecommended =
-      totalSelectedSeconds >= RECOMMENDED_MIN_SECONDS &&
-      totalSelectedSeconds <= RECOMMENDED_MAX_SECONDS
+      totalSelectedMs >= RECOMMENDED_MIN_MS &&
+      totalSelectedMs <= RECOMMENDED_MAX_MS
     return {
       kind: "ok" as const,
       inRecommended,
     }
-  }, [selectedSegmentIds.length, totalSelectedSeconds])
+  }, [selectedSegmentIds.length, totalSelectedMs])
 
   // ---------------------------------------------------------------------------
   // 试听 —— 同时只允许一段播放（参考 VoiceSelectionPanel 模式）
@@ -345,16 +362,17 @@ export function CosyVoiceSegmentPicker({
       >
         {durationStatus.kind === "empty" && (
           <span>
-            勾选 {MIN_SECONDS}-{MAX_SECONDS} 秒的段作为克隆样本（推荐{" "}
-            {RECOMMENDED_MIN_SECONDS}-{RECOMMENDED_MAX_SECONDS} 秒效果最好）
+            勾选 {MIN_DURATION_MS / 1000}-{MAX_DURATION_MS / 1000} 秒的段作为
+            克隆样本（推荐 {RECOMMENDED_MIN_MS / 1000}-
+            {RECOMMENDED_MAX_MS / 1000} 秒效果最好）
           </span>
         )}
         {durationStatus.kind === "ok" && (
           <span>
             ✓ 已选 {selectedSegmentIds.length} 段 · 共{" "}
-            {totalSelectedSeconds.toFixed(1)}s
+            {(totalSelectedMs / 1000).toFixed(1)}s
             {!durationStatus.inRecommended &&
-              ` · 建议落到 ${RECOMMENDED_MIN_SECONDS}-${RECOMMENDED_MAX_SECONDS}s`}
+              ` · 建议落到 ${RECOMMENDED_MIN_MS / 1000}-${RECOMMENDED_MAX_MS / 1000}s`}
           </span>
         )}
         {(durationStatus.kind === "too_short" ||
@@ -369,7 +387,9 @@ export function CosyVoiceSegmentPicker({
           {segments.map((seg) => {
             const isSelected = selectedSet.has(seg.segmentId)
             const isPlaying = playingSegmentId === seg.segmentId
-            const isShortSingle = seg.durationS < MIN_SECONDS
+            // v2.2 ms-precision：与总时长校验同一精度源
+            const segDurationMs = Math.max(0, seg.endMs - seg.startMs)
+            const isShortSingle = segDurationMs < MIN_DURATION_MS
             return (
               <li
                 key={seg.segmentId}
@@ -431,7 +451,7 @@ export function CosyVoiceSegmentPicker({
                       : undefined
                   }
                 >
-                  {seg.durationS.toFixed(1)}s
+                  {(segDurationMs / 1000).toFixed(1)}s
                 </span>
               </li>
             )

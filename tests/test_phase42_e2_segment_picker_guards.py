@@ -275,46 +275,71 @@ def test_e2_modal_close_resets_segments():
 
 
 # ---------------------------------------------------------------------------
-# 11. 3.0-60.0 秒阈值前后端 cross-file 同步
+# 11. ms 精度阈值前后端 cross-file 同步（v2.2 Codex PR #16 P2 fix）
 # ---------------------------------------------------------------------------
 
 
-def test_e2_modal_three_to_sixty_second_threshold_literal():
-    """§0 决策 2 / v2.1：客户端阈值固定 3.0-60.0 秒，与 backend
-    ``MIN_DURATION_MS = 3_000`` / ``MAX_DURATION_MS = 60_000`` 一致（单位
-    不同：前端 seconds，后端 ms；守卫做 ×1000 换算）。
+def test_e2_ms_precision_threshold_invariants():
+    """§0 决策 2 / v2.2 / Codex PR #16 P2 fix：前端**全程毫秒精度**，与
+    backend ``MIN_DURATION_MS = 3_000`` / ``MAX_DURATION_MS = 60_000``
+    **同单位**严格匹配。
 
-    两侧任一字面量改了都会同步红。"""
-    # 前端 modal canRequestConsent 含 selectedDurationSeconds < 3 / > 60
+    v2.1 用 ``durationS``（端点返回的一位小数 round 值）做聚合 + 用秒
+    阈值校验会让真实 2.96s → 显示 3.0s → 前端放行 → 后端 ms 精度拒收的
+    边界 case bug。v2.2 全部改为：
+
+    - Picker 聚合用 ``endMs - startMs``（精确 ms 差值）
+    - Picker 暴露 ``onSelectedDurationMsChange: (ms: number) => void``
+    - Modal state ``selectedDurationMs``、校验 ``< 3000`` / ``> 60000``
+    - 后端 ``MIN_DURATION_MS = 3_000`` / ``MAX_DURATION_MS = 60_000`` 不动
+
+    本测试在一处断言四条 invariant；任一漂移会同步红。"""
     modal_src = _strip_ts_comments(CLONE_MODAL.read_text(encoding="utf-8"))
+    picker_src = _strip_ts_comments(PICKER_FILE.read_text(encoding="utf-8"))
+    backend_src = BACKEND_SAMPLE_VALIDATOR.read_text(encoding="utf-8")
+
+    # (1) Modal canRequestConsent 用 ms 字面量校验
     has_min = bool(
-        re.search(r"selectedDurationSeconds\s*<\s*3(?:\.0)?(?!\d)", modal_src)
+        re.search(r"selectedDurationMs\s*<\s*3000(?!\d)", modal_src)
     )
     has_max = bool(
-        re.search(r"selectedDurationSeconds\s*>\s*60(?:\.0)?(?!\d)", modal_src)
+        re.search(r"selectedDurationMs\s*>\s*60000(?!\d)", modal_src)
     )
     assert has_min and has_max, (
         "CosyVoiceCloneModal canRequestConsent 必须含 "
-        "`selectedDurationSeconds < 3` 和 `selectedDurationSeconds > 60` "
-        "字面量阈值（§0 决策 2）。"
+        "`selectedDurationMs < 3000` 和 `selectedDurationMs > 60000` "
+        "字面量阈值（v2.2 / §0 决策 2 / Codex PR #16 P2 fix）。"
     )
 
-    # 后端 sample_validator.py 含 MIN_DURATION_MS = 3_000 / MAX_DURATION_MS = 60_000
-    backend_src = BACKEND_SAMPLE_VALIDATOR.read_text(encoding="utf-8")
-    backend_min = re.search(
-        r"MIN_DURATION_MS\s*=\s*3_?000\b", backend_src
+    # (2) Picker 聚合源必须用 endMs - startMs 精确毫秒（防 durationS 一位
+    # 小数 round 漂移）。允许 `seg.endMs - seg.startMs` 等对象访问形式。
+    assert re.search(r"\.endMs\s*-\s*\w+\.startMs", picker_src), (
+        "CosyVoiceSegmentPicker 必须用 `seg.endMs - seg.startMs` 精确毫秒"
+        "计算总时长（v2.2 / Codex PR #16 P2 fix）。\n"
+        "speaker-audio 端点返回的 `duration_s` 字段是一位小数 round 值"
+        "（如真实 2.96s → 3.0s），会让 2.96s 边界 case 前端放行后被后端"
+        "ms 精度（MIN_DURATION_MS=3000）拒收。"
     )
-    backend_max = re.search(
-        r"MAX_DURATION_MS\s*=\s*60_?000\b", backend_src
+
+    # (3) Picker 暴露 ms-unit prop（避免和 v2.1 的 seconds-unit 漂回）
+    assert re.search(
+        r"onSelectedDurationMsChange\s*:\s*\(\s*ms\s*:\s*number\s*\)\s*=>\s*void",
+        picker_src,
+    ), (
+        "CosyVoiceSegmentPicker 必须暴露 "
+        "`onSelectedDurationMsChange: (ms: number) => void` prop"
+        "（v2.2 / Codex PR #16 P2 fix）。命名带 'Ms' 后缀强制和 modal 校验"
+        "对齐 ms 单位。"
     )
+
+    # (4) Backend 常量不动
+    backend_min = re.search(r"MIN_DURATION_MS\s*=\s*3_?000\b", backend_src)
+    backend_max = re.search(r"MAX_DURATION_MS\s*=\s*60_?000\b", backend_src)
     assert backend_min and backend_max, (
         "Backend sample_validator.py 必须含 MIN_DURATION_MS = 3_000 和 "
         "MAX_DURATION_MS = 60_000。前后端阈值漂移会让前端禁用条件与"
         "后端拒绝条件不一致 —— 用户体验断层。"
     )
-    # ×1000 换算的语义 cross-check（防御：有人改前端为 4 / 50 但后端没改）：
-    # 后端 3_000 ms == 前端 3 s；后端 60_000 ms == 前端 60 s。本测试已经
-    # 同时扫两侧字面量，等价于做了这个换算的 invariant。
 
 
 # ---------------------------------------------------------------------------
