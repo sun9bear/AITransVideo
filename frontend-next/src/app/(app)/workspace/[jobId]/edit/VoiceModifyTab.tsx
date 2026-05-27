@@ -65,6 +65,15 @@ import {
   type VoiceSelectionPricingResponse,
 } from "@/lib/api/voiceSelection"
 import { VoiceCloneModal, SpeakerAudioAuditModal } from "@/components/workspace/VoiceSelectionPanel"
+// Phase 4.2 E.1 — CosyVoice clone wiring in editing-state tab. Mirror of
+// VoiceSelectionPanel: button onClick splits by provider; MiniMax stays in
+// the legacy VoiceCloneModal (re-exported from VoiceSelectionPanel),
+// CosyVoice opens the dedicated D.2 modal.
+import { CosyVoiceCloneModal } from "@/components/voice-clone/CosyVoiceCloneModal"
+import {
+  getCosyvoiceCloneGate,
+  type CosyvoiceCloneGateResponse,
+} from "@/lib/api/cosyvoiceClone"
 
 /* ---------- Types (mirror VoiceSelectionPanel) ---------- */
 
@@ -220,6 +229,14 @@ export function VoiceModifyTab({
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({})
   const [previewError, setPreviewError] = useState<Record<string, string | null>>({})
   const [cloneModalSpeaker, setCloneModalSpeaker] = useState<string | null>(null)
+  // Phase 4.2 E.1: parallel state for CosyVoice clone. Mirrors
+  // VoiceSelectionPanel — disjoint from cloneModalSpeaker so only one
+  // modal is mounted at a time. Provider-aware dispatch in the clone
+  // button onClick below.
+  const [cosyvoiceCloneModalSpeaker, setCosyvoiceCloneModalSpeaker] =
+    useState<string | null>(null)
+  const [cosyvoiceCloneGate, setCosyvoiceCloneGate] =
+    useState<CosyvoiceCloneGateResponse | null>(null)
   // 2026-05-09: 核对原音弹窗 — readOnly 模式 (editing 状态后端的 reassign /
   // keep-original 端点 require voice_selection_review 阶段未 approved,
   // editing 状态会 409,所以这里只播放,不暴露 mutation 控件)。
@@ -589,6 +606,25 @@ export function VoiceModifyTab({
     }
   }, [])
 
+  // Phase 4.2 E.1: fetch CosyVoice clone-gate once on mount (mirrors
+  // VoiceSelectionPanel). Failure → null state → CosyVoice button hidden,
+  // matching the safe denied default. No periodic refresh — gate is per
+  // user policy state.
+  useEffect(() => {
+    let cancelled = false
+    getCosyvoiceCloneGate()
+      .then((data) => {
+        if (cancelled) return
+        setCosyvoiceCloneGate(data)
+      })
+      .catch(() => {
+        /* silent — null state hides the button safely */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // ---- Handlers ----
 
   const handleProviderChange = useCallback((speakerId: string, provider: string) => {
@@ -830,11 +866,21 @@ export function VoiceModifyTab({
     if (!sp?.canClone) return false
     const state = draftStates[speakerId]
     if (!state) return false
-    if (hasMultiProvider) {
-      return providerMap[state.selectedProvider]?.supportsClone ?? false
+    const provider = hasMultiProvider
+      ? state.selectedProvider
+      : defaultProvider
+    // Runtime availability (A0b backend supports_clone).
+    const supportsClone = hasMultiProvider
+      ? providerMap[state.selectedProvider]?.supportsClone ?? false
+      : defaultProvider === "minimax"
+    if (!supportsClone) return false
+    // Phase 4.2 E.1: CosyVoice second gate — display-layer authorization
+    // visibility (D.1 /clone-gate). MiniMax legacy path unchanged.
+    if (provider === "cosyvoice") {
+      return cosyvoiceCloneGate?.can_access_clone === true
     }
-    return defaultProvider === "minimax"
-  }, [speakers, draftStates, hasMultiProvider, providerMap, defaultProvider])
+    return true
+  }, [speakers, draftStates, hasMultiProvider, providerMap, defaultProvider, cosyvoiceCloneGate])
 
   // ---- Render ----
 
@@ -1232,7 +1278,17 @@ export function VoiceModifyTab({
                           type="button"
                           className="h-8 rounded px-3 text-xs font-medium transition disabled:opacity-50 border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20"
                           disabled={applying}
-                          onClick={() => setCloneModalSpeaker(sp.speakerId)}
+                          onClick={() => {
+                            // Phase 4.2 E.1 — provider-aware dispatch.
+                            // Mirrors VoiceSelectionPanel. MiniMax keeps
+                            // legacy in-file VoiceCloneModal (untouched);
+                            // CosyVoice opens the dedicated D.2 modal.
+                            if (currentProvider === "cosyvoice") {
+                              setCosyvoiceCloneModalSpeaker(sp.speakerId)
+                            } else {
+                              setCloneModalSpeaker(sp.speakerId)
+                            }
+                          }}
                         >
                           克隆音色
                         </button>
@@ -1359,7 +1415,8 @@ export function VoiceModifyTab({
         )}
       </section>
 
-      {/* Clone Modal (reused from main flow) */}
+      {/* Clone Modal — MiniMax legacy path (reused from VoiceSelectionPanel
+          export). Function body untouched, locked by G_MX.2 / G6.1.5. */}
       {selectedSpeakerRef && (
         <VoiceCloneModal
           cloneCostCredits={cloneCostCredits}
@@ -1369,6 +1426,33 @@ export function VoiceModifyTab({
           onComplete={handleCloneComplete}
         />
       )}
+
+      {/* Phase 4.2 E.1: CosyVoice clone modal — file-upload path only in
+          E.1. sourceSegmentIds left undefined → modal renders the
+          disabled-segments placeholder + file-upload widget. Segment
+          picker UI is E.2 scope. */}
+      {cosyvoiceCloneModalSpeaker ? (
+        <CosyVoiceCloneModal
+          open={true}
+          onClose={() => setCosyvoiceCloneModalSpeaker(null)}
+          speakerId={cosyvoiceCloneModalSpeaker}
+          speakerName={
+            displaySpeakers.find(
+              (s) => s.speakerId === cosyvoiceCloneModalSpeaker,
+            )?.speakerName ?? cosyvoiceCloneModalSpeaker
+          }
+          defaultSourceJobId={jobId}
+          sourceSegmentIds={undefined}
+          onSuccess={(voice) => {
+            handleCloneComplete(
+              cosyvoiceCloneModalSpeaker,
+              voice.voice_id,
+              { reused: false },
+            )
+            setCosyvoiceCloneModalSpeaker(null)
+          }}
+        />
+      ) : null}
 
       {/* 核对原音 Modal — readOnly 模式 (editing 状态) */}
       {(() => {

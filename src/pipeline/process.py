@@ -7509,6 +7509,13 @@ class ProcessPipeline:
             return voices, display_map
 
         # Build all three providers
+        # ``supports_clone`` 决定前端是否对该 provider 渲染"克隆音色"按钮。
+        # MiniMax: 一直支持。CosyVoice: Phase 4.1 起通过 mainland worker 支持，
+        # 由 ``AVT_MAINLAND_VOICE_WORKER_ENABLED`` 控制（env 字面读取集中在
+        # ``services.mainland_worker.client_factory`` 内，F.6 守卫强制）。
+        # VolcEngine: 无 user-clone 实现。
+        from services.mainland_worker.client_factory import is_worker_enabled_in_env
+        _cosyvoice_clone_enabled = is_worker_enabled_in_env()
         all_providers: dict[str, dict[str, object]] = {}
         all_display_maps: dict[str, dict[str, str]] = {}
         for prov in ("minimax", "cosyvoice", "volcengine"):
@@ -7517,10 +7524,16 @@ class ProcessPipeline:
             except Exception:
                 voices, dmap = [], {}
             all_display_maps[prov] = dmap
+            if prov == "minimax":
+                supports_clone = True
+            elif prov == "cosyvoice":
+                supports_clone = _cosyvoice_clone_enabled
+            else:
+                supports_clone = False
             all_providers[prov] = {
                 "label": _PROVIDER_LABELS.get(prov, prov),
                 "available_voices": voices,
-                "supports_clone": prov == "minimax",
+                "supports_clone": supports_clone,
             }
 
         # Default provider voices (backward compat)
