@@ -53,15 +53,30 @@ interface CosyVoiceCloneModalProps {
   /** Display label; pre-fills the form (user can edit before submit). */
   speakerName: string
   /**
-   * Optional — if the user wants to clone from existing transcript segments
-   * of a specific job rather than upload a fresh file, parent passes the
-   * job id here. The modal lets the user switch between "file" / "segments"
-   * mode via a radio toggle when this is provided.
+   * Optional — job id whose transcript segments will be used as the sample
+   * source when sampleMode === "segments". Without this, segments mode is
+   * **disabled entirely** (only file upload is available).
    *
-   * NOT yet wired in D.2 — segments selector UI (picking which segment ids)
-   * is deferred to E phase. For now, segments mode shows a placeholder.
+   * Provided alone (without `sourceSegmentIds`) is not enough: D.2 does not
+   * ship a segment picker UI, so parent must supply both pieces in E phase.
+   * See PR #14 Codex P2 二轮 (discussion 2026-05-27).
    */
   defaultSourceJobId?: string
+  /**
+   * Optional — real, non-empty array of integer segment ids from
+   * `defaultSourceJobId`'s transcript. Type matches backend strict
+   * `int[]` contract (Phase 4.2 A.2b `_parse_source_segments`).
+   *
+   * **D.2 安全契约**：segments 模式只在
+   * ``defaultSourceJobId && sourceSegmentIds && sourceSegmentIds.length > 0``
+   * 全部满足时才放出选项。任何 placeholder / 占位 id 都被静态守卫拒绝
+   * (``test_d2_clone_modal_no_placeholder_segment_id``)。
+   *
+   * E 阶段父组件（VoiceSelectionPanel 等）从转写选段 UI 收集真实 segment
+   * 编号后传入；D.2 standalone 使用时不传此 prop，CloneModal 只走 file
+   * 上传路径。
+   */
+  sourceSegmentIds?: number[]
   /** Called with the backend's voice metadata after a successful clone. */
   onSuccess: (voice: CosyvoiceCloneSuccess) => void
 }
@@ -94,8 +109,20 @@ export function CosyVoiceCloneModal({
   speakerId,
   speakerName,
   defaultSourceJobId,
+  sourceSegmentIds,
   onSuccess,
 }: CosyVoiceCloneModalProps) {
+  // -------------------------------------------------------------------------
+  // segments-mode 可用性闸（PR #14 Codex P2 二轮 fix —— 不允许提交占位 id）
+  // -------------------------------------------------------------------------
+  // segments 模式仅在父组件**同时**传入 job id 和**非空** integer segment 数组
+  // 时才放出。任何 placeholder / 占位字符串会被 backend strict int 校验拒收
+  // (`type(x) is int`)，提前在 UI 上禁用比让用户提交后看 400 错误友好。
+  const segmentsModeAvailable =
+    Boolean(defaultSourceJobId) &&
+    Array.isArray(sourceSegmentIds) &&
+    sourceSegmentIds.length > 0
+
   // -------------------------------------------------------------------------
   // Local form state
   // -------------------------------------------------------------------------
@@ -103,9 +130,10 @@ export function CosyVoiceCloneModal({
     DEFAULT_COSYVOICE_TARGET_MODEL,
   )
   const [editableSpeakerName, setEditableSpeakerName] = useState(speakerName)
-  const [sampleMode, setSampleMode] = useState<CosyvoiceSampleMode>(
-    defaultSourceJobId ? "segments" : "file",
-  )
+  // **默认始终 "file"**（PR #14 Codex P2 二轮）。即使父组件传了
+  // defaultSourceJobId 也先停在 file 模式 —— 让用户主动选 segments 模式才切，
+  // 避免误以为已经选好"用任务转写片段"而点提交。
+  const [sampleMode, setSampleMode] = useState<CosyvoiceSampleMode>("file")
   const [sampleFile, setSampleFile] = useState<File | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
   const [submitState, setSubmitState] = useState<SubmitState>({ kind: "idle" })
@@ -142,18 +170,20 @@ export function CosyVoiceCloneModal({
     }
   }, [open])
 
-  // Reset form when modal closes so reopening starts fresh
+  // Reset form when modal closes so reopening starts fresh.
+  // sampleMode always resets to "file" (the safe default per Codex P2 二轮);
+  // user must explicitly switch to segments mode if they want it.
   useEffect(() => {
     if (!open) {
       setTargetModel(DEFAULT_COSYVOICE_TARGET_MODEL)
       setEditableSpeakerName(speakerName)
-      setSampleMode(defaultSourceJobId ? "segments" : "file")
+      setSampleMode("file")
       setSampleFile(null)
       setFileError(null)
       setSubmitState({ kind: "idle" })
       setConsentOpen(false)
     }
-  }, [open, speakerName, defaultSourceJobId])
+  }, [open, speakerName])
 
   // -------------------------------------------------------------------------
   // File handling — 5 维校验的"客户端可早期 catch"部分（格式 + 大小）
@@ -192,11 +222,19 @@ export function CosyVoiceCloneModal({
     if (editableSpeakerName.trim() === "") return false
     if (sampleMode === "file") return sampleFile !== null
     if (sampleMode === "segments") {
-      // D.2: segments selector UI is stubbed; require a sourceJobId at minimum.
-      return Boolean(defaultSourceJobId)
+      // segmentsModeAvailable already encodes the
+      // `defaultSourceJobId && sourceSegmentIds && length > 0` gate.
+      // No placeholders accepted — backend strict int check would reject.
+      return segmentsModeAvailable
     }
     return false
-  }, [gate, editableSpeakerName, sampleMode, sampleFile, defaultSourceJobId])
+  }, [
+    gate,
+    editableSpeakerName,
+    sampleMode,
+    sampleFile,
+    segmentsModeAvailable,
+  ])
 
   const handleConsentConfirmed = useCallback(
     async (consent: CosyvoiceConsentPayload) => {
@@ -212,12 +250,12 @@ export function CosyVoiceCloneModal({
           sampleFile: sampleMode === "file" ? sampleFile ?? undefined : undefined,
           sourceJobId:
             sampleMode === "segments" ? defaultSourceJobId : undefined,
-          // D.2 placeholder: parent provides actual segment IDs in E phase.
-          // For D.2 standalone testing, segments mode is gated above on
-          // sourceJobId presence; a non-empty array stub keeps the contract
-          // intact (backend rejects empty array, which is the right thing).
+          // segments mode is gated by `segmentsModeAvailable` above which
+          // requires non-empty `sourceSegmentIds` from the parent. PR #14
+          // Codex P2 二轮 fix: NO placeholder ids — backend strict
+          // `type(x) is int` would reject `"__d2_placeholder__"` immediately.
           sourceSegmentIds:
-            sampleMode === "segments" ? ["__d2_placeholder__"] : undefined,
+            sampleMode === "segments" ? sourceSegmentIds : undefined,
         })
         toast.success("克隆成功，已加入个人音色库")
         setSubmitState({ kind: "idle" })
@@ -242,6 +280,7 @@ export function CosyVoiceCloneModal({
       sampleMode,
       sampleFile,
       defaultSourceJobId,
+      sourceSegmentIds,
       onSuccess,
     ],
   )
@@ -395,7 +434,36 @@ export function CosyVoiceCloneModal({
                     </div>
                   </label>
 
-                  {defaultSourceJobId && (
+                  {/* segments 模式：仅在父组件**同时**传入 defaultSourceJobId
+                      和非空 sourceSegmentIds 时才放出可选 radio。D.2 standalone
+                      不传 sourceSegmentIds，所以这一块默认不出现 —— file 上传
+                      是唯一可用路径。E 阶段 VoiceSelectionPanel 会先调出选段
+                      UI 收集真实 segment id 再渲染本组件。 */}
+                  {defaultSourceJobId && !segmentsModeAvailable && (
+                    <div
+                      data-sample-mode="segments-disabled"
+                      className="flex items-start gap-3 rounded-xl border border-border bg-muted/10 p-3 opacity-60"
+                    >
+                      <input
+                        type="radio"
+                        name="cosyvoice-sample-mode"
+                        checked={false}
+                        disabled
+                        className="mt-1 h-4 w-4"
+                      />
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-foreground">
+                          从当前任务转写选段
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          任务 {defaultSourceJobId} 可选，但还未选择具体段落。
+                          下一阶段接入选段 UI 后启用；目前请先用文件上传。
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {segmentsModeAvailable && (
                     <label
                       data-sample-mode="segments"
                       className="flex items-start gap-3 rounded-xl border border-border bg-muted/30 p-3 cursor-pointer hover:bg-muted/50 transition"
@@ -413,8 +481,8 @@ export function CosyVoiceCloneModal({
                           从当前任务转写选段
                         </p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          基于任务 {defaultSourceJobId} 的 transcript
-                          选择若干段拼接为样本。具体选段 UI 将在下一阶段接入。
+                          基于任务 {defaultSourceJobId} 的 transcript 选中的{" "}
+                          {sourceSegmentIds?.length ?? 0} 个段落拼接为样本。
                         </p>
                       </div>
                     </label>
