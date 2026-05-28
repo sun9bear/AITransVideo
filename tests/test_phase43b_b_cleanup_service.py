@@ -432,10 +432,51 @@ def test_cleanup_claims_before_worker_call():
 # ---------------------------------------------------------------------------
 
 
-def test_lease_exceeds_delete_worst_case_floor():
-    """spec §2.7：LEASE 必须 > delete_voice 最坏重试窗口（防双删）。"""
-    assert svc.CLEANUP_CLAIM_LEASE_SECONDS >= svc.DELETE_VOICE_WORST_CASE_FLOOR_SECONDS
+def test_lease_exceeds_real_delete_worst_case():
+    """spec §2.7 / Codex 4.3b-B-fix P2：LEASE + floor 必须 >= 真实 client
+    delete_voice 最坏重试窗口——**从真实 client 常量重算**，client retry/timeout
+    变大而 LEASE/floor 没跟上 → red（不再依赖一个偏低的硬编码 floor）。"""
+    from services.mainland_worker.client import (
+        DEFAULT_TIMEOUT_SECONDS,
+        MAX_NETWORK_RETRIES,
+        RETRY_BACKOFF_SECONDS,
+    )
+
+    t = DEFAULT_TIMEOUT_SECONDS
+    per_attempt = (t.connect or 0) + (t.read or 0) + (t.write or 0)
+    backoff_between = sum(RETRY_BACKOFF_SECONDS[: max(0, MAX_NETWORK_RETRIES - 1)])
+    worst_case = MAX_NETWORK_RETRIES * per_attempt + backoff_between
+    assert svc.CLEANUP_CLAIM_LEASE_SECONDS >= worst_case, (
+        f"LEASE {svc.CLEANUP_CLAIM_LEASE_SECONDS} < delete 最坏窗口 {worst_case}（双删风险）"
+    )
+    assert svc.DELETE_VOICE_WORST_CASE_FLOOR_SECONDS >= worst_case, (
+        f"floor {svc.DELETE_VOICE_WORST_CASE_FLOOR_SECONDS} < 真实最坏窗口 {worst_case}；"
+        f"client retry/timeout 变大了，请上调 floor + LEASE"
+    )
     assert svc.CLEANUP_CLAIM_LEASE_SECONDS == 600
+
+
+def test_release_noop_on_already_expired_row():
+    """Codex 4.3b-B-fix P3：行已软删（manual / 竞态）后，失败 release 不再
+    bump attempts/error（release 也加 expired_at IS NULL 守卫，与 complete 一致）。"""
+    async def _t():
+        sm = await _make_session()
+        v = _mk_voice(expired_at=_past())  # 已软删
+        await _insert(sm, v)
+        # 模拟竞态：claim 后该行被 manual 软删，留着 claim/run_id
+        async with sm() as db:
+            row = (
+                await db.execute(select(UserVoice).where(UserVoice.id == v.id))
+            ).scalar_one()
+            row.cleanup_claim_until = _future()
+            row.cleanup_run_id = "run-1"
+            await db.commit()
+        async with sm() as db:
+            outcome = await svc.release_with_backoff(db, v.id, run_id="run-1", error="x")
+        assert outcome == "noop", "已软删行不应被失败路径更新"
+        row = await _get(sm, v.id)
+        assert row.cleanup_attempts == 0, "expired 行 attempts 不被 bump"
+        assert row.cleanup_last_error is None
 
 
 def test_service_does_not_import_worker_client():
