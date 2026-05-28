@@ -1101,6 +1101,53 @@ def _express_upload_error(status_code: int, code: str, **extra: object) -> JSONR
     return JSONResponse(status_code=status_code, content={"ok": False, "error": error})
 
 
+def _express_uploader_readiness_error(
+    *, user_id: str, job_id: str, speaker_id: str, sha256: str,
+) -> JSONResponse | None:
+    """E1-fix（Codex E1 review P1）：uploader 生产就绪 gate。
+
+    与 Studio POST /clone 的 readiness gate 同款三步检查（统一 error code），
+    防止 local_fs_stub 返 ``file://`` URL 交给 worker / DashScope（不可访问）：
+
+    1. backend == "local_fs_stub" → 503 sample_uploader_not_configured
+    2. backend ∉ PRODUCTION_READY_BACKENDS → 503 sample_uploader_not_implemented
+    3. backend == "aliyun_oss" 且 missing_aliyun_oss_settings 非空
+       → 503 sample_uploader_config_missing
+
+    返回 ``None`` 表示就绪（caller 继续 build + upload）。
+    日志脱敏：只 log 脱敏字段，缺失配置项**只 log 字段名**（不 log 值）。
+    """
+    uploader_backend = getattr(gw_settings, "cosyvoice_sample_uploader", "local_fs_stub")
+    if uploader_backend == "local_fs_stub":
+        logger.error(
+            "[express-sample-upload] refusing: sample uploader still "
+            "LocalFsStubUploader (DashScope/worker can't fetch file:// URLs); "
+            "set AVT_COSYVOICE_SAMPLE_UPLOADER=aliyun_oss "
+            "(user_id=%s job_id=%s speaker_id=%s sha256=%s)",
+            user_id, job_id, speaker_id, sha256[:16],
+        )
+        return _express_upload_error(503, "sample_uploader_not_configured")
+    if uploader_backend not in PRODUCTION_READY_BACKENDS:
+        logger.error(
+            "[express-sample-upload] refusing: sample uploader backend %r "
+            "configured but factory not production-ready (PROD_READY=%s IMPLEMENTED=%s)",
+            uploader_backend,
+            sorted(PRODUCTION_READY_BACKENDS),
+            sorted(IMPLEMENTED_BACKENDS),
+        )
+        return _express_upload_error(503, "sample_uploader_not_implemented")
+    if uploader_backend == "aliyun_oss":
+        missing_oss = missing_aliyun_oss_settings(gw_settings)
+        if missing_oss:
+            # 只 log 缺失的字段名（不 log 它们的值 / 其它 OSS secret）
+            logger.error(
+                "[express-sample-upload] refusing: aliyun_oss missing config: %s",
+                ", ".join(missing_oss),
+            )
+            return _express_upload_error(503, "sample_uploader_config_missing")
+    return None
+
+
 @internal_router.post("/express-sample-upload")
 async def express_sample_upload(
     sample: UploadFile = File(...),
@@ -1166,16 +1213,27 @@ async def express_sample_upload(
 
     sha256 = hashlib.sha256(data).hexdigest()
 
-    # === spec §5.5.4 uploader 未配 → 503 ===
+    # === spec §5.5.4 uploader readiness gate（E1-fix, Codex E1 review P1）===
+    # **关键**：与 Studio POST /clone 同款 readiness gate（line ~571-627）。
+    # 必须在 build / upload 之前拒绝 local_fs_stub / 未实现 backend / 缺
+    # OSS 配置，否则 local_fs_stub 会返 file:// URL → pipeline 把它交给
+    # 武汉 worker / DashScope → 服务端不可访问 → clone 失败。这正是
+    # Phase 4.2 之前防过的坑。error code 与 Studio /clone 统一。
+    gate_error = _express_uploader_readiness_error(
+        user_id=user_id, job_id=job_id, speaker_id=speaker_id, sha256=sha256,
+    )
+    if gate_error is not None:
+        return gate_error
+
     try:
         uploader = build_sample_uploader_from_settings(gw_settings)
-    except Exception as exc:  # ValueError 等
+    except Exception as exc:  # 兜底：readiness gate 已过仍 build 失败
         logger.warning(
-            "[express-sample-upload] uploader not configured "
+            "[express-sample-upload] uploader build failed after readiness gate "
             "(user_id=%s job_id=%s speaker_id=%s sha256=%s): %s",
             user_id, job_id, speaker_id, sha256[:16], type(exc).__name__,
         )
-        return _express_upload_error(503, "uploader_not_configured")
+        return _express_upload_error(503, "sample_uploader_not_configured")
 
     # === 上传 + presign（spec §5.5 TTL=120s）。不调 worker。===
     try:
