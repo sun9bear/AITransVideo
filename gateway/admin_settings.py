@@ -252,6 +252,7 @@ class AdminSettings(BaseModel):
     # 变 True，导致 admin UI bug 把字符串传到这里**意外打开 Express 自动 clone
     # → 全部 allowlist 用户付费 API**。``StrictBool`` 只接受 Python True/False。
     express_cosyvoice_auto_clone_enabled: StrictBool = False
+    express_cosyvoice_auto_clone_allowlist_enabled: StrictBool = True
 
     # Beta 灰度白名单：``user_id`` 字符串数组（UUID 字符串形态）。
     # admin 自动 bypass（不需进 allowlist）。空数组（默认） + enabled=True

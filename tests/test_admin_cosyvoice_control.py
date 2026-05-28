@@ -48,6 +48,10 @@ def test_backend_control_model_rejects_string_bools():
     payload["express_cosyvoice_auto_clone_enabled"] = "true"
     with pytest.raises(ValidationError):
         CosyVoiceControlSettings(**payload)
+    payload["express_cosyvoice_auto_clone_enabled"] = False
+    payload["express_cosyvoice_auto_clone_allowlist_enabled"] = "false"
+    with pytest.raises(ValidationError):
+        CosyVoiceControlSettings(**payload)
 
 
 @pytest.mark.asyncio

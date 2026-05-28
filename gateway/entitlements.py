@@ -239,6 +239,10 @@ async def get_express_auto_clone_availability(
     flag_enabled = bool(
         getattr(admin, "express_cosyvoice_auto_clone_enabled", False)
     )
+    allowlist_enabled = (
+        getattr(admin, "express_cosyvoice_auto_clone_allowlist_enabled", True)
+        is not False
+    )
     allowlist = list(
         getattr(admin, "express_cosyvoice_auto_clone_user_allowlist", []) or []
     )
@@ -249,7 +253,7 @@ async def get_express_auto_clone_availability(
             "reason": "admin_flag_off",
         }
 
-    if is_admin or (user_id_str and user_id_str in allowlist):
+    if is_admin or not allowlist_enabled or (user_id_str and user_id_str in allowlist):
         return {
             "available": True,
             "reason": "ok",

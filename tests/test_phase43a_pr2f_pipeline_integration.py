@@ -33,6 +33,7 @@ from services.express.auto_clone import (  # noqa: E402
 )
 from services.express.pipeline_clients import (  # noqa: E402
     _K_ALLOWLIST,
+    _K_ALLOWLIST_ENABLED,
     _K_ENABLED,
     _K_MIN_LINES,
     _K_MIN_RATIO,
@@ -80,6 +81,7 @@ def _invoke(
     enabled=True,
     worker=True,
     consent=_CONSENT_OK,
+    allowlist_enabled=True,
     allowlist=_UNSET,
     user_id="user-1",
     real_run=False,
@@ -91,6 +93,7 @@ def _invoke(
     effective_allowlist = [user_id] if allowlist is _UNSET else allowlist
     settings_map = {
         _K_ENABLED: enabled,
+        _K_ALLOWLIST_ENABLED: allowlist_enabled,
         _K_ALLOWLIST: effective_allowlist,
         _K_TARGET_MODEL: "cosyvoice-v3.5-flash",
         _K_MIN_RATIO: 0.30,
@@ -170,6 +173,15 @@ def test_gate_empty_allowlist_skips(monkeypatch):
     assert outcome is None and run_calls["n"] == 0, "空 allowlist 必须 skip（fail-closed）"
 
 
+def test_gate_allowlist_disabled_empty_allowlist_proceeds(monkeypatch):
+    outcome, _, _, run_calls = _invoke(
+        monkeypatch,
+        allowlist_enabled=False,
+        allowlist=[],
+    )
+    assert run_calls["n"] == 1, "allowlist gate disabled should not block eligible users"
+
+
 def test_gate_malformed_allowlist_skips(monkeypatch):
     """allowlist 非 list（string / dict / None）→ fail-closed skip。"""
     for bad in ("user-1", {"user-1": True}, None, 123):
@@ -177,6 +189,15 @@ def test_gate_malformed_allowlist_skips(monkeypatch):
         assert outcome is None and run_calls["n"] == 0, (
             f"malformed allowlist {bad!r} 必须 fail-closed skip"
         )
+
+
+def test_gate_malformed_allowlist_enabled_still_enforces_allowlist(monkeypatch):
+    outcome, _, _, run_calls = _invoke(
+        monkeypatch,
+        allowlist_enabled="false",
+        allowlist=[],
+    )
+    assert outcome is None and run_calls["n"] == 0
 
 
 def test_gate_missing_identity_skips(monkeypatch):

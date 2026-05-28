@@ -7,6 +7,7 @@ export interface AdminCosyvoiceSettings {
   cosyvoice_clone_general_availability_enabled: boolean
   cosyvoice_clone_max_voices_per_user: number
   express_cosyvoice_auto_clone_enabled: boolean
+  express_cosyvoice_auto_clone_allowlist_enabled: boolean
   express_cosyvoice_auto_clone_user_allowlist: string[]
   express_cosyvoice_auto_clone_main_speaker_min_ratio: number
   express_cosyvoice_auto_clone_main_speaker_min_lines: number

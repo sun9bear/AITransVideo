@@ -45,6 +45,7 @@ class CosyVoiceControlSettings(BaseModel):
     cosyvoice_clone_general_availability_enabled: StrictBool
     cosyvoice_clone_max_voices_per_user: int
     express_cosyvoice_auto_clone_enabled: StrictBool
+    express_cosyvoice_auto_clone_allowlist_enabled: StrictBool
     express_cosyvoice_auto_clone_user_allowlist: list[str]
     express_cosyvoice_auto_clone_main_speaker_min_ratio: float
     express_cosyvoice_auto_clone_main_speaker_min_lines: int

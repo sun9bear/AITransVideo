@@ -47,6 +47,7 @@ def test_admin_settings_has_all_8_phase43a_fields():
     field_names = set(AdminSettings.model_fields.keys())
     required = {
         "express_cosyvoice_auto_clone_enabled",
+        "express_cosyvoice_auto_clone_allowlist_enabled",
         "express_cosyvoice_auto_clone_user_allowlist",
         "express_cosyvoice_auto_clone_main_speaker_min_ratio",
         "express_cosyvoice_auto_clone_main_speaker_min_lines",
@@ -64,6 +65,7 @@ def test_admin_settings_default_values_match_spec():
     from admin_settings import AdminSettings
     defaults = AdminSettings()
     assert defaults.express_cosyvoice_auto_clone_enabled is False
+    assert defaults.express_cosyvoice_auto_clone_allowlist_enabled is True
     assert defaults.express_cosyvoice_auto_clone_user_allowlist == []
     assert defaults.express_cosyvoice_auto_clone_main_speaker_min_ratio == 0.30
     assert defaults.express_cosyvoice_auto_clone_main_speaker_min_lines == 5
@@ -84,6 +86,19 @@ def test_enabled_field_uses_strict_bool():
             continue
         raise AssertionError(
             f"express_cosyvoice_auto_clone_enabled 接受了 {bad!r}（应为 StrictBool）"
+        )
+
+
+def test_allowlist_enabled_field_uses_strict_bool():
+    from admin_settings import AdminSettings
+    import pydantic
+    for bad in ["1", "false", "on", "yes", 0]:
+        try:
+            AdminSettings(express_cosyvoice_auto_clone_allowlist_enabled=bad)
+        except (pydantic.ValidationError, ValueError):
+            continue
+        raise AssertionError(
+            f"express_cosyvoice_auto_clone_allowlist_enabled 接受了 {bad!r}"
         )
 
 
@@ -184,6 +199,7 @@ def _read_page() -> str:
 
 EXPRESS_FIELDS_TS_TYPES: dict[str, str] = {
     "express_cosyvoice_auto_clone_enabled": "boolean",
+    "express_cosyvoice_auto_clone_allowlist_enabled": "boolean",
     "express_cosyvoice_auto_clone_user_allowlist": "string[]",
     "express_cosyvoice_auto_clone_main_speaker_min_ratio": "number",
     "express_cosyvoice_auto_clone_main_speaker_min_lines": "number",
@@ -214,6 +230,7 @@ def test_ts_default_settings_contains_all_8_express_fields():
     src = _read_page()
     expected_defaults = {
         "express_cosyvoice_auto_clone_enabled": "false",
+        "express_cosyvoice_auto_clone_allowlist_enabled": "true",
         "express_cosyvoice_auto_clone_user_allowlist": "[]",
         "express_cosyvoice_auto_clone_main_speaker_min_ratio": "0.30",
         "express_cosyvoice_auto_clone_main_speaker_min_lines": "5",
@@ -258,6 +275,7 @@ def test_ts_reset_button_passes_through_hidden_fields():
     """
     src = _read_page()
     hidden_fields = [
+        "express_cosyvoice_auto_clone_allowlist_enabled",
         "express_cosyvoice_auto_clone_user_allowlist",
         "express_cosyvoice_auto_clone_main_speaker_min_ratio",
         "express_cosyvoice_auto_clone_main_speaker_min_lines",
@@ -464,12 +482,14 @@ def _make_user(
 def _make_admin_settings_stub(
     *,
     enabled: bool = False,
+    allowlist_enabled: bool = True,
     allowlist: list[str] | None = None,
 ) -> SimpleNamespace:
     """Return an object whose ``getattr(...)`` calls match what the handler
     expects on the real AdminSettings Pydantic instance."""
     return SimpleNamespace(
         express_cosyvoice_auto_clone_enabled=enabled,
+        express_cosyvoice_auto_clone_allowlist_enabled=allowlist_enabled,
         express_cosyvoice_auto_clone_user_allowlist=list(allowlist or []),
     )
 
@@ -606,6 +626,17 @@ def test_availability_returns_not_in_allowlist_with_empty_allowlist(monkeypatch)
     stub = _make_admin_settings_stub(enabled=True, allowlist=[])
     result = _call_availability(user, monkeypatch, settings_stub=stub)
     assert result == {"available": False, "reason": "not_in_allowlist"}
+
+
+def test_availability_returns_ok_when_allowlist_gate_disabled(monkeypatch):
+    user = _make_user(role="user", user_id="00000000-0000-0000-0000-000000000abc")
+    stub = _make_admin_settings_stub(
+        enabled=True,
+        allowlist_enabled=False,
+        allowlist=[],
+    )
+    result = _call_availability(user, monkeypatch, settings_stub=stub)
+    assert result == {"available": True, "reason": "ok"}
 
 
 # --- Response shape lockdown：永远 2 keys, 永不 leak allowlist ---

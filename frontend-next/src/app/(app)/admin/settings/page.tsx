@@ -100,6 +100,7 @@ interface AdminSettings {
   // 渲染：只暴露主开关 toggle；其它 8 个进 state 但不渲染入口（防止
   // canary 期间误操作；将来 Phase 4.3 全量时再加 UI）。
   express_cosyvoice_auto_clone_enabled: boolean
+  express_cosyvoice_auto_clone_allowlist_enabled: boolean
   express_cosyvoice_auto_clone_user_allowlist: string[]
   express_cosyvoice_auto_clone_main_speaker_min_ratio: number
   express_cosyvoice_auto_clone_main_speaker_min_lines: number
@@ -155,6 +156,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   // --- Phase 4.3a Express CosyVoice 自动 clone canary 默认值（2026-05-28）---
   // 必须与 ``gateway/admin_settings.py`` Pydantic 默认值严格一致：
   //   enabled                       = False
+  //   allowlist_enabled             = True
   //   user_allowlist                = []
   //   main_speaker_min_ratio        = 0.30
   //   main_speaker_min_lines        = 5
@@ -164,6 +166,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   //   per_user_active_temp_cap      = 3
   // 否则用户翻 Phase 4.2 GA toggle 时 full-body save 会把后端这 9 个字段重置。
   express_cosyvoice_auto_clone_enabled: false,
+  express_cosyvoice_auto_clone_allowlist_enabled: true,
   express_cosyvoice_auto_clone_user_allowlist: [],
   express_cosyvoice_auto_clone_main_speaker_min_ratio: 0.30,
   express_cosyvoice_auto_clone_main_speaker_min_lines: 5,
@@ -991,6 +994,8 @@ export default function AdminSettingsPage() {
             // 擦掉。
             express_cosyvoice_auto_clone_enabled:
               DEFAULT_SETTINGS.express_cosyvoice_auto_clone_enabled,
+            express_cosyvoice_auto_clone_allowlist_enabled:
+              s.express_cosyvoice_auto_clone_allowlist_enabled,
             express_cosyvoice_auto_clone_user_allowlist:
               s.express_cosyvoice_auto_clone_user_allowlist,
             express_cosyvoice_auto_clone_main_speaker_min_ratio:

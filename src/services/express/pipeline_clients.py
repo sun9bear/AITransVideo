@@ -48,6 +48,7 @@ _REGISTER_TIMEOUT_S = 15.0
 
 # admin_settings keys（主 spec §7）
 _K_ENABLED = "express_cosyvoice_auto_clone_enabled"
+_K_ALLOWLIST_ENABLED = "express_cosyvoice_auto_clone_allowlist_enabled"
 _K_ALLOWLIST = "express_cosyvoice_auto_clone_user_allowlist"
 _K_MIN_RATIO = "express_cosyvoice_auto_clone_main_speaker_min_ratio"
 _K_MIN_LINES = "express_cosyvoice_auto_clone_main_speaker_min_lines"
@@ -358,11 +359,13 @@ def maybe_run_express_auto_clone(
         # pipeline 只有 user_id、没有 user role，所以**不做 admin bypass**
         # （availability endpoint 才有 admin bypass）；admin 灰度冒烟须把自己的
         # user_id 显式加进 allowlist —— 与部署 SOP 一致。
-        allowlist = _admin(_K_ALLOWLIST, [])
-        if not isinstance(allowlist, list) or not allowlist:
-            return None
-        if str(user_id) not in {str(x) for x in allowlist}:
-            return None
+        allowlist_enabled = _admin(_K_ALLOWLIST_ENABLED, True)
+        if allowlist_enabled is not False:
+            allowlist = _admin(_K_ALLOWLIST, [])
+            if not isinstance(allowlist, list) or not allowlist:
+                return None
+            if str(user_id) not in {str(x) for x in allowlist}:
+                return None
 
         target_model = str(_admin(_K_TARGET_MODEL, TARGET_MODEL_DEFAULT) or TARGET_MODEL_DEFAULT)
         try:

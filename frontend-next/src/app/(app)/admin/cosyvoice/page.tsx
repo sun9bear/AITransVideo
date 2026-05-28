@@ -169,6 +169,12 @@ export default function AdminCosyvoicePage() {
             danger
             onChange={(checked) => setSettings((s) => s && ({ ...s, express_cosyvoice_auto_clone_enabled: checked }))}
           />
+          <ToggleField
+            label="启用 Express allowlist 限制"
+            description="关闭后，所有已登录用户在主开关开启且提交页勾选授权时都可触发自动克隆；daily/active cap 仍然生效。"
+            checked={settings.express_cosyvoice_auto_clone_allowlist_enabled}
+            onChange={(checked) => setSettings((s) => s && ({ ...s, express_cosyvoice_auto_clone_allowlist_enabled: checked }))}
+          />
           <AllowlistField
             label="Express 自动克隆 allowlist"
             value={settings.express_cosyvoice_auto_clone_user_allowlist}
