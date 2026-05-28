@@ -74,10 +74,13 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pip install -r gateway/requirements.txt
-      - name: Run reservation PG atomicity tests
+      - name: Run PG concurrency integration tests
         env:
           AVT_TEST_PG_DSN: postgresql+asyncpg://avt:avt_test@localhost:5432/aivideotrans_test
-        run: pytest -q tests/test_phase43a_pr2_reservation_pg_atomic.py
+        run: >
+          pytest -q
+          tests/test_phase43a_pr2_reservation_pg_atomic.py
+          tests/test_phase43b_voice_cleanup_pg_concurrent.py
 
   frontend:
     runs-on: ubuntu-latest
