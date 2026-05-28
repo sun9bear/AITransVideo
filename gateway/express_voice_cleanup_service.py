@@ -41,8 +41,14 @@ MAX_CLEANUP_ATTEMPTS = 5
 # claim 租约（spec §2.7）：必须 > delete_voice 最坏重试窗口（见守卫常量）
 CLEANUP_CLAIM_LEASE_SECONDS = 600
 # delete_voice 最坏重试窗口安全下界（守卫断言 LEASE >= 此值；spec §2.7）。
-# delete_voice = max_network_retries × (per-attempt timeout + backoff)，保守取 120s。
-DELETE_VOICE_WORST_CASE_FLOOR_SECONDS = 120
+# 与真实 client 常量绑定（src/services/mainland_worker/client.py，2026-05-28）：
+#   MAX_NETWORK_RETRIES = 3
+#   DEFAULT_TIMEOUT = Timeout(connect=5, read=60, write=10, pool=5)
+#   RETRY_BACKOFF_SECONDS = (1, 5, 15)  → 3 次尝试间 2 次退避 = 1+5 = 6s
+# 最坏 ≈ 3 × (connect 5 + read 60 + write 10) + 6 = 231s。取 240s 留 margin。
+# **守卫**（test_lease_exceeds_delete_worst_case_floor）从真实 client 常量重算，
+# client retry/timeout 变大而 LEASE/floor 没跟上 → 测试 red（Codex 4.3b-B-fix P2）。
+DELETE_VOICE_WORST_CASE_FLOOR_SECONDS = 240
 # 失败 backoff 基数（指数退避，封顶 1h）
 _BACKOFF_BASE_SECONDS = 300
 _BACKOFF_CAP_SECONDS = 3600
@@ -202,6 +208,7 @@ async def release_with_backoff(
             select(UserVoice).where(
                 UserVoice.id == voice_pk,
                 UserVoice.cleanup_run_id == run_id,  # 守卫：lease 仍属本 runner
+                UserVoice.expired_at.is_(None),  # 守卫：行已软删（manual/竞态）→ 不再 bump attempts/error
             )
         )
     ).scalar_one_or_none()
