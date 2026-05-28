@@ -172,6 +172,15 @@ export interface CreateTranslationJobInput {
    */
   localFileName?: string
   service_mode?: 'express' | 'studio' | 'smart'
+  /**
+   * Phase 4.3a PR3 — Express auto-clone consent (user opt-in checkbox).
+   * Only meaningful for ``service_mode === 'express'``. Defaults to false
+   * (no clone). When true, ``submitTranslationJob`` sends
+   * ``express_consent.auto_voice_clone = true`` + a client timestamp. The
+   * submit layer forces this to false for non-express modes so a stale
+   * checkbox can never trigger a paid clone (spec §2.6).
+   */
+  expressAutoVoiceClone?: boolean
 }
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [
