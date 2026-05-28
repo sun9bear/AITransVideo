@@ -177,12 +177,26 @@ async def get_express_auto_clone_availability(
     返回 schema：
         {
             "available": bool,        # 是否渲染 checkbox UI
-            "reason": str,            # "ok" | "admin_flag_off" | "not_in_allowlist" | "unauthenticated"
+            "reason": str,            # 见下 5 个 reason 之一
         }
+
+    全部可能的 reason 值（5 个）：
+        - "ok"                          available=True，可渲染入口
+        - "unauthenticated"             available=False，user 为 None
+        - "admin_settings_unavailable"  available=False，admin_settings load 失败
+                                        （fail-closed，避免 admin 配置坏时
+                                         意外开放入口）
+        - "admin_flag_off"              available=False，admin 主开关 False
+        - "not_in_allowlist"            available=False，已登录普通用户
+                                        但 user_id ∉ allowlist
 
     授权规则（与 spec §2 Layer 1 + Layer 3 对齐）：
         - 未登录 → available=False, reason="unauthenticated"
-        - admin 用户 → available=True（admin 自动 bypass allowlist）
+        - admin_settings load 失败 → available=False,
+          reason="admin_settings_unavailable"（fail-closed）
+        - admin 用户 + flag=True → available=True
+        - admin 用户 + flag=False → available=False, reason="admin_flag_off"
+          （admin 关闭自己的功能也认；让 admin 能从 UI 验证 flag 是否生效）
         - admin_flag=False → available=False, reason="admin_flag_off"
         - admin_flag=True 但 user_id ∉ allowlist → available=False,
           reason="not_in_allowlist"
