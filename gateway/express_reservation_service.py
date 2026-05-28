@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import ExpressCloneReservation, User
@@ -196,7 +197,33 @@ async def reserve(
         expires_at=now + timedelta(minutes=int(ttl_minutes)),
     )
     db.add(reservation)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # partial unique 第二道防线（spec §4.1 实现注意）：并发同
+        # (user,job,speaker) 竞态下，若 users-row-lock 未完全串行化两个
+        # INSERT（理论上锁能串行，但唯一约束是 fail-safe），uq_express_
+        # reservation_active 会让第二个 INSERT 抛 IntegrityError。回滚 +
+        # 重查返回已有 active reservation，仍幂等（不重复占 cap）。
+        await db.rollback()
+        existing_after_conflict = (
+            await db.execute(
+                select(ExpressCloneReservation).where(
+                    ExpressCloneReservation.user_id == user_id,
+                    ExpressCloneReservation.job_id == job_id,
+                    ExpressCloneReservation.speaker_id == speaker_id,
+                    ExpressCloneReservation.status == RESERVED,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_after_conflict is not None:
+            return ReserveOutcome(
+                status="reserved",
+                reservation_id=str(existing_after_conflict.id),
+                expires_at=existing_after_conflict.expires_at,
+                idempotent_hit=True,
+            )
+        raise  # 非 active-unique 冲突的意外 IntegrityError，向上抛
     return ReserveOutcome(
         status="reserved",
         reservation_id=str(reservation.id),
