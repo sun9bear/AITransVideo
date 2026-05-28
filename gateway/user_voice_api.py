@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -31,6 +32,10 @@ from user_voice_service import (
     match_user_voices,
     update_user_voice_label,
 )
+# Phase 4.3a PR2-C: reservation endpoints 薄封装 express_reservation_service。
+# service 独立模块（不 import user_voice_api，无循环）；endpoint 放本文件
+# internal_router 与 PR1 budget endpoint 同地，复用 _internal_access_error。
+import express_reservation_service as _reservation_svc
 
 logger = logging.getLogger(__name__)
 
@@ -1382,6 +1387,166 @@ async def internal_express_auto_clone_budget(
         "active_temp_remaining": max(0, active_temp_cap - active_temp_count),
         "can_clone": deny_reason is None,
         "deny_reason": deny_reason,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.3a PR2-C: reservation endpoints（reserve / consume / release）
+# ---------------------------------------------------------------------------
+# 薄封装 express_reservation_service（PR2-B）。endpoint 职责：
+#   - X-Internal-Key 鉴权（复用 _internal_access_error）
+#   - 输入校验（user_id UUID / job_id / speaker_id regex / target_model 白名单）
+#   - 从 admin_settings 读 daily_cap / active_temp_cap / reservation_ttl_minutes
+#     （caller 不传 cap；admin_settings 读不到 → fail-closed 503）
+#   - 映射 service outcome 到 HTTP（reserved 200 / denied 409 / user_not_found 404
+#     / conflict 409）—— **不**把 conflict 吞成 200（保留状态机语义）
+# 并发原子性由 service 的 users-row-lock 保证（PR2-C-pg 真 PG 验）。
+
+# job_id / speaker_id regex（与 PR1 E1 express-sample-upload 一致）
+_RESERVATION_JOB_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+_RESERVATION_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z]{1,3}$")
+# target_model 白名单（与 admin_settings._VALID_CLONE_TARGET_MODELS 一致）
+_RESERVATION_TARGET_MODELS = frozenset({"cosyvoice-v3.5-flash", "cosyvoice-v3.5-plus"})
+
+
+def _load_express_reservation_caps() -> tuple[int, int, int] | None:
+    """读 admin_settings 的 daily_cap / active_temp_cap / reservation_ttl_minutes。
+
+    返回 ``(daily_cap, active_temp_cap, ttl_minutes)`` 或 ``None``（fail-closed:
+    admin_settings 读不到 → caller 返 503，不进 reserve）。
+    """
+    try:
+        from admin_settings import load_settings
+        admin = load_settings()
+        return (
+            int(getattr(admin, "express_cosyvoice_auto_clone_per_user_daily_cap", 5)),
+            int(getattr(admin, "express_cosyvoice_auto_clone_per_user_active_temp_cap", 3)),
+            int(getattr(admin, "express_cosyvoice_auto_clone_reservation_ttl_minutes", 30)),
+        )
+    except Exception as exc:
+        logger.warning("express reservation: admin_settings load failed: %s", exc)
+        return None
+
+
+@internal_router.post("/express-auto-clone-reservations/reserve")
+async def internal_express_reservation_reserve(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Phase 4.3a §4.1：原子预占 Express auto-clone 名额。
+
+    body：``{user_id, job_id, speaker_id, target_model}``。cap / ttl 从
+    admin_settings 读（caller 不传）。
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    user_id = body.get("user_id")
+    job_id = str(body.get("job_id", "")).strip()
+    speaker_id = str(body.get("speaker_id", "")).strip()
+    target_model = str(body.get("target_model", "")).strip()
+
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (ValueError, AttributeError, TypeError):
+        return _json(400, {"ok": False, "error": "invalid_user_id"})
+    if not _RESERVATION_JOB_ID_PATTERN.match(job_id):
+        return _json(400, {"ok": False, "error": "invalid_job_id"})
+    if not _RESERVATION_SPEAKER_ID_PATTERN.match(speaker_id):
+        return _json(400, {"ok": False, "error": "invalid_speaker_id"})
+    if target_model not in _RESERVATION_TARGET_MODELS:
+        return _json(400, {"ok": False, "error": "invalid_target_model"})
+
+    caps = _load_express_reservation_caps()
+    if caps is None:
+        # fail-closed：admin_settings 读不到不允许 reserve
+        return _json(503, {"ok": False, "error": "admin_settings_unavailable"})
+    daily_cap, active_temp_cap, ttl_minutes = caps
+
+    outcome = await _reservation_svc.reserve(
+        db,
+        user_id=user_uuid,
+        job_id=job_id,
+        speaker_id=speaker_id,
+        target_model=target_model,
+        ttl_minutes=ttl_minutes,
+        daily_cap=daily_cap,
+        active_temp_cap=active_temp_cap,
+    )
+    if outcome.status == "user_not_found":
+        return _json(404, {"ok": False, "error": "user_not_found"})
+    if outcome.status == "denied":
+        return _json(409, {"ok": False, "deny_reason": outcome.deny_reason})
+    # reserved（新建或幂等命中）
+    return _json(200, {
+        "ok": True,
+        "reservation_id": outcome.reservation_id,
+        "status": "reserved",
+        "expires_at": outcome.expires_at.isoformat() if outcome.expires_at else None,
+        "idempotent_hit": outcome.idempotent_hit,
+    })
+
+
+@internal_router.post("/express-auto-clone-reservations/{reservation_id}/consume")
+async def internal_express_reservation_consume(
+    reservation_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Phase 4.3a §4.2：reserved → consumed（register-smart 成功后）。
+
+    保留 service 状态机语义：conflict **不**吞成 200。
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    voice_id = str(body.get("voice_id", "")).strip()
+    if not voice_id:
+        return _json(400, {"ok": False, "error": "voice_id_required"})
+
+    outcome = await _reservation_svc.consume(
+        db, reservation_id=reservation_id, voice_id=voice_id
+    )
+    if outcome.ok:
+        return _json(200, {"ok": True, "status": outcome.status})
+    # conflict / missing → 409（保留状态机语义，不吞成 200）
+    return _json(409, {
+        "ok": False,
+        "status": outcome.status,
+        "conflict_reason": outcome.conflict_reason,
+    })
+
+
+@internal_router.post("/express-auto-clone-reservations/{reservation_id}/release")
+async def internal_express_reservation_release(
+    reservation_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Phase 4.3a §4.3：reserved → released（clone/register 失败 / 主动放弃）。
+
+    保留 service 状态机语义：already_consumed conflict 不吞成 200。
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    reason = str(body.get("reason", "")).strip() or "unspecified"
+
+    outcome = await _reservation_svc.release(
+        db, reservation_id=reservation_id, reason=reason
+    )
+    if outcome.ok:
+        return _json(200, {"ok": True, "status": outcome.status})
+    return _json(409, {
+        "ok": False,
+        "status": outcome.status,
+        "conflict_reason": outcome.conflict_reason,
     })
 
 
