@@ -413,3 +413,250 @@ def test_phase42_d1_admin_settings_ui_guards_still_pass():
     assert d1_guard.exists(), (
         "Phase 4.2 D.1 守卫文件缺失（Phase 4.3a 不应触碰它）"
     )
+
+
+# ---------------------------------------------------------------------------
+# Layer 5: availability endpoint 直接行为测试（Codex D-fix P2）
+# ---------------------------------------------------------------------------
+#
+# AST/static 守卫已经锁住 endpoint shape，但 Codex 二轮 review 要求补
+# 直接行为测试：覆盖 5 个 reason 全分支 + admin bypass 行为。
+#
+# 测试策略（与 tests/test_gateway_entitlements.py 同模式）：
+#   - 直接 import handler async function，不起 FastAPI server
+#   - monkeypatch `admin_settings.load_settings` 注入测试 admin_settings 对象
+#   - 用 SimpleNamespace 构造 fake user
+#   - asyncio.run / loop.run_until_complete 跑 async handler
+# ---------------------------------------------------------------------------
+
+
+import asyncio  # noqa: E402  — late import to keep §1-§4 guards untouched
+import types  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+# 复用 test_gateway_entitlements.py 同模式的 fake database 桩，让 entitlements
+# import 链能在没有 PG 驱动的本地环境下解析（gateway 业务模块 import 时会
+# 引到 database / asyncpg，必须先 stub）。
+_fake_database = types.ModuleType("database")
+_fake_database.get_db = MagicMock()
+_fake_database.engine = MagicMock()
+_fake_database.async_session = MagicMock()
+sys.modules.setdefault("database", _fake_database)
+
+
+def _make_user(
+    *,
+    role: str = "user",
+    user_id: str = "00000000-0000-0000-0000-000000000abc",
+) -> SimpleNamespace:
+    """Build a mock user object that satisfies attribute access patterns
+    in get_express_auto_clone_availability handler."""
+    return SimpleNamespace(
+        id=user_id,
+        role=role,
+        plan_code="free",
+        email=f"{role}@example.com",
+        display_name=role,
+    )
+
+
+def _make_admin_settings_stub(
+    *,
+    enabled: bool = False,
+    allowlist: list[str] | None = None,
+) -> SimpleNamespace:
+    """Return an object whose ``getattr(...)`` calls match what the handler
+    expects on the real AdminSettings Pydantic instance."""
+    return SimpleNamespace(
+        express_cosyvoice_auto_clone_enabled=enabled,
+        express_cosyvoice_auto_clone_user_allowlist=list(allowlist or []),
+    )
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _call_availability(user, monkeypatch, *, settings_stub=None, load_raises=False):
+    """Invoke get_express_auto_clone_availability with monkey-patched
+    load_settings. Returns the response dict.
+
+    load_raises=True simulates admin_settings.json load failure (fail-closed
+    path).
+    """
+    import admin_settings as _admin_settings_mod
+    from entitlements import get_express_auto_clone_availability
+
+    if load_raises:
+        def _raise() -> None:
+            raise RuntimeError("simulated admin_settings load failure")
+
+        monkeypatch.setattr(
+            _admin_settings_mod, "load_settings", _raise, raising=True
+        )
+    else:
+        monkeypatch.setattr(
+            _admin_settings_mod,
+            "load_settings",
+            lambda: settings_stub,
+            raising=True,
+        )
+    return _run(get_express_auto_clone_availability(user=user))
+
+
+# --- 5 个 reason 全分支覆盖（Codex D-fix #1） ---
+
+
+def test_availability_returns_unauthenticated_when_user_is_none(monkeypatch):
+    """user=None → available=False, reason="unauthenticated"。
+
+    在未登录场景下 endpoint **不**应触及 admin_settings（avoid useless
+    disk I/O + 避免暴露 admin 配置信号给未登录侧通道）。
+    """
+    # 设一个 sentinel：如果 load_settings 被调，测试直接 fail
+    import admin_settings as _admin_settings_mod
+    sentinel_called = {"flag": False}
+
+    def _sentinel():
+        sentinel_called["flag"] = True
+        return _make_admin_settings_stub()
+
+    monkeypatch.setattr(
+        _admin_settings_mod, "load_settings", _sentinel, raising=True
+    )
+
+    from entitlements import get_express_auto_clone_availability
+    result = _run(get_express_auto_clone_availability(user=None))
+    assert result == {"available": False, "reason": "unauthenticated"}
+    assert sentinel_called["flag"] is False, (
+        "unauthenticated 分支不应调用 load_settings —— 避免不必要的 I/O"
+    )
+
+
+def test_availability_returns_admin_settings_unavailable_on_load_failure(monkeypatch):
+    """admin_settings load 抛异常 → available=False,
+    reason="admin_settings_unavailable"（fail-closed）。
+    """
+    user = _make_user(role="admin")
+    result = _call_availability(user, monkeypatch, load_raises=True)
+    assert result == {
+        "available": False,
+        "reason": "admin_settings_unavailable",
+    }
+
+
+def test_availability_returns_admin_flag_off_for_admin_when_disabled(monkeypatch):
+    """admin 自己 + flag=False → available=False, reason="admin_flag_off"。
+
+    spec §8.4：admin 关掉主开关时连自己也不该看到入口（让 admin 能从
+    UI 验证 flag 是否真的关掉）。
+    """
+    user = _make_user(role="admin")
+    stub = _make_admin_settings_stub(enabled=False)
+    result = _call_availability(user, monkeypatch, settings_stub=stub)
+    assert result == {"available": False, "reason": "admin_flag_off"}
+
+
+def test_availability_returns_ok_for_admin_when_enabled(monkeypatch):
+    """admin 自己 + flag=True → available=True, reason="ok"（不需要进 allowlist）。"""
+    user = _make_user(role="admin")
+    stub = _make_admin_settings_stub(enabled=True, allowlist=[])
+    result = _call_availability(user, monkeypatch, settings_stub=stub)
+    assert result == {"available": True, "reason": "ok"}
+
+
+def test_availability_returns_ok_for_normal_user_in_allowlist(monkeypatch):
+    """普通用户 + flag=True + user_id ∈ allowlist → available=True, reason="ok"。"""
+    user = _make_user(
+        role="user", user_id="00000000-0000-0000-0000-000000000beta"
+    )
+    stub = _make_admin_settings_stub(
+        enabled=True,
+        allowlist=["00000000-0000-0000-0000-000000000beta"],
+    )
+    result = _call_availability(user, monkeypatch, settings_stub=stub)
+    assert result == {"available": True, "reason": "ok"}
+
+
+def test_availability_returns_not_in_allowlist_for_normal_user_not_in_allowlist(monkeypatch):
+    """普通用户 + flag=True + user_id ∉ allowlist → available=False,
+    reason="not_in_allowlist"。
+    """
+    user = _make_user(
+        role="user", user_id="00000000-0000-0000-0000-000000000999"
+    )
+    stub = _make_admin_settings_stub(
+        enabled=True,
+        allowlist=["00000000-0000-0000-0000-000000000beta"],  # 不同 UUID
+    )
+    result = _call_availability(user, monkeypatch, settings_stub=stub)
+    assert result == {"available": False, "reason": "not_in_allowlist"}
+
+
+def test_availability_returns_not_in_allowlist_with_empty_allowlist(monkeypatch):
+    """边界 case：allowlist 空数组 + 普通用户 → 必须返 not_in_allowlist
+    （不能因 ``"" in []`` 之类的 Python 真值表面行为意外放行）。
+    """
+    user = _make_user(role="user", user_id="00000000-0000-0000-0000-000000000abc")
+    stub = _make_admin_settings_stub(enabled=True, allowlist=[])
+    result = _call_availability(user, monkeypatch, settings_stub=stub)
+    assert result == {"available": False, "reason": "not_in_allowlist"}
+
+
+# --- Response shape lockdown：永远 2 keys, 永不 leak allowlist ---
+
+
+def test_availability_response_has_exactly_two_keys(monkeypatch):
+    """任意场景下响应都必须**精确** 2 keys：``available`` + ``reason``。
+
+    防止未来意外 leak ``user_id`` / ``allowlist_size`` / 任何 admin 配置信号。
+    """
+    cases = [
+        # (user, settings_stub, load_raises)
+        (None, None, False),
+        (_make_user(role="admin"), None, True),
+        (_make_user(role="admin"), _make_admin_settings_stub(enabled=False), False),
+        (_make_user(role="admin"), _make_admin_settings_stub(enabled=True), False),
+        (
+            _make_user(role="user", user_id="aaaa"),
+            _make_admin_settings_stub(enabled=True, allowlist=["aaaa"]),
+            False,
+        ),
+        (
+            _make_user(role="user", user_id="not-in"),
+            _make_admin_settings_stub(enabled=True, allowlist=["aaaa"]),
+            False,
+        ),
+    ]
+    for user, stub, raises in cases:
+        if user is None:
+            from entitlements import get_express_auto_clone_availability
+            import admin_settings as _m
+            monkeypatch.setattr(
+                _m, "load_settings", lambda: stub, raising=True
+            )
+            result = _run(get_express_auto_clone_availability(user=None))
+        else:
+            result = _call_availability(
+                user, monkeypatch, settings_stub=stub, load_raises=raises
+            )
+        assert set(result.keys()) == {"available", "reason"}, (
+            f"响应 keys 不应有除 available/reason 外的字段: {result.keys()}"
+        )
+        # 防隐私 leak：response value 里也不应出现 allowlist 内容
+        for k, v in result.items():
+            if isinstance(v, str):
+                # allowlist UUID 是 "aaaa" / "not-in" 等；这里要求 reason 字段
+                # 是 5 个允许 enum 之一，不包含任何 user-id substring
+                assert v in {
+                    "ok",
+                    "unauthenticated",
+                    "admin_settings_unavailable",
+                    "admin_flag_off",
+                    "not_in_allowlist",
+                }, f"reason 字段返了非 enum 值: {v!r}"
