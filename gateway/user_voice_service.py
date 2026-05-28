@@ -773,9 +773,23 @@ async def add_user_voice(
     billing_sku: str | None = None,
     clone_provider_request_id: str | None = None,
     clone_worker_request_id: str | None = None,
+    # ---- Phase 4.3a (migration 031): 临时音色生命周期（spec §6.3.1） ----
+    is_temporary: bool = False,
+    temporary_expires_at: datetime | None = None,
 ) -> UserVoice:
     if source_speaker_name_key is None:
         source_speaker_name_key = normalize_speaker_name_key(source_speaker_name)
+
+    # Phase 4.3a §6.3.1 (Codex 三轮 P1-2): non-temporary writes MUST clear
+    # temporary_expires_at. This guards against:
+    #   - caller bug passing is_temporary=False + a stale ts
+    #   - existing-revive path where the row was previously temporary
+    #     (is_temporary=True + ts) and is now being upgraded to long-term
+    #     (user clicked "保存到我的音色库" in a future Phase 4.3b flow)
+    # The rule is one line, applied to both insert + revive branches below.
+    effective_temporary_expires_at = (
+        temporary_expires_at if is_temporary else None
+    )
 
     # Check existing (including expired — revive if re-cloned)
     result = await db.execute(
@@ -822,6 +836,11 @@ async def add_user_voice(
         existing.billing_sku = billing_sku
         existing.clone_provider_request_id = clone_provider_request_id
         existing.clone_worker_request_id = clone_worker_request_id
+        # ---- Phase 4.3a §6.3.1：临时音色字段每次显式覆盖（不走 _set_if_empty）----
+        # 这两个字段表达"本次 clone 决定该 voice 是否临时"，不是 once-and-for-all。
+        # revive 时必须能 long-term↔temporary 双向切换；非 temp 强制清 ts 防 stale。
+        existing.is_temporary = is_temporary
+        existing.temporary_expires_at = effective_temporary_expires_at
         await db.commit()
         return existing
 
@@ -859,6 +878,9 @@ async def add_user_voice(
         billing_sku=billing_sku,
         clone_provider_request_id=clone_provider_request_id,
         clone_worker_request_id=clone_worker_request_id,
+        # Phase 4.3a §6.3.1：临时音色生命周期（非 temp 强制清 ts 防 stale）
+        is_temporary=is_temporary,
+        temporary_expires_at=effective_temporary_expires_at,
     )
     db.add(voice)
     await db.commit()
