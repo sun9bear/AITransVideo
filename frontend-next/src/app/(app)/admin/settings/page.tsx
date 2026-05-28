@@ -106,6 +106,8 @@ interface AdminSettings {
   express_cosyvoice_auto_clone_target_model: string
   express_cosyvoice_auto_clone_per_user_daily_cap: number
   express_cosyvoice_auto_clone_per_user_active_temp_cap: number
+  // Phase 4.3a PR2 §3: reservation TTL（分钟），validator 5-120
+  express_cosyvoice_auto_clone_reservation_ttl_minutes: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -168,6 +170,8 @@ const DEFAULT_SETTINGS: AdminSettings = {
   express_cosyvoice_auto_clone_target_model: 'cosyvoice-v3.5-flash',
   express_cosyvoice_auto_clone_per_user_daily_cap: 5,
   express_cosyvoice_auto_clone_per_user_active_temp_cap: 3,
+  // Phase 4.3a PR2 §3：与 gateway Pydantic 默认值一致（30 分钟）
+  express_cosyvoice_auto_clone_reservation_ttl_minutes: 30,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [
@@ -1000,6 +1004,8 @@ export default function AdminSettingsPage() {
               s.express_cosyvoice_auto_clone_per_user_daily_cap,
             express_cosyvoice_auto_clone_per_user_active_temp_cap:
               s.express_cosyvoice_auto_clone_per_user_active_temp_cap,
+            express_cosyvoice_auto_clone_reservation_ttl_minutes:
+              s.express_cosyvoice_auto_clone_reservation_ttl_minutes,
           }))}
           type="button"
         >

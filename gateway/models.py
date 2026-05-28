@@ -808,6 +808,90 @@ class UserVoice(Base):
     )
 
 
+class ExpressCloneReservation(Base):
+    """Phase 4.3a PR2 — Express auto-clone atomic reservation（migration 032）.
+
+    Express 快捷版自动克隆的**原子成本闸**载体。付费 worker clone 之前，
+    pipeline 先在此表原子预占一个名额；register 成功 consume，失败 release,
+    TTL 到期 expired。独立于 ``user_voices`` 音色事实表（spec §2.1），避免
+    污染 list/match/routing/count 语义。
+
+    状态机：``reserved → consumed | released | expired``（spec §3）。
+
+    并发原子性靠 reserve service 在 transaction 内锁 ``users`` row
+    （``SELECT ... FOR UPDATE``）串行化同一 user 的 reserve；
+    ``uq_express_reservation_active`` partial unique 是幂等第二道防线。
+    """
+
+    __tablename__ = "express_clone_reservations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    speaker_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 状态机；server_default 'reserved' 与 migration 一致
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reserved'")
+    )
+    target_model: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    # TTL：reserve 时应用层填 now + RESERVATION_TTL。NOT NULL 强制每个
+    # reservation 都有过期时间（spec §4.1：永不过期是 bug）。
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    # consume 时填（关联 user_voices.voice_id）
+    consumed_voice_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    # release / expire 原因（审计）
+    released_reason: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+
+    __table_args__ = (
+        # 幂等第二道防线（spec §2.3 / §4.1）：同 (user,job,speaker) 最多
+        # 一个 active(reserved)。partial unique —— consumed/released/expired
+        # 不占唯一槽。
+        Index(
+            "uq_express_reservation_active",
+            "user_id",
+            "job_id",
+            "speaker_id",
+            unique=True,
+            postgresql_where=text("status = 'reserved'"),
+        ),
+        # budget count 查询（spec §5）
+        Index(
+            "idx_express_reservation_user_status",
+            "user_id",
+            "status",
+            "created_at",
+        ),
+        # TTL sweeper + reserve 内 inline expire 选行（spec §4.1 step 2 + §8）
+        Index(
+            "idx_express_reservation_ttl_pending",
+            "expires_at",
+            postgresql_where=text("status = 'reserved'"),
+        ),
+    )
+
+
 class PricingConfigVersion(Base):
     """Versioned pricing configuration for admin publish/draft/archive workflow."""
 

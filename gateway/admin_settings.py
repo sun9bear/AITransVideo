@@ -289,6 +289,12 @@ class AdminSettings(BaseModel):
     # 临时音色数量上限。防多任务并发把临时表撑爆。默认 3（spec §2.5）。
     express_cosyvoice_auto_clone_per_user_active_temp_cap: int = 3
 
+    # Phase 4.3a PR2 §3：reservation TTL（分钟）。reserve 时应用层填
+    # expires_at = now + 这个值。覆盖单次 clone 全程（upload+worker < 1 分钟）
+    # + 崩溃回收冗余。validator 5-120（防误设 0 = 立即过期永远 reserve 不到 /
+    # 误设 7 天 = 崩溃的 reserved 名额长期占 cap）。
+    express_cosyvoice_auto_clone_reservation_ttl_minutes: int = 30
+
     @field_validator("whisper_alignment_trigger")
     @classmethod
     def validate_whisper_alignment_trigger(cls, v: str) -> str:
@@ -404,6 +410,21 @@ class AdminSettings(BaseModel):
             raise ValueError(
                 f"express_cosyvoice_auto_clone_per_user_active_temp_cap 必须在 "
                 f"[0, 100]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator("express_cosyvoice_auto_clone_reservation_ttl_minutes")
+    @classmethod
+    def validate_express_auto_clone_reservation_ttl(cls, v: int) -> int:
+        """Phase 4.3a PR2 §3：[5, 120] 分钟。
+
+        下界 5 防误设 0（reservation 立即过期 → 永远 reserve 不到名额）；
+        上界 120 防误设 7 天（崩溃的 reserved 名额长期占 cap，用户被锁死）。
+        """
+        if not (5 <= int(v) <= 120):
+            raise ValueError(
+                f"express_cosyvoice_auto_clone_reservation_ttl_minutes 必须在 "
+                f"[5, 120]，收到 {v!r}"
             )
         return int(v)
 
