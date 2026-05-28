@@ -225,10 +225,30 @@ async def list_user_voices(
     user_id: object,
     *,
     include_expired: bool = False,
+    include_temporary: bool = False,
 ) -> list[UserVoice]:
+    """List a user's voices.
+
+    Phase 4.3a §6.4 (Codex P1-2): ``include_temporary`` defaults to
+    ``False`` so the user-facing "我的音色" list does NOT show Express
+    auto-clone temporary voices (``is_temporary=True``). Those are
+    task-scoped — surfacing them in the long-term library would confuse
+    users (they'd see voices about to be swept). Callers that explicitly
+    need temporary rows (e.g. future Phase 4.3b sweeper) pass True.
+
+    NB: this is independent of routing decisions — segment TTS routing
+    reads ``lookup_clone_voice_routing_metadata`` which deliberately
+    INCLUDES temporary voices (the just-cloned temp voice is exactly what
+    the current job's segments need). Do NOT add an is_temporary filter
+    there.
+    """
     stmt = select(UserVoice).where(UserVoice.user_id == user_id)
     if not include_expired:
         stmt = stmt.where(UserVoice.expired_at.is_(None))
+    if not include_temporary:
+        # Phase 4.3a §6.4: hide Express auto-clone temporary voices from
+        # the long-term library list by default.
+        stmt = stmt.where(UserVoice.is_temporary.is_(False))
     stmt = stmt.order_by(UserVoice.created_at.desc())
     result = await db.execute(stmt)
     return list(result.scalars().all())
@@ -239,21 +259,33 @@ async def count_active_voices_for_user_and_provider(
     user_id: object,
     *,
     provider: str,
+    include_temporary: bool = False,
 ) -> int:
     """统计某 user 当前 active（``expired_at IS NULL``） + 指定 ``provider`` 的音色数。
 
     Phase 4.1 C.2 二轮 review（Codex 2026-05-25）：CosyVoice clone endpoint
     在调用付费 worker 前用此计数实施 ``cosyvoice_clone_max_voices_per_user``
     quota，避免灰度用户反复触发 ¥0.01/次 clone。
+
+    Phase 4.3a §6.4 (Codex P1-2)：``include_temporary`` 默认 ``False`` ——
+    Express 自动 clone 出的临时音色（``is_temporary=True``）**不**计入
+    长期音色库配额 ``cosyvoice_clone_max_voices_per_user``。临时音色有
+    自己的成本闸 ``express_cosyvoice_auto_clone_per_user_active_temp_cap``
+    （spec §2.5），不该挤占用户长期 Studio 手动 clone 的额度。
     """
+    where_clauses = [
+        UserVoice.user_id == user_id,
+        UserVoice.expired_at.is_(None),
+        UserVoice.provider == provider,
+    ]
+    if not include_temporary:
+        # Phase 4.3a §6.4: exclude temporary voices from the long-term
+        # library quota count.
+        where_clauses.append(UserVoice.is_temporary.is_(False))
     result = await db.execute(
         select(func.count())
         .select_from(UserVoice)
-        .where(
-            UserVoice.user_id == user_id,
-            UserVoice.expired_at.is_(None),
-            UserVoice.provider == provider,
-        )
+        .where(*where_clauses)
     )
     return int(result.scalar() or 0)
 
@@ -529,6 +561,7 @@ async def match_user_voices(
     platform: str | None = None,
     limit: int = 5,
     include_cross_source: bool = False,
+    include_temporary: bool = False,
 ) -> list[UserVoiceMatch]:
     """Find personal voice candidates for a user.
 
@@ -544,6 +577,14 @@ async def match_user_voices(
     Default ``include_cross_source=False`` preserves the legacy
     behaviour for the old ``voice-match`` and ``internal match``
     endpoints.
+
+    Phase 4.3a §6.4 (Codex P1-2): ``include_temporary`` defaults to
+    ``False`` so Smart auto-reuse / candidate-first selection NEVER picks
+    up Express auto-clone temporary voices (``is_temporary=True``) across
+    jobs. A temporary voice belongs to ONE job; reusing it in another
+    job would make a 7-day sweep (Phase 4.3b) silently break the second
+    job's audio. Both the same-source and cross-source SELECT clauses
+    enforce this. Callers needing temporary rows pass True explicitly.
     """
     clean_hash = _clean_optional_text(source_content_hash)
     clean_speaker_id = _clean_optional_text(source_speaker_id)
@@ -566,12 +607,17 @@ async def match_user_voices(
     seen_voice_ids: set[str] = set()
 
     if clean_hash:
+        same_source_where = [
+            UserVoice.user_id == user_id,
+            UserVoice.expired_at.is_(None),
+            UserVoice.source_content_hash == clean_hash,
+        ]
+        if not include_temporary:
+            # Phase 4.3a §6.4: never reuse a temporary Express clone
+            # voice across jobs.
+            same_source_where.append(UserVoice.is_temporary.is_(False))
         result = await db.execute(
-            select(UserVoice).where(
-                UserVoice.user_id == user_id,
-                UserVoice.expired_at.is_(None),
-                UserVoice.source_content_hash == clean_hash,
-            )
+            select(UserVoice).where(*same_source_where)
         )
         for voice in result.scalars().all():
             if getattr(voice, "expired_at", None) is not None:
@@ -618,6 +664,10 @@ async def match_user_voices(
             UserVoice.expired_at.is_(None),
             UserVoice.source_speaker_name_key == clean_name_key,
         ]
+        if not include_temporary:
+            # Phase 4.3a §6.4: cross-source candidates also exclude
+            # temporary Express clones.
+            cross_where.append(UserVoice.is_temporary.is_(False))
         if clean_hash:
             # Only exclude same-source rows when we have a current hash;
             # NULL-hash voices pass through (they came from a different
