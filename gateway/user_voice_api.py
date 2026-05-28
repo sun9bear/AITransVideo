@@ -1145,22 +1145,61 @@ async def internal_register_smart_clone(
             ),
         })
 
-    # 2. worker routing 一致性：provider==cosyvoice_voice_clone 或
-    #    requires_worker=True 时，target_model 必须是非空 string。否则
-    #    add_user_voice 会注册成功，但 lookup_clone_voice_routing_metadata
-    #    的 ``target_model != ""`` 条件查不到该 row → segment TTS 回退官方
-    #    音色 → 用户克隆白做（Codex E review P1 重点）。fail-closed 400。
+    # 2. worker routing 自洽性（Codex GitHub PR #17 review P2-1 收紧）。
+    #
+    # lookup_clone_voice_routing_metadata 的查询条件是：
+    #   provider == "cosyvoice_voice_clone" AND tts_provider == "cosyvoice"
+    #   AND requires_worker IS TRUE AND target_model != ""
+    # 任何 cosyvoice_voice_clone row 只要这 4 个字段不全自洽，就会**写入成功
+    # 但 routing lookup 查不到** → segment TTS 静默回退官方预设音色（这正是
+    # 线上遇到过的症状）。E-fix 只校验了 target_model，漏了 requires_worker /
+    # tts_provider / platform，导致下面这种 row 仍能写入：
+    #   {provider: cosyvoice_voice_clone, requires_worker: false, target_model: ...}
+    # P2-1 把 cosyvoice_voice_clone provider 的 4 字段强制自洽，fail-closed 400。
     target_model_raw = body.get("target_model")
-    needs_target_model = (provider == "cosyvoice_voice_clone") or (requires_worker is True)
-    if needs_target_model:
+    if provider == "cosyvoice_voice_clone":
+        if requires_worker is not True:
+            return _json(400, {
+                "error": "cosyvoice_clone_requires_worker_true",
+                "detail": (
+                    "provider='cosyvoice_voice_clone' requires requires_worker=true; "
+                    "otherwise lookup_clone_voice_routing_metadata (requires_worker IS TRUE) "
+                    "won't find the row and segment TTS falls back to a preset voice"
+                ),
+            })
+        if tts_provider != "cosyvoice":
+            return _json(400, {
+                "error": "cosyvoice_clone_tts_provider_mismatch",
+                "detail": (
+                    "provider='cosyvoice_voice_clone' requires tts_provider='cosyvoice' "
+                    f"(got {tts_provider!r}); routing lookup matches on tts_provider"
+                ),
+            })
+        if platform != "dashscope_mainland":
+            return _json(400, {
+                "error": "cosyvoice_clone_platform_mismatch",
+                "detail": (
+                    "provider='cosyvoice_voice_clone' requires platform='dashscope_mainland' "
+                    f"(got {platform!r})"
+                ),
+            })
         if not isinstance(target_model_raw, str) or not target_model_raw.strip():
             return _json(400, {
                 "error": "target_model_required_for_worker_clone",
                 "detail": (
-                    "target_model must be a non-empty string when "
-                    "provider='cosyvoice_voice_clone' or requires_worker=true; "
-                    "otherwise lookup_clone_voice_routing_metadata cannot find "
-                    "the row and segment TTS falls back to a preset voice"
+                    "provider='cosyvoice_voice_clone' requires non-empty target_model; "
+                    "otherwise lookup_clone_voice_routing_metadata can't find the row"
+                ),
+            })
+    elif requires_worker is True:
+        # 非 cosyvoice provider 但 requires_worker=True（异常组合）：仍要求
+        # target_model 非空，保留 E-fix 行为。
+        if not isinstance(target_model_raw, str) or not target_model_raw.strip():
+            return _json(400, {
+                "error": "target_model_required_for_worker_clone",
+                "detail": (
+                    "target_model must be a non-empty string when requires_worker=true; "
+                    "otherwise lookup_clone_voice_routing_metadata can't find the row"
                 ),
             })
 
