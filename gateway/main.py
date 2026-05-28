@@ -441,6 +441,10 @@ app.include_router(mainland_voice_worker_router)
 # 5-layer fail-closed pipeline before any paid worker call.
 from cosyvoice_clone.api import router as cosyvoice_clone_router  # noqa: E402
 app.include_router(cosyvoice_clone_router)
+# Phase 4.3a E1: Express auto-clone internal sample upload endpoint
+# (X-Internal-Key; pipeline → gateway OSS PUT → presigned GET URL; no worker call).
+from cosyvoice_clone.api import internal_router as cosyvoice_clone_internal_router  # noqa: E402
+app.include_router(cosyvoice_clone_internal_router)
 app.include_router(voice_catalog_internal_router)
 
 from user_voice_api import router as user_voice_router, internal_router as user_voice_internal_router
