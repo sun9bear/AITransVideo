@@ -351,6 +351,37 @@ _DEFAULT_EXPRESS_PROVIDER = "cosyvoice"
 _DEFAULT_STUDIO_PROVIDER = "minimax"
 
 
+def _apply_validated_express_consent(
+    request_data: dict,
+    *,
+    express_consent_payload: dict | None,
+    express_consent_parse_error: str | None,
+) -> None:
+    """Phase 4.3a §3.2 + Codex GitHub PR #17 复审 P2-1：把 validated Express
+    consent 写进转发给 Job API 的 ``request_data``，**先清掉客户端夹带的**。
+
+    安全契约：``express_consent`` / ``express_consent_parse_error`` 只能由
+    Gateway 的 validated Express path 生成（``service_mode==express`` +
+    ``validate_express_consent`` 跑过 + 后端 ``server_confirmed_at``）。任何
+    客户端**直接**在 body 里塞的 ``express_consent`` 都是 forged，必须丢弃 ——
+    否则 Studio / Smart job（``express_consent_payload`` 为 None）会把 forged
+    dict 透传给 Job API 并被 ``src/services/jobs/api.py`` 持久化，破坏"非
+    Express job 的 ``express_consent`` 必须为 None"的模型契约。
+
+    原地修改 ``request_data``（无返回值）：
+
+    1. **无条件** pop 掉 ``express_consent`` / ``express_consent_parse_error``
+       （清客户端 forged 值）
+    2. 仅当 caller 传入 validated payload / parse_error（非 None）时写回
+    """
+    request_data.pop("express_consent", None)
+    request_data.pop("express_consent_parse_error", None)
+    if express_consent_payload is not None:
+        request_data["express_consent"] = express_consent_payload
+    if express_consent_parse_error is not None:
+        request_data["express_consent_parse_error"] = express_consent_parse_error
+
+
 def compute_job_policy(user, service_mode: str) -> dict:
     """Compute job execution policy based on user role, plan, and service mode.
 
@@ -1406,14 +1437,13 @@ async def intercept_create_job(
     if smart_consent_payload is not None:
         request_data["smart_consent"] = smart_consent_payload
 
-    # Phase 4.3a §3.2: forward express_consent + parse_error verbatim.
-    # Only set when service_mode==express (the validator block above is
-    # gated on that). server_confirmed_at (if any) is already part of
-    # the dict; pipeline reads it for worker request + audit.
-    if express_consent_payload is not None:
-        request_data["express_consent"] = express_consent_payload
-    if express_consent_parse_error is not None:
-        request_data["express_consent_parse_error"] = express_consent_parse_error
+    # Phase 4.3a §3.2: forward express_consent + parse_error（Codex GitHub
+    # PR #17 复审 P2-1：先清客户端夹带的，再只写回 validated 值）。
+    _apply_validated_express_consent(
+        request_data,
+        express_consent_payload=express_consent_payload,
+        express_consent_parse_error=express_consent_parse_error,
+    )
 
     # Forward to upstream with modified body
     upstream_response = await proxy_request(

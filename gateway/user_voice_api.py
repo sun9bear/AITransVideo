@@ -1203,6 +1203,25 @@ async def internal_register_smart_clone(
                 ),
             })
 
+    # 3. 临时音色必须有合法 expiry（Codex GitHub PR #17 复审 P2-2）。
+    #    is_temporary=true 但 temporary_expires_at 缺失 / 格式坏 →
+    #    _parse_optional_datetime 返 None → 写出"临时但永不过期"row：
+    #    被 UI 隐藏（is_temporary=true 不进列表）、一直占 active_temp_cap、
+    #    Phase 4.3b sweeper 也扫不到（sweeper 选行条件含 temporary_expires_at < now）。
+    #    fail-closed 400 强制 caller 传合法 expiry。
+    parsed_temporary_expires_at = _parse_optional_datetime(
+        body.get("temporary_expires_at")
+    )
+    if is_temporary is True and parsed_temporary_expires_at is None:
+        return _json(400, {
+            "error": "temporary_expires_at_required_for_temporary_voice",
+            "detail": (
+                "is_temporary=true requires a valid ISO 8601 temporary_expires_at; "
+                "a temporary voice without expiry would never be swept and would "
+                "permanently occupy the active_temp_cap quota"
+            ),
+        })
+
     try:
         voice = await add_user_voice(
             db,
@@ -1245,9 +1264,9 @@ async def internal_register_smart_clone(
             clone_provider_request_id=body.get("clone_provider_request_id"),
             clone_worker_request_id=body.get("clone_worker_request_id"),
             is_temporary=is_temporary,  # E-fix: strict-bool validated above
-            temporary_expires_at=_parse_optional_datetime(
-                body.get("temporary_expires_at")
-            ),
+            # P2-2: is_temporary=true 时已校验为合法 datetime；
+            # is_temporary=false 时 add_user_voice 内部强制清成 None（E §6.3.1）。
+            temporary_expires_at=parsed_temporary_expires_at,
         )
     except Exception as exc:
         logger.exception(
