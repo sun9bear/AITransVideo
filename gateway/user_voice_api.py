@@ -1079,6 +1079,25 @@ async def internal_register_smart_clone(
     provider = str(body.get("provider") or "minimax_voice_clone")
     tts_provider = body.get("tts_provider") or "minimax_tts"
     platform = body.get("platform") or "minimax_domestic"
+    created_from = str(body.get("created_from") or "smart_auto")
+
+    # Phase 4.3a §6.3 防漂移 400 (Codex 二轮 P1-6)：
+    # CosyVoice clone 行**必须**显式带 created_from（"express_auto" 用于
+    # Phase 4.3a / "studio_manual" / "cosyvoice_clone_endpoint" 用于 Studio）。
+    # 如果一个 cosyvoice_voice_clone provider 行落到默认 "smart_auto"，说明
+    # caller（大概率 Express pipeline）漏传 created_from —— 拒收，避免审计
+    # 把 Express 自动 clone 误记成 Smart 来源。Smart MiniMax 旧 caller 走
+    # minimax_voice_clone provider，不受此约束（默认 smart_auto 合法）。
+    if provider == "cosyvoice_voice_clone" and created_from == "smart_auto":
+        return _json(400, {
+            "error": "created_from_required_for_cosyvoice_clone",
+            "detail": (
+                "cosyvoice_voice_clone provider requires explicit created_from "
+                "('express_auto' for Phase 4.3a Express auto-clone, or "
+                "'studio_manual' / 'cosyvoice_clone_endpoint' for Studio paths); "
+                "got default 'smart_auto' which implies a caller bug"
+            ),
+        })
 
     try:
         voice = await add_user_voice(
@@ -1104,8 +1123,27 @@ async def internal_register_smart_clone(
             source_content_tags=body.get("source_content_tags"),
             clone_sample_seconds=body.get("clone_sample_seconds"),
             clone_sample_segment_ids=body.get("clone_sample_segment_ids"),
-            created_from=body.get("created_from") or "smart_auto",
+            created_from=created_from,
             notes=notes,
+            # ---- Phase 4.3a §6.3：routing 9 + temporary 2 字段 pass-through ----
+            # Smart MiniMax 旧 caller 不传这些 → add_user_voice 默认值
+            # （region_constraint="overseas_ok", requires_worker=False,
+            #  is_temporary=False, ... 全部 None）→ 行为字节级不变。
+            # Express auto-clone caller 显式传全部 11 字段，把 CosyVoice
+            # worker routing + 临时音色生命周期写进 user_voices 行。
+            region_constraint=str(body.get("region_constraint") or "overseas_ok"),
+            requires_worker=bool(body.get("requires_worker") or False),
+            target_model=body.get("target_model"),
+            worker_provider=body.get("worker_provider"),
+            worker_region=body.get("worker_region"),
+            clone_api_model=body.get("clone_api_model"),
+            billing_sku=body.get("billing_sku"),
+            clone_provider_request_id=body.get("clone_provider_request_id"),
+            clone_worker_request_id=body.get("clone_worker_request_id"),
+            is_temporary=bool(body.get("is_temporary") or False),
+            temporary_expires_at=_parse_optional_datetime(
+                body.get("temporary_expires_at")
+            ),
         )
     except Exception as exc:
         logger.exception(
