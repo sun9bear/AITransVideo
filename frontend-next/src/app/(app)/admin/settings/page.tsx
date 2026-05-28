@@ -84,9 +84,9 @@ interface AdminSettings {
   cosyvoice_clone_max_voices_per_user: number
   cosyvoice_clone_max_concurrent_jobs: number
   // --- Phase 4.3a Express CosyVoice 自动 clone canary (2026-05-28) ---
-  // spec §8.1: full-body POST 语义同 Phase 4.2 D.1 — 全部 8 个字段必须
+  // spec §8.1: full-body POST 语义同 Phase 4.2 D.1 — 全部 9 个字段必须
   // 进 state，否则 ``cosyvoice_clone_general_availability_enabled`` toggle
-  // 一保存就会把后端这 8 个字段静默重置为 Pydantic 默认。
+  // 一保存就会把后端这 9 个字段静默重置为 Pydantic 默认。
   //
   // 字段语义（详见 gateway/admin_settings.py 中 Phase 4.3a 段）：
   // - ``enabled``: Layer 1 主开关，StrictBool；默认 false（fail-safe）
@@ -95,8 +95,9 @@ interface AdminSettings {
   // - ``sample_max_seconds``: 样本拼接 cap，[10, 60] 秒
   // - ``target_model``: 固定 cosyvoice-v3.5-flash（spec §1.1 G1）
   // - ``per_user_daily_cap`` / ``per_user_active_temp_cap``: 成本闸
+  // - ``reservation_ttl_minutes``: PR2 reservation TTL，[5, 120] 默认 30
   //
-  // 渲染：只暴露主开关 toggle；其它 7 个进 state 但不渲染入口（防止
+  // 渲染：只暴露主开关 toggle；其它 8 个进 state 但不渲染入口（防止
   // canary 期间误操作；将来 Phase 4.3 全量时再加 UI）。
   express_cosyvoice_auto_clone_enabled: boolean
   express_cosyvoice_auto_clone_user_allowlist: string[]
@@ -161,7 +162,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   //   target_model                  = "cosyvoice-v3.5-flash"
   //   per_user_daily_cap            = 5
   //   per_user_active_temp_cap      = 3
-  // 否则用户翻 Phase 4.2 GA toggle 时 full-body save 会把后端这 8 个字段重置。
+  // 否则用户翻 Phase 4.2 GA toggle 时 full-body save 会把后端这 9 个字段重置。
   express_cosyvoice_auto_clone_enabled: false,
   express_cosyvoice_auto_clone_user_allowlist: [],
   express_cosyvoice_auto_clone_main_speaker_min_ratio: 0.30,
@@ -905,7 +906,7 @@ export default function AdminSettingsPage() {
           ⚠️ 付费 API 硬约束：触发后会调武汉 worker → DashScope CosyVoice，按次计费。
           默认关闭 → 即使用户在 allowlist 也不会触发；打开后**仅 allowlist + admin**
           能在 Express 任务里触发自动克隆（spec §2 Layer 1 + Layer 3 双门控）。
-          其它 7 个 hidden 字段（allowlist / 阈值 / cap / target_model）通过 full-body
+          其它 8 个 hidden 字段（allowlist / 阈值 / cap / target_model / ttl）通过 full-body
           save 透传，不在本 toggle UI 里渲染入口。 */}
       <SettingSection
         title="Express 快捷版自动克隆 (canary)"
@@ -929,7 +930,7 @@ export default function AdminSettingsPage() {
               <strong className="text-[color:var(--cinnabar)]">⚠️ Phase 4.3a 灰度路径，仅 allowlist 用户能触发。</strong>
               触发条件 5 层 AND：admin 开关 + worker env + allowlist + 用户 consent +
               成本闸（每用户每日 5 次 / 当前活跃临时音色 3 个）。
-              其它 7 个字段（allowlist / 阈值 / cap）通过 admin_settings.json 持久化，本页保持后端 Pydantic 默认值，
+              其它 8 个字段（allowlist / 阈值 / cap / ttl）通过 admin_settings.json 持久化，本页保持后端 Pydantic 默认值，
               如需修改请直接编辑 <code className="font-mono">admin_settings.json</code> 或后续 Phase 4.3b 升级 UI。
               失败任意一层 = 走 CosyVoice 预设音色（与当前 Express 行为一致）。
             </p>
@@ -985,8 +986,8 @@ export default function AdminSettingsPage() {
               DEFAULT_SETTINGS.cosyvoice_clone_general_availability_enabled,
             // --- Phase 4.3a Express 自动 clone reset 规则（spec §8.2 P2-3）---
             // 同 Phase 4.2 D.1 模式：可见 toggle (enabled) 显式回 DEFAULT (false)，
-            // 让 admin 能在 UI 上看到复位生效；其它 7 个 hidden 字段透传 current
-            // state，避免点恢复默认 + 保存时静默把 allowlist / 阈值 / cap 全部
+            // 让 admin 能在 UI 上看到复位生效；其它 8 个 hidden 字段透传 current
+            // state，避免点恢复默认 + 保存时静默把 allowlist / 阈值 / cap / ttl 全部
             // 擦掉。
             express_cosyvoice_auto_clone_enabled:
               DEFAULT_SETTINGS.express_cosyvoice_auto_clone_enabled,
