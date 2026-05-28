@@ -161,3 +161,87 @@ async def get_entitlements(
             "in_trial": in_trial,
         },
     }
+
+
+@router.get("/api/me/express-auto-clone-availability")
+async def get_express_auto_clone_availability(
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Phase 4.3a §8.4：返回当前用户是否能看到 Express 自动 clone 入口。
+
+    Frontend G 阶段调用此 endpoint 决定 ``TranslationForm`` 是否渲染
+    "自动克隆主说话人音色（实验性）" checkbox。返回 ``available=true``
+    时前端才显示，**但前端仅是展示层**——真正的授权边界在 pipeline
+    Layer 1-3 + budget endpoint（spec §2 / §2.5）。
+
+    返回 schema：
+        {
+            "available": bool,        # 是否渲染 checkbox UI
+            "reason": str,            # "ok" | "admin_flag_off" | "not_in_allowlist" | "unauthenticated"
+        }
+
+    授权规则（与 spec §2 Layer 1 + Layer 3 对齐）：
+        - 未登录 → available=False, reason="unauthenticated"
+        - admin 用户 → available=True（admin 自动 bypass allowlist）
+        - admin_flag=False → available=False, reason="admin_flag_off"
+        - admin_flag=True 但 user_id ∉ allowlist → available=False,
+          reason="not_in_allowlist"
+        - admin_flag=True 且 user_id ∈ allowlist → available=True
+
+    **不**返回 allowlist 内容（隐私）。**不**做 daily_cap / active_temp_cap
+    检查（那是 pipeline budget endpoint 的事，spec §2.5）。
+
+    NOTE: Phase 4.3a 阶段尚无 `general_availability` 二段灰度，仅靠
+    enabled flag + allowlist 双门控；Phase 4.3 全量时会扩展。
+    """
+    if user is None:
+        return {
+            "available": False,
+            "reason": "unauthenticated",
+        }
+
+    role = (getattr(user, "role", "user") or "user").strip().lower()
+    user_id_str = str(getattr(user, "id", "") or "").strip()
+
+    # admin 自动 bypass allowlist（spec §2 Layer 3）；同时仍然受
+    # admin_flag 控制——admin 关 flag 时也看不到入口（自闭功能）。
+    is_admin = role == "admin"
+
+    # 读 admin_settings（与 entitlements 同模式：每次请求重读，hot-reloadable）
+    try:
+        from admin_settings import load_settings
+        admin = load_settings()
+    except Exception as exc:
+        logger.warning(
+            "express auto-clone availability: admin_settings load failed: %s",
+            exc,
+        )
+        # Fail-closed：admin_settings 读不到时一律 unavailable
+        return {
+            "available": False,
+            "reason": "admin_settings_unavailable",
+        }
+
+    flag_enabled = bool(
+        getattr(admin, "express_cosyvoice_auto_clone_enabled", False)
+    )
+    allowlist = list(
+        getattr(admin, "express_cosyvoice_auto_clone_user_allowlist", []) or []
+    )
+
+    if not flag_enabled:
+        return {
+            "available": False,
+            "reason": "admin_flag_off",
+        }
+
+    if is_admin or (user_id_str and user_id_str in allowlist):
+        return {
+            "available": True,
+            "reason": "ok",
+        }
+
+    return {
+        "available": False,
+        "reason": "not_in_allowlist",
+    }

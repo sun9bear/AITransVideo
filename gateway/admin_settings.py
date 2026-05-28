@@ -229,6 +229,66 @@ class AdminSettings(BaseModel):
     #   3. clone 完成 / 失败时 decrement
     cosyvoice_clone_max_concurrent_jobs: int = 2        # Phase 4.2 占位（未生效）
 
+    # --- Phase 4.3a Express CosyVoice 自动 clone canary（2026-05-28） ---
+    # spec docs/plans/2026-05-28-phase43a-express-cosyvoice-auto-clone-spec.md
+    #
+    # 8 个字段为 Express 快捷版自动 clone 提供：admin 主开关 + 灰度
+    # allowlist + 主说话人筛选阈值 + 样本长度 cap + 模型名 + 成本闸
+    # （per-user daily / active-temp）。
+    #
+    # 与 Phase 4.2 ``cosyvoice_clone_*`` 字段平行存在：那 6 个字段服务
+    # Studio 手动 clone（用户在选音色页点"克隆音色"按钮），这里 8 个字段
+    # 服务 Express pipeline 内部自动触发的 canary 路径。两套策略独立可调。
+    #
+    # 授权层（spec §2 Layer 顺序）：
+    #   Layer 1: ``express_cosyvoice_auto_clone_enabled``（admin 主开关）
+    #   Layer 2: worker env 就绪（``is_worker_enabled_in_env()``）—— pipeline 层判断
+    #   Layer 3: 用户在 ``express_cosyvoice_auto_clone_user_allowlist`` OR admin
+    #   Layer 4: 用户 consent ``auto_voice_clone is True``（C 阶段已落地）
+    #   Layer 5/6/7（业务参数 + 成本闸）：本节字段配合 pipeline 实现
+    #
+    # **类型用 ``StrictBool``**（与 cosyvoice_clone_general_availability_enabled 同模式）：
+    # 普通 ``bool`` Pydantic 宽松解析下 ``"1"`` / ``"on"`` / ``"true"`` 都会
+    # 变 True，导致 admin UI bug 把字符串传到这里**意外打开 Express 自动 clone
+    # → 全部 allowlist 用户付费 API**。``StrictBool`` 只接受 Python True/False。
+    express_cosyvoice_auto_clone_enabled: StrictBool = False
+
+    # Beta 灰度白名单：``user_id`` 字符串数组（UUID 字符串形态）。
+    # admin 自动 bypass（不需进 allowlist）。空数组（默认） + enabled=True
+    # = 只有 admin 能触发，与 enabled=False 在普通用户视角等效（双保险）。
+    express_cosyvoice_auto_clone_user_allowlist: list[str] = []
+
+    # 主说话人筛选阈值（pipeline `identify_express_main_speaker` 使用）：
+    # 占比 < min_ratio 或 lines < min_lines → 不触发 clone，走预设音色。
+    # 默认 30% / 5 行（spec §4.2，覆盖独白 / 1对1 / 多人会议场景）。
+    # admin 可在 canary 期间根据 audit JSONL reason_code 分布调整。
+    express_cosyvoice_auto_clone_main_speaker_min_ratio: float = 0.30
+    express_cosyvoice_auto_clone_main_speaker_min_lines: int = 5
+
+    # 样本最大长度 cap（秒）：spec §4.3 CosyVoice v3.5-flash 推荐 10-20s
+    # prompt；超过 20s 收益递减且 OSS PUT 流量浪费。
+    express_cosyvoice_auto_clone_sample_max_seconds: float = 20.0
+
+    # 目标 model 硬编码（Phase 4.3a 范围）：spec §1.1 G1 + admin UI 提示
+    # 文字 "Phase 4.3a 固定，不可改"；Phase 4.3 全量时再开下拉。
+    express_cosyvoice_auto_clone_target_model: str = "cosyvoice-v3.5-flash"
+
+    # --- 成本闸（spec §2.5 / Codex 二轮 P1-2 fix）---
+    # 临时音色不计入 ``cosyvoice_clone_max_voices_per_user``（长期库配额）
+    # 因 ``is_temporary=true`` 在 D1 阶段 user_voice_service 隔离矩阵。
+    # 但完全不计任何配额 = canary 用户可无限刷付费 API。本节两 cap 单独
+    # 防 Phase 4.3a 灰度期间成本失控。
+    #
+    # daily_cap：当日内（UTC）express_auto created clone 行数上限。
+    # 查询过滤 ``provider='cosyvoice_voice_clone' AND created_from='express_auto'``，
+    # **不**过滤 ``expired_at`` / ``is_temporary``——"曾经发生过即算"。
+    # 默认 5（spec §2.5；canary Stage 1 临时调到 1 看 audit 再放）。
+    express_cosyvoice_auto_clone_per_user_daily_cap: int = 5
+
+    # active_temp_cap：当前 user 持有的 ``is_temporary=true AND expired_at IS NULL``
+    # 临时音色数量上限。防多任务并发把临时表撑爆。默认 3（spec §2.5）。
+    express_cosyvoice_auto_clone_per_user_active_temp_cap: int = 3
+
     @field_validator("whisper_alignment_trigger")
     @classmethod
     def validate_whisper_alignment_trigger(cls, v: str) -> str:
@@ -268,6 +328,84 @@ class AdminSettings(BaseModel):
         if normalized not in _VALID_ENDPOINT_MODES:
             raise ValueError(f"端点模式必须是 {sorted(_VALID_ENDPOINT_MODES)} 之一，收到: {v!r}")
         return normalized
+
+    @field_validator("express_cosyvoice_auto_clone_target_model")
+    @classmethod
+    def validate_express_auto_clone_target_model(cls, v: str) -> str:
+        """Phase 4.3a：仅允许 cosyvoice-v3.5-flash / plus（同 Phase 4.1 白名单）。
+
+        Phase 4.3a 在 spec §1.1 G1 硬编码 flash，但 admin_settings 字段允许
+        将来 Phase 4.3 全量时打开 plus；validator 复用 Phase 4.1 白名单
+        避免接受任意字符串绕过 worker 端的 model 验证。
+        """
+        normalized = v.strip()
+        if normalized not in _VALID_CLONE_TARGET_MODELS:
+            raise ValueError(
+                f"express_cosyvoice_auto_clone_target_model 必须是 "
+                f"{sorted(_VALID_CLONE_TARGET_MODELS)} 之一，收到 {v!r}"
+            )
+        return normalized
+
+    @field_validator("express_cosyvoice_auto_clone_main_speaker_min_ratio")
+    @classmethod
+    def validate_express_auto_clone_min_ratio(cls, v: float) -> float:
+        """Phase 4.3a §4.2：[0.10, 1.0] 区间。
+
+        < 0.10 = 噪音 speaker 也可能触发（spec 反向不健康）；
+        > 1.0 = 数学不可能。
+        """
+        if not (0.10 <= float(v) <= 1.0):
+            raise ValueError(
+                f"express_cosyvoice_auto_clone_main_speaker_min_ratio 必须在 "
+                f"[0.10, 1.0]，收到 {v!r}"
+            )
+        return float(v)
+
+    @field_validator("express_cosyvoice_auto_clone_main_speaker_min_lines")
+    @classmethod
+    def validate_express_auto_clone_min_lines(cls, v: int) -> int:
+        """Phase 4.3a §4.2：[1, 100] 行。"""
+        if not (1 <= int(v) <= 100):
+            raise ValueError(
+                f"express_cosyvoice_auto_clone_main_speaker_min_lines 必须在 "
+                f"[1, 100]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator("express_cosyvoice_auto_clone_sample_max_seconds")
+    @classmethod
+    def validate_express_auto_clone_sample_max_seconds(cls, v: float) -> float:
+        """Phase 4.3a §4.3：[10.0, 60.0] 秒，与 sample_uploader 的硬上限一致。"""
+        if not (10.0 <= float(v) <= 60.0):
+            raise ValueError(
+                f"express_cosyvoice_auto_clone_sample_max_seconds 必须在 "
+                f"[10.0, 60.0]，收到 {v!r}"
+            )
+        return float(v)
+
+    @field_validator("express_cosyvoice_auto_clone_per_user_daily_cap")
+    @classmethod
+    def validate_express_auto_clone_daily_cap(cls, v: int) -> int:
+        """Phase 4.3a §2.5：[0, 1000]。0 = 全用户硬禁（紧急降级）；
+        admin 可在 canary 期间临时把 cap 调到 0 关停 daily clone 流量。
+        """
+        if not (0 <= int(v) <= 1000):
+            raise ValueError(
+                f"express_cosyvoice_auto_clone_per_user_daily_cap 必须在 "
+                f"[0, 1000]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator("express_cosyvoice_auto_clone_per_user_active_temp_cap")
+    @classmethod
+    def validate_express_auto_clone_active_temp_cap(cls, v: int) -> int:
+        """Phase 4.3a §2.5：[0, 100]。"""
+        if not (0 <= int(v) <= 100):
+            raise ValueError(
+                f"express_cosyvoice_auto_clone_per_user_active_temp_cap 必须在 "
+                f"[0, 100]，收到 {v!r}"
+            )
+        return int(v)
 
     @field_validator("cosyvoice_clone_default_target_model")
     @classmethod
