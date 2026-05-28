@@ -393,3 +393,24 @@ def test_budget_response_shape_complete(monkeypatch):
         "can_clone", "deny_reason",
     ):
         assert key in parsed, f"budget response 缺字段 {key}"
+
+
+def test_budget_endpoint_docstring_marks_advisory_not_atomic():
+    """守卫（Codex GitHub PR #17 P2-2）：budget endpoint docstring 必须明确
+    标注它是 advisory，不是 atomic gate；并指向 PR2 atomic reservation。
+
+    防止后续维护者（含 PR2 实施）误把 read-only GET 当付费前最终成本闸。
+    """
+    import inspect
+    import user_voice_api
+    doc = inspect.getdoc(user_voice_api.internal_express_auto_clone_budget) or ""
+    assert "advisory" in doc.lower(), (
+        "budget endpoint docstring 必须含 'advisory' —— 标注它不是 atomic gate"
+    )
+    assert "atomic" in doc.lower(), (
+        "budget endpoint docstring 必须提到 atomic（说明并发竞态 + PR2 reservation）"
+    )
+    # 必须指向 PR2 / reservation 作为真正的 gate
+    assert "reservation" in doc.lower() or "PR2" in doc, (
+        "budget endpoint docstring 必须指向 PR2 atomic reservation 作为最终成本闸"
+    )

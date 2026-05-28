@@ -180,6 +180,14 @@ Segments (运行结束后):
 - **Layer 6（daily cap）**：app pipeline 通过 internal endpoint 查 daily count → 超 cap 跳过 + 审计 `reason_code=express_auto_clone_daily_cap_reached_{count}_of_{cap}`
 - **Layer 7（active temp cap）**：同上查 active temp count → 超 cap 跳过 + 审计 `reason_code=express_auto_clone_active_temp_cap_reached_{count}_of_{cap}`
 
+**⚠️ budget endpoint 是 advisory，不是 atomic gate（v0.4 Codex GitHub PR #17 P2-2）**：
+
+`GET /api/internal/express-auto-clone-budget` 是 **read-only advisory snapshot**。并发下同一 user 多个 Express job 同时调它会读到**相同** count、全部 `can_clone=true`、一起进付费 worker → 突破 cap。它**不能**作为付费前的最终成本闸，只用于：
+- 前端 / admin 展示余量（非 gating）
+- pipeline 早期 fail-fast 快速短路（已明显超 cap 时省掉 sample 抽取）
+
+**真正的 atomic 成本闸由 PR2 实现**（见 §2.6a），与 pipeline 的 worker call 流程紧耦合（consume on register-success / release on clone-fail / TTL）。PR1 只交付这个 advisory endpoint + 两个 counter，**不**交付 atomic reservation。
+
 **为什么用 internal endpoint 不在 pipeline 直查 DB**：pipeline 不应该持有 DB 连接（D.7 关注点分离，避免在 app 容器装 SQLAlchemy ORM 依赖）。新增 internal endpoint：
 
 ```
@@ -249,6 +257,26 @@ Response 200:
 - `test_budget_gate_runs_before_oss_upload` — 同上，断言 `POST /api/internal/cosyvoice/express-sample-upload` 不被调用
 - `test_budget_gate_runs_before_worker_clone` — 同上，断言 `client.clone(...)` 不被调用
 - `test_sample_validate_failure_skips_oss_and_worker` — fixture: `validate_sample` 返 `duration_s=8.0`，断言 OSS endpoint + worker 都不被调用
+
+### 2.6a 成本闸原子性：advisory vs atomic（v0.4 Codex GitHub PR #17 P2-2）
+
+**问题（GitHub Codex review 提出）**：§2.5 的 `GET /api/internal/express-auto-clone-budget` 是 read-only 快照。并发下同一 user 多个 Express job 同时调它会读到**相同** `daily_count` / `active_temp_count`，全部得到 `can_clone=true`，然后一起进付费 worker → **突破 cap**。read-only GET 无原子预占，无法防竞态。
+
+**Phase 4.3a 范围决策（用户 2026-05-28 拍板）**：
+
+- **PR1（本阶段）**：budget GET endpoint 是 **advisory only**。用于前端展示余量 + pipeline 早期 fail-fast 快速短路（省 sample 抽取）。endpoint docstring + 本节明确标注它**不是** atomic gate。
+- **PR2（pipeline 阶段）hard requirement**：付费 worker clone 之前的**最终**成本闸**必须**用 **atomic reservation**，**不得**把 advisory GET 当最终闸。reservation 机制要求：
+  - 付费前在 DB transaction 内做 per-user 原子检查 + 预占（行锁 / `SELECT ... FOR UPDATE` / 独立 reservation 表，PR2 设计时定）
+  - daily / active_temp 计数**包含** active reservations（预占即占额度）
+  - 同一 `job_id + speaker_id` 幂等返回同一 reservation
+  - register 成功 → consume（reservation 转正）；clone 失败 / 跳过 → release；stale reservation 有 TTL
+  - 返回 `reservation_id`，pipeline 持有到 register / release
+
+**为什么 reservation 放 PR2 而不是 PR1**：reservation 的 consume（register 成功）/ release（clone 失败）/ TTL 时机与 pipeline 的 worker call 流程**紧耦合**。PR1（gateway foundation）没有 pipeline consumer，孤立加 reservation 状态机无法端到端测 consume/release 闭环（只能测 reserve 本身），价值打折且易漂移。PR2 与 pipeline 一起设计 + 端到端测最自然。
+
+**canary 期风险缓释**：admin 主开关默认 False + allowlist 灰度 + gateway concurrency limit（`max_concurrent_jobs`）共同限制并发面；PR1→PR2 之间 Express auto-clone 不会对普通用户开放，advisory-only 的 PR1 窗口期无生产风险。
+
+**PR2 spec 必须**在独立文档里把 reservation 机制设计完整（表 / 状态机 / endpoint / TTL sweeper / consume-release 时机），并加守卫测试断言 pipeline 付费前调的是 atomic reserve 而非 advisory GET。
 
 ---
 

@@ -1269,11 +1269,25 @@ async def internal_express_auto_clone_budget(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Phase 4.3a §2.5 成本闸：查询某 user 的 Express auto-clone 预算。
+    """Phase 4.3a §2.5 成本闸：查询某 user 的 Express auto-clone 预算（**advisory**）。
 
-    Pipeline（Layer 5/6/7，spec §2.6）在 sample extraction / OSS upload /
-    worker clone **之前**调此 endpoint，只读 ``can_clone`` + ``deny_reason``
-    决策。两个独立 cap：
+    ⚠️⚠️ **这是 read-only ADVISORY snapshot，不是 atomic cost gate** ⚠️⚠️
+    （Codex GitHub PR #17 review P2-2）
+
+    并发语义警告：同一 user 多个 Express job 同时调此 GET，会读到**相同**
+    的 ``daily_count`` / ``active_temp_count``，全部得到 ``can_clone=true``，
+    然后一起进入付费 worker → **突破 daily_cap / active_temp_cap**。本
+    endpoint 只做"读当前状态"，**无**原子预占 / 行锁，无法防并发竞态。
+
+    **PR2 pipeline 硬约束（spec §2.6a）**：付费 worker clone 之前的**最终**
+    成本闸**必须**用 atomic reservation（DB transaction + 行锁 / reservation
+    表，consume on register-success / release on clone-fail / TTL），**不得**
+    把本 advisory GET 当作付费前最终闸。本 GET 只用于：
+    - 前端 / admin 展示用户当前预算余量（非 gating）
+    - pipeline 早期快速短路（fail-fast：已明显超 cap 时省掉 sample 抽取），
+      但**最终** gating 仍由 PR2 的 atomic reservation 决定
+
+    两个独立 cap：
 
     - **daily_cap**：今天（UTC 自然日）发生过的 express_auto clone 次数上限
       （``count_express_auto_clones_today`` —— 不过滤 expired_at / is_temporary）
