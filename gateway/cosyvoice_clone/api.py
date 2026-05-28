@@ -56,10 +56,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -71,7 +72,7 @@ for _candidate in [
     if _candidate.is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1056,6 +1057,162 @@ async def cosyvoice_clone(
             "worker_request_id": clone_resp.worker_request_id,
             "provider_request_id": clone_resp.provider_request_id,
             "created_at": _utc_now_iso(),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.3a E1：Express 自动 clone 内部样本上传 endpoint（spec §5.3 / §5.5）
+# ---------------------------------------------------------------------------
+#
+# 为什么是独立 internal endpoint（不复用上面的 POST /clone）：
+# - 上面的 /clone 是 user-facing（session-auth），一站式 upload + 调武汉
+#   worker。Express auto-clone 在 pipeline 子进程里跑，需要**自己**控制
+#   upload 与 worker call 之间的时序（中间还要主说话人识别 / sample 抽取），
+#   不适合让一个 endpoint 全包。
+# - pipeline 不能 import gateway（D.7）也不能在 app 容器装 boto3（NG10）；
+#   所以 pipeline 用 requests 发 multipart 到这个 internal endpoint，由
+#   gateway（持有 OSS 凭证 + boto3）完成 PUT 并回 presigned GET URL。
+#
+# 安全合同（spec §5.5）：X-Internal-Key 鉴权 + content-type 白名单 +
+# size cap 2MB + user_id/job_id/speaker_id regex + 日志脱敏 + **不调 worker**。
+
+internal_router = APIRouter(
+    prefix="/api/internal/cosyvoice",
+    tags=["cosyvoice-clone-internal"],
+)
+
+# spec §5.5.2 输入白名单
+_EXPRESS_SAMPLE_ALLOWED_CONTENT_TYPES = frozenset({
+    "audio/wav",
+    "audio/x-wav",
+    "audio/wave",
+})
+_EXPRESS_SAMPLE_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+_EXPRESS_SAMPLE_TTL_SECONDS = 120  # spec §5.5 presigned URL TTL=120s
+_JOB_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z]{1,3}$")
+
+
+def _express_upload_error(status_code: int, code: str, **extra: object) -> JSONResponse:
+    """spec §5.5.4 错误响应 shape：``{"ok": false, "error": {"code": ...}}``。"""
+    error: dict[str, object] = {"code": code}
+    error.update(extra)
+    return JSONResponse(status_code=status_code, content={"ok": False, "error": error})
+
+
+@internal_router.post("/express-sample-upload")
+async def express_sample_upload(
+    sample: UploadFile = File(...),
+    user_id: str = Form(...),
+    job_id: str = Form(...),
+    speaker_id: str = Form(...),
+    x_internal_key: str | None = Header(default=None, alias="X-Internal-Key"),
+) -> JSONResponse:
+    """Phase 4.3a E1：Express auto-clone 样本上传（spec §5.5）。
+
+    pipeline → 此 endpoint（multipart）→ OSS PUT → 回 presigned GET URL。
+    **不**调武汉 worker（worker 由 pipeline 在拿到 URL 后单独调）。
+
+    Response 200:
+        {"ok": true, "presigned_get_url": ..., "sha256": ..., "expires_at": ...}
+
+    NB: spec §5.5 response 列了 ``object_key`` 字段（dashboard 可视性
+    nice-to-have），但 ``SampleUploader.upload_and_sign`` 接口只返 signed
+    URL、不暴露内部 object key（key 由 uploader 用 sha256 + uuid 生成）。
+    Express worker clone 只需要 url + sha256（``WorkerCloneSample``），
+    所以本实现省略 object_key —— 偏离 spec §5.5 的非关键字段，记于此。
+
+    日志脱敏（spec §5.5.3）：只 log user_id / job_id / speaker_id /
+    sha256[:16] / status；**绝不** log presigned URL / OSS AK / sample bytes。
+    """
+    # === spec §5.5.1 鉴权（X-Internal-Key only）===
+    expected_key = (gw_settings.internal_api_key or "").strip()
+    received_key = (x_internal_key or "").strip()
+    if not expected_key or expected_key != received_key:
+        # 不 log received_key（可能含部分 secret）
+        logger.warning(
+            "[express-sample-upload] unauthorized: missing/invalid X-Internal-Key"
+        )
+        return _express_upload_error(401, "unauthorized")
+
+    # === spec §5.5.2 content-type 白名单 ===
+    content_type = (sample.content_type or "").strip().lower()
+    if content_type not in _EXPRESS_SAMPLE_ALLOWED_CONTENT_TYPES:
+        return _express_upload_error(
+            415,
+            "unsupported_content_type",
+            expected=sorted(_EXPRESS_SAMPLE_ALLOWED_CONTENT_TYPES),
+        )
+
+    # === spec §5.5.2 user_id / job_id / speaker_id 格式校验 ===
+    try:
+        uuid.UUID(str(user_id))
+    except (ValueError, AttributeError, TypeError):
+        return _express_upload_error(400, "invalid_user_id")
+    if not _JOB_ID_PATTERN.match(str(job_id)):
+        return _express_upload_error(400, "invalid_job_id")
+    if not _SPEAKER_ID_PATTERN.match(str(speaker_id)):
+        return _express_upload_error(400, "invalid_speaker_id")
+
+    # === spec §5.5.2 size cap + 空 body 拒绝 ===
+    data = await _read_upload_file(sample)
+    if not data:
+        return _express_upload_error(400, "empty_sample")
+    if len(data) > _EXPRESS_SAMPLE_MAX_BYTES:
+        return _express_upload_error(
+            413, "sample_too_large", max_bytes=_EXPRESS_SAMPLE_MAX_BYTES
+        )
+
+    sha256 = hashlib.sha256(data).hexdigest()
+
+    # === spec §5.5.4 uploader 未配 → 503 ===
+    try:
+        uploader = build_sample_uploader_from_settings(gw_settings)
+    except Exception as exc:  # ValueError 等
+        logger.warning(
+            "[express-sample-upload] uploader not configured "
+            "(user_id=%s job_id=%s speaker_id=%s sha256=%s): %s",
+            user_id, job_id, speaker_id, sha256[:16], type(exc).__name__,
+        )
+        return _express_upload_error(503, "uploader_not_configured")
+
+    # === 上传 + presign（spec §5.5 TTL=120s）。不调 worker。===
+    try:
+        presigned_get_url = uploader.upload_and_sign(
+            data,
+            filename_hint=f"{speaker_id}.wav",
+            ttl_seconds=_EXPRESS_SAMPLE_TTL_SECONDS,
+        )
+    except Exception as exc:
+        # 不 log url / key / bytes；只 log 类型 + 脱敏字段
+        logger.warning(
+            "[express-sample-upload] uploader runtime error "
+            "(user_id=%s job_id=%s speaker_id=%s sha256=%s): %s",
+            user_id, job_id, speaker_id, sha256[:16], type(exc).__name__,
+        )
+        return _express_upload_error(
+            503, "uploader_runtime_error", detail=type(exc).__name__
+        )
+
+    expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=_EXPRESS_SAMPLE_TTL_SECONDS)
+    ).isoformat()
+
+    # 成功：只 log 脱敏字段（绝不 log presigned_get_url）
+    logger.info(
+        "[express-sample-upload] ok (user_id=%s job_id=%s speaker_id=%s "
+        "sha256=%s bytes=%d)",
+        user_id, job_id, speaker_id, sha256[:16], len(data),
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "presigned_get_url": presigned_get_url,
+            "sha256": sha256,
+            "expires_at": expires_at,
         },
     )
 
