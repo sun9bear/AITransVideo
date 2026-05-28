@@ -3312,6 +3312,46 @@ class ProcessPipeline:
             # _enrich_speakers_with_clone_routing 在 approve 时注入）。
             # Schema: {speaker_id: {requires_worker, worker_target_model}}
             _speaker_voice_routing: dict[str, dict[str, object]] = {}
+
+            # --- Phase 4.3a PR2-F: Express auto-clone (CosyVoice via mainland worker) ---
+            # Single entry; ALL gates (admin master switch default-OFF / worker
+            # env / user consent / allowlist) live inside
+            # maybe_run_express_auto_clone — orchestrator logic stays in
+            # services.express.*, this call site is intentionally tiny. With the
+            # admin switch off (production default) it is a no-op, so Express
+            # behaves exactly as before PR2. On success it injects the clone
+            # voice_id + worker routing into _speaker_voices /
+            # _speaker_voice_routing in place; any failure leaves them untouched
+            # so downstream falls back to a CosyVoice preset (never MiniMax).
+            # PR3 wires the frontend consent UI; until then most jobs skip here.
+            if job_service_mode == "express" and approved_voice_selection is None:
+                try:
+                    from services.express.pipeline_clients import (
+                        maybe_run_express_auto_clone as _maybe_express_auto_clone,
+                    )
+
+                    _maybe_express_auto_clone(
+                        user_id=_snap("user_id", "") or "",
+                        job_id=config.job_id or "",
+                        project_dir=final_project_dir,
+                        source_audio_path=source_audio_path,
+                        transcript_lines=transcript_result.lines,
+                        speaker_voices=_speaker_voices,
+                        speaker_routing=_speaker_voice_routing,
+                        express_consent=_snap("express_consent", None),
+                    )
+                    # Mirror any injected clone voice into the a/b vars the
+                    # translation/display path reads (matches the Studio
+                    # approved-selection sync below).
+                    voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
+                    voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
+                except Exception as _express_exc:  # never fatal — preset fallback
+                    print(
+                        f"[S2.5] Express auto-clone 异常（非致命，回预设音色）："
+                        f"{type(_express_exc).__name__}: {_express_exc}",
+                        flush=True,
+                    )
+
             if approved_voice_selection is not None:
                 sel_speakers = approved_voice_selection.get("speakers")
                 if isinstance(sel_speakers, list):
