@@ -443,7 +443,8 @@ def test_lease_exceeds_real_delete_worst_case():
     )
 
     t = DEFAULT_TIMEOUT_SECONDS
-    per_attempt = (t.connect or 0) + (t.read or 0) + (t.write or 0)
+    # 全 4 段 timeout（pool/connect/read/write）—— 二轮补 pool（Codex）
+    per_attempt = (t.pool or 0) + (t.connect or 0) + (t.read or 0) + (t.write or 0)
     backoff_between = sum(RETRY_BACKOFF_SECONDS[: max(0, MAX_NETWORK_RETRIES - 1)])
     worst_case = MAX_NETWORK_RETRIES * per_attempt + backoff_between
     assert svc.CLEANUP_CLAIM_LEASE_SECONDS >= worst_case, (
