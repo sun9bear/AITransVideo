@@ -7,7 +7,11 @@ import { StatusBadge } from "@/components/status-badge"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
 import { ApiError } from "@/lib/api/client"
 import { getErrorMessage } from "@/lib/api/errors"
-import { getEntitlements, type UserEntitlements } from "@/lib/api/entitlements"
+import {
+  getEntitlements,
+  getExpressAutoCloneAvailability,
+  type UserEntitlements,
+} from "@/lib/api/entitlements"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
 import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
@@ -34,6 +38,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
   const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart">("express")
+  // Phase 4.3a PR3 — Express auto-clone consent. Both default false (opt-in).
+  // `expressAutoCloneAvailable` is server-gated (admin flag + allowlist) and
+  // fail-closed; the checkbox only renders when express + available.
+  const [expressAutoCloneAvailable, setExpressAutoCloneAvailable] = useState(false)
+  const [expressAutoVoiceClone, setExpressAutoVoiceClone] = useState(false)
   const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
   const [credits, setCredits] = useState<CreditsResponse | null>(null)
   const [creditRates, setCreditRates] = useState<{
@@ -146,7 +155,21 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         setSmartPauseWarningEnabled(Boolean(pricing.smart_pause_warning_enabled))
       })
       .catch(() => setSmartPauseWarningEnabled(false))
+    // Phase 4.3a PR3: Express auto-clone availability (admin flag + allowlist).
+    // Fail-closed in the client; default state is already false.
+    getExpressAutoCloneAvailability()
+      .then((a) => setExpressAutoCloneAvailable(a.available === true))
+      .catch(() => setExpressAutoCloneAvailable(false))
   }, [])
+
+  // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
+  // Express, or losing availability, force-resets the checkbox to false so a
+  // stale opt-in can't ride into a later submit / a non-express job.
+  useEffect(() => {
+    if (serviceMode !== "express" || !expressAutoCloneAvailable) {
+      setExpressAutoVoiceClone(false)
+    }
+  }, [serviceMode, expressAutoCloneAvailable])
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -166,6 +189,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         localFileName: sourceType === "local_video" ? (uploadFileName || undefined) : undefined,
         transcriptionMethod: sourceType === "local_video" ? "assemblyai" : transcriptionMethod,
         service_mode: serviceMode,
+        // spec §2.6: force false unless currently in Express, so a stale
+        // checkbox (mode switched away then back) can't trigger a paid clone.
+        expressAutoVoiceClone: serviceMode === "express" ? expressAutoVoiceClone : false,
       })
       setActiveJobs((prev) => [createdJob, ...prev])
       setSubmitState("success")
@@ -518,6 +544,53 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             )}
           </section>
+
+          {/* Phase 4.3a PR3: Express auto-clone consent checkbox. Renders ONLY
+              when express mode AND the server reports availability (admin flag +
+              allowlist; fail-closed). Default unchecked (opt-in). Copy must not
+              promise a deletion deadline — the cleanup sweeper is Phase 4.3b. */}
+          {serviceMode === "express" && expressAutoCloneAvailable ? (
+            <section
+              className="rounded-xl border p-4"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--bamboo) 8%, transparent)",
+                borderColor: "color-mix(in oklab, var(--bamboo) 32%, transparent)",
+              }}
+            >
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 shrink-0 accent-[color:var(--primary)]"
+                  checked={expressAutoVoiceClone}
+                  disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  onChange={(e) => setExpressAutoVoiceClone(e.target.checked)}
+                />
+                <span className="block space-y-1.5">
+                  <span className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-foreground">自动克隆主说话人音色</span>
+                    <span
+                      className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                      style={{
+                        backgroundColor: "color-mix(in oklab, var(--bamboo) 14%, transparent)",
+                        color: "var(--bamboo)",
+                        border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
+                      }}
+                    >
+                      实验性
+                    </span>
+                  </span>
+                  <span className="block text-xs leading-relaxed text-muted-foreground">
+                    勾选后，系统会用视频中占比最高的说话人的一小段语音（约 10–20 秒）克隆一个临时音色用于本次配音，让主说话人的声音更贴近原片。
+                  </span>
+                  <span className="block space-y-0.5 text-xs leading-relaxed text-muted-foreground">
+                    <span className="block">· 该音色为本次任务临时使用，不进入你的永久音色库；系统后续会按清理策略处理</span>
+                    <span className="block">· 会占用一次音色克隆配额</span>
+                    <span className="block">· 失败时自动改用预设音色，不影响配音完成</span>
+                  </span>
+                </span>
+              </label>
+            </section>
+          ) : null}
 
           {/* Phase 4 (plan 2026-05-17-user-voice-candidate-first §Smart 弱匹配暂停):
               warn the user when admin has enabled the "weak match confirmation"
