@@ -30,11 +30,47 @@ if str(_GATEWAY) not in sys.path:
 
 _PG_DSN = os.environ.get("AVT_TEST_PG_DSN", "").strip()
 
-pytestmark = pytest.mark.skipif(
+# 仅给**需要 PG 的测试**加 skip；DSN 安全 guard 的单元测 always run
+# （不依赖 PG，且必须在任何环境验证 DROP TABLE 防护存在）。
+_SKIP_NO_PG = pytest.mark.skipif(
     not _PG_DSN,
     reason="AVT_TEST_PG_DSN unset — PG concurrency test runs only in CI "
     "backend-pg-integration job (sqlite can't test FOR UPDATE blocking)",
 )
+
+# 允许 DROP TABLE 的 host 白名单（本地 / CI service container alias）。
+_SAFE_PG_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres"})
+
+
+class UnsafeTestDsnError(RuntimeError):
+    """DSN 指向疑似非测试库 —— 拒绝执行 DROP TABLE（Codex C-pg-fix）。"""
+
+
+def _assert_safe_test_dsn(dsn: str) -> None:
+    """fail-closed：本测试会 DROP TABLE users / user_voices /
+    express_clone_reservations。若有人误把 AVT_TEST_PG_DSN 指到非测试库，
+    会删核心表。这里强制：
+
+    - database name **必须含** 'test'
+    - host **必须** 在本地 / CI service 白名单内
+
+    任一不满足 → raise UnsafeTestDsnError，**绝不** DROP。
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(dsn)
+    host = (parsed.hostname or "").lower()
+    db = (parsed.path or "").lstrip("/").lower()
+    if "test" not in db:
+        raise UnsafeTestDsnError(
+            f"refusing to DROP TABLE: DB name {db!r} must contain 'test' "
+            f"(AVT_TEST_PG_DSN looks like a non-test database)"
+        )
+    if host not in _SAFE_PG_HOSTS:
+        raise UnsafeTestDsnError(
+            f"refusing to DROP TABLE: host {host!r} not in {sorted(_SAFE_PG_HOSTS)} "
+            f"(AVT_TEST_PG_DSN must point at a local / CI test database)"
+        )
 
 
 def _run(coro):
@@ -56,6 +92,9 @@ async def _setup_engine():
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from models import ExpressCloneReservation, UserVoice
+
+    # fail-closed：DROP TABLE 前强制确认 DSN 指向测试库（Codex C-pg-fix）
+    _assert_safe_test_dsn(_PG_DSN)
 
     engine = create_async_engine(_PG_DSN, future=True)
 
@@ -87,6 +126,7 @@ async def _teardown(engine):
     await engine.dispose()
 
 
+@_SKIP_NO_PG
 def test_pg_concurrent_reserve_cap_one_only_one_wins():
     """cap=1 + 10 并发不同 speaker → 恰好 1 reserved，9 active_temp_cap_exceeded。"""
     async def _t():
@@ -114,6 +154,7 @@ def test_pg_concurrent_reserve_cap_one_only_one_wins():
     _run(_t())
 
 
+@_SKIP_NO_PG
 def test_pg_concurrent_reserve_same_key_idempotent():
     """10 并发同 (user,job,speaker) → 全部同一 reservation_id，表里只 1 active row。"""
     async def _t():
@@ -140,3 +181,50 @@ def test_pg_concurrent_reserve_same_key_idempotent():
         finally:
             await _teardown(engine)
     _run(_t())
+
+
+# ---------------------------------------------------------------------------
+# DSN 安全 guard 单元测（always run，不依赖 PG —— Codex C-pg-fix）
+# ---------------------------------------------------------------------------
+
+
+def test_dsn_guard_rejects_non_test_db():
+    """db name 不含 'test' → 拒绝（防误删生产表）。"""
+    with pytest.raises(UnsafeTestDsnError):
+        _assert_safe_test_dsn("postgresql+asyncpg://avt:pw@localhost:5432/aivideotrans")
+    with pytest.raises(UnsafeTestDsnError):
+        _assert_safe_test_dsn("postgresql+asyncpg://avt:pw@localhost:5432/production")
+
+
+def test_dsn_guard_rejects_remote_host():
+    """host 不在本地/CI 白名单 → 拒绝（即便 db 名含 test）。"""
+    with pytest.raises(UnsafeTestDsnError):
+        _assert_safe_test_dsn("postgresql+asyncpg://avt:pw@db.prod.example.com:5432/aivideotrans_test")
+    with pytest.raises(UnsafeTestDsnError):
+        _assert_safe_test_dsn("postgresql+asyncpg://avt:pw@10.0.0.5:5432/test_db")
+
+
+def test_dsn_guard_accepts_ci_and_local_test_dsn():
+    """CI service DSN + 本地 test DSN 应通过（不 raise）。"""
+    # CI job 用的 DSN
+    _assert_safe_test_dsn("postgresql+asyncpg://avt:avt_test@localhost:5432/aivideotrans_test")
+    # CI service container host alias
+    _assert_safe_test_dsn("postgresql+asyncpg://avt:avt_test@postgres:5432/aivideotrans_test")
+    # 127.0.0.1
+    _assert_safe_test_dsn("postgresql+asyncpg://avt:pw@127.0.0.1:5432/my_test_db")
+
+
+def test_setup_engine_calls_dsn_guard_before_drop():
+    """守卫：_setup_engine 在任何 DROP TABLE 之前调 _assert_safe_test_dsn。
+
+    静态扫源码确认 guard 调用位置在 DROP 之前（防未来重构把 guard 挪到
+    DROP 之后或删掉）。
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    guard_call = src.find("_assert_safe_test_dsn(_PG_DSN)")
+    first_drop = src.find("DROP TABLE IF EXISTS")
+    assert guard_call != -1, "_setup_engine 必须调 _assert_safe_test_dsn(_PG_DSN)"
+    assert first_drop != -1
+    assert guard_call < first_drop, (
+        "DSN 安全 guard 必须在第一个 DROP TABLE 之前调用（fail-closed）"
+    )
