@@ -293,6 +293,7 @@ async def reset_cleanup_state(
                 UserVoice.cleanup_attempts > 0,
                 not_in_flight,  # 不碰 in-flight 行（防与 auto sweeper 竞态 double-delete）
             )
+            .order_by(UserVoice.temporary_expires_at.asc())  # 与 claim_batch 一致，选行稳定可复现
             .limit(limit)
             .with_for_update(skip_locked=True)  # PG：原子跳过他人持锁行；sqlite no-op
         )
