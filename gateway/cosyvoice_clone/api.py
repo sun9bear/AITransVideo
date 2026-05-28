@@ -1090,8 +1090,13 @@ _EXPRESS_SAMPLE_ALLOWED_CONTENT_TYPES = frozenset({
 })
 _EXPRESS_SAMPLE_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
 _EXPRESS_SAMPLE_TTL_SECONDS = 120  # spec §5.5 presigned URL TTL=120s
-_JOB_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
-_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z]{1,3}$")
+# PR2-C-fix（Codex review P1）：放宽以匹配真实 job/speaker，避免误杀
+# （speaker_10 / speaker_a_1 / YouTube-id-like / UUID-like job）。speaker_id
+# 与 pipeline 真源 ``src/pipeline/process.py::_SPEAKER_ID_PATTERN``
+# ``^speaker_[a-z0-9_]+$`` 对齐；总长 ≤ 64。与 user_voice_api reservation
+# endpoint 的 regex 保持一致。
+_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]{1,56}$")
 
 
 def _express_upload_error(status_code: int, code: str, **extra: object) -> JSONResponse:

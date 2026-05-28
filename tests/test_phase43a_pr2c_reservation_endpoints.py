@@ -117,6 +117,67 @@ def test_reserve_400_invalid_target_model(monkeypatch):
     assert status == 400 and parsed["error"] == "invalid_target_model"
 
 
+# --- PR2-C-fix（Codex P1）：regex 放宽接受真实 job/speaker ---
+
+
+def _reserve_reaches_service(mod, body, monkeypatch):
+    """跑 reserve，返回 (status, parsed, service_called)。service.reserve mock
+    成功；若 endpoint 因校验失败提前返回，service 不被调。"""
+    reserve_mock = AsyncMock(return_value=svc.ReserveOutcome(status="reserved", reservation_id="r"))
+    monkeypatch.setattr(svc, "reserve", reserve_mock, raising=True)
+    req = _request(body)
+    resp = _run(mod.internal_express_reservation_reserve(req, db=AsyncMock()))
+    return resp.status_code, json.loads(resp.body), reserve_mock.await_count > 0
+
+
+def test_reserve_accepts_uppercase_youtube_like_job_id(monkeypatch):
+    """YouTube-id-like job_id（含大写）应被接受，不再 400。"""
+    mod = _setup(monkeypatch)
+    status, _, called = _reserve_reaches_service(
+        mod, {**_VALID_BODY, "job_id": "orQKfIXMiA8"}, monkeypatch)
+    assert status == 200 and called, "含大写的 job_id 不应被 400"
+
+
+def test_reserve_accepts_uuid_like_job_id(monkeypatch):
+    mod = _setup(monkeypatch)
+    status, _, called = _reserve_reaches_service(
+        mod, {**_VALID_BODY, "job_id": "job_a1b2-c3d4-e5f6"}, monkeypatch)
+    assert status == 200 and called, "UUID-like（含连字符）job_id 不应被 400"
+
+
+def test_reserve_accepts_speaker_10(monkeypatch):
+    """speaker_10（数字）应被接受（pipeline 真源 ^speaker_[a-z0-9_]+$）。"""
+    mod = _setup(monkeypatch)
+    status, _, called = _reserve_reaches_service(
+        mod, {**_VALID_BODY, "speaker_id": "speaker_10"}, monkeypatch)
+    assert status == 200 and called, "speaker_10 不应被 400"
+
+
+def test_reserve_accepts_speaker_a_1(monkeypatch):
+    mod = _setup(monkeypatch)
+    status, _, called = _reserve_reaches_service(
+        mod, {**_VALID_BODY, "speaker_id": "speaker_a_1"}, monkeypatch)
+    assert status == 200 and called, "speaker_a_1 不应被 400"
+
+
+def test_reserve_still_rejects_illegal_job_id(monkeypatch):
+    """非法 job_id（空格 / 感叹号 / path traversal）仍 400。"""
+    mod = _setup(monkeypatch)
+    for bad in ["bad job", "job!", "../etc/passwd", "job/../x", "a" * 65]:
+        status, parsed, called = _reserve_reaches_service(
+            mod, {**_VALID_BODY, "job_id": bad}, monkeypatch)
+        assert status == 400 and not called, f"非法 job_id {bad!r} 应 400 不调 service"
+
+
+def test_reserve_still_rejects_illegal_speaker_id(monkeypatch):
+    """非法 speaker_id（非 speaker_ 前缀 / 大写 / 超长）仍 400。"""
+    mod = _setup(monkeypatch)
+    for bad in ["SPEAKER_A", "notspeaker_a", "speaker_A", "speaker_" + "a" * 57]:
+        status, parsed, called = _reserve_reaches_service(
+            mod, {**_VALID_BODY, "speaker_id": bad}, monkeypatch)
+        assert status == 400 and not called, f"非法 speaker_id {bad!r} 应 400 不调 service"
+
+
 def test_reserve_503_admin_settings_unavailable(monkeypatch):
     """fail-closed：admin_settings 读不到 cap → 503，不进 service.reserve。"""
     mod = _setup(monkeypatch, caps_unavailable=True)
@@ -164,14 +225,16 @@ def test_reserve_409_active_temp_cap(monkeypatch):
 
 
 def test_reserve_passes_admin_caps_to_service(monkeypatch):
-    """endpoint 从 admin_settings 读 cap/ttl 传给 service（caller 不传 cap）。"""
+    """endpoint 从 admin_settings 读 cap/ttl 传给 service（caller 不传 cap）。
+
+    PR2-C-fix：单次调用（原版调了两次只取最后 call_args，易踩 mock count 坑）。
+    """
     mod = _setup(monkeypatch, caps=(7, 4, 45))
     reserve_mock = AsyncMock(return_value=svc.ReserveOutcome(status="reserved", reservation_id="r"))
     monkeypatch.setattr(svc, "reserve", reserve_mock, raising=True)
-    _call_reserve(mod, _VALID_BODY, monkeypatch, outcome=None)
-    # 上面 outcome=None 不重设 mock；手动调
     req = _request(_VALID_BODY)
     _run(mod.internal_express_reservation_reserve(req, db=AsyncMock()))
+    assert reserve_mock.await_count == 1, "endpoint 应只调一次 service.reserve"
     _, kwargs = reserve_mock.call_args
     assert kwargs["daily_cap"] == 7
     assert kwargs["active_temp_cap"] == 4
