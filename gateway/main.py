@@ -299,6 +299,28 @@ async def lifespan(app: FastAPI):
         # the no-op behavior of an unscheduled task.
         logger.exception("Failed to start r2_artifact_sweeper; continuing without proactive push")
 
+    # Phase 4.3a PR2-D: Express auto-clone reservation TTL sweeper. Reclaims
+    # "reserved but never consumed" cap slots whose expires_at has passed
+    # (e.g. the process crashed mid-reserve, or the user never started
+    # another reserve so the per-reserve inline expire never ran). Pure DB
+    # state flip — only calls expire_stale_reservations; never touches
+    # user_voices and never calls a paid / external API. Same fail-safe
+    # pattern as r2_artifact_sweeper above: a broken sweeper must not block
+    # gateway startup. The per-user inline expire inside reserve()
+    # (service §4.1 step 2) is the real-time primary defense; this loop is
+    # only the background backstop.
+    try:
+        from express_reservation_sweeper import sweeper_loop as _express_resv_sweeper_loop
+        _express_resv_task = _asyncio.create_task(
+            _express_resv_sweeper_loop(), name="express-reservation-sweeper",
+        )
+        app.state.express_reservation_sweeper_task = _express_resv_task
+    except Exception:
+        logger.exception(
+            "Failed to start express_reservation_sweeper; reservation TTL "
+            "reclaim falls back to the per-reserve inline expire",
+        )
+
     # Phase 8 §T8.4: pan backup background schedulers.
     # 4 loops: archive_scanner (daily 03:30 BJT), token_refresh (6h),
     # orphan_cleanup (Sat 04:00 BJT), stale_reaper (30 min).
@@ -327,6 +349,9 @@ async def lifespan(app: FastAPI):
         "pack_cleanup_task",
         "project_cleanup_task",
         "r2_artifact_sweeper_task",
+        # Phase 4.3a PR2-D: cancel the reservation TTL sweeper cleanly so
+        # shutdown doesn't hang on its asyncio.sleep().
+        "express_reservation_sweeper_task",
         # Phase 8 §T8.4 pan schedulers (CodeX P2-5: previously omitted,
         # causing potential race with engine.dispose() on shutdown).
         "pan_archive_scanner_task",
