@@ -174,11 +174,49 @@ def test_register_smart_rejects_requires_worker_true_empty_target_model(monkeypa
     assert parsed["error"] == "target_model_required_for_worker_clone"
 
 
-def test_register_smart_rejects_cosyvoice_provider_missing_target_model(monkeypatch):
-    """provider=cosyvoice_voice_clone + requires_worker=False + 无 target_model
-    → 仍 400（provider 触发 target_model 必填）。
+def test_register_smart_cosyvoice_requires_worker_false_rejected(monkeypatch):
+    """P2-1（Codex GitHub PR #17 review）：provider=cosyvoice_voice_clone +
+    requires_worker=False → 400 cosyvoice_clone_requires_worker_true。
+
+    这是 P2-1 核心修复：之前 E-fix 只校验 target_model，允许
+    {provider: cosyvoice_voice_clone, requires_worker: false, target_model: ...}
+    写入，但 lookup_clone_voice_routing_metadata (requires_worker IS TRUE)
+    查不到 → TTS 回退官方音色（线上症状）。
     """
     body = _valid_cosyvoice_body(requires_worker=False)
+    status, parsed = _call_register_smart(body, monkeypatch)
+    assert status == 400
+    assert parsed["error"] == "cosyvoice_clone_requires_worker_true"
+
+
+def test_register_smart_cosyvoice_wrong_tts_provider_rejected(monkeypatch):
+    """P2-1：cosyvoice provider + tts_provider != cosyvoice → 400。"""
+    body = _valid_cosyvoice_body(tts_provider="minimax_tts")
+    status, parsed = _call_register_smart(body, monkeypatch)
+    assert status == 400
+    assert parsed["error"] == "cosyvoice_clone_tts_provider_mismatch"
+
+
+def test_register_smart_cosyvoice_default_tts_provider_rejected(monkeypatch):
+    """P2-1：cosyvoice provider 但不传 tts_provider（默认 minimax_tts）→ 400。"""
+    body = _valid_cosyvoice_body()
+    body.pop("tts_provider")  # 默认 minimax_tts → 与 cosyvoice provider 不自洽
+    status, parsed = _call_register_smart(body, monkeypatch)
+    assert status == 400
+    assert parsed["error"] == "cosyvoice_clone_tts_provider_mismatch"
+
+
+def test_register_smart_cosyvoice_wrong_platform_rejected(monkeypatch):
+    """P2-1：cosyvoice provider + platform != dashscope_mainland → 400。"""
+    body = _valid_cosyvoice_body(platform="minimax_domestic")
+    status, parsed = _call_register_smart(body, monkeypatch)
+    assert status == 400
+    assert parsed["error"] == "cosyvoice_clone_platform_mismatch"
+
+
+def test_register_smart_cosyvoice_missing_target_model_rejected(monkeypatch):
+    """P2-1：cosyvoice provider（其它字段自洽）+ 无 target_model → 400。"""
+    body = _valid_cosyvoice_body()
     body.pop("target_model")
     status, parsed = _call_register_smart(body, monkeypatch)
     assert status == 400
