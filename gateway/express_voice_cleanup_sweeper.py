@@ -41,11 +41,14 @@ def _dry_run_worker_delete(voice_id, *, user_id, job_id, reason):  # pragma: no 
     raise RuntimeError("worker_delete must not be called in dry-run")
 
 
-async def sweep_once(*, session_factory=None, dry_run=None):
+async def sweep_once(*, session_factory=None, dry_run=None, include_give_up=False):
     """跑一轮清理。``dry_run=None`` → 读 env 默认（观察期 True）。
 
     实跑模式：**worker 不可用在 claim 前 fail-fast**（整轮 skip，return None）。
     返回 ``CleanupReport`` 或 None（worker 未配置而 skip）。
+
+    ``include_give_up``：**仅 manual CLI** 传 True（把 give-up 行也纳入本轮）；
+    自动 lifespan loop 永远 False（give-up 是有意停手，自动重试会无限刷付费）。
     """
     import express_voice_cleanup_service as svc
     from express_voice_cleanup_audit import emit_voice_cleanup_audit
@@ -95,6 +98,7 @@ async def sweep_once(*, session_factory=None, dry_run=None):
             worker_delete=worker_delete,
             dry_run=dry,
             limit=SWEEP_BATCH_SIZE,
+            include_give_up=include_give_up,
             audit_emit=emit_voice_cleanup_audit,
         )
     finally:

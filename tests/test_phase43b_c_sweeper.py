@@ -45,11 +45,9 @@ import express_voice_cleanup_sweeper as swp  # noqa: E402
 
 
 def _run(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    # asyncio.run joins the default executor (asyncio.to_thread worker threads)
+    # before closing the loop → no "Event loop is closed" thread warning.
+    return asyncio.run(coro)
 
 
 _USER = uuid.UUID("00000000-0000-0000-0000-0000000000e7")
