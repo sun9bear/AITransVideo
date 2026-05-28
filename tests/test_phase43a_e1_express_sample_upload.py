@@ -198,6 +198,50 @@ def test_400_invalid_speaker_id(monkeypatch):
     assert resp.json()["error"]["code"] == "invalid_speaker_id"
 
 
+# --- PR2-C-fix（Codex P1）：upload endpoint regex 与 reserve 同步放宽 ---
+
+
+def test_upload_accepts_uppercase_job_id(monkeypatch):
+    """YouTube-id-like job_id（含大写）应被接受。"""
+    client = _make_client(monkeypatch, uploader=_FakeUploader())
+    resp = client.post(
+        _URL, files=_wav_file(), data=_form(job_id="orQKfIXMiA8"),
+        headers={"X-Internal-Key": _TEST_KEY},
+    )
+    assert resp.status_code == 200, "含大写 job_id 不应被 upload 400"
+
+
+def test_upload_accepts_uuid_like_job_id(monkeypatch):
+    client = _make_client(monkeypatch, uploader=_FakeUploader())
+    resp = client.post(
+        _URL, files=_wav_file(), data=_form(job_id="job_a1b2-c3d4"),
+        headers={"X-Internal-Key": _TEST_KEY},
+    )
+    assert resp.status_code == 200
+
+
+def test_upload_accepts_speaker_10_and_a_1(monkeypatch):
+    """speaker_10 / speaker_a_1 应被接受（pipeline 真源 ^speaker_[a-z0-9_]+$）。"""
+    for sp in ("speaker_10", "speaker_a_1"):
+        client = _make_client(monkeypatch, uploader=_FakeUploader())
+        resp = client.post(
+            _URL, files=_wav_file(), data=_form(speaker_id=sp),
+            headers={"X-Internal-Key": _TEST_KEY},
+        )
+        assert resp.status_code == 200, f"{sp} 不应被 upload 400"
+
+
+def test_upload_still_rejects_illegal_job_and_speaker(monkeypatch):
+    """非法 job/speaker 仍 400。"""
+    client = _make_client(monkeypatch, uploader=_FakeUploader())
+    r1 = client.post(_URL, files=_wav_file(), data=_form(job_id="bad job!"),
+                     headers={"X-Internal-Key": _TEST_KEY})
+    assert r1.status_code == 400 and r1.json()["error"]["code"] == "invalid_job_id"
+    r2 = client.post(_URL, files=_wav_file(), data=_form(speaker_id="SPEAKER_A"),
+                     headers={"X-Internal-Key": _TEST_KEY})
+    assert r2.status_code == 400 and r2.json()["error"]["code"] == "invalid_speaker_id"
+
+
 # ---------------------------------------------------------------------------
 # §5.5.4 uploader 错误
 # ---------------------------------------------------------------------------

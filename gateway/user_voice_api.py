@@ -1402,9 +1402,14 @@ async def internal_express_auto_clone_budget(
 #     / conflict 409）—— **不**把 conflict 吞成 200（保留状态机语义）
 # 并发原子性由 service 的 users-row-lock 保证（PR2-C-pg 真 PG 验）。
 
-# job_id / speaker_id regex（与 PR1 E1 express-sample-upload 一致）
-_RESERVATION_JOB_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
-_RESERVATION_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z]{1,3}$")
+# job_id / speaker_id regex（PR2-C-fix：放宽以匹配真实值，Codex review P1）。
+# - job_id 系统格式是 ``job_<hex>`` 小写，但放宽到含大写/连字符以兼容
+#   YouTube-id-like / UUID-like，避免误杀（``^[A-Za-z0-9_-]{1,64}$``）。
+# - speaker_id 与 pipeline 真源 ``src/pipeline/process.py::_SPEAKER_ID_PATTERN``
+#   ``^speaker_[a-z0-9_]+$`` 对齐——原 ``^speaker_[a-z]{1,3}$`` 太窄，会
+#   400 误杀 ``speaker_10`` / ``speaker_a_1``。总长 ≤ 64（DB String(64)）。
+_RESERVATION_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_RESERVATION_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]{1,56}$")
 # target_model 白名单（与 admin_settings._VALID_CLONE_TARGET_MODELS 一致）
 _RESERVATION_TARGET_MODELS = frozenset({"cosyvoice-v3.5-flash", "cosyvoice-v3.5-plus"})
 
