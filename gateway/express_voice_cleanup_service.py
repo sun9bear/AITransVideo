@@ -268,9 +268,18 @@ async def reset_cleanup_state(
     last_error / claim_until / run_id，让 give-up / backoff 行重新可被清理。
 
     **自动 sweeper 绝不调本函数**（give-up 是有意停手，自动重试会无限刷付费）。
-    返回重置的行数。
+
+    **并发安全（Codex 4.3b-D-fix P1）**：**绝不**重置正被其它 runner 认领
+    （``cleanup_claim_until > now``，in-flight）的行——否则清掉它的 ``run_id``
+    会让那个 runner 删完 worker 后 ``complete_soft_delete`` 更新 0 行、DB 仍
+    ``expired_at=NULL`` → 下轮重复 ``delete_voice``。select 用
+    ``FOR UPDATE SKIP LOCKED`` + claim-lease predicate 原子排除 in-flight，
+    UPDATE 再重复 predicate（belt-and-suspenders）。返回重置的行数。
     """
     now = now or _now()
+    not_in_flight = (UserVoice.cleanup_claim_until.is_(None)) | (
+        UserVoice.cleanup_claim_until < now
+    )
     stuck_ids = (
         await db.execute(
             select(UserVoice.id)
@@ -282,15 +291,17 @@ async def reset_cleanup_state(
                 UserVoice.temporary_expires_at < now,
                 UserVoice.expired_at.is_(None),
                 UserVoice.cleanup_attempts > 0,
+                not_in_flight,  # 不碰 in-flight 行（防与 auto sweeper 竞态 double-delete）
             )
             .limit(limit)
+            .with_for_update(skip_locked=True)  # PG：原子跳过他人持锁行；sqlite no-op
         )
     ).scalars().all()
     if not stuck_ids:
         return 0
     result = await db.execute(
         update(UserVoice)
-        .where(UserVoice.id.in_(stuck_ids))
+        .where(UserVoice.id.in_(stuck_ids), not_in_flight)  # 重复 predicate 防 TOCTOU
         .values(
             cleanup_attempts=0,
             cleanup_retry_after=None,
