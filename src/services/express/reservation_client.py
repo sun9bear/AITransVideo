@@ -55,9 +55,25 @@ def _gateway_base() -> str:
     return os.environ.get("AVT_GATEWAY_URL", "http://127.0.0.1:8880").rstrip("/")
 
 
+def _safe_json(raw: str) -> dict:
+    """解析 body 为 dict。空 / 非 JSON / 非 dict（array/string/number）→ ``{}``。
+
+    **绝不抛 JSONDecodeError**（Codex E-fix item 3）：malformed 200 body 不能
+    让裸异常穿出 client；上层凭 ``{}`` 判定 malformed_* 并走安全分支。
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _post_json(path: str, payload: dict, *, timeout: float = _DEFAULT_TIMEOUT_S) -> tuple[int, dict]:
     """POST JSON → (status, body_dict)。4xx/5xx 也返回 (status, body)，
-    不 raise（body 里有 deny_reason / error）。网络层错误抛 URLError。"""
+    不 raise（body 里有 deny_reason / error）。malformed/空 body → ``{}``（不裸抛
+    JSONDecodeError）。仅网络层错误抛 OSError/URLError，由 caller 转 transport_error。"""
     url = f"{_gateway_base()}{path}"
     headers = {"Content-Type": "application/json"}
     key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
@@ -69,18 +85,14 @@ def _post_json(path: str, payload: dict, *, timeout: float = _DEFAULT_TIMEOUT_S)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
             status = int(getattr(resp, "status", 200) or 200)
-            return status, json.loads(raw or "{}")
+            return status, _safe_json(raw)
     except urllib.error.HTTPError as exc:
         # 409 / 404 / 503 / 400：gateway 返回 JSON body，提取出来
         try:
             raw = exc.read().decode("utf-8")
         except Exception:
             raw = ""
-        try:
-            body = json.loads(raw or "{}")
-        except ValueError:
-            body = {}
-        return int(exc.code), body
+        return int(exc.code), _safe_json(raw)
 
 
 def reserve(
@@ -94,16 +106,20 @@ def reserve(
     }
     try:
         status, body = _post_json(_RESERVE_PATH, payload, timeout=timeout)
-    except urllib.error.URLError as exc:
+    except OSError as exc:  # URLError/ConnectionError/TimeoutError 都是 OSError 子类
         logger.warning("express reserve transport error: %s", exc)
         return ReserveResult(ok=False, http_status=0, error="transport_error")
-    if status == 200 and body.get("ok"):
-        return ReserveResult(
-            ok=True,
-            http_status=200,
-            reservation_id=body.get("reservation_id"),
-            idempotent_hit=bool(body.get("idempotent_hit")),
-        )
+    if status == 200:
+        # 成功必须带 reservation_id —— 否则没有可 consume/release 的句柄，
+        # 视为 malformed（Codex E-fix item 1）：ok=False 阻止越过成本闸。
+        if body.get("ok") and body.get("reservation_id"):
+            return ReserveResult(
+                ok=True,
+                http_status=200,
+                reservation_id=body.get("reservation_id"),
+                idempotent_hit=bool(body.get("idempotent_hit")),
+            )
+        return ReserveResult(ok=False, http_status=200, error="malformed_reserve_response")
     if status == 409:
         return ReserveResult(ok=False, http_status=409, deny_reason=body.get("deny_reason"))
     return ReserveResult(
@@ -117,7 +133,7 @@ def consume(
     path = _CONSUME_PATH.format(rid=str(reservation_id))
     try:
         status, body = _post_json(path, {"voice_id": str(voice_id)}, timeout=timeout)
-    except urllib.error.URLError as exc:
+    except OSError as exc:  # URLError/ConnectionError/TimeoutError 都是 OSError 子类
         logger.warning("express consume transport error: %s", exc)
         return TransitionResult(ok=False, http_status=0, error="transport_error")
     if status == 200 and body.get("ok"):
@@ -137,7 +153,7 @@ def release(
     path = _RELEASE_PATH.format(rid=str(reservation_id))
     try:
         status, body = _post_json(path, {"reason": str(reason)}, timeout=timeout)
-    except urllib.error.URLError as exc:
+    except OSError as exc:  # URLError/ConnectionError/TimeoutError 都是 OSError 子类
         logger.warning("express release transport error: %s", exc)
         return TransitionResult(ok=False, http_status=0, error="transport_error")
     if status == 200 and body.get("ok"):
