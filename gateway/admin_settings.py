@@ -232,12 +232,12 @@ class AdminSettings(BaseModel):
     # --- Phase 4.3a Express CosyVoice 自动 clone canary（2026-05-28） ---
     # spec docs/plans/2026-05-28-phase43a-express-cosyvoice-auto-clone-spec.md
     #
-    # 8 个字段为 Express 快捷版自动 clone 提供：admin 主开关 + 灰度
+    # 9 个字段为 Express 快捷版自动 clone 提供：admin 主开关 + 灰度
     # allowlist + 主说话人筛选阈值 + 样本长度 cap + 模型名 + 成本闸
-    # （per-user daily / active-temp）。
+    # （per-user daily / active-temp）+ reservation TTL（PR2-A 加）。
     #
     # 与 Phase 4.2 ``cosyvoice_clone_*`` 字段平行存在：那 6 个字段服务
-    # Studio 手动 clone（用户在选音色页点"克隆音色"按钮），这里 8 个字段
+    # Studio 手动 clone（用户在选音色页点"克隆音色"按钮），这里 9 个字段
     # 服务 Express pipeline 内部自动触发的 canary 路径。两套策略独立可调。
     #
     # 授权层（spec §2 Layer 顺序）：
