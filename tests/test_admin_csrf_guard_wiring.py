@@ -8,6 +8,7 @@ if _gateway_dir not in sys.path:
     sys.path.insert(0, _gateway_dir)
 
 import admin_cost_api  # noqa: E402
+import admin_cosyvoice_control_api  # noqa: E402
 import admin_disk_api  # noqa: E402
 import admin_job_monitor_api  # noqa: E402
 import admin_settings  # noqa: E402
@@ -28,6 +29,7 @@ _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 _SESSION_ADMIN_ROUTERS = [
     ("admin_cost_api", admin_cost_api.router),
+    ("admin_cosyvoice_control_api", admin_cosyvoice_control_api.router),
     ("admin_disk_api", admin_disk_api.router),
     ("admin_job_monitor_api", admin_job_monitor_api.router),
     ("admin_settings", admin_settings.router),

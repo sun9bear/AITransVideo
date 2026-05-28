@@ -45,6 +45,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ADMIN_FILES = (
     "gateway/admin_settings.py",
     "gateway/admin_disk_api.py",
+    "gateway/admin_cosyvoice_control_api.py",
     "gateway/admin_job_monitor_api.py",
     "gateway/admin_smart_analytics_api.py",
     "gateway/cost_management.py",

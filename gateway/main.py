@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from admin_settings import router as admin_router
+from admin_cosyvoice_control_api import router as admin_cosyvoice_control_router
 from admin_disk_api import router as admin_disk_router
 from pan.auth import router as pan_auth_router
 from pan.admin_api import router as pan_admin_router
@@ -454,6 +455,7 @@ app.include_router(auth_email_router)
 # --- Admin settings routes (before catch-all) ---
 
 app.include_router(admin_router)
+app.include_router(admin_cosyvoice_control_router)
 app.include_router(admin_disk_router)
 app.include_router(pan_auth_router)
 app.include_router(pan_admin_router)
