@@ -807,6 +807,30 @@ class UserVoice(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 
+    # ── Phase 4.3b 临时音色清理 sweeper 追踪字段（migration 033）──────────────
+    # 仅对 ``provider='cosyvoice_voice_clone' AND is_temporary=TRUE`` 的到期行有意义；
+    # 其它 row 全默认（attempts=0 / 其余 NULL），行为不变。清理 = 删 DashScope
+    # voice（付费）→ 软删 DB（写 ``expired_at``）。失败永不写 ``expired_at``，靠
+    # 下面字段做 backoff + give-up + 并发 claim-lease。详见
+    # docs/plans/2026-05-28-phase43b-temporary-voice-cleanup-sweeper-spec.md。
+    #
+    # backoff / give-up：
+    cleanup_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    cleanup_retry_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cleanup_last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 并发 claim-lease（spec §2.7）：认领时写 ``claim_until=now()+LEASE`` +
+    # ``run_id``；select 过滤 ``claim_until IS NULL OR claim_until < now()``；
+    # 完成更新用 ``run_id`` 守卫防 lease 被重认领后 clobber。FOR UPDATE SKIP
+    # LOCKED 是 PG 语义（并发原子性留 PG integration 测试）。
+    cleanup_claim_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cleanup_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
 
 class ExpressCloneReservation(Base):
     """Phase 4.3a PR2 — Express auto-clone atomic reservation（migration 032）.
