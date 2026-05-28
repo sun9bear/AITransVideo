@@ -80,12 +80,14 @@ async def sweep_once(*, session_factory=None, dry_run=None):
         from services.mainland_worker.types import WorkerDeleteVoiceRequest
 
         def worker_delete(voice_id, *, user_id, job_id, reason):
-            client.delete_voice(
+            resp = client.delete_voice(
                 str(voice_id),
                 WorkerDeleteVoiceRequest(
                     job_id=str(job_id), user_id=str(user_id), reason=str(reason)
                 ),
             )
+            # 回 worker_request_id 给 core 写 success audit（付费删除对账锚点）
+            return getattr(resp, "worker_request_id", None)
 
     try:
         return await svc.cleanup_expired_temporary_voices(

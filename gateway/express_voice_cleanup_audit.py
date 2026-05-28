@@ -43,10 +43,17 @@ def emit_voice_cleanup_audit(
     user_id: str | None = None,
     error: str | None = None,
     dry_run: bool = False,
+    worker_request_id: str | None = None,
+    cleanup_attempts: int | None = None,
+    temporary_expires_at: str | None = None,
     **extra: Any,
 ) -> None:
     """追加一行清理决策 JSONL。decision ∈ cleaned / cleanup_failed /
-    cleanup_give_up / dry_run。写盘失败非致命（吞 + log）。"""
+    cleanup_give_up / dry_run。写盘失败非致命（吞 + log）。
+
+    spec §6 对账字段：``worker_request_id``（删 DashScope 的 audit 锚点，付费对账）/
+    ``cleanup_attempts`` / ``temporary_expires_at``。
+    """
     record: dict[str, Any] = {
         "kind": AUDIT_KIND,
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -56,13 +63,17 @@ def emit_voice_cleanup_audit(
         "user_id": user_id,
         "error": error,
         "dry_run": bool(dry_run),
+        "worker_request_id": worker_request_id,
+        "cleanup_attempts": cleanup_attempts,
+        "temporary_expires_at": temporary_expires_at,
     }
     if extra:
         record.update(extra)
 
     logger.info(
-        "express temp voice cleanup: decision=%s voice=%s user=%s error=%s dry_run=%s",
-        decision, voice_id, user_id, error, dry_run,
+        "express temp voice cleanup: decision=%s voice=%s user=%s error=%s "
+        "dry_run=%s worker_request_id=%s attempts=%s",
+        decision, voice_id, user_id, error, dry_run, worker_request_id, cleanup_attempts,
     )
     try:
         audit_dir = _runtime_logs_dir()

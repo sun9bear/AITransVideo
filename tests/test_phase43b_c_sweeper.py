@@ -124,6 +124,29 @@ def test_audit_emits_cleaned_on_success():
         )
         cleaned = [r for r in records if r["decision"] == "cleaned"]
         assert len(cleaned) == 1 and cleaned[0]["voice_id"] == v.voice_id
+        # spec §6 字段在 success audit（worker_request_id mock 返 None）
+        assert cleaned[0]["cleanup_attempts"] == 0
+        assert cleaned[0]["temporary_expires_at"] is not None
+    _run(_t())
+
+
+def test_audit_cleaned_includes_worker_request_id(monkeypatch):
+    """spec §6：success audit 带 worker_request_id（付费删除对账锚点）。"""
+    async def _t():
+        sm = await _make_session()
+        v = _mk_voice()
+        await _insert(sm, v)
+        records: list = []
+
+        def _worker_with_id(voice_id, *, user_id, job_id, reason):
+            return "wr-9"  # worker_delete adapter 回 worker_request_id
+
+        await svc.cleanup_expired_temporary_voices(
+            sm, worker_delete=_worker_with_id, dry_run=False, limit=10,
+            audit_emit=_recording_audit(records),
+        )
+        cleaned = [r for r in records if r["decision"] == "cleaned"][0]
+        assert cleaned["worker_request_id"] == "wr-9"
     _run(_t())
 
 
@@ -139,6 +162,8 @@ def test_audit_emits_failed():
         )
         failed = [r for r in records if r["decision"] == "cleanup_failed"]
         assert len(failed) == 1 and failed[0]["error"] == "RuntimeError"
+        assert failed[0]["cleanup_attempts"] == 1  # 认领时 0 → 失败后 +1
+        assert failed[0]["temporary_expires_at"] is not None
     _run(_t())
 
 
@@ -153,6 +178,8 @@ def test_audit_emits_give_up():
             audit_emit=_recording_audit(records),
         )
         assert [r["decision"] for r in records] == ["cleanup_give_up"]
+        assert records[0]["cleanup_attempts"] == svc.MAX_CLEANUP_ATTEMPTS  # MAX-1 → +1
+        assert records[0]["temporary_expires_at"] is not None
     _run(_t())
 
 
@@ -168,6 +195,8 @@ def test_audit_emits_dry_run():
         )
         assert [r["decision"] for r in records] == ["dry_run"]
         assert records[0]["dry_run"] is True and records[0]["voice_id"] == v.voice_id
+        assert records[0]["cleanup_attempts"] == 0
+        assert records[0]["temporary_expires_at"] is not None
     _run(_t())
 
 
@@ -195,10 +224,10 @@ def test_audit_failure_in_emitter_does_not_break_cleanup():
 # ===========================================================================
 
 
-def test_sweep_once_dry_run_default_no_delete(monkeypatch):
-    """env 未设 → dry-run 默认 True：不删、不认领、不需要 worker。"""
+def test_sweep_once_dry_run_default_no_delete(tmp_path, monkeypatch):
+    """env 未设 → dry-run 默认 True：不删、不认领、不需要 worker。audit 写 tmp。"""
     monkeypatch.delenv("AVT_EXPRESS_VOICE_CLEANUP_DRY_RUN", raising=False)
-    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", "/nonexistent_avt_test_audit_dir")
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
 
     async def _t():
         sm = await _make_session()
@@ -210,6 +239,9 @@ def test_sweep_once_dry_run_default_no_delete(monkeypatch):
         row = await _get(sm, v.id)
         assert row.expired_at is None, "dry-run 不删"
         assert row.cleanup_run_id is None, "dry-run 不认领"
+        # dry-run audit 落在 tmp（不污染仓库外路径）
+        from express_voice_cleanup_audit import _AUDIT_FILENAME
+        assert (tmp_path / _AUDIT_FILENAME).exists()
     _run(_t())
 
 
@@ -232,9 +264,13 @@ def test_sweep_once_worker_unavailable_failfast_before_claim(monkeypatch):
     _run(_t())
 
 
-def test_sweep_once_real_delete_when_worker_ready(monkeypatch):
-    """实跑 + worker 可用 → 调 client.delete_voice → 软删行 + close client。"""
+def test_sweep_once_real_delete_when_worker_ready(tmp_path, monkeypatch):
+    """实跑 + worker 可用 → 调 client.delete_voice → 软删行 + close client +
+    success audit 带 worker_request_id（端到端：sweeper closure → core → JSONL）。"""
     import mainland_voice_worker as mvw
+
+    class _FakeDeleteResp:
+        worker_request_id = "wr-real-9"
 
     class _FakeClient:
         def __init__(self):
@@ -243,6 +279,7 @@ def test_sweep_once_real_delete_when_worker_ready(monkeypatch):
 
         def delete_voice(self, voice_id, req):
             self.deleted.append(voice_id)
+            return _FakeDeleteResp()
 
         def close(self):
             self.closed = True
@@ -250,6 +287,7 @@ def test_sweep_once_real_delete_when_worker_ready(monkeypatch):
     fake = _FakeClient()
     monkeypatch.setattr(mvw, "is_mainland_voice_worker_config_ready", lambda s: True)
     monkeypatch.setattr(mvw, "build_mainland_voice_worker_client", lambda s: fake)
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
 
     async def _t():
         sm = await _make_session()
@@ -261,6 +299,12 @@ def test_sweep_once_real_delete_when_worker_ready(monkeypatch):
         assert fake.closed is True, "client 必须 close"
         row = await _get(sm, v.id)
         assert row.expired_at is not None and row.cleanup_run_id is None
+        # success audit 带 worker_request_id（对账锚点）写到 tmp JSONL
+        from express_voice_cleanup_audit import _AUDIT_FILENAME
+        lines = (tmp_path / _AUDIT_FILENAME).read_text(encoding="utf-8").strip().splitlines()
+        cleaned = [json.loads(ln) for ln in lines if json.loads(ln)["decision"] == "cleaned"]
+        assert cleaned and cleaned[0]["worker_request_id"] == "wr-real-9"
+        assert cleaned[0]["voice_id"] == v.voice_id
     _run(_t())
 
 

@@ -85,14 +85,23 @@ def _error_code(exc: BaseException) -> str:
     return str(getattr(exc, "code", None) or type(exc).__name__)[:200]
 
 
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
 @dataclass(frozen=True)
 class ClaimedVoice:
-    """认领到的行的纯值快照（脱离 ORM session，跨事务安全传递）。"""
+    """认领到的行的纯值快照（脱离 ORM session，跨事务安全传递）。
+
+    携带 ``temporary_expires_at`` / ``cleanup_attempts``（认领时的值）供 audit
+    结构化（spec §6 对账字段）。"""
 
     pk: object               # UserVoice.id
     voice_id: str
     user_id: object
     source_job_id: str | None
+    temporary_expires_at: datetime | None = None
+    cleanup_attempts: int = 0
 
 
 @dataclass
@@ -179,6 +188,8 @@ async def claim_batch(
                 voice_id=row.voice_id,
                 user_id=row.user_id,
                 source_job_id=getattr(row, "source_job_id", None),
+                temporary_expires_at=row.temporary_expires_at,
+                cleanup_attempts=int(row.cleanup_attempts or 0),
             )
         )
     await db.commit()
@@ -282,6 +293,8 @@ async def cleanup_expired_temporary_voices(
                 _safe_audit(
                     audit_emit, decision="dry_run", voice_id=r.voice_id,
                     user_id=str(r.user_id), dry_run=True,
+                    cleanup_attempts=int(r.cleanup_attempts or 0),
+                    temporary_expires_at=_iso(r.temporary_expires_at),
                 )
             return CleanupReport(dry_run=True, selected=[r.voice_id for r in rows])
 
@@ -302,7 +315,8 @@ async def cleanup_expired_temporary_voices(
             # 付费/外部。worker client 是**同步阻塞** HTTP（read 超时可达 60s）；
             # 丢线程跑，**绝不阻塞 gateway 事件循环**（参照 r2_artifact_sweeper
             # 的 asyncio.to_thread(publish_artifacts)）。失败 raise。
-            await asyncio.to_thread(
+            # 返回值是 worker_request_id（对账锚点；mock / 旧 adapter 可能返 None）
+            worker_request_id = await asyncio.to_thread(
                 worker_delete,
                 c.voice_id,
                 user_id=c.user_id,
@@ -315,14 +329,20 @@ async def cleanup_expired_temporary_voices(
                     db, c.pk, run_id=run_id, error=_error_code(exc), now=_now()
                 )
             code = _error_code(exc)
+            # 失败后 attempts = 认领时的值 + 1（release_with_backoff 已 +1）
+            attempts_after = c.cleanup_attempts + 1
             if outcome == "gave_up":
                 report.gave_up += 1
                 _safe_audit(audit_emit, decision="cleanup_give_up",
-                            voice_id=c.voice_id, user_id=str(c.user_id), error=code)
+                            voice_id=c.voice_id, user_id=str(c.user_id), error=code,
+                            cleanup_attempts=attempts_after,
+                            temporary_expires_at=_iso(c.temporary_expires_at))
             elif outcome == "failed":
                 report.failed += 1
                 _safe_audit(audit_emit, decision="cleanup_failed",
-                            voice_id=c.voice_id, user_id=str(c.user_id), error=code)
+                            voice_id=c.voice_id, user_id=str(c.user_id), error=code,
+                            cleanup_attempts=attempts_after,
+                            temporary_expires_at=_iso(c.temporary_expires_at))
             else:  # noop：lease 已被重认领
                 report.run_id_conflict += 1
             continue
@@ -332,7 +352,10 @@ async def cleanup_expired_temporary_voices(
         if ok:
             report.deleted += 1
             _safe_audit(audit_emit, decision="cleaned",
-                        voice_id=c.voice_id, user_id=str(c.user_id))
+                        voice_id=c.voice_id, user_id=str(c.user_id),
+                        worker_request_id=worker_request_id,
+                        cleanup_attempts=c.cleanup_attempts,
+                        temporary_expires_at=_iso(c.temporary_expires_at))
         else:
             report.run_id_conflict += 1
     return report
