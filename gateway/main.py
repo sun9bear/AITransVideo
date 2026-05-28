@@ -321,6 +321,27 @@ async def lifespan(app: FastAPI):
             "reclaim falls back to the per-reserve inline expire",
         )
 
+    # Phase 4.3b-C: Express temporary-voice cleanup sweeper. Deletes the
+    # DashScope voice for expired temporary cosyvoice clones (paid worker call)
+    # then soft-deletes the user_voices row. Distinct from the reservation
+    # sweeper above (that one only flips reservation status, never calls the
+    # worker). Defaults to DRY-RUN (AVT_EXPRESS_VOICE_CLEANUP_DRY_RUN=true) so
+    # it only logs "would delete" until an operator flips it on. worker
+    # unavailable -> fail-fast before claiming. Same fail-safe pattern: a broken
+    # sweeper must not block gateway startup. migration 033 must be applied for
+    # the cleanup_* columns to exist; until then a tick logs and continues.
+    try:
+        from express_voice_cleanup_sweeper import sweeper_loop as _express_voice_cleanup_loop
+        _express_voice_cleanup_task = _asyncio.create_task(
+            _express_voice_cleanup_loop(), name="express-voice-cleanup-sweeper",
+        )
+        app.state.express_voice_cleanup_sweeper_task = _express_voice_cleanup_task
+    except Exception:
+        logger.exception(
+            "Failed to start express_voice_cleanup_sweeper; expired temporary "
+            "voices will not be auto-reclaimed (manual CLI cleanup still works)",
+        )
+
     # Phase 8 §T8.4: pan backup background schedulers.
     # 4 loops: archive_scanner (daily 03:30 BJT), token_refresh (6h),
     # orphan_cleanup (Sat 04:00 BJT), stale_reaper (30 min).
@@ -352,6 +373,8 @@ async def lifespan(app: FastAPI):
         # Phase 4.3a PR2-D: cancel the reservation TTL sweeper cleanly so
         # shutdown doesn't hang on its asyncio.sleep().
         "express_reservation_sweeper_task",
+        # Phase 4.3b-C: cancel the temporary-voice cleanup sweeper on shutdown.
+        "express_voice_cleanup_sweeper_task",
         # Phase 8 §T8.4 pan schedulers (CodeX P2-5: previously omitted,
         # causing potential race with engine.dispose() on shutdown).
         "pan_archive_scanner_task",

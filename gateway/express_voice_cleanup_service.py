@@ -25,6 +25,8 @@ callable（C/sweeper 层装配真 ``MainlandWorkerClient.delete_voice``；worker
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -33,6 +35,21 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import UserVoice
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_audit(audit_emit, /, **fields) -> None:
+    """调注入式 audit 回调；audit 永不破坏清理（buggy emitter / 写盘失败都吞）。
+
+    ``audit_emit=None`` → no-op（B core 不强制 audit；C/D 装配真 emitter）。
+    """
+    if audit_emit is None:
+        return
+    try:
+        audit_emit(**fields)
+    except Exception:  # noqa: BLE001 — audit 非致命
+        logger.exception("voice cleanup audit emit failed (non-fatal)")
 
 # 只清 Express 自动 clone 出的临时 cosyvoice 音色（有 DashScope worker voice 可删）
 CLEANUP_PROVIDER = "cosyvoice_voice_clone"
@@ -241,6 +258,7 @@ async def cleanup_expired_temporary_voices(
     now: datetime | None = None,
     include_give_up: bool = False,
     lease_seconds: int = CLEANUP_CLAIM_LEASE_SECONDS,
+    audit_emit=None,
 ) -> CleanupReport:
     """清理核心入口（spec §4.1）。
 
@@ -260,6 +278,11 @@ async def cleanup_expired_temporary_voices(
             rows = await select_eligible(
                 db, limit=limit, now=now, include_give_up=include_give_up
             )
+            for r in rows:
+                _safe_audit(
+                    audit_emit, decision="dry_run", voice_id=r.voice_id,
+                    user_id=str(r.user_id), dry_run=True,
+                )
             return CleanupReport(dry_run=True, selected=[r.voice_id for r in rows])
 
     # phase 1：认领（短事务）
@@ -276,21 +299,30 @@ async def cleanup_expired_temporary_voices(
     # phase 2：处理（事务外，逐行；每行独立短事务更新）
     for c in claimed:
         try:
-            worker_delete(
+            # 付费/外部。worker client 是**同步阻塞** HTTP（read 超时可达 60s）；
+            # 丢线程跑，**绝不阻塞 gateway 事件循环**（参照 r2_artifact_sweeper
+            # 的 asyncio.to_thread(publish_artifacts)）。失败 raise。
+            await asyncio.to_thread(
+                worker_delete,
                 c.voice_id,
                 user_id=c.user_id,
                 job_id=c.source_job_id or "cleanup",
                 reason="temporary_voice_ttl_cleanup",
-            )  # 付费/外部；失败 raise
+            )
         except Exception as exc:  # noqa: BLE001 — 任意失败均 backoff/give-up（无 already-gone 捷径）
             async with db_factory() as db:
                 outcome = await release_with_backoff(
                     db, c.pk, run_id=run_id, error=_error_code(exc), now=_now()
                 )
+            code = _error_code(exc)
             if outcome == "gave_up":
                 report.gave_up += 1
+                _safe_audit(audit_emit, decision="cleanup_give_up",
+                            voice_id=c.voice_id, user_id=str(c.user_id), error=code)
             elif outcome == "failed":
                 report.failed += 1
+                _safe_audit(audit_emit, decision="cleanup_failed",
+                            voice_id=c.voice_id, user_id=str(c.user_id), error=code)
             else:  # noop：lease 已被重认领
                 report.run_id_conflict += 1
             continue
@@ -299,6 +331,8 @@ async def cleanup_expired_temporary_voices(
             ok = await complete_soft_delete(db, c.pk, run_id=run_id, now=_now())
         if ok:
             report.deleted += 1
+            _safe_audit(audit_emit, decision="cleaned",
+                        voice_id=c.voice_id, user_id=str(c.user_id))
         else:
             report.run_id_conflict += 1
     return report
