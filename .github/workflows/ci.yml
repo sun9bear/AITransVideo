@@ -46,9 +46,10 @@ jobs:
           tests/test_aligner_concurrency.py::test_align_all_parallel_first_error_sets_stop_event_and_skips_paid_fallback
           tests/test_aligner_concurrency.py::test_align_all_parallel_base_exception_sets_stop_event_and_reraises
 
-  # Phase 4.3a PR2-C-pg: reservation 并发原子性需要真 PostgreSQL（users row
-  # FOR UPDATE 阻塞语义，sqlite 测不了）。独立 job 起 postgres service，只跑
-  # 这一个文件；不影响上面的 backend job（仍纯 pytest 无 PG 依赖）。
+  # Phase 4.3a/4.3b PG 并发原子性需要真 PostgreSQL（FOR UPDATE [SKIP LOCKED]
+  # 阻塞语义，sqlite 测不了）。独立 job 起 postgres service，只跑 PG integration
+  # 文件（PR2 reservation atomic + 4.3b voice-cleanup claim 并发）；不影响上面的
+  # backend job（仍纯 pytest 无 PG 依赖）。
   backend-pg-integration:
     runs-on: ubuntu-latest
     services:
