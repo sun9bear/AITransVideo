@@ -868,6 +868,10 @@ class ExpressCloneReservation(Base):
         # 幂等第二道防线（spec §2.3 / §4.1）：同 (user,job,speaker) 最多
         # 一个 active(reserved)。partial unique —— consumed/released/expired
         # 不占唯一槽。
+        # partial unique：同时声明 postgresql_where + sqlite_where（同条件），
+        # 让 partial 语义在 PG（生产）和 sqlite（单测）都生效。否则 sqlite
+        # 忽略 postgresql_where → 退化成全量 unique → expired 行仍占 (user,
+        # job,speaker) 唯一槽，新 reserved 插入误冲突（生产 PG partial 正确）。
         Index(
             "uq_express_reservation_active",
             "user_id",
@@ -875,6 +879,7 @@ class ExpressCloneReservation(Base):
             "speaker_id",
             unique=True,
             postgresql_where=text("status = 'reserved'"),
+            sqlite_where=text("status = 'reserved'"),
         ),
         # budget count 查询（spec §5）
         Index(
@@ -888,6 +893,7 @@ class ExpressCloneReservation(Base):
             "idx_express_reservation_ttl_pending",
             "expires_at",
             postgresql_where=text("status = 'reserved'"),
+            sqlite_where=text("status = 'reserved'"),
         ),
     )
 
