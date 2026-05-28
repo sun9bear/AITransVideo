@@ -248,17 +248,21 @@ def test_register_smart_passes_routing_and_temporary_fields():
     pass-through 给 add_user_voice。
     """
     src = _read_user_voice_api()
+    # NB: requires_worker / is_temporary / target_model 在 E-fix 后改为
+    # 校验后变量（requires_worker=requires_worker / target_model=target_model_raw
+    # / is_temporary=is_temporary），不再是内联 bool(body.get(...))。
+    # 严格 bool + target_model 校验由 test_phase43a_e_fix_*.py 行为测试覆盖。
     required_passthrough = [
         'region_constraint=str(body.get("region_constraint")',
-        'requires_worker=bool(body.get("requires_worker")',
-        'target_model=body.get("target_model")',
+        'requires_worker=requires_worker,',
+        'target_model=target_model_raw,',
         'worker_provider=body.get("worker_provider")',
         'worker_region=body.get("worker_region")',
         'clone_api_model=body.get("clone_api_model")',
         'billing_sku=body.get("billing_sku")',
         'clone_provider_request_id=body.get("clone_provider_request_id")',
         'clone_worker_request_id=body.get("clone_worker_request_id")',
-        'is_temporary=bool(body.get("is_temporary")',
+        'is_temporary=is_temporary,',
         'temporary_expires_at=_parse_optional_datetime(',
     ]
     for snippet in required_passthrough:
