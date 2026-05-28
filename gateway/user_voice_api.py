@@ -22,6 +22,8 @@ from user_voice_service import (
     add_user_voice,
     auto_reuse_summary_dict,
     candidate_to_dict,
+    count_active_temporary_voices,
+    count_express_auto_clones_today,
     delete_user_voice,
     fetch_user_voice,
     list_user_voices,
@@ -1220,6 +1222,94 @@ async def internal_register_smart_clone(
         "ok": True,
         "voice_id": voice.voice_id,
         "user_id": str(voice.user_id),
+    })
+
+
+@internal_router.get("/express-auto-clone-budget")
+async def internal_express_auto_clone_budget(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Phase 4.3a §2.5 成本闸：查询某 user 的 Express auto-clone 预算。
+
+    Pipeline（Layer 5/6/7，spec §2.6）在 sample extraction / OSS upload /
+    worker clone **之前**调此 endpoint，只读 ``can_clone`` + ``deny_reason``
+    决策。两个独立 cap：
+
+    - **daily_cap**：今天（UTC 自然日）发生过的 express_auto clone 次数上限
+      （``count_express_auto_clones_today`` —— 不过滤 expired_at / is_temporary）
+    - **active_temp_cap**：当前 active 临时音色数上限
+      （``count_active_temporary_voices`` —— is_temporary=true AND expired_at IS NULL）
+
+    Auth: ``X-Internal-Key`` only（与其它 internal endpoint 一致）。
+
+    Response 200:
+        {
+          "ok": true,
+          "daily_count": int, "daily_cap": int, "daily_remaining": int,
+          "active_temp_count": int, "active_temp_cap": int, "active_temp_remaining": int,
+          "can_clone": bool,
+          "deny_reason": null | "daily_cap_exceeded" | "active_temp_cap_exceeded"
+        }
+
+    fail-closed：admin_settings 读不到 → can_clone=false +
+    deny_reason="admin_settings_unavailable"（不查 DB）。
+
+    deny_reason 优先级（固定，Codex E2 review 要求）：
+        admin_settings_unavailable > daily_cap_exceeded > active_temp_cap_exceeded > null
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    user_id = request.query_params.get("user_id", "")
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (ValueError, AttributeError, TypeError):
+        return _json(400, {"error": "invalid_user_id"})
+
+    # fail-closed：admin_settings 读不到 → 不让 clone（不查 DB）
+    try:
+        from admin_settings import load_settings
+        admin = load_settings()
+        daily_cap = int(
+            getattr(admin, "express_cosyvoice_auto_clone_per_user_daily_cap", 5)
+        )
+        active_temp_cap = int(
+            getattr(admin, "express_cosyvoice_auto_clone_per_user_active_temp_cap", 3)
+        )
+    except Exception as exc:
+        logger.warning(
+            "express-auto-clone-budget: admin_settings load failed for "
+            "user_id=%s: %s",
+            user_id, exc,
+        )
+        return _json(200, {
+            "ok": True,
+            "can_clone": False,
+            "deny_reason": "admin_settings_unavailable",
+        })
+
+    daily_count = await count_express_auto_clones_today(db, user_uuid)
+    active_temp_count = await count_active_temporary_voices(db, user_uuid)
+
+    # deny_reason 优先级固定：daily 先于 active（每日总量限制优先于并发库存）
+    deny_reason: str | None = None
+    if daily_count >= daily_cap:
+        deny_reason = "daily_cap_exceeded"
+    elif active_temp_count >= active_temp_cap:
+        deny_reason = "active_temp_cap_exceeded"
+
+    return _json(200, {
+        "ok": True,
+        "daily_count": daily_count,
+        "daily_cap": daily_cap,
+        "daily_remaining": max(0, daily_cap - daily_count),
+        "active_temp_count": active_temp_count,
+        "active_temp_cap": active_temp_cap,
+        "active_temp_remaining": max(0, active_temp_cap - active_temp_count),
+        "can_clone": deny_reason is None,
+        "deny_reason": deny_reason,
     })
 
 
