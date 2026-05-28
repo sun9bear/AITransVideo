@@ -182,6 +182,8 @@ class JobService:
         display_name: str | None = None,
         expires_at: str | None = None,
         smart_consent: dict | None = None,
+        express_consent: dict | None = None,
+        express_consent_parse_error: str | None = None,
     ) -> JobRecord:
         normalized_source_type = str(source_type).strip()
         normalized_source_ref = str(source_ref).strip()
@@ -286,6 +288,12 @@ class JobService:
             # auto-clone / auto-translation-review paths. None for
             # express/studio jobs (Gateway only forwards when service_mode==smart).
             smart_consent=smart_consent,
+            # Phase 4.3a Express auto-clone canary (spec §3.2). JobRecord
+            # persists; pipeline (Phase 4.3a F stage) reads to gate the
+            # CosyVoice auto-clone. None for studio/smart jobs (Gateway
+            # only forwards when service_mode==express).
+            express_consent=express_consent,
+            express_consent_parse_error=express_consent_parse_error,
         )
         self.store.save_job(record)
         self.store.append_event(

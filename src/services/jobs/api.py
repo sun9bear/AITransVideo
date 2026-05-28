@@ -930,6 +930,22 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                             if isinstance(payload.get("smart_consent"), dict)
                             else None
                         ),
+                        # Phase 4.3a Express auto-clone passthrough (spec
+                        # §3.2). Gateway has already run validate_express_consent
+                        # and (when auto_voice_clone is True) added the
+                        # authoritative server_confirmed_at field; pipeline
+                        # reads the persisted dict to gate the CosyVoice
+                        # auto-clone canary.
+                        express_consent=(
+                            payload.get("express_consent")
+                            if isinstance(payload.get("express_consent"), dict)
+                            else None
+                        ),
+                        express_consent_parse_error=(
+                            str(payload["express_consent_parse_error"]).strip()
+                            if payload.get("express_consent_parse_error")
+                            else None
+                        ),
                     )
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return

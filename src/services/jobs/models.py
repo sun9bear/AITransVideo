@@ -197,6 +197,33 @@ class JobRecord:
     # and tests/test_smart_auto_voice_review.py:206 for enforcement.
     smart_consent: dict[str, object] | None = None
 
+    # --- Phase 4.3a Express auto-clone (canary, 2026-05-28) ---
+    # User's express-mode consent payload (spec v0.3 §3). Written by
+    # Gateway at job creation from the request body. Persisted on
+    # JobRecord, read by pipeline (Phase 4.3a F) to gate the Express
+    # CosyVoice auto-clone canary path. Always None for studio/smart jobs.
+    # Shape: {
+    #   "auto_voice_clone": bool,          # explicit opt-in (strict True)
+    #   "client_confirmed_at": str | None, # frontend timestamp, untrusted
+    #   "server_confirmed_at": str | None, # gateway-generated UTC ISO8601;
+    #                                      # set ONLY when auto_voice_clone
+    #                                      # is True; the authoritative
+    #                                      # timestamp for worker request +
+    #                                      # audit (spec §3.1.a).
+    # }
+    # ``auto_voice_clone is True`` is the gate (strict identity, matches
+    # smart_consent style). Pipeline must read ``server_confirmed_at``
+    # not ``client_confirmed_at`` for worker / audit-level consent time.
+    express_consent: dict[str, object] | None = None
+    # Parse error reason from ``validate_express_consent`` when the
+    # raw payload was malformed (e.g. ``auto_voice_clone_not_bool``).
+    # Soft-skip semantics: presence of a non-None value means the
+    # client sent a malformed payload but the job still continues
+    # without auto-clone — pipeline writes the reason to audit JSONL
+    # so排障 can distinguish "user did not opt in" from "client bug".
+    # spec §3.1.a + §9.1 audit schema.
+    express_consent_parse_error: str | None = None
+
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
         self.job_type = str(self.job_type).strip()
@@ -220,6 +247,11 @@ class JobRecord:
         self.fallback_summary = _copy_optional_dict(self.fallback_summary)
         self.smart_state = _copy_optional_dict(self.smart_state)
         self.smart_consent = _copy_optional_dict(self.smart_consent)
+        # Phase 4.3a: deep-copy and normalize express_consent + parse_error
+        self.express_consent = _copy_optional_dict(self.express_consent)
+        self.express_consent_parse_error = _normalize_optional_text(
+            self.express_consent_parse_error
+        )
         self.user_id = _normalize_optional_text(self.user_id)
         self.workspace_dir = _normalize_optional_text(self.workspace_dir)
         self.source_content_hash = _normalize_optional_text(self.source_content_hash)
@@ -336,6 +368,9 @@ class JobRecord:
             "smart_state": _serialize_optional_dict(self.smart_state),
             # --- Smart MVP P2 entry-input (PR#3C-b3g) ---
             "smart_consent": _serialize_optional_dict(self.smart_consent),
+            # --- Phase 4.3a Express auto-clone entry-input ---
+            "express_consent": _serialize_optional_dict(self.express_consent),
+            "express_consent_parse_error": self.express_consent_parse_error,
         }
 
     @classmethod
@@ -404,6 +439,9 @@ class JobRecord:
             smart_state=payload.get("smart_state"),
             # --- Smart MVP P2 entry-input (PR#3C-b3g) ---
             smart_consent=payload.get("smart_consent"),
+            # --- Phase 4.3a Express auto-clone entry-input ---
+            express_consent=payload.get("express_consent"),
+            express_consent_parse_error=payload.get("express_consent_parse_error"),
         )
 
 
