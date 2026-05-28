@@ -18,6 +18,7 @@
 - Smart job 是否允许进入 editing
 - Smart/Studio 项目列表“修改”入口
 - editing 内音色复用、显式 clone、审听与 post-edit re-synthesis 计量
+- CosyVoice clone gate、source_segments、worker routing 在 editing 中的保留和清除
 - `edit_generation` 与 Pan backup/restore 的当前代约束
 - editing 写请求经 Gateway Job API proxy 时受 CSRF same-origin guard
 
@@ -39,8 +40,12 @@ graph TD
     CandidateApi --> StrongNamed["strong_named cross-source unique-name"]
     VoiceModify --> ReuseMatch["matchVoiceForSelection legacy reuse check"]
     VoiceModify --> CloneModal["VoiceCloneModal reuse / explicit clone"]
+    VoiceModify --> CosyGate["CosyVoice clone-gate"]
+    CosyGate --> CosyCloneModal["CosyVoiceCloneModal + source_segments"]
     VoiceModify --> AudioAudit["SpeakerAudioAuditModal"]
     CloneModal --> VoiceOverride["apply voice override + voice_reuse"]
+    CosyCloneModal --> WorkerOverride["apply voice override + requires_worker"]
+    WorkerOverride --> VoiceOverride
 
     Speakers --> CreateDialog["EditPageSpeakerCreateDialog"]
     CreateDialog --> CreateApi["POST /editing/speakers"]
@@ -107,6 +112,8 @@ graph TD
 - `VoiceModifyTab.tsx` 也调用 `voice-candidates`，按强匹配、可能匹配、其他个人音色分组展示，和 Studio voice selection 保持一致；跨源唯一同名候选可作为 `strong_named` 强复用候选出现。
 - approve payload 可以带 `voice_reuse`，让 Gateway 区分复用已有音色与新克隆。
 - clone 不是进入编辑页后的自动动作，仍受 clone lock、source metadata、calibration hook 约束。
+- CosyVoice clone 入口会先读 `/api/voice/cosyvoice/clone-gate`，并与 provider `supports_clone` 做 AND；gate 失败只隐藏/禁用入口，不触发付费 worker。
+- `CosyVoiceCloneModal` 支持上传 sample 或从当前任务选择 `source_segments`，提交前必须经过 consent modal。
 
 结论：后编辑音色修改已经接回主审核流的复用/克隆安全边界，不做后台自动克隆。
 
@@ -196,6 +203,15 @@ graph TD
 
 结论：后编辑重合成已经具备成本归因入口，避免与主流水线 TTS 混算。
 
+### 3.12 CosyVoice worker routing 是 editing voice-map 的一部分
+
+- `src/services/jobs/editing_voice_map.py` 在 set voice override 时可写 `requires_worker=True` 与 `worker_target_model`。
+- `src/services/jobs/editing_commit.py` 会把 worker routing 写进 baseline `editor/segments.json`，这是后续 pipeline 重跑 TTS 的输入事实。
+- `src/services/jobs/copy_service.py` 在 `copy_as_new` 时保留 worker routing；选择非 worker 音色时会清除 stale `requires_worker / worker_target_model`。
+- `VoiceModifyTab.tsx` 对 clone voice preview 和后续 regenerate 复用同一套 routing，避免 UI 看到 CosyVoice clone voice，但正式 TTS 走 legacy endpoint。
+
+结论：post-edit 的音色修改不能只改 `voice_id`；CosyVoice clone voice 必须连同 worker routing 一起提交、持久化、复制或清除。
+
 ## 4. 关键证据
 
 - `src/services/jobs/api.py`
@@ -207,6 +223,11 @@ graph TD
   - Studio/Smart edit eligibility
 - `frontend-next/src/app/(app)/workspace/[jobId]/edit/VoiceModifyTab.tsx`
   - Voice modify candidate-first reuse / clone entry
+  - CosyVoice clone-gate and worker routing
+- `frontend-next/src/components/voice-clone/CosyVoiceCloneModal.tsx`
+  - explicit CosyVoice clone entry
+- `frontend-next/src/components/voice-clone/CosyVoiceSegmentPicker.tsx`
+  - source_segments picker
 - `frontend-next/src/app/(app)/workspace/[jobId]/edit/SplitSegmentDialog.tsx`
   - multi-cut split UI
   - explicit LLM suggest-split button
@@ -235,6 +256,11 @@ graph TD
   - sync hard gate
   - overwrite claim
   - stale deliverable invalidation
+  - worker routing persistence
+- `src/services/jobs/editing_voice_map.py`
+  - voice-map worker routing metadata
+- `src/services/jobs/copy_service.py`
+  - copy_as_new routing preservation
 - `src/services/usage_meter.py`
   - post-edit re-synthesis bucket
 - `gateway/models.py`
@@ -250,6 +276,7 @@ graph TD
 - 想改 Smart job 是否能进入 editing
 - 想改项目列表是否展示“修改”入口
 - 想改 editing 中音色复用、clone、审听入口
+- 想排查 CosyVoice clone voice 在 editing regenerate / commit / copy_as_new 后为什么没有走国内 worker
 - 想改编辑页布局、段落行、左侧当前段操作面
 - 想改 split-many、智能切点、切点拖动或 source/cn index 规则
 - 想改批量 re-TTS 或 segment status

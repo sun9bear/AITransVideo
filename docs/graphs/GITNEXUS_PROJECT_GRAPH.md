@@ -1,6 +1,6 @@
 # GitNexus 项目图谱
 
-新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-05-24`
+新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-05-28`
 
 生成方式：基于 GitNexus 最新索引、Git 历史 diff 与源代码交叉整理。
 
@@ -8,24 +8,24 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1418 |
-| 节点数 | 25,600 |
-| 关系数 | 57,969 |
-| 聚类数 | 950 |
+| 文件数 | 1504 |
+| 节点数 | 27,534 |
+| 关系数 | 62,770 |
+| 聚类数 | 1030 |
 | 流程数 | 300 |
-| 索引提交 | `34a7838` |
+| 索引提交 | `0ba02c77` |
 | 索引状态 | `up-to-date` |
 
 本轮最需要反映的结构变化：
 
-- Gateway 安全面完成 CSRF 收口：`gateway/csrf.py` 的 same-origin guard 覆盖 auth/account、job proxy、upload、admin、support、notifications、billing、Pan、voice catalog/user voice 等写路由。
-- 生产安全默认更严格：Compose 默认 `AVT_ENV=production`，`validate_production_safety` 要求生产 auth，fake payment 默认只允许 dev/test，Next healthcheck 改为静态 `/healthz.txt`。
-- Smart P5 进入默认自动化：`strong_named` 支持跨源唯一同名个人音色自动复用；`smart_auto_reuse_on_possible_user_voice_match=True` 会自动提升 top possible match，且优先于旧的 pause-on-possible-match。
-- MiniMax `status_code=1008 / insufficient balance / 余额不足` 被归类为 provider exhaustion，Smart clone 会暂停而不是按普通 provider error 重试到 preset。
-- Smart analytics 成为 admin 正式控制面：`gateway/admin_smart_analytics_api.py` 提供 summary/csv、job report summary/csv、Phase 1b flags，前端新增 `/admin/smart-analytics` 与 `/admin/report-analysis`。
-- Phase 1a/1b 质量 sidecar 进入项目事实：translation quality、subtitle width、speaker evidence、voice sample scoring shadow 通过 Job API `/jobs/{id}/reports` 与 admin report analysis 汇总。
-- 成本/模型配置继续推进：Gemini 3.5 Flash 可选，Gemini 3.1 Flash Lite 迁移到 GA `gemini-3.1-flash-lite`，成本目录继续以 RMB-direct 字段固化 provider price。
-- 前端 polling 治理落地：`usePollingTask`、`useBackgroundTask`、admin heartbeat、notification bell 在 hidden tab 暂停或降频，并在 visibility 恢复后刷新。
+- CosyVoice clone / domestic worker 成为新主干：Gateway 增加 `/api/voice/cosyvoice/clone-gate` 与 `POST /api/voice/cosyvoice/clone`，`src/services/mainland_worker` 提供 HMAC worker client/app/provider 层。
+- 用户显式付费 clone 边界更清晰：CosyVoice clone 必须经过 consent modal、admin allowlist/GA、max voices、sample XOR `source_segments`、production uploader、worker config gate，所有 gate 都在付费 worker 调用前 fail-closed。
+- `user_voices` 承载 worker routing 与审计事实：`requires_worker`、`target_model`、`region_constraint`、`clone_worker_request_id`、`temporary_expires_at` 已进入 schema，并通过 candidates、review approve、editing voice-map、commit/copy-as-new 传播。
+- TTS worker path 已接入 workflow：`requires_worker=True` 的 segment 强制走 CosyVoice mainland worker，不静默 fallback；worker billed chars 是 authoritative；segment regenerate 避免 worker 段落 final retry loop。
+- 前端克隆 UX 补齐：`CosyVoiceCloneModal`、`CosyVoiceConsentModal`、`CosyVoiceSegmentPicker` 与 `cosyvoiceClone.ts` 进入 VoiceSelectionPanel 和 VoiceModifyTab，Next dev rewrite 收窄以避免 clone 请求误代理到生产。
+- Smart 上线门禁继续收紧：两层 kill switch、pricing consistency/fallback、`fail_and_refund` deferred blocker 与 voice auto-reuse quality metrics 都有测试守卫。
+- Pan backup 经过生产问题后硬化：HTTP feature gate、全局非阻塞 advisory lock、`AVT_PAN_TMP_DIR`、free-space preflight、tail range probe、stale reaper/residue cleanup 状态责任边界已固化。
+- 文档组织面已把 AI workgroup 历史迁入 `docs/archive/ai-workgroup`，`docs/plans/README.md` 成为当前计划状态索引。
 
 ## 2. 关键基座
 
@@ -41,6 +41,7 @@
 | Auth | phone + email registration, reset, session | `gateway/auth_phone.py`, `gateway/auth_email.py`, `frontend-next/src/components/auth/*` |
 | Security | CSRF same-origin guard, production env validation, fake payment production gate | `gateway/csrf.py`, `gateway/main.py`, `gateway/startup_checks.py`, `gateway/payment_providers.py` |
 | Calibration | manual / clone-after / review-preflight / Smart clone mirror / candidate matching / source metadata | `gateway/user_voice_api.py`, `gateway/user_voice_service.py`, `gateway/voice_calibration_hook.py`, `gateway/voice_calibration_review_preflight.py` |
+| CosyVoice Worker | explicit user clone, clone-gate, sample/source_segments, OSS/R2 uploader, HMAC mainland worker, worker-routed TTS | `gateway/cosyvoice_clone/api.py`, `gateway/mainland_voice_worker.py`, `src/services/mainland_worker/*`, `src/services/tts/tts_generator.py` |
 | Admin/Ops | settings, Smart LLM defaults, Smart voice policy, Smart analytics, report analysis, Phase 1b flags, traffic, support, cost, disk cleanup/resize, R2 sweeper | `gateway/admin_settings.py`, `src/services/llm_registry.py`, `gateway/admin_smart_analytics_api.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/main.py` |
 | Metering & Settlement | `UsageMeter`, voice reuse/clone/rejection meter, RMB-direct pricing, Smart credits policy, terminal settle, cost backfill | `src/services/usage_meter.py`, `gateway/cost_management.py`, `gateway/credits_service.py`, `gateway/job_terminal_mirror.py`, `gateway/cost_summary_backfill.py` |
 | Pan Backup | admin-only Baidu Pan archive/restore, BackupRecord state machine, schedulers, residue cleanup, observability | `gateway/pan/*`, `gateway/background_task_reconciler.py`, `frontend-next/src/lib/api/pan.ts`, `scripts/r2_observability.py` |
@@ -50,6 +51,7 @@
 
 - 图谱索引：`docs/graphs/README.md`
 - 工作流内核图：`docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- CosyVoice / Mainland Worker 图：`docs/graphs/GITNEXUS_COSYVOICE_MAINLAND_WORKER_GRAPH.md`
 - Smart 自动审核图：`docs/graphs/GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
 - 剪映草稿交付图：`docs/graphs/GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
 - 审核流图：`docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
@@ -72,6 +74,7 @@ graph TD
     TranslationForm["TranslationForm service_mode selector"] --> FrontApi
     ReviewUI["Review panels + SmartAutoDecisionPanel"] --> FrontApi
     EditUI["Post-edit UI"] --> FrontApi
+    VoiceCloneUI["CosyVoice clone modal + source segment picker"] --> FrontApi
     AppShell["Bell / popup / support / admin entry"] --> FrontApi
     AdminUI["Admin / Ops UI"] --> FrontApi
     PanUI["Admin Pan dashboard / backups / bulk backup"] --> FrontApi
@@ -91,6 +94,8 @@ graph TD
     Gateway --> PanPlane["Pan backup admin API + OAuth"]
     Gateway --> SecurityPlane["CSRF same-origin + production safety"]
     Gateway --> SmartAnalyticsApi["admin_smart_analytics_api"]
+    Gateway --> CosyVoiceCloneApi["CosyVoice clone API + clone-gate"]
+    Gateway --> MainlandWorkerAdmin["mainland worker admin status/healthz"]
     Gateway --> Proxy["ownership + subresource proxy"]
 
     JobApi --> Workflow["process.py / ProjectWorkflow"]
@@ -143,6 +148,15 @@ graph TD
     CandidateUI --> CloneModal["voice clone/reuse modal"]
     CandidateUI --> CandidateAudit["voice_candidate_rejected / voice_reuse audit"]
     CloneModal --> CalibrationPlane
+    CloneModal --> CosyVoiceCloneApi
+    CosyVoiceCloneApi --> CloneGate["allowlist/GA + runtime_ready + max voices"]
+    CosyVoiceCloneApi --> SampleGate["sample upload OR source_segments"]
+    SampleGate --> SampleUploader["OSS/R2 sample uploader"]
+    SampleUploader --> MainlandWorkerClient["HMAC MainlandWorkerClient.clone"]
+    MainlandWorkerAdmin --> MainlandWorkerClient
+    MainlandWorkerClient --> WorkerApp["mainland worker app /cosyvoice/*"]
+    WorkerApp --> UserVoiceWorkerRow["user_voices requires_worker + target_model + worker_request_id"]
+    UserVoiceWorkerRow --> VoiceCandidates
 
     EditUI --> EditingPlane["Smart/Studio edit / speakers / split / regenerate / batch / commit"]
     EditingPlane --> CloneModal
@@ -150,8 +164,12 @@ graph TD
     EditingPlane --> SuggestSplit["LLM suggest-split explicit button"]
     EditingPlane --> Workflow
     EditingPlane --> DeliveryReset["invalidate stale deliverables"]
+    EditingPlane --> WorkerRouting["editing voice-map preserves worker routing"]
+    WorkerRouting --> Workflow
 
     Workflow --> EditOutputs["editor package / publish outputs"]
+    Workflow --> TTSWorkerRouting["requires_worker segment -> CosyVoice mainland worker TTS"]
+    TTSWorkerRouting --> MainlandWorkerClient
     EditOutputs --> WhisperEnsure["ensure_whisper_aligned_subtitles"]
     WhisperEnsure --> PackTask["materials_pack"]
     WhisperEnsure --> JDraftTask["generate-jianying-draft"]
@@ -339,8 +357,20 @@ graph TD
 
 结论：质量改进先通过 sidecar 和 admin report-analysis 看数据，再决定是否打开行为 gate。
 
+### 5.12 CosyVoice 国内 worker 是新的付费语音边界
+
+- `gateway/cosyvoice_clone/api.py` 把 clone-gate、用户显式 clone、`source_segments` 样本拼接、uploader gate、worker config gate 和 UserVoice 写入集中在一个 Gateway 原生 API。
+- `gateway/mainland_voice_worker.py` 只暴露 admin status/healthz 和 client factory，普通用户不能直接访问 worker。
+- `src/services/mainland_worker/worker/app.py` 的业务路由全部 HMAC 验签，provider 层可在 mock/real CosyVoice 间切换。
+- migration 030/031 把 `requires_worker`、`target_model`、`clone_worker_request_id`、`temporary_expires_at` 写进 `user_voices`，让 worker routing 成为数据库事实。
+- `src/services/tts/tts_generator.py` 在 `requires_worker=True` 时强制走 `_generate_one_cosyvoice_via_worker`，不允许静默 fallback 到海外 endpoint 或默认音色。
+- `src/services/jobs/editing_voice_map.py`、`editing_commit.py`、`copy_service.py` 负责在后编辑与 copy-as-new 中保留或清除 worker routing，避免 stale routing 漂移。
+
+结论：CosyVoice clone 不是普通 voice catalog 扩展，而是由用户显式授权、Gateway 前置 gate、国内 worker RPC、UserVoice 路由事实和 TTS fail-closed 共同组成的付费语音边界。
+
 ## 6. 按任务选图
 
+- 要看 CosyVoice clone、clone-gate、source_segments、mainland worker、HMAC、worker routing、`requires_worker` TTS dispatch，读 `GITNEXUS_COSYVOICE_MAINLAND_WORKER_GRAPH.md`
 - 要看 Smart 自动审核、consent、P5 possible-match auto-reuse、voice reuse/clone quota、handoff、quality report、cost summary，读 `GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
 - 要看 phone/email auth、trial、pricing truth、Smart entry/entitlement/consent/weak-match warning、payment production gate、CSRF，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
 - 要看 Smart/Studio post-edit 修改入口、multi-cut、智能切点和编辑态克隆/复用音色，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`

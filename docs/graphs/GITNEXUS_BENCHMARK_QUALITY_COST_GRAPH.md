@@ -10,11 +10,13 @@
 - attempt-level LLM / TTS audit
 - provider/model 维度 TTS 与 post-edit re-synthesis 计量
 - voice clone / voice reuse / voice candidate rejection 计量
+- CosyVoice mainland worker billed chars 与 worker request id
 - RMB-direct provider/model cost catalog
 - Smart sidecar trio
 - Smart handoff quality report synthesis
 - Smart admin-only cost summary 与 settlement backfill
 - Smart analytics summary / CSV
+- Smart voice auto-reuse quality metrics
 - Phase 1a/1b reports and report-analysis flags
 - `user_edit_events.jsonl`
 - `effective_marker.marked_event_ids`
@@ -29,6 +31,8 @@ graph TD
     Workflow["workflow / translation / TTS"] --> Usage["UsageMeter"]
     Translator["gemini/translator.py"] --> Usage
     VoiceClone["Smart / manual voice clone"] --> Usage
+    CosyWorker["CosyVoice mainland worker TTS"] --> Usage
+    CosyWorker --> WorkerBilled["worker billed_chars + request_id"]
     VoiceReuse["same-source UserVoice reuse"] --> Usage
     VoiceReject["possible UserVoice candidate rejected"] --> Usage
     PostEditResynth["post-edit re-synthesis"] --> Usage
@@ -43,12 +47,14 @@ graph TD
     Smart --> SmartState["JobRecord.smart_state"]
     Smart --> RetryStats["retry_summary / budget_exhausted events"]
     Smart --> SmartAnalytics["admin_smart_analytics summary/csv"]
+    SmartDecision --> ReuseQuality["voice_reuse_quality"]
 
     SmartDecision --> Synth["quality_report_synthesizer.py"]
     Synth --> UserQuality["Job API smart-quality-report"]
     SmartQuality --> UserQuality
     SmartCost --> AdminCost["admin_cost_api"]
     SmartAnalytics --> Admin["admin costs / credits observability"]
+    ReuseQuality --> SmartAnalytics
 
     Workflow --> ReportSidecars["reports/*.json/jsonl"]
     ReportSidecars --> TranslationQuality["translation_quality_report"]
@@ -233,6 +239,23 @@ graph TD
 
 结论：Smart 上线前后的质量/成本判断可以在离线 sidecar 上完成，不需要引入线上付费评估调用。
 
+### 3.16 CosyVoice worker 成本以 worker 回包为准
+
+- `src/services/tts/tts_generator.py` 在 `_generate_one_cosyvoice_via_worker` 中保留 worker 返回的 `billed_chars`，不使用本地估算覆盖。
+- CosyVoice clone endpoint 会返回并记录 `worker_request_id`，`user_voices.clone_worker_request_id` 是后续支持和成本追踪的主锚点。
+- worker route 不允许 fallback 到 legacy CosyVoice/default voice，否则成本、音色和区域约束都会同时失真。
+- `src/services/tts/segment_regenerate.py` 对 worker 段落禁用 final retry loop，避免单个编辑段落失败时产生多次付费 worker 调用。
+
+结论：国内 worker 的成本证据来自 worker response 与 request id，而不是普通 TTS 字符估算。
+
+### 3.17 Smart voice auto-reuse quality 进入跨任务指标
+
+- `gateway/admin_smart_analytics_api.py` 从 decisions 中提取 `strong / strong_named / possible_auto` 复用命中。
+- 聚合逻辑会读取后续人工 edit events，计算复用后是否被用户改掉。
+- `/admin/smart-analytics` 的 voice reuse Tab 只展示后端 summary，不在前端重算。
+
+结论：自动复用的价值不只看节省 clone 成本，还要看复用后是否稳定通过用户修改。
+
 ## 4. 关键证据
 
 - `src/services/smart/sidecar_emitter.py`
@@ -250,6 +273,14 @@ graph TD
   - voice clone / voice reuse / voice candidate rejected metrics
   - provider/model TTS summary
   - post-edit re-synthesis bucket
+- `src/services/tts/tts_generator.py`
+  - mainland worker TTS billed chars preservation
+- `src/services/tts/segment_regenerate.py`
+  - worker segment retry guard
+- `gateway/cosyvoice_clone/api.py`
+  - worker_request_id and target_model echo audit
+- `gateway/alembic/versions/030_cosyvoice_clone_metadata.py`
+  - clone worker request id schema
 - `gateway/cost_management.py`
   - RMB-direct provider/model cost catalog
   - backward-compatible USD conversion fallback
@@ -258,6 +289,7 @@ graph TD
   - Smart analytics summary / CSV
   - Phase 1a/1b report analysis endpoints
   - Phase 1b flag read/update API
+  - voice auto-reuse quality metrics
 - `src/services/phase1b_report_summary.py`
   - report sidecar aggregation and recommendations
 - `src/services/translation_quality.py`
@@ -306,6 +338,8 @@ graph TD
 - 想改 Smart sidecar、quality report、cost summary
 - 想改 provider/model RMB 成本目录或 admin 成本读模型
 - 想看 Smart analytics summary / CSV 的指标来源
+- 想排查 CosyVoice worker billed chars、worker_request_id 或 clone/TTS 成本归因
+- 想评估 Smart 自动复用后是否被人工修改
 - 想看 Phase 1a/1b report analysis、translation quality、subtitle width、speaker evidence、voice sample scoring 的数据口径
 - 想决定某个 Phase 1b shadow flag 能否升级为行为 gate
 - 想看 pan backup / restore / token / residue cleanup 的事件观测口径

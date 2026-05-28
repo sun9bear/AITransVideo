@@ -11,6 +11,7 @@
 - `BackgroundTask` 调度平面
 - `BackupRecord` 与 `Job.status` 双状态机
 - tar manifest、安全打包、上传三重校验、恢复安全解包
+- HTTP feature gate、全局非阻塞 advisory lock、tar staging tmp dir 与 free-space preflight
 - archive scanner、stale reaper、orphan cleanup、residue cleanup
 - pan 事件、通知、R2 observability
 - Admin dashboard / backups list / 项目列表批量备份
@@ -47,13 +48,16 @@ graph TD
     BackgroundTask --> Dispatcher["background_task_executors.py adapters"]
 
     Dispatcher --> BackupExec["backup_executor"]
-    BackupExec --> BackupLock["PG advisory lock"]
+    BackupExec --> FeatureGate["AVT_ENABLE_PAN_BACKUP HTTP gate"]
+    BackupExec --> GlobalLock["global pg_try_advisory_lock polling"]
+    GlobalLock --> BackupLock["per-job PG advisory lock"]
     BackupLock --> JobSucceeded["Job.status=succeeded precondition"]
     JobSucceeded --> Archiving["Job.status=archiving"]
     Archiving --> Uploading["BackupRecord.status=uploading"]
-    Uploading --> Manifest["build_manifest + write_tar_with_manifest"]
+    Uploading --> TmpPreflight["AVT_PAN_TMP_DIR free-space preflight"]
+    TmpPreflight --> Manifest["build_manifest + write_tar_with_manifest"]
     Manifest --> BaiduUpload["BaiduPanClient upload chunks"]
-    BaiduUpload --> Verify3["size + md5/etag + tail read-back gates"]
+    BaiduUpload --> Verify3["size + md5/etag + range tail read-back gates"]
     Verify3 --> Uploaded["BackupRecord.status=uploaded"]
     Uploaded --> DeleteLocal["rmtree project_dir"]
     Uploaded --> DeleteR2["delete r2_artifacts"]
@@ -163,6 +167,25 @@ graph TD
 
 结论：Pan backup 不能在默认本地路径暗中启用，必须经过部署配置和管理员连接网盘。
 
+### 3.8 生产硬化后的并发与磁盘边界
+
+- Pan HTTP API 现在也受 `AVT_ENABLE_PAN_BACKUP` feature gate 保护，不只是 scheduler 被 gate。
+- `backup_executor.py` 使用全局 `pg_try_advisory_lock` + per-job lock + backoff polling，避免 blocking `pg_advisory_lock` 在等待期间占住 DB connection。
+- lock release 失败会 invalidate connection，避免 session-level advisory lock 泄漏到连接池。
+- tar staging 改走 `AVT_PAN_TMP_DIR`，并在打包前用 free-space ratio preflight 拒绝明显放不下的任务。
+- `baidu_pan_client.py` 的 remote tail verify 使用 range GET 与 tuple timeout，避免大文件 tail probe 因默认超时失败。
+
+结论：Pan backup 的主风险已经从“能否上传”扩展为“不会拖垮 DB pool、不会写爆 root disk、不会在 post-commit 残留状态上误完成”。
+
+### 3.9 stale reaper 与 residue cleanup 的状态责任已拆清
+
+- post-commit 残留场景中，`stale_reaper.py` 只负责发现并 enqueue `pan_residue_cleanup`。
+- `residue_cleanup.py` 才负责确认本地/R2 residue 清完，并最终把 job 从 `archiving` flip 到 `archived`。
+- stale reaper 在 enqueue 前必须释放 per-job advisory lock，否则 residue cleanup 会立即拿不到锁并空跑。
+- backup executor 在 R2 删除失败或 status flip 失败时保留 `archiving` 与 `r2_artifacts`，让 residue cleanup 还有重试证据。
+
+结论：不要把 `archiving -> archived` 提前放回 stale reaper；那会破坏 residue cleanup 的前置条件。
+
 ## 4. 关键证据
 
 - `gateway/pan/admin_api.py`
@@ -180,8 +203,9 @@ graph TD
   - CSRF-protected connect route
 - `gateway/pan/backup_executor.py`
   - backup state machine
-  - advisory lock
+  - global non-blocking advisory lock
   - manifest/tar/upload/3-gate verification
+  - `AVT_PAN_TMP_DIR` free-space preflight
   - post-commit cleanup
 - `gateway/pan/restore_executor.py`
   - restore state machine
@@ -189,9 +213,15 @@ graph TD
   - moved=True hidden commit point
 - `gateway/pan/residue_cleanup.py`
   - idempotent project_dir + R2 residue cleanup
+  - owns final `archiving -> archived` flip
 - `gateway/pan/stale_reaper.py`
   - stale uploading/restoring recovery
   - post-commit archiving forward-resolve
+  - residue cleanup enqueue contract
+- `gateway/pan/_feature_gate.py`
+  - HTTP API feature gate
+- `gateway/pan/_lock_keys.py`
+  - stable advisory lock keys
 - `gateway/pan/scheduler.py`
   - auto archive / token refresh / orphan cleanup / stale reaper loops
 - `gateway/background_task_reconciler.py`
@@ -217,5 +247,6 @@ graph TD
 - 想排查 `archiving / archived / restoring` 状态
 - 想排查 `BackupRecord.uploading / uploaded / restoring / restored / failed`
 - 想改 auto-archive、stale reaper、orphan cleanup、residue cleanup
+- 想排查全局锁等待、DB pool 被占、lock 泄漏、tar staging 空间不足或 tail probe 超时
 - 想确认 R2 artifacts 和本地 project dir 什么时候会被删除
 - 想接入 pan.* observability 或通知

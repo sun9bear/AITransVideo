@@ -15,6 +15,8 @@
 - translation review audit metrics
 - candidate-first user voice reuse / P5 possible-match auto-reuse / weak-match confirmation / voice clone / preset / pause orchestration
 - user voice quota、MiniMax balance exhaustion 与真实 provider wiring
+- Smart kill switch、pricing consistency、`fail_and_refund` deferred blocker
+- voice auto-reuse quality metrics
 - minor speaker preset auto-match
 - handoff 到 Studio human review
 - `[SMART_STATE]` marker、`smart_decisions.jsonl`、quality report、admin cost summary、credits policy
@@ -25,6 +27,8 @@
 graph TD
     Form["TranslationForm service_mode=smart"] --> Submit["submitTranslationJob smart_consent"]
     Submit --> GatewayPolicy["job_intercept compute_job_policy"]
+    GatewayPolicy --> KillSwitch["env + admin Smart kill switch"]
+    KillSwitch --> EntitlementOff["remove smart / smart_disabled"]
     GatewayPolicy --> ConsentValidator["smart_consent.py schema validator"]
     ConsentValidator --> PreflightQuota["pre-flight UserVoice quota safety water mark"]
     PreflightQuota --> JobRecord["JobRecord service_mode=smart"]
@@ -117,8 +121,10 @@ graph TD
     Quality --> UserQuality
     Cost --> AdminCost["GET /api/admin/jobs/{id}/cost"]
     Decisions --> SmartAnalytics["/api/admin/smart-analytics summary/csv"]
+    Decisions --> ReuseQuality["voice_reuse_quality"]
     Quality --> SmartAnalytics
     Cost --> SmartAnalytics
+    ReuseQuality --> SmartAnalytics
     Cloned --> CloneMeter["UsageMeter record_voice_clone"]
     Reused --> ReuseMeter["UsageMeter record_voice_reuse"]
     OfferedCandidates --> RejectMeter["UsageMeter voice_candidate_rejected on user rejection"]
@@ -252,6 +258,24 @@ graph TD
 
 结论：`smart_state` 是 pipeline / runner / Gateway / settlement 之间的正式桥，不是只给前端展示的备注字段。
 
+### 3.13 kill switch 与 `fail_and_refund` 是上线安全门
+
+- Smart kill switch 现在有两层：`gateway/config.py` 的 env 层和 `gateway/admin_settings.py` 的 runtime toggle。
+- `gateway/entitlements.py`、`gateway/job_intercept.py` 和 admin settings UI 都必须读取同一套开关，不允许 plan 或 admin 角色绕过。
+- `gateway/smart_consent.py` 仍显式阻断 `on_budget_exhausted="fail_and_refund"`，直到 release reserve、clone reversal、partial capture settlement 全链路完成。
+- pricing consistency validator 守住 `smart.standard=100` 的固定价事实，clean-local fallback 只服务本地可运行性，不成为第二套产品定价真源。
+
+结论：Smart 上线不是只看 pipeline 可跑；入口、权益、定价和预算耗尽策略也必须能一键停用或显式拒绝未完成路径。
+
+### 3.14 voice auto-reuse quality 已进入 Smart analytics
+
+- `gateway/admin_smart_analytics_api.py` 从 `smart_decisions.jsonl` 聚合 `strong / strong_named / possible_auto` 复用命中。
+- 同一 job 的后续 edit events 会被用来判断该 speaker 是否又被人工改掉，从而形成 auto-reuse 质量样本。
+- `/admin/smart-analytics` 新增“自动复用质量”Tab，只消费后端 `voice_reuse_quality`，前端不重新计算指标。
+- reused audit contract 保留 P5 evidence 字段和 reason code，避免后续分析丢失“为什么复用”的解释。
+
+结论：P5 auto-reuse 不再只是策略开关，已经进入可观测、可回溯、可下线的质量评估链路。
+
 ## 4. 关键证据
 
 - `frontend-next/src/components/workspace/TranslationForm.tsx`
@@ -277,6 +301,9 @@ graph TD
   - voice reuse / candidate rejection audit
 - `gateway/smart_consent.py`
   - Smart consent schema lock
+  - `fail_and_refund` blocked policy
+- `gateway/entitlements.py`
+  - Smart kill switch effective allowed modes
 - `src/services/smart/auto_translation_review.py`
   - full-auto translation review audit metrics
   - ignored `compliance_block` compatibility parameter
@@ -316,6 +343,7 @@ graph TD
 - `gateway/admin_smart_analytics_api.py`
   - Smart summary / CSV analytics
   - report analysis aggregation
+  - voice reuse quality aggregation
 - `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx`
   - admin Smart analytics UI
 - `frontend-next/src/components/workspace/TranslationForm.tsx`
@@ -328,6 +356,12 @@ graph TD
   - MiniMax 1008 / insufficient balance contract
 - `tests/test_strong_named_auto_reuse.py`
   - cross-source unique-name auto-reuse contract
+- `tests/test_smart_kill_switch.py`
+  - two-layer kill switch contract
+- `tests/test_smart_fail_and_refund_blocked.py`
+  - deferred budget policy blocker
+- `tests/test_admin_smart_analytics_voice_reuse.py`
+  - voice auto-reuse quality metrics
 
 ## 5. 什么时候优先看这张图
 
@@ -340,4 +374,6 @@ graph TD
 - 想排查 Smart job 为什么没有 quality report 或为什么显示转人工
 - 想排查 Smart 扣费、退款、成本摘要、sidecar 审计
 - 想看 Smart analytics 为什么统计某个 handoff reason、cost 或质量指标
+- 想看 Smart 为什么被 kill switch 拦住，或为什么 `fail_and_refund` 被拒绝
+- 想评估 possible/strong/strong_named 自动复用质量
 - 想改多说话人 Smart voice assignment

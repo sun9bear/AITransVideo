@@ -77,6 +77,8 @@ graph TD
     Advisory --> Blocks
 
     Blocks --> TTS["TTS"]
+    TTS --> CosyWorkerRoute["requires_worker segment -> CosyVoice mainland worker"]
+    CosyWorkerRoute --> WorkerBilled["worker billed_chars authoritative"]
     TTS --> Alignment["DSP-first alignment"]
     Alignment --> Parallel["ThreadPoolExecutor + paid_fallback semaphore"]
     Parallel --> ForceDSP["force_dsp / capped_dsp_underflow review severity"]
@@ -179,6 +181,16 @@ graph TD
 
 结论：打开 admin 开关不等于节点一定具备 whisper runtime。
 
+### 3.9 CosyVoice worker routing 已进入 TTS 主干
+
+- `src/pipeline/process.py` 会从 review approve / voice-map enrichment 读取 `requires_worker / worker_target_model`，并写回 `DubbingSegment`。
+- `requires_worker=True` 会强制段落使用 `tts_provider="cosyvoice"`，避免 job-level provider 或旧 snapshot 把克隆音色带到 MiniMax/VolcEngine 路径。
+- `src/services/tts/tts_generator.py` 对 worker 段落调用 `_generate_one_cosyvoice_via_worker`，不允许静默 fallback 到 legacy CosyVoice 默认音色。
+- worker 返回的 billed chars 是 authoritative，不能被普通字符估算覆盖。
+- `src/services/tts/segment_regenerate.py` 对 worker 段落禁用 final retry loop，避免单段重试放大成多次付费 worker 调用。
+
+结论：CosyVoice clone voice 已经不是普通 `voice_id`，而是带 worker routing 的 TTS 分支。
+
 ## 4. 关键证据
 
 - `src/pipeline/process.py`
@@ -229,6 +241,11 @@ graph TD
 - `src/services/alignment/aligner.py`
   - parallel alignment
   - paid fallback semaphore
+- `src/services/tts/tts_generator.py`
+  - `requires_worker` dispatch
+  - mainland worker billed chars preservation
+- `src/services/tts/segment_regenerate.py`
+  - worker segment retry guard
 - `src/modules/subtitles/cue_pipeline.py`
   - window-first timing
   - sync guard
@@ -240,6 +257,7 @@ graph TD
 - 想改 `process.py` 主流水线
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
 - 想改 Smart voice review、个人音色候选、P5 possible-match auto-reuse、弱匹配暂停、同源音色复用、translation review、handoff、terminal report
+- 想改 CosyVoice clone voice 如何进入 TTS、preview 或 segment regenerate
 - 想改 Phase 1a/1b report sidecars 或 Job API reports 目录
 - 想改 DSP / paid fallback / force_dsp review 语义
 - 想改 cue pipeline、SRT、deliverable-time whisper

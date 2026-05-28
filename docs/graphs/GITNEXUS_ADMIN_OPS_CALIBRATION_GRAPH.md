@@ -9,6 +9,7 @@
 - alignment / whisper / paid fallback settings
 - Smart prompt model settings
 - Smart voice candidate / clone / weak-match policy settings
+- CosyVoice clone 灰度、GA、max voices、sample uploader 与 mainland worker health
 - Smart analytics、report analysis 与 Phase 1b rollout flags
 - CSRF same-origin guard、production startup guard 与 fake payment gate
 - frontend polling governance
@@ -33,6 +34,7 @@ graph TD
     Gateway --> Costs["credits observability / cost management"]
     Gateway --> AdminCost["/api/admin/jobs/{id}/cost"]
     Gateway --> SmartAnalytics["/api/admin/smart-analytics/*"]
+    Gateway --> MainlandWorkerAdmin["/api/admin/mainland-voice-worker/*"]
     Gateway --> AdminDisk["/api/admin/disk/*"]
     Gateway --> PanAdmin["/api/admin/pan/*"]
     Gateway --> Security["csrf + production safety"]
@@ -42,9 +44,13 @@ graph TD
     Settings --> WhisperPolicy["whisper policy fields"]
     Settings --> PromptModels["prompt_models studio/express/smart"]
     Settings --> SmartVoicePolicy["smart_auto_clone / reuse / auto_reuse_possible / pause_on_possible"]
+    Settings --> CosyVoicePolicy["cosyvoice clone allowlist / GA / worker / max voices"]
     Settings --> Phase1BFlags["phase1b report flags"]
     PromptModels --> LLMRegistry["llm_registry mode defaults + admin override"]
     SmartVoicePolicy --> SmartRuntime["process.py read_admin_setting"]
+    CosyVoicePolicy --> CloneGate["/api/voice/cosyvoice/clone-gate"]
+    MainlandWorkerAdmin --> WorkerHealth["status / healthz no secret leak"]
+    WorkerHealth --> WorkerClient["build_mainland_voice_worker_client"]
     Phase1BFlags --> RuntimeFlags["services.runtime_flags"]
     OpsEnv["INSTALL_WHISPER + .[whisper] + HF_HOME"] --> WhisperCap["runtime capability"]
     WhisperCap --> WhisperPolicy
@@ -284,6 +290,17 @@ graph TD
 
 结论：看接口压力或“为什么刚才没刷新”时，需要区分 visibility-aware pause 与真实接口失败。
 
+### 3.18 CosyVoice / mainland worker 进入 admin 运维面
+
+- `gateway/admin_settings.py` 新增 CosyVoice clone 灰度字段：`cosyvoice_clone_worker_enabled`、默认 target model、allowlist、GA、max voices per user。
+- `gateway/mainland_voice_worker.py` 暴露 `/api/admin/mainland-voice-worker/status` 与 `/healthz`，只返回 effective_enabled、url、key id、has secret 和 worker health，不泄露 HMAC secret。
+- `gateway/startup_checks.py` 会在 worker config 不完整时降级 `mainland_voice_worker_enabled`，Gateway 启动不因 worker 缺失崩溃。
+- `gateway/cosyvoice_clone/api.py` 的 clone-gate 将 admin policy、uploader backend、worker config readiness 合并为 runtime readiness，便于前端和运维定位是授权问题还是运行态问题。
+- sample uploader 不能在 production clone path 中继续使用 `local_fs_stub`；worker enabled 但 uploader 未配置时 clone 在付费调用前 503。
+- UserVoice 的 worker routing 字段和 `temporary_expires_at` 让 admin 排查 clone voice 生命周期、路由、worker request id 有数据库锚点。
+
+结论：CosyVoice clone 的上线面不是单个按钮，而是 admin 灰度、uploader、worker health、UserVoice schema 和 TTS routing 的组合运维面。
+
 ## 4. 关键证据
 
 - `gateway/admin_disk_api.py`
@@ -319,6 +336,12 @@ graph TD
   - Smart summary / CSV
   - Phase 1a/1b report aggregation
   - Phase 1b flags API
+- `gateway/mainland_voice_worker.py`
+  - mainland worker status / healthz
+  - client factory readiness
+- `gateway/cosyvoice_clone/api.py`
+  - clone-gate runtime readiness
+  - explicit clone paid worker gate
 - `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx`
   - admin Smart analytics dashboard
 - `frontend-next/src/app/(app)/admin/report-analysis/page.tsx`
@@ -349,7 +372,12 @@ graph TD
 - `gateway/admin_settings.py`
   - prompt model settings
   - Smart voice policy settings
+  - CosyVoice clone rollout settings
   - Phase 1b report rollout flags
+- `gateway/alembic/versions/030_cosyvoice_clone_metadata.py`
+  - UserVoice worker routing schema
+- `gateway/alembic/versions/031_user_voice_temp_expiry.py`
+  - temporary voice expiry schema
 - `src/services/llm_registry.py`
   - mode-aware LLM defaults
 - `src/services/runtime_flags.py`
@@ -383,6 +411,7 @@ graph TD
 - 想排查 Smart voice policy 为什么允许/禁止复用、克隆或弱匹配暂停
 - 想排查 P5 possible-match 为什么自动复用或没有暂停
 - 想排查 Smart clone quota / match / register-smart / UserVoice mirror
+- 想排查 CosyVoice clone-gate、mainland worker health、sample uploader 或 worker secret 配置
 - 想看 Smart analytics、report analysis、Phase 1b flags 为什么显示某个统计或开关状态
 - 想排查 CSRF 403、生产启动 safety guard、fake payment 被禁用
 - 想排查前端后台标签页为什么没有持续 polling 或恢复后才刷新

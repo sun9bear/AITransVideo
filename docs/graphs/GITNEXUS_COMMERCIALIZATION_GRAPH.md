@@ -11,8 +11,10 @@
 - email auth 前门
 - Smart service mode 入口与固定价
 - Smart consent schema、预算耗尽策略与固定价承诺边界
+- Smart kill switch、pricing consistency 与 `fail_and_refund` deferred blocker
 - Smart voice policy、possible-match 自动复用、弱匹配暂停提示与候选音色确认边界
 - Smart 全自动产品承诺
+- CosyVoice clone 的用户显式付费触发、allowlist/GA gate 与 worker runtime gate
 - entitlements 与 allowed service modes
 - trial 发放边界
 - fake payment production gate
@@ -56,6 +58,8 @@ graph TD
 
     Workspace["TranslationForm"] --> Entitlements["GET entitlements"]
     Entitlements --> AllowedModes["allowed_service_modes"]
+    Entitlements --> SmartKill["Smart kill switch env + admin"]
+    SmartKill --> AllowedModes
     AllowedModes --> Express["express"]
     AllowedModes --> Studio["studio"]
     AllowedModes --> Smart["smart"]
@@ -75,6 +79,12 @@ graph TD
     AdminVoicePolicy --> PossibleAutoReuse["P5 auto-reuse possible-match top candidate"]
     AdminVoicePolicy --> VoiceQuotaPreflight
     ConsentValidator --> VoiceQuotaPreflight
+
+    Workspace --> CosyCloneUI["CosyVoice clone UI"]
+    CosyCloneUI --> CloneGate["/api/voice/cosyvoice/clone-gate"]
+    CloneGate --> CloneConsent["CosyVoice consent modal"]
+    CloneConsent --> ClonePost["POST /api/voice/cosyvoice/clone"]
+    ClonePost --> WorkerRuntime["uploader + mainland worker runtime gate"]
 
     Billing["billing / checkout"] --> PaymentProviders["payment_providers"]
     PaymentProviders --> FakeGate["fake payment dev/test default"]
@@ -193,6 +203,25 @@ graph TD
 
 结论：onboarding 入口从 phone 扩展到 phone + email，但下游运营触达统一。
 
+### 3.12 Smart kill switch 是商业化上线门
+
+- `gateway/config.py` 提供 env 层 kill switch，`gateway/admin_settings.py` 提供 runtime toggle。
+- `gateway/entitlements.py` 会从 allowed service modes 中移除 `smart`，admin 用户也不能自动绕过。
+- `gateway/job_intercept.py` 在 Smart consent 校验前先检查 kill switch，避免关闭后仍进入 Smart 创建路径。
+- pricing consistency 守住 Smart fixed price，`smart.standard=100` 不应在前端或本地 fallback 变成第二套真源。
+- `fail_and_refund` 仍在 consent validator 中显式阻断，直到完整结算链路完成。
+
+结论：Smart 商业化不是“有入口就卖”，必须能统一停用、统一定价、统一拒绝未完成预算策略。
+
+### 3.13 CosyVoice clone 是用户显式触发的付费能力
+
+- `GET /api/voice/cosyvoice/clone-gate` 只读展示层 gate，合并 allowlist/GA、worker enabled、uploader backend、worker config readiness。
+- `POST /api/voice/cosyvoice/clone` 必须由用户通过 clone modal + consent modal 显式触发，不从 review/edit fallback 静默发起。
+- clone 前检查 max voices per user、sample/source_segments 输入、sample uploader、worker config；任一失败都在付费 worker 调用前 fail-closed。
+- CosyVoice clone 成功写入 `user_voices` 的 worker routing 和 request id，后续 TTS 必须按该路由走国内 worker。
+
+结论：CosyVoice clone 的商业边界是“用户知情 + Gateway gate + worker runtime ready”，不是普通后台补救逻辑。
+
 ## 4. 关键证据
 
 - `gateway/plan_catalog.py`
@@ -200,6 +229,7 @@ graph TD
   - allowed service modes
 - `gateway/entitlements.py`
   - entitlement response
+  - Smart kill switch allowed modes
 - `gateway/credits_service.py`
   - estimate and debit rates
 - `gateway/job_intercept.py`
@@ -209,8 +239,13 @@ graph TD
   - candidate rejection audit
 - `gateway/smart_consent.py`
   - Smart consent schema and allowed budget policy
+  - `fail_and_refund` deferred blocker
 - `gateway/admin_settings.py`
   - Smart voice policy settings
+- `gateway/cosyvoice_clone/api.py`
+  - CosyVoice clone-gate and explicit clone
+- `gateway/mainland_voice_worker.py`
+  - worker config readiness and health
 - `gateway/payment_providers.py`
   - fake payment production gate
 - `gateway/billing.py`
@@ -256,6 +291,8 @@ graph TD
 - 想改 pricing / trial / billing truth
 - 想改 Smart 可售入口、固定价、allowed service modes
 - 想改 Smart consent、预算耗尽策略、admin voice policy、possible-match auto-reuse、voice library quota 预检
+- 想排查 Smart 为什么被 kill switch 下线、为什么 `fail_and_refund` 被拒
+- 想排查 CosyVoice clone 为什么不可用、为什么必须用户显式触发
 - 想改候选音色确认、弱匹配暂停提示、非计费候选拒绝审计
 - 想改 fake payment、生产支付门禁、CSRF 同源保护
 - 想确认 Smart 全自动产品承诺与 translation review audit-only 的边界

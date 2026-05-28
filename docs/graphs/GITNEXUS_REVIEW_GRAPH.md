@@ -13,6 +13,7 @@
 - Smart full-auto 后 translation review 不再默认成为人工 gate
 - Smart 完成或 handoff 后如何显示用户可见决策摘要
 - voice selection approve 前的 candidate-first 音色候选、`strong_named`/possible-match 复用、克隆锁与 calibration preflight
+- CosyVoice clone gate、consent modal、source segment picker 与 worker routing 如何进入审核确认
 
 ## 2. 主图
 
@@ -59,6 +60,11 @@ graph TD
     VoiceSelectPanel --> CloneModal["VoiceCloneModal explicit clone"]
     CloneModal --> CloneLock["Gateway per-speaker clone lock"]
     CloneLock --> CloneResult["UserVoice source metadata + auto calibration"]
+    VoiceSelectPanel --> CosyGate["CosyVoice clone-gate"]
+    CosyGate --> CosyModal["CosyVoiceCloneModal + Consent + SegmentPicker"]
+    CosyModal --> CosyClone["POST /api/voice/cosyvoice/clone"]
+    CosyClone --> WorkerRoute["requires_worker + worker_target_model"]
+    WorkerRoute --> VoiceApi
     VoiceSelectPanel --> VoiceApi["voiceSelection.ts / approveVoiceSelection"]
     ReuseApprove --> VoiceApi
     CloneResult --> VoiceApi
@@ -149,10 +155,13 @@ tab 映射仍然是：
 - 可能匹配包含 same-source named、same-source speaker-id changed、cross-source named；人工选中后也是复用事件，不是新克隆。
 - `VoiceCloneModal` 打开时仍调用 `matchVoiceForSelection(jobId, speakerId)`，用于显式 clone 流程里的可复用提示。
 - 用户仍可显式触发 clone；Gateway 用 `review_state` 中的 per-speaker `cloning.started_at` 做短期 clone lock，重复点击返回 `clone_in_progress`。
+- CosyVoice 克隆入口现在还需要 provider `supports_clone` 与 `/api/voice/cosyvoice/clone-gate` 的 `can_access_clone` 同时满足；clone-gate 只读展示层状态，不调用付费 worker。
+- CosyVoice clone 通过独立的 `CosyVoiceCloneModal` 与 `CosyVoiceConsentModal` 触发，样本可以来自 multipart upload，也可以来自当前任务的 `source_segments`。
 - clone 成功后写入 UserVoice source metadata，并通过 calibration hook 触发速度校准。
+- CosyVoice clone 成功后还会写 `requires_worker=True`、`target_model`、`region_constraint`、`clone_worker_request_id`，review approve 必须把 `requires_worker / worker_target_model` 传给后续 workflow。
 - 如果 Smart 因弱匹配暂停写入了 `smart_offered_candidates`，用户最后选择候选以外的 voice，Gateway 会记录非计费 `voice_candidate_rejected` usage event。
 
-结论：voice selection 现在把“复用已有个人音色”和“新克隆”放在同一个人工确认入口里；但 Smart P5 已经尽量在自动层消化 possible-match，人工确认主要是保守策略或用户主动修改入口。
+结论：voice selection 现在把“复用已有个人音色”和“新克隆”放在同一个人工确认入口里；但 CosyVoice clone voice 不是普通 `voice_id`，还必须携带 worker routing。Smart P5 已经尽量在自动层消化 possible-match，人工确认主要是保守策略或用户主动修改入口。
 
 ## 9. Voice selection approve 会先做 T2 calibration preflight
 
@@ -181,8 +190,14 @@ tab 映射仍然是：
   - `getVoiceCandidates(...)`
   - smart-offered candidate pre-select
   - `matchVoiceForSelection(jobId, speakerId)`
-  - `VoiceCloneModal` reuse / clone UI
+  - `VoiceCloneModal` / `CosyVoiceCloneModal` reuse / clone UI
   - `approveVoiceSelection(jobId, approvals)`
+- `frontend-next/src/components/voice-clone/CosyVoiceCloneModal.tsx`
+  - CosyVoice consent + clone-gate bound clone UI
+- `frontend-next/src/components/voice-clone/CosyVoiceSegmentPicker.tsx`
+  - source_segments picker
+- `frontend-next/src/lib/api/cosyvoiceClone.ts`
+  - clone-gate and clone client
 - `frontend-next/src/lib/api/voiceSelection.ts`
   - `VoiceCandidatesResponse`
   - `VoiceCandidate`
@@ -195,9 +210,12 @@ tab 映射仍然是：
   - `/job-api/jobs/{job_id}/voice-match`
   - per-speaker clone lock
   - source metadata on clone
+- `gateway/cosyvoice_clone/api.py`
+  - CosyVoice clone-gate and explicit clone endpoint
 - `gateway/job_intercept.py`
   - `_record_voice_reuse_events`
   - `_record_voice_candidate_rejection_events`
+  - speaker worker routing enrichment
 - `gateway/user_voice_service.py`
   - same-source / cross-source candidate scopes
   - `strong_named` auto-reuse tier
@@ -218,5 +236,6 @@ tab 映射仍然是：
 - voice selection 为什么提示强匹配/可能匹配/其他个人音色、为什么 clone 按钮被锁住
 - Smart possible-match 为什么自动复用、为什么没有进入弱匹配暂停
 - Smart 弱匹配暂停后，用户确认或拒绝候选分别如何审计
+- CosyVoice clone 入口为什么不可见，或 approve 后为什么 TTS 没走国内 worker
 - review submit 前为什么会先跑 voice calibration
 - pipeline 怎样进入 `waiting_for_review`，又怎样恢复

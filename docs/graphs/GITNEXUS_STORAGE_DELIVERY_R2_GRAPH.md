@@ -13,6 +13,7 @@
 - proactive publish、registry redirect、lazy fallback
 - terminal mirror、R2 parity、cleanup 与 observability
 - Pan archive 后的本地 project_dir / R2 artifacts 删除与恢复边界
+- CosyVoice clone sample uploader 与交付 R2 registry 的边界
 - materials pack / job subresource 写路由的 CSRF same-origin guard
 
 ## 2. 主图
@@ -63,6 +64,10 @@ graph TD
     PanR2Delete --> Registry
     PanResidue["pan residue_cleanup / stale_reaper"] --> PanLocalDelete
     PanResidue --> PanR2Delete
+
+    CosyClone["CosyVoice clone sample"] --> SampleUploader["sample_uploader OSS/R2/local-stub"]
+    SampleUploader --> WorkerInput["mainland worker input object"]
+    WorkerInput -.-> NotRegistry["not r2_artifacts registry"]
 
     EventLog["download.* / stream.* / pan.* events"] --> R2Obs["scripts/r2_observability.py"]
     PanBackup --> EventLog
@@ -135,6 +140,15 @@ graph TD
 
 结论：生成交付物是 state-changing action，需要同源保护；下载交付物仍以 ownership/storage resolution 为主。
 
+### 3.8 CosyVoice sample uploader 不是用户交付物 registry
+
+- `gateway/cosyvoice_clone/sample_uploader.py` 服务 clone 前的样本交付给国内 worker，可用 OSS/R2/local stub backend。
+- sample uploader 的对象生命周期服务 worker clone，不进入 `r2_artifacts` 交付物 registry，也不改变用户下载 URL。
+- worker enabled 但 uploader 仍是 `local_fs_stub` 时，clone endpoint 在付费 worker 调用前 503。
+- 交付物 R2 路径仍以 `publish.dubbed_video`、`materials_pack`、`editor.jianying_draft_zip` 等 artifact identity 为主，不应把 clone sample object 当成结果交付物。
+
+结论：CosyVoice sample storage 是 worker 输入通道，和用户结果交付/R2 parity 是不同域。
+
 ## 4. 关键证据
 
 - `gateway/r2_artifact_sweeper.py`
@@ -154,6 +168,8 @@ graph TD
 - `gateway/storage/backend_router.py`
   - registry redirect
   - lazy fallback
+- `gateway/cosyvoice_clone/sample_uploader.py`
+  - CosyVoice clone sample upload backend
 - `gateway/materials_api.py`
   - CSRF-protected materials-pack generation route
 - `gateway/main.py`
@@ -175,4 +191,5 @@ graph TD
 - 想看 R2 redirect / fallback 的观测口径
 - 想判断 Pan 归档后为什么本地或 R2 还没删除
 - 想判断 archived 任务恢复后为什么 R2 registry 没自动回来
+- 想确认 CosyVoice clone sample upload 是否会进入用户交付物 registry
 - 想排查 materials pack / generate draft / review 子资源为什么被 CSRF 拦截
