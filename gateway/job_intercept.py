@@ -1056,6 +1056,42 @@ async def intercept_create_job(
         # Persist the canonical 6-field form (no extras leaked through).
         smart_consent_payload = consent_obj.to_dict()
 
+    # --- express_consent validation (Phase 4.3a §3.1.a / §3.2) ---
+    # Express consent is OPTIONAL and uses **soft skip** semantics (unlike
+    # Smart's hard-fail). validate_express_consent never raises:
+    #   - missing / non-dict → returns (None, "express_consent_missing_or_invalid_type")
+    #   - malformed field type → returns (None, "<reason>")
+    #   - well-formed → returns (parsed_dict, None)
+    # When parse_error != None the JobRecord still carries the reason so
+    # pipeline can emit audit JSONL with a specific reason_code; the
+    # job is NOT rejected (auto-clone simply does not run).
+    # spec v0.3 §3.1 / §3.1.a — and design rationale §1.1 G6.
+    express_consent_payload: dict | None = None
+    express_consent_parse_error: str | None = None
+    if service_mode == "express":
+        from express_consent import validate_express_consent
+        raw_express_consent = request_data.get("express_consent")
+        express_consent_payload, express_consent_parse_error = (
+            validate_express_consent(raw_express_consent)
+        )
+        # Phase 4.3a §3.1.a server-side authoritative timestamp.
+        # When the user explicitly opted into auto-clone (auto_voice_clone
+        # is True, strict identity), Gateway stamps a UTC ISO 8601 string
+        # as the **authoritative** consent time. Pipeline writes this into
+        # WorkerCloneConsent.confirmed_at and the audit JSONL key timestamp
+        # — NOT the client-supplied client_confirmed_at (which can be
+        # forged by a malicious client).
+        # We deliberately set server_confirmed_at ONLY when auto_voice_clone
+        # is True: if the user did not opt in, there is no consent action
+        # for the server to confirm.
+        if (
+            express_consent_payload is not None
+            and express_consent_payload.get("auto_voice_clone") is True
+        ):
+            express_consent_payload["server_confirmed_at"] = (
+                datetime.now(timezone.utc).isoformat()
+            )
+
     # --- User context ---
     user_role = getattr(user, "role", "user") or "user" if user else "user"
     user_plan = getattr(user, "plan_code", "free") or "free" if user else "free"
@@ -1369,6 +1405,15 @@ async def intercept_create_job(
     # else stays out of the upstream request to keep JobRecord clean.
     if smart_consent_payload is not None:
         request_data["smart_consent"] = smart_consent_payload
+
+    # Phase 4.3a §3.2: forward express_consent + parse_error verbatim.
+    # Only set when service_mode==express (the validator block above is
+    # gated on that). server_confirmed_at (if any) is already part of
+    # the dict; pipeline reads it for worker request + audit.
+    if express_consent_payload is not None:
+        request_data["express_consent"] = express_consent_payload
+    if express_consent_parse_error is not None:
+        request_data["express_consent_parse_error"] = express_consent_parse_error
 
     # Forward to upstream with modified body
     upstream_response = await proxy_request(
