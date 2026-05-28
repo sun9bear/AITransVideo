@@ -139,6 +139,29 @@ def _parse_optional_datetime(value: object) -> datetime | None:
         return None
 
 
+def _strict_optional_bool(body: dict, key: str) -> tuple[bool | None, str | None]:
+    """Phase 4.3a E-fix (Codex E review P1)：严格 bool 解析。
+
+    Returns ``(value, None)`` on success, ``(None, error_code)`` on failure.
+
+    - 字段缺省 / None → ``(False, None)``（默认 False，向后兼容）
+    - 字段是 Python ``bool`` → ``(value, None)``
+    - 字段是任何其它类型（含 ``"false"`` / ``"0"`` / ``1`` / ``0``） →
+      ``(None, "<key>_must_be_bool")``
+
+    **为什么不用 ``bool(body.get(key) or False)``**：那会把字符串
+    ``"false"`` / ``"0"`` 当 truthy → 意外 ``True``，导致 routing 字段
+    （requires_worker）/ 临时音色标记（is_temporary）静默错配。worker
+    routing 决策必须严格 bool，不能宽松解析。
+    """
+    if key not in body or body[key] is None:
+        return False, None
+    value = body[key]
+    if not isinstance(value, bool):
+        return None, f"{key}_must_be_bool"
+    return value, None
+
+
 def _match_to_dict(match) -> dict:
     """Serialize a :class:`UserVoiceMatch` for the legacy endpoints.
 
@@ -1099,6 +1122,46 @@ async def internal_register_smart_clone(
             ),
         })
 
+    # ---- Phase 4.3a E-fix (Codex E review P1): 严格 bool + target_model 校验 ----
+    # 1. requires_worker / is_temporary 必须严格 bool（拒 "false" / "0" / 1）。
+    requires_worker, rw_err = _strict_optional_bool(body, "requires_worker")
+    if rw_err is not None:
+        return _json(400, {
+            "error": rw_err,
+            "detail": (
+                "requires_worker must be a JSON boolean (true/false), not a "
+                "string/number; loose coercion would silently misroute TTS"
+            ),
+        })
+    is_temporary, it_err = _strict_optional_bool(body, "is_temporary")
+    if it_err is not None:
+        return _json(400, {
+            "error": it_err,
+            "detail": (
+                "is_temporary must be a JSON boolean (true/false), not a "
+                "string/number"
+            ),
+        })
+
+    # 2. worker routing 一致性：provider==cosyvoice_voice_clone 或
+    #    requires_worker=True 时，target_model 必须是非空 string。否则
+    #    add_user_voice 会注册成功，但 lookup_clone_voice_routing_metadata
+    #    的 ``target_model != ""`` 条件查不到该 row → segment TTS 回退官方
+    #    音色 → 用户克隆白做（Codex E review P1 重点）。fail-closed 400。
+    target_model_raw = body.get("target_model")
+    needs_target_model = (provider == "cosyvoice_voice_clone") or (requires_worker is True)
+    if needs_target_model:
+        if not isinstance(target_model_raw, str) or not target_model_raw.strip():
+            return _json(400, {
+                "error": "target_model_required_for_worker_clone",
+                "detail": (
+                    "target_model must be a non-empty string when "
+                    "provider='cosyvoice_voice_clone' or requires_worker=true; "
+                    "otherwise lookup_clone_voice_routing_metadata cannot find "
+                    "the row and segment TTS falls back to a preset voice"
+                ),
+            })
+
     try:
         voice = await add_user_voice(
             db,
@@ -1132,15 +1195,15 @@ async def internal_register_smart_clone(
             # Express auto-clone caller 显式传全部 11 字段，把 CosyVoice
             # worker routing + 临时音色生命周期写进 user_voices 行。
             region_constraint=str(body.get("region_constraint") or "overseas_ok"),
-            requires_worker=bool(body.get("requires_worker") or False),
-            target_model=body.get("target_model"),
+            requires_worker=requires_worker,  # E-fix: strict-bool validated above
+            target_model=target_model_raw,
             worker_provider=body.get("worker_provider"),
             worker_region=body.get("worker_region"),
             clone_api_model=body.get("clone_api_model"),
             billing_sku=body.get("billing_sku"),
             clone_provider_request_id=body.get("clone_provider_request_id"),
             clone_worker_request_id=body.get("clone_worker_request_id"),
-            is_temporary=bool(body.get("is_temporary") or False),
+            is_temporary=is_temporary,  # E-fix: strict-bool validated above
             temporary_expires_at=_parse_optional_datetime(
                 body.get("temporary_expires_at")
             ),
