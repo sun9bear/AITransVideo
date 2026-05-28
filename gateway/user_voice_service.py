@@ -291,6 +291,80 @@ async def count_active_voices_for_user_and_provider(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4.3a §2.5 成本闸 — Express auto-clone budget counters
+# ---------------------------------------------------------------------------
+
+
+async def count_express_auto_clones_today(
+    db: AsyncSession,
+    user_id: object,
+) -> int:
+    """统计某 user **今天**（UTC 自然日）发生过的 Express auto-clone 次数。
+
+    spec §2.5 daily_cap 查询语义（Codex E2 review 重点）：
+
+        provider = 'cosyvoice_voice_clone'
+        AND created_from = 'express_auto'
+        AND created_at >= today_start (UTC 00:00:00)
+        AND user_id = :user_id
+
+    **不**过滤 ``expired_at`` / ``is_temporary`` —— daily_cap 是"今天**曾经
+    发生过**多少次付费 clone"的计数，软删了又跑、临时还是长期都算。这样
+    用户无法通过删除临时音色绕过每日限额（防成本失控）。
+
+    与 ``count_active_voices_for_user_and_provider``（active 库存计数，过滤
+    expired_at IS NULL）语义**故意不同**：那个是"现在有多少"，这个是
+    "今天发生过多少"。
+    """
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    result = await db.execute(
+        select(func.count())
+        .select_from(UserVoice)
+        .where(
+            UserVoice.user_id == user_id,
+            UserVoice.provider == "cosyvoice_voice_clone",
+            UserVoice.created_from == "express_auto",
+            UserVoice.created_at >= today_start,
+            # NB: 故意不过滤 expired_at / is_temporary
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def count_active_temporary_voices(
+    db: AsyncSession,
+    user_id: object,
+) -> int:
+    """统计某 user 当前 active 的临时音色数。
+
+    spec §2.5 active_temp_cap 查询语义：
+
+        is_temporary = TRUE
+        AND expired_at IS NULL
+        AND user_id = :user_id
+
+    用于防止用户多任务并发把临时音色表撑爆（每用户 active 临时音色上限
+    ``express_cosyvoice_auto_clone_per_user_active_temp_cap``，默认 3）。
+
+    soft-deleted（``expired_at`` 非空）的临时音色**不**计入 —— 它们已经
+    被 sweeper / 用户删除，不再占额度。spec §2.5 未限 provider（任何
+    is_temporary=true 都算），与 spec 文字一致。
+    """
+    result = await db.execute(
+        select(func.count())
+        .select_from(UserVoice)
+        .where(
+            UserVoice.user_id == user_id,
+            UserVoice.is_temporary.is_(True),
+            UserVoice.expired_at.is_(None),
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+# ---------------------------------------------------------------------------
 # Phase 4.1 E.1: worker routing 元数据查询（Codex 2026-05-25 E v2 三签字版本）
 # ---------------------------------------------------------------------------
 
