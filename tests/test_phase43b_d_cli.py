@@ -59,6 +59,10 @@ def _past(h: float = 1) -> datetime:
     return datetime.now(timezone.utc) - timedelta(hours=h)
 
 
+def _future(h: float = 1) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=h)
+
+
 async def _make_session():
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False}
@@ -142,6 +146,52 @@ def test_reset_cleanup_state_revives_stuck_rows():
         assert g.cleanup_retry_after is None
         nt = await _get(sm, non_temp.id)
         assert nt.cleanup_attempts == 3, "非 eligible 行不被重置"
+    _run(_t())
+
+
+def test_reset_skips_in_flight_claimed_row():
+    """Codex 4.3b-D-fix P1：reset 绝不碰正被认领（claim_until 未来）的 in-flight 行，
+    否则清掉 run_id 会让那个 runner 删完 worker 后 complete 更新 0 行 → 重复 delete。"""
+    async def _t():
+        sm = await _make_session()
+        in_flight = _mk_voice(
+            cleanup_attempts=svc.MAX_CLEANUP_ATTEMPTS,
+            cleanup_claim_until=_future(), cleanup_run_id="other-runner",
+        )
+        expired_lease = _mk_voice(
+            cleanup_attempts=svc.MAX_CLEANUP_ATTEMPTS,
+            cleanup_claim_until=_past(), cleanup_run_id="stale",
+        )
+        await _insert(sm, in_flight, expired_lease)
+        async with sm() as db:
+            n = await svc.reset_cleanup_state(db, limit=50)
+        assert n == 1, "只重置 lease 过期的 stuck 行，不碰 in-flight"
+        infl = await _get(sm, in_flight.id)
+        assert infl.cleanup_attempts == svc.MAX_CLEANUP_ATTEMPTS, "in-flight 不被 reset"
+        assert infl.cleanup_run_id == "other-runner", "in-flight run_id 必须保留（防 double-delete）"
+        el = await _get(sm, expired_lease.id)
+        assert el.cleanup_attempts == 0 and el.cleanup_run_id is None, "lease 过期可 reset"
+    _run(_t())
+
+
+def test_run_cli_execute_reset_skipped_when_worker_unavailable(monkeypatch):
+    """Codex 4.3b-D-fix P2：--execute --reset-attempts 但 worker 不可用 →
+    **不 reset DB**（不 revive 没法清理的行），report None。"""
+    import mainland_voice_worker as mvw
+    monkeypatch.setattr(mvw, "is_mainland_voice_worker_config_ready", lambda s: False)
+
+    async def _t():
+        sm = await _make_session()
+        v = _mk_voice(cleanup_attempts=svc.MAX_CLEANUP_ATTEMPTS, cleanup_last_error="x")
+        await _insert(sm, v)
+        report, reset_count = await cli.run_cleanup_cli(
+            _args(execute=True, reset_attempts=True), session_factory=sm
+        )
+        assert report is None, "worker 不可用 → sweep_once fail-fast skip"
+        assert reset_count == 0, "worker 不可用 → reset 也跳过（不 mutate DB）"
+        row = await _get(sm, v.id)
+        assert row.cleanup_attempts == svc.MAX_CLEANUP_ATTEMPTS, "row 未被 reset"
+        assert row.cleanup_last_error == "x"
     _run(_t())
 
 
