@@ -263,7 +263,9 @@ def test_register_smart_passes_routing_and_temporary_fields():
         'clone_provider_request_id=body.get("clone_provider_request_id")',
         'clone_worker_request_id=body.get("clone_worker_request_id")',
         'is_temporary=is_temporary,',
-        'temporary_expires_at=_parse_optional_datetime(',
+        # review-fix-2 P2-2：temporary_expires_at 改用校验后变量
+        # （is_temporary=true 时强制合法 datetime，否则 400）
+        'temporary_expires_at=parsed_temporary_expires_at,',
     ]
     for snippet in required_passthrough:
         assert snippet in src, (
