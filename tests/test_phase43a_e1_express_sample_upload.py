@@ -57,9 +57,25 @@ class _FakeUploader:
 
 
 def _make_client(monkeypatch, *, uploader=None, uploader_raises_build=False,
-                 internal_key=_TEST_KEY):
-    """构造仅含 internal_router 的最小 FastAPI app + monkeypatch 依赖。"""
+                 internal_key=_TEST_KEY, uploader_backend="aliyun_oss",
+                 missing_oss=None):
+    """构造仅含 internal_router 的最小 FastAPI app + monkeypatch 依赖。
+
+    默认 ``uploader_backend="aliyun_oss"`` + 无 missing config → readiness gate
+    放行（happy path 默认就绪）。E1-fix readiness 测试用 uploader_backend /
+    missing_oss 参数模拟各种未就绪态。
+    """
     monkeypatch.setattr(clone_api.gw_settings, "internal_api_key", internal_key, raising=False)
+    # E1-fix: readiness gate 读 gw_settings.cosyvoice_sample_uploader。
+    monkeypatch.setattr(
+        clone_api.gw_settings, "cosyvoice_sample_uploader",
+        uploader_backend, raising=False,
+    )
+    # missing_aliyun_oss_settings 返回缺失字段列表（空 = 配齐）
+    monkeypatch.setattr(
+        clone_api, "missing_aliyun_oss_settings",
+        lambda _settings: list(missing_oss or []), raising=True,
+    )
 
     if uploader_raises_build:
         def _build(_settings):
@@ -187,14 +203,84 @@ def test_400_invalid_speaker_id(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_503_uploader_not_configured(monkeypatch):
+def test_503_uploader_build_failure_after_readiness_gate(monkeypatch):
+    """readiness gate 通过（aliyun_oss + config 齐）但 build 仍抛 → 503 兜底。"""
     client = _make_client(monkeypatch, uploader_raises_build=True)
     resp = client.post(
         _URL, files=_wav_file(), data=_form(),
         headers={"X-Internal-Key": _TEST_KEY},
     )
     assert resp.status_code == 503
-    assert resp.json()["error"]["code"] == "uploader_not_configured"
+    assert resp.json()["error"]["code"] == "sample_uploader_not_configured"
+
+
+# ---------------------------------------------------------------------------
+# E1-fix（Codex E1 review P1）：uploader readiness gate
+# ---------------------------------------------------------------------------
+
+
+def test_503_local_fs_stub_backend_refused(monkeypatch):
+    """local_fs_stub backend → 503 sample_uploader_not_configured（防 file:// URL）。"""
+    uploader = _FakeUploader(url="file:///tmp/sample.wav")
+    client = _make_client(monkeypatch, uploader=uploader, uploader_backend="local_fs_stub")
+    resp = client.post(
+        _URL, files=_wav_file(), data=_form(),
+        headers={"X-Internal-Key": _TEST_KEY},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "sample_uploader_not_configured"
+    # 关键：readiness gate 在 upload 之前拦截 → uploader 根本不该被调
+    assert uploader.calls == [], (
+        "local_fs_stub 必须在 upload_and_sign 之前被 readiness gate 拦截"
+    )
+
+
+def test_503_non_production_ready_backend_refused(monkeypatch):
+    """backend 不在 PRODUCTION_READY_BACKENDS → 503 sample_uploader_not_implemented。"""
+    uploader = _FakeUploader()
+    client = _make_client(
+        monkeypatch, uploader=uploader, uploader_backend="some_future_backend"
+    )
+    resp = client.post(
+        _URL, files=_wav_file(), data=_form(),
+        headers={"X-Internal-Key": _TEST_KEY},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "sample_uploader_not_implemented"
+    assert uploader.calls == []
+
+
+def test_503_aliyun_oss_missing_config_refused(monkeypatch):
+    """aliyun_oss + missing config → 503 sample_uploader_config_missing。"""
+    uploader = _FakeUploader()
+    client = _make_client(
+        monkeypatch, uploader=uploader, uploader_backend="aliyun_oss",
+        missing_oss=["AVT_COSYVOICE_OSS_ENDPOINT", "AVT_COSYVOICE_OSS_BUCKET"],
+    )
+    resp = client.post(
+        _URL, files=_wav_file(), data=_form(),
+        headers={"X-Internal-Key": _TEST_KEY},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "sample_uploader_config_missing"
+    assert uploader.calls == []
+
+
+def test_aliyun_oss_missing_config_does_not_leak_values_in_logs(monkeypatch, caplog):
+    """守卫：config_missing 日志只 log 字段名，不 log 字段值 / 其它 secret。"""
+    import logging
+    client = _make_client(
+        monkeypatch, uploader=_FakeUploader(), uploader_backend="aliyun_oss",
+        missing_oss=["AVT_COSYVOICE_OSS_ACCESS_KEY_SECRET"],
+    )
+    with caplog.at_level(logging.DEBUG):
+        client.post(
+            _URL, files=_wav_file(), data=_form(),
+            headers={"X-Internal-Key": _TEST_KEY},
+        )
+    # 字段名可以 log（排障需要），但不应有任何 secret 值样式
+    assert "LTAI" not in caplog.text  # OSS AK 前缀
+    assert "Signature=" not in caplog.text
 
 
 def test_503_uploader_runtime_error(monkeypatch):
