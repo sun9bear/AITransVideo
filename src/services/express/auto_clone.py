@@ -199,6 +199,10 @@ def run_express_auto_clone(
         reason = reserve_res.deny_reason or reserve_res.error or "reserve_failed"
         return _finish("skipped", f"reserve_{reason}")
     reservation_id = reserve_res.reservation_id
+    if not reservation_id:
+        # 200 ok 但无 reservation_id —— 没有可 consume/release 的句柄，看似成功实则
+        # 没占到名额。绝不进 upload/worker（Codex E-fix item 2，防越过成本闸）。
+        return _finish("skipped", "reserve_malformed_response")
     audit["reservation_id"] = reservation_id
 
     # 此后持有 reservation —— 任何失败必 release（_safe_release 不静默）。
@@ -254,6 +258,11 @@ def run_express_auto_clone(
     if not upload_res.ok:
         _safe_release("upload_failed")
         return _finish("skipped", "upload_failed", upload_error=upload_res.error)
+    if not (upload_res.presigned_get_url and upload_res.sha256):
+        # ok 但缺 presigned URL / sha256 —— worker 没有可引用的 sample，必 release
+        # 不进 worker（Codex E-fix item 2）。
+        _safe_release("upload_malformed_response")
+        return _finish("skipped", "upload_malformed_response")
 
     # === worker clone（付费；CLAUDE.md：不重试，client max_attempts=1）===
     try:
@@ -272,6 +281,11 @@ def run_express_auto_clone(
     if not clone_res.ok:
         _safe_release("worker_failed")
         return _finish("skipped", "worker_failed", worker_error=clone_res.error)
+    if not clone_res.voice_id:
+        # worker 报成功但没回 voice_id —— 无法 register/consume/routing；也无 id 可
+        # delete（无法孤儿清理），只能 release + skip（Codex E-fix item 2）。
+        _safe_release("worker_malformed_response")
+        return _finish("skipped", "worker_malformed_response")
     audit["voice_id"] = clone_res.voice_id
     audit["worker_request_id"] = clone_res.worker_request_id
     audit["provider_request_id"] = clone_res.provider_request_id

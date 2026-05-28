@@ -126,6 +126,66 @@ def test_reserve_transport_error(monkeypatch):
     assert not res.ok and res.error == "transport_error" and res.http_status == 0
 
 
+def _fake_urlopen_factory(raw_bytes: bytes, status: int = 200):
+    class _Resp:
+        def __init__(self):
+            self.status = status
+
+        def read(self):
+            return raw_bytes
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _f(req, timeout=None):
+        return _Resp()
+
+    return _f
+
+
+def test_reserve_200_without_reservation_id_is_malformed(monkeypatch):
+    """200 ok 但缺 reservation_id → ok=False malformed（Codex E-fix item 1）。"""
+    monkeypatch.setattr(rc, "_post_json", lambda *a, **k: (200, {"ok": True, "status": "reserved"}))
+    res = rc.reserve(user_id="u1", job_id="j1", speaker_id="speaker_a", target_model="m")
+    assert not res.ok and res.error == "malformed_reserve_response"
+
+
+def test_reserve_200_empty_reservation_id_is_malformed(monkeypatch):
+    monkeypatch.setattr(rc, "_post_json", lambda *a, **k: (200, {"ok": True, "reservation_id": ""}))
+    res = rc.reserve(user_id="u1", job_id="j1", speaker_id="speaker_a", target_model="m")
+    assert not res.ok and res.error == "malformed_reserve_response"
+
+
+def test_post_json_non_json_body_does_not_raise(monkeypatch):
+    """200 非 JSON body → _post_json 返回 (200, {})，不裸抛（Codex E-fix item 3）。"""
+    monkeypatch.setattr(rc.urllib.request, "urlopen", _fake_urlopen_factory(b"<html>oops</html>"))
+    status, body = rc._post_json("/x", {})
+    assert status == 200 and body == {}
+
+
+def test_post_json_empty_body_does_not_raise(monkeypatch):
+    monkeypatch.setattr(rc.urllib.request, "urlopen", _fake_urlopen_factory(b""))
+    status, body = rc._post_json("/x", {})
+    assert status == 200 and body == {}
+
+
+def test_post_json_non_dict_json_coerced_to_empty(monkeypatch):
+    # 合法 JSON 但不是 object（array）→ {}
+    monkeypatch.setattr(rc.urllib.request, "urlopen", _fake_urlopen_factory(b'[1, 2, 3]'))
+    status, body = rc._post_json("/x", {})
+    assert status == 200 and body == {}
+
+
+def test_reserve_non_json_200_maps_to_malformed(monkeypatch):
+    """端到端：200 非 JSON → reserve 返回 malformed（不抛异常穿出 client）。"""
+    monkeypatch.setattr(rc.urllib.request, "urlopen", _fake_urlopen_factory(b"not json{"))
+    res = rc.reserve(user_id="u1", job_id="j1", speaker_id="speaker_a", target_model="m")
+    assert not res.ok and res.error == "malformed_reserve_response"
+
+
 def test_consume_200_and_409(monkeypatch):
     monkeypatch.setattr(rc, "_post_json", lambda *a, **k: (200, {"ok": True, "status": "consumed"}))
     assert rc.consume("r1", voice_id="v1").ok
@@ -296,6 +356,47 @@ def test_no_reserve_no_worker(captured_audit):
     assert outcome.reason_code == "reserve_active_temp_cap_exceeded"
     assert rec == ["prepare_sample", "reserve"], "reserve 失败后不应 upload/clone"
     assert "upload" not in rec and "clone" not in rec
+    assert sv == {}
+
+
+def test_reserve_ok_but_no_reservation_id_skips_no_worker(captured_audit):
+    """reserve 看似 ok 但无 reservation_id → skip，绝不 upload/worker（E-fix）。"""
+    rec: list = []
+    clients = _clients(rec, reserve=ReserveResult(ok=True, reservation_id=None))
+    outcome, sv, _ = _run(rec, captured_audit, clients=clients)
+    assert outcome.cloned is False and outcome.reason_code == "reserve_malformed_response"
+    assert rec == ["prepare_sample", "reserve"]
+    assert "upload" not in rec and "clone" not in rec
+    assert sv == {}
+
+
+def test_upload_ok_but_missing_url_releases_no_worker(captured_audit):
+    """upload ok 但缺 presigned URL → release，不进 worker（E-fix）。"""
+    rec: list = []
+    clients = _clients(rec, upload=UploadResult(ok=True, presigned_get_url=None, sha256="abc"))
+    outcome, sv, _ = _run(rec, captured_audit, clients=clients)
+    assert outcome.reason_code == "upload_malformed_response"
+    assert "release" in rec and "clone" not in rec
+    assert sv == {}
+
+
+def test_upload_ok_but_missing_sha_releases_no_worker(captured_audit):
+    rec: list = []
+    clients = _clients(rec, upload=UploadResult(ok=True, presigned_get_url="https://x", sha256=None))
+    outcome, sv, _ = _run(rec, captured_audit, clients=clients)
+    assert outcome.reason_code == "upload_malformed_response"
+    assert "release" in rec and "clone" not in rec
+    assert sv == {}
+
+
+def test_clone_ok_but_missing_voice_id_releases_no_register(captured_audit):
+    """clone ok 但缺 voice_id → release，不 register/delete（无 id 可删）（E-fix）。"""
+    rec: list = []
+    clients = _clients(rec, clone=CloneResult(ok=True, voice_id=None, worker_request_id="wr"))
+    outcome, sv, _ = _run(rec, captured_audit, clients=clients)
+    assert outcome.reason_code == "worker_malformed_response"
+    assert "release" in rec
+    assert "register" not in rec and "delete_voice" not in rec
     assert sv == {}
 
 
