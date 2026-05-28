@@ -54,6 +54,13 @@ def emit_voice_cleanup_audit(
     spec §6 对账字段：``worker_request_id``（删 DashScope 的 audit 锚点，付费对账）/
     ``cleanup_attempts`` / ``temporary_expires_at``。
     """
+    # drift 守卫：未知 decision 仍写（audit 完整性 > 严格性），但 log warning
+    # 让"枚举看似存在却没生效"的漂移暴露出来（Codex C P3）。
+    if decision not in _VALID_DECISIONS:
+        logger.warning(
+            "express voice cleanup audit: unknown decision %r (expected one of %s)",
+            decision, sorted(_VALID_DECISIONS),
+        )
     record: dict[str, Any] = {
         "kind": AUDIT_KIND,
         "ts": datetime.now(timezone.utc).isoformat(),

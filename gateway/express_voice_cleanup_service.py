@@ -260,6 +260,50 @@ async def release_with_backoff(
     return outcome
 
 
+async def reset_cleanup_state(
+    db: AsyncSession, *, now: datetime | None = None, limit: int = 200
+) -> int:
+    """**Manual ops only**（CLI ``--reset-attempts``）：把 eligible-base 的到期临时
+    cosyvoice 音色里 ``cleanup_attempts > 0`` 的行重置——清 attempts / retry_after /
+    last_error / claim_until / run_id，让 give-up / backoff 行重新可被清理。
+
+    **自动 sweeper 绝不调本函数**（give-up 是有意停手，自动重试会无限刷付费）。
+    返回重置的行数。
+    """
+    now = now or _now()
+    stuck_ids = (
+        await db.execute(
+            select(UserVoice.id)
+            .where(
+                UserVoice.provider == CLEANUP_PROVIDER,
+                UserVoice.requires_worker.is_(True),
+                UserVoice.is_temporary.is_(True),
+                UserVoice.temporary_expires_at.isnot(None),
+                UserVoice.temporary_expires_at < now,
+                UserVoice.expired_at.is_(None),
+                UserVoice.cleanup_attempts > 0,
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+    if not stuck_ids:
+        return 0
+    result = await db.execute(
+        update(UserVoice)
+        .where(UserVoice.id.in_(stuck_ids))
+        .values(
+            cleanup_attempts=0,
+            cleanup_retry_after=None,
+            cleanup_last_error=None,
+            cleanup_claim_until=None,
+            cleanup_run_id=None,
+            updated_at=now,
+        )
+    )
+    await db.commit()
+    return int(result.rowcount or 0)
+
+
 async def cleanup_expired_temporary_voices(
     db_factory,
     *,
@@ -372,5 +416,6 @@ __all__ = [
     "claim_batch",
     "complete_soft_delete",
     "release_with_backoff",
+    "reset_cleanup_state",
     "cleanup_expired_temporary_voices",
 ]
