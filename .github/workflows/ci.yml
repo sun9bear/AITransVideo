@@ -46,6 +46,39 @@ jobs:
           tests/test_aligner_concurrency.py::test_align_all_parallel_first_error_sets_stop_event_and_skips_paid_fallback
           tests/test_aligner_concurrency.py::test_align_all_parallel_base_exception_sets_stop_event_and_reraises
 
+  # Phase 4.3a PR2-C-pg: reservation 并发原子性需要真 PostgreSQL（users row
+  # FOR UPDATE 阻塞语义，sqlite 测不了）。独立 job 起 postgres service，只跑
+  # 这一个文件；不影响上面的 backend job（仍纯 pytest 无 PG 依赖）。
+  backend-pg-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: avt
+          POSTGRES_PASSWORD: avt_test
+          POSTGRES_DB: aivideotrans_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip install -r gateway/requirements.txt
+      - name: Run reservation PG atomicity tests
+        env:
+          AVT_TEST_PG_DSN: postgresql+asyncpg://avt:avt_test@localhost:5432/aivideotrans_test
+        run: pytest -q tests/test_phase43a_pr2_reservation_pg_atomic.py
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
