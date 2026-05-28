@@ -330,7 +330,8 @@ def maybe_run_express_auto_clone(
     - **L1 admin 主开关**（默认 False → no-op，Express 行为不变）
     - **L4 consent**（无 consent → skip，不调 auto_clone；前端 UI 留 PR3）
     - **L2 worker env**（武汉 worker 未启用 → skip）
-    - **L3 allowlist**（非空且不含该 user → skip）
+    - **L3 allowlist**（fail-closed：空 / 非 list / 不含该 user → skip。空
+      allowlist = 没人能用，等效 admin flag off；无 admin bypass）
 
     任一不过 → return None（**不构造 client、不调 run_express_auto_clone**），
     Express 走预设音色。全过则装配真实 deps 调编排，成功原地注入 routing。
@@ -351,9 +352,16 @@ def maybe_run_express_auto_clone(
 
         if not is_worker_enabled_in_env():
             return None
-        # L3 allowlist（非空才生效；空 = 不额外限制）
-        allowlist = _admin(_K_ALLOWLIST, []) or []
-        if isinstance(allowlist, list) and allowlist and str(user_id) not in {str(x) for x in allowlist}:
+        # L3 allowlist —— **fail-closed canary gate**（与 PR1 availability +
+        # 主 spec 一致）：空 allowlist = 没人能用（等效 admin flag off，双保险），
+        # **不是**"全员放行"。非 list（malformed）也 fail-closed skip。
+        # pipeline 只有 user_id、没有 user role，所以**不做 admin bypass**
+        # （availability endpoint 才有 admin bypass）；admin 灰度冒烟须把自己的
+        # user_id 显式加进 allowlist —— 与部署 SOP 一致。
+        allowlist = _admin(_K_ALLOWLIST, [])
+        if not isinstance(allowlist, list) or not allowlist:
+            return None
+        if str(user_id) not in {str(x) for x in allowlist}:
             return None
 
         target_model = str(_admin(_K_TARGET_MODEL, TARGET_MODEL_DEFAULT) or TARGET_MODEL_DEFAULT)

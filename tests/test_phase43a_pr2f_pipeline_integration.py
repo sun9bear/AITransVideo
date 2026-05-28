@@ -40,6 +40,8 @@ from services.express.pipeline_clients import (  # noqa: E402
     _K_TARGET_MODEL,
 )
 
+_UNSET = object()  # distinct from None so tests can pass an explicit null allowlist
+
 _CONSENT_OK = {
     "auto_voice_clone": True,
     "server_confirmed_at": "2026-05-28T03:44:51.345Z",
@@ -78,15 +80,18 @@ def _invoke(
     enabled=True,
     worker=True,
     consent=_CONSENT_OK,
-    allowlist=None,
+    allowlist=_UNSET,
     user_id="user-1",
     real_run=False,
     clients=None,
     project_dir="/tmp/express_pr2f",
 ):
+    # allowlist is fail-closed: default sentinel None → allowlist the test user
+    # so "all gates pass" cases proceed; explicit values exercise the gate.
+    effective_allowlist = [user_id] if allowlist is _UNSET else allowlist
     settings_map = {
         _K_ENABLED: enabled,
-        _K_ALLOWLIST: allowlist if allowlist is not None else [],
+        _K_ALLOWLIST: effective_allowlist,
         _K_TARGET_MODEL: "cosyvoice-v3.5-flash",
         _K_MIN_RATIO: 0.30,
         _K_MIN_LINES: 5,
@@ -158,10 +163,20 @@ def test_gate_allowlist_includes_user_proceeds(monkeypatch):
     assert run_calls["n"] == 1, "user 在 allowlist 内应进入 auto_clone"
 
 
-def test_gate_empty_allowlist_proceeds(monkeypatch):
-    """空 allowlist = 不额外限制（只要其它闸过）。"""
+def test_gate_empty_allowlist_skips(monkeypatch):
+    """fail-closed：空 allowlist = 没人能用（等效 admin flag off），不是全员放行
+    （Codex PR2-F-fix；与 PR1 availability + spec 一致）。"""
     outcome, _, _, run_calls = _invoke(monkeypatch, allowlist=[])
-    assert run_calls["n"] == 1
+    assert outcome is None and run_calls["n"] == 0, "空 allowlist 必须 skip（fail-closed）"
+
+
+def test_gate_malformed_allowlist_skips(monkeypatch):
+    """allowlist 非 list（string / dict / None）→ fail-closed skip。"""
+    for bad in ("user-1", {"user-1": True}, None, 123):
+        outcome, _, _, run_calls = _invoke(monkeypatch, allowlist=bad)
+        assert outcome is None and run_calls["n"] == 0, (
+            f"malformed allowlist {bad!r} 必须 fail-closed skip"
+        )
 
 
 def test_gate_missing_identity_skips(monkeypatch):
