@@ -1,9 +1,15 @@
-"""MiMo-V2-TTS provider — alternative to MiniMax TTS.
+"""MiMo-V2.5-TTS provider — alternative to MiniMax TTS.
 
 API: POST https://api.xiaomimimo.com/v1/chat/completions
 Auth: Bearer token via MIMO_API_KEY env var
 RPM limit: 100 (vs MiniMax's 20)
 Available voices: mimo_default, default_zh, default_en
+
+Default model is ``mimo-v2.5-tts`` (plan 2026-05-27 Phase 3, smoke-verified
+2026-05-29: voice ``mimo_default`` + the existing payload format work on V2.5).
+Override / rollback at runtime via the ``MIMO_TTS_MODEL`` env var
+(e.g. ``MIMO_TTS_MODEL=mimo-v2-tts`` reverts to V2 without a code change —
+V2 TTS has no official deprecation date).
 """
 
 from __future__ import annotations
@@ -23,7 +29,9 @@ except ImportError:  # pragma: no cover
 
 
 DEFAULT_MIMO_BASE_URL = "https://api.xiaomimimo.com/v1/chat/completions"
-DEFAULT_MIMO_MODEL = "mimo-v2-tts"
+# Phase 3 (plan 2026-05-27): proactive upgrade to V2.5 (smoke-verified
+# 2026-05-29). MIMO_TTS_MODEL env overrides for runtime rollback to v2-tts.
+DEFAULT_MIMO_MODEL = os.environ.get("MIMO_TTS_MODEL", "mimo-v2.5-tts")
 DEFAULT_MIMO_VOICE = "mimo_default"  # Official preset; style via <style> tag in content
 DEFAULT_MIMO_AUDIO_FORMAT = "wav"
 DEFAULT_MIMO_TIMEOUT_SECONDS = 60

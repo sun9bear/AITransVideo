@@ -34,7 +34,7 @@ JOB_TTS_BUCKETS = {
 }
 
 DEFAULT_PRICE_CATALOG: dict[str, Any] = {
-    "version": "2026-05-29-mimo-v2.5-llm",
+    "version": "2026-05-29-mimo-v2.5-llm-tts",
     "currency": "RMB",
     # Retained for backward compat — ``_rate_to_rmb`` still honors
     # ``_per_million_usd`` fields if present (multiplies by this rate).
@@ -158,6 +158,29 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
         "volcengine:seed-tts-1.1": {
             "rmb_per_10k_billed_chars": 3.0,
             "source": "cost_metering_plan_alias",
+        },
+        # MiMo TTS — 官方 2026-05-27 公告"限时免费"、无失效日期（plan Phase 3）。
+        # token-based billing 且当前免费，billed_chars 保持 0；用 promotional
+        # 标记让 admin 成本页显示"限免"而非 missing_rate / 长期 0 成本误导。
+        # 三个 key 覆盖事件解析的几种 model 取值（resolver 默认 mimo-tts +
+        # 实际 v2.5/v2 名）。
+        "mimo:mimo-tts": {
+            "rmb_per_10k_billed_chars": 0.0,
+            "promotional": True,
+            "promotional_note": "限时免费，失效日期未知/待确认",
+            "source": "xiaomi_mimo_limited_free_2026-05-27",
+        },
+        "mimo:mimo-v2.5-tts": {
+            "rmb_per_10k_billed_chars": 0.0,
+            "promotional": True,
+            "promotional_note": "限时免费，失效日期未知/待确认",
+            "source": "xiaomi_mimo_limited_free_2026-05-27",
+        },
+        "mimo:mimo-v2-tts": {
+            "rmb_per_10k_billed_chars": 0.0,
+            "promotional": True,
+            "promotional_note": "限时免费，失效日期未知/待确认",
+            "source": "xiaomi_mimo_limited_free_2026-05-27",
         },
     },
     "voice_clone": {
@@ -478,7 +501,10 @@ def apply_costs(breakdown: JobCostBreakdown, catalog: dict[str, Any]) -> None:
             continue
         price = _coerce_float(rate.get("rmb_per_10k_billed_chars"))
         row.cost_rmb = round(row.billed_chars / 10_000 * price, 6)
-        row.rate_status = "configured"
+        # Promotional (limited-free) providers are marked distinctly so the
+        # admin cost page does not read "configured 0 cost" as a permanent
+        # price (plan 2026-05-27 Phase 3 — MiMo TTS limited-free).
+        row.rate_status = "promotional" if rate.get("promotional") else "configured"
         row.rate_source = str(rate.get("source") or "")
 
     for row in breakdown.voice_clone_rows:

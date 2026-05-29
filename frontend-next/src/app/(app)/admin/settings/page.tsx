@@ -233,13 +233,13 @@ const TTS_SPEED_MODE_OPTIONS = [
 
 const TTS_OPTIONS = [
   { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，RPM 20' },
-  { value: 'mimo', label: 'MiMo-V2-TTS（小米）', description: '限时免费，RPM 100，自然语言风格控制' },
+  { value: 'mimo', label: 'MiMo-V2.5-TTS（小米）', description: '限时免费（无失效日期，随时可能转收费），RPM 100，自然语言风格控制' },
   { value: 'volcengine', label: '豆包语音合成 2.0（V3）', description: '火山引擎 V3 流式接口，300+音色，¥3/万字符，自动情感表达' },
 ]
 
 const EXPRESS_TTS_OPTIONS = [
   { value: 'cosyvoice', label: 'CosyVoice', description: '阿里通义，快速合成，适合快捷版' },
-  { value: 'mimo', label: 'MiMo-V2-TTS（小米）', description: '限时免费，RPM 100，自然语言风格控制' },
+  { value: 'mimo', label: 'MiMo-V2.5-TTS（小米）', description: '限时免费（无失效日期，随时可能转收费），RPM 100，自然语言风格控制' },
   { value: 'volcengine', label: '豆包语音合成 1.0', description: '火山引擎 V3 流式接口，100+音色，¥5/万字符' },
 ]
 
