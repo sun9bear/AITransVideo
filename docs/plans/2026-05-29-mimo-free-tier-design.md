@@ -1,7 +1,7 @@
 # 免费版视频翻译流程设计（MiMo voiceclone 保留原声）
 
 **日期**：2026-05-29
-**状态**：`PHASED` —— 经 CodeX review 后改为**两阶段**（见 §1.5）。**Phase 1（内部 spike / allowlist 灰度）先行**，验证 MiMo voiceclone 质量/延迟/失败率/参考片段/10MB/成本；**Phase 2（公开免费版）** 待 Phase 1 通过 + 补齐落地 gate + consent/法务确认后再做。brainstorming 全段确认（1/1b/2/3）+ spec review 过；CodeX review 6 点已核实属实并吸收。
+**状态**：`PHASED` —— 经 CodeX review 后改为**两阶段**（见 §1.5）。**Phase 1（内部 spike / allowlist 灰度）先行**，验证 MiMo voiceclone 质量/延迟/失败率/参考片段/10MB/成本；**Phase 2（公开免费版）** 待 Phase 1 通过 + 补齐落地 gate + consent/法务确认后再做。**【2026-05-29】Phase 1 批量验收已通过（4/4 成功、p50≈10s、3 段复测均无口吃），转入 Phase 2 规划。另测得 MiMo voiceclone 长输入 run-to-run 不稳定（同输入时长/停顿方差大）；产品决策：免费版本期先不做切片（现有 Express 对齐吸收方差、免费版可接受波动），切片降为 deferred 后备杠杆（gate #7，见 §1.5）。** brainstorming 全段确认（1/1b/2/3）+ spec review 过；CodeX review 6 点已核实属实并吸收。
 **类型**：设计稿（design spec，brainstorming 产物）
 **前置**：[MiMo voiceclone/voicedesign 可行性评估](2026-05-29-mimo-voiceclone-voicedesign-feasibility.md)
 
@@ -41,7 +41,17 @@ CodeX review 指出"复用 Express"被想得太轻——多个下游系统对未
 - ⚠️ **延迟方差**：同任务先用 7s 参考（base64 456KB）**120s 超时**，换 4s 参考即 6.2s。非线性，叠加美国→中国 api.xiaomimimo.com 跨境延迟。**结论：参考片段控制在 3–5s；跨境可靠性/失败率需小批量复测**（Phase 1 待办）。
 - 验证机制：assistant role + `cn_text`、`modalities:["audio"]`、`audio.voice=data:audio/wav;base64,...`、`format:wav`。
 
+**Phase 1 批量结果 + 验收结论（2026-05-29，美国主机，同一真实任务 `job_e6067174347645209e7d75040599ed3b`）**：
+- ✅ **失败率**：单说话人视频 seg1–4 批量跑 voiceclone，**4/4 成功、0 失败**。1 份 per-speaker 参考（`speaker_a`，从 `speech_for_asr.wav` 提取的 ≤5s 干净片段）喂全部 4 段，**音色段间一致**（用户试听未提漂移）——验证 **per-speaker（而非 per-segment）参考策略**成立。
+- ✅ **延迟**：5.5 / 10.0 / 12.3 / 9.5s，**p50≈10s、max 12.3s**，均 < 15s 门槛；参考封顶 5s，**未撞 10MB 上限**。
+- ⚠️ **质量（长文本 run-to-run 不稳定）**：seg3（原段 29.55s、中文 126 字，约 seg1 的 4 倍长）首个单次样本后半段韵律塌、有"口吃"感。纯 ffmpeg 分析排除"参考停顿被克隆"（参考无内部静音），定位为 **TTS 长输入通病**。**用同文本 + 同参考单次合成复测 3 次**：输出 23.2 / 27.8 / 28.3s（叠加原始 28.5s，**4 样本时长方差 ~19%**），停顿分布从"零长停顿"到"八个 0.5–0.84s 停顿"全谱漂移——**确认 MiMo voiceclone 长输入 run-to-run 不稳定**（质量 + 时长都抖；极端短样本 23.2s 在 29.55s 槽位短 21.5%，会触发对齐 rewrite）。原始口吃只是该高方差分布里的一个样本，**"重生成碰运气"不能作修复**。
+- **切短可修（已验证，本期不做）**：seg3 切 4 短句逐句合成再 concat（+trim 接缝）后病态长静音消失、停顿均匀，用户 A/B 判"更顺"——**切片是已验证的压方差/修口吃杠杆**，但见下方产品决策本期不落地。
+- **验收门槛核对**：失败率 0%（4/4）✓ ／ p50≈10s < 15s ✓ ／ 质量（保留原声成立，用户判"还行，甚至优于 CosyVoice 克隆"；3 段复测均无口吃，但样本间听感仍有差异）✓。
+- **结论：Phase 1 通过，进 Phase 2 规划。** **产品决策（2026-05-29，用户）：免费版本期先不做切片**——(1) 复用的 Express 对齐层（atempo + 补静音 + >20% 才 rewrite）本就吸收 TTS 时长方差，长输入不稳定会优雅降级为"偶尔某段稍慢 / 被重写"、不致任务失败，**无需切片即可上线**；(2) 免费引流漏斗可接受质量波动，付费版（Studio 切分 / 后编辑）是质量升级卖点。切片作为**已验证的 deferred 后备杠杆**归档（用户后续抱怨长段质量再启用），见下表 gate #7 注。
+
 ### Phase 2：公开免费版（Phase 1 通过后，且必须先补齐以下 gate）
+
+> 📋 实现计划：[2026-05-29-mimo-free-tier-phase2-plan.md](2026-05-29-mimo-free-tier-phase2-plan.md)（Phase 2a 核心流程 behind flag + Phase 2b 变现；本期不做切片，consent/法务为 LAUNCH GATE）。
 以下每条都是 CodeX 核实的**落地必改点**，缺一即出 bug 或泄露：
 
 | # | 落地点 | 现状（已核实） | Phase 2 必做 |
@@ -52,6 +62,8 @@ CodeX review 指出"复用 Express"被想得太轻——多个下游系统对未
 | 4 | MiMo provider | `mimo_tts_provider.py:48` 硬编码 `audio.voice=mimo_default`；`tts_generator.py:487` 不传 model/参考音频 | 新 voiceclone 分支：model 透传 + base64 音频构造 + 10MB 校验 + mock 测试 |
 | 5 | 下载 gate | `downloadable_keys.py:94` 仅 express 受限，其余（含 free）**默认 Studio 全放行** | 加显式 `free` 分支（只放水印成品，草稿/后编辑产物门控）——**不能只靠 UI 隐藏** |
 | 6 | fallback 可见性 | — | kill-switch 降级 / MiMo 失败回落，需对用户/admin 可见提示，不静默 |
+
+> **Gate #7「长段切短再合成」— deferred（本期不做，2026-05-29 用户决策）。** Phase 1 复测确认 MiMo voiceclone 长输入 run-to-run 不稳定（同一 126 字文本 + 同参考，单次合成 4 样本时长 23.2–28.5s、~19% 方差，停顿分布大幅漂移），切短是**已验证**的压方差 / 修口吃杠杆。但现有 Express 对齐层吸收时长方差、免费版可接受质量波动，故**本期不落地切片**；归档为后备杠杆，仅当 Phase 2 用户抱怨长段质量时启用（切短句逐句合成 → concat trim 接缝，落 §2.2 step3 / gate #4，阈值 admin 可配）。
 
 ## 2. 第 1 段：架构 + 模式分发 + 音色数据流 ✅（已确认）
 
@@ -146,4 +158,5 @@ CodeX review 指出"复用 Express"被想得太轻——多个下游系统对未
 - 每日配额的重置语义（自然日固定时区 / 滚动 24h）、PG 存储模型
 - 后编辑 add-on：MiMo 免费期"进入即解锁不逐次扣"，转收费后"按段计"的切换机制
 - 每说话人参考片段的"最长干净片段"选取算法（时长阈值、质量门槛）
+- **长段切短再合成 — deferred 后备杠杆**（Phase 1 已验证可压方差 / 修口吃，但本期不做，见 §1.5 / gate #7 注）：若将来启用，需定切分阈值（字数 / 时长）、切句策略（标点优先）、接缝 trim/crossfade 参数
 - add-on 价格/费率在 `pricing_runtime` 的 schema 落点

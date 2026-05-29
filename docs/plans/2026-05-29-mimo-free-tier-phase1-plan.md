@@ -31,7 +31,7 @@
 - Modify: `src/services/tts/mimo_tts_provider.py`
 - Test: `tests/test_mimo_voiceclone_provider.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 # tests/test_mimo_voiceclone_provider.py
@@ -74,12 +74,12 @@ def test_synthesize_voiceclone_requires_key(monkeypatch):
         mp.synthesize_voiceclone("x", reference_audio=b"\x00" * 100, api_key=None)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `python -m pytest tests/test_mimo_voiceclone_provider.py -q`
 Expected: FAIL（`synthesize_voiceclone` 未定义）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 在 `mimo_tts_provider.py`：先把 `synthesize()` 里提取音频的那段抽成共享 helper（DRY），再加 voiceclone 函数。
 
@@ -161,17 +161,17 @@ def synthesize_voiceclone(
 
 同时把 `synthesize()` 末尾的提取段替换为 `return _extract_audio_bytes(response_data)`（DRY，行为不变）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `python -m pytest tests/test_mimo_voiceclone_provider.py -q`
 Expected: PASS（3 条）
 
-- [ ] **Step 5: 回归基础 TTS 没被 DRY 重构搞坏**
+- [x] **Step 5: 回归基础 TTS 没被 DRY 重构搞坏**
 
 Run: `python -m pytest tests/test_mimo_tts_v25.py -q`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/services/tts/mimo_tts_provider.py tests/test_mimo_voiceclone_provider.py
@@ -188,7 +188,7 @@ git commit -m "feat(mimo): add synthesize_voiceclone (inline ref + 10MB guard) [
 
 **模式参考：** `src/services/transcript_reviewer.py::_extract_speaker_audio_clips`（最长发言段 + ffmpeg 切片）。本任务区别：源用 **clean** `speech_for_asr.wav`、目标 **3–5s**、输出 **wav 24kHz**、持久化到 job 产物目录（非 `.review_tmp`）。
 
-- [ ] **Step 1: 写失败测试**（选段逻辑可纯函数化，避免依赖真实 ffmpeg）
+- [x] **Step 1: 写失败测试**（选段逻辑可纯函数化，避免依赖真实 ffmpeg）
 
 ```python
 # tests/test_voiceclone_reference.py
@@ -214,12 +214,12 @@ def test_pick_reference_window_returns_none_if_all_too_short():
     assert pick_reference_window(segs, "s1", min_s=3.0, max_s=5.0) is None
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `python -m pytest tests/test_voiceclone_reference.py -q`
 Expected: FAIL（模块/函数未定义）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 # src/services/tts/voiceclone_reference.py
@@ -296,12 +296,12 @@ def extract_speaker_references(
     return refs
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `python -m pytest tests/test_voiceclone_reference.py -q`
 Expected: PASS（2 条）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/services/tts/voiceclone_reference.py tests/test_voiceclone_reference.py
@@ -318,7 +318,7 @@ git commit -m "feat(mimo): per-speaker clean reference extraction from speech_fo
 
 **用途：** 开发者在美国主机手动跑，针对一个真实 job_dir 验证质量 + 量化延迟/失败率/usage。**不进 CI、不自动调用**（付费 API 合规——MiMo 现免费，但仍仅手动触发）。
 
-- [ ] **Step 1: 写 smoke 测试（mock provider，不打真实 API）**
+- [x] **Step 1: 写 smoke 测试（mock provider，不打真实 API）**
 
 ```python
 # tests/test_mimo_voiceclone_spike.py
@@ -348,12 +348,12 @@ def test_run_spike_smoke(tmp_path, monkeypatch):
     assert (tmp_path / "spike_out").exists()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `python -m pytest tests/test_mimo_voiceclone_spike.py -q`
 Expected: FAIL（模块未定义）
 
-- [ ] **Step 3: 实现 harness**
+- [x] **Step 3: 实现 harness**
 
 ```python
 # scripts/spike/mimo_voiceclone_spike.py
@@ -437,12 +437,12 @@ if __name__ == "__main__":
 
 **导入约定（已核实）：** 仓库 `tests/test_quality_benchmark_tools.py` 已用 `from scripts.benchmark... import ...`，经 PEP 420 命名空间包工作。所以本任务**加 `scripts/spike/__init__.py`（对齐 `scripts/benchmark/__init__.py`），不要加顶层 `scripts/__init__.py`**（会破坏现有命名空间包布局）。测试 `monkeypatch.setattr(spike, "synthesize_voiceclone", ...)` 能生效，因为 harness 在模块顶部 import 了这两个名字。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `python -m pytest tests/test_mimo_voiceclone_spike.py -q`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/spike/mimo_voiceclone_spike.py tests/test_mimo_voiceclone_spike.py
@@ -455,11 +455,11 @@ git commit -m "feat(mimo): internal voiceclone spike harness (latency/failure/us
 
 > 这不是代码任务，是 Phase 1 的验收动作。**仅开发者手动触发**（付费 API 合规）。
 
-- [ ] **Step 1:** 把三个文件 `docker cp` 进 `aivideotrans-app`（src bind-mount）/ 或 `git archive` 打包上传解包；`docker restart aivideotrans-app`（参照本会话 Phase 2/3 部署手法）。
-- [ ] **Step 2:** 选 2–3 个不同说话人/语言的真实 job_dir，容器内跑：
+- [x] **Step 1:** 把三个文件 `docker cp` 进 `aivideotrans-app`（src bind-mount）/ 或 `git archive` 打包上传解包；`docker restart aivideotrans-app`（参照本会话 Phase 2/3 部署手法）。
+- [x] **Step 2:** 选 2–3 个不同说话人/语言的真实 job_dir，容器内跑：
   `docker exec aivideotrans-app python -m scripts.spike.mimo_voiceclone_spike <job_dir> --max-segments 8`
-- [ ] **Step 3:** 拉回 `report.json` + 几条输出 wav，人工评：音色一致性、自然度、**latency p50/max、失败率**、是否撞 10MB（参考已封 5s，应不会）。
-- [ ] **Step 4:** 把结论写回 design 文档 §1.5 Phase 1（替换"首测结果"为"批量结果"），据此决定是否进 Phase 2。
+- [x] **Step 3:** 拉回 `report.json` + 几条输出 wav，人工评：音色一致性、自然度、**latency p50/max、失败率**、是否撞 10MB（参考已封 5s，应不会）。
+- [x] **Step 4:** 把结论写回 design 文档 §1.5 Phase 1（替换"首测结果"为"批量结果"），据此决定是否进 Phase 2。
 
 **验收门槛（建议）：** 失败率低、p50 延迟可接受（<15s）、质量 ≥ CosyVoice（首测已初步满足）。达标 → 进 Phase 2 公开版规划（含 6 个落地 gate + consent/法务）。
 
