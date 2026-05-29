@@ -125,6 +125,7 @@ services:
         NEXT_PUBLIC_GEETEST_REGISTER_CAPTCHA_ID: "${NEXT_PUBLIC_GEETEST_REGISTER_CAPTCHA_ID:-}"
         NEXT_PUBLIC_GEETEST_LOGIN_CAPTCHA_ID: "${NEXT_PUBLIC_GEETEST_LOGIN_CAPTCHA_ID:-}"
         NEXT_PUBLIC_ENABLE_POST_EDIT: "${NEXT_PUBLIC_ENABLE_POST_EDIT:-0}"
+        NEXT_PUBLIC_ENABLE_FREE_TIER: "${NEXT_PUBLIC_ENABLE_FREE_TIER:-0}"
         # GEO canonical origin — inlined into the standalone bundle at build
         # time so client-side imports of `lib/seo/site.ts` see the real URL.
         # Also set as a runtime env below for server-component reads. Must
@@ -295,6 +296,9 @@ services:
       VOLCENGINE_TTS_ACCESS_KEY: "${VOLCENGINE_TTS_ACCESS_KEY:-}"
       # Studio post-edit feature flag (D29) — gate editing endpoints
       AVT_ENABLE_POST_EDIT: "${AVT_ENABLE_POST_EDIT:-false}"
+      # MiMo free-tier (Phase 2a) — gate service_mode="free" creation.
+      # Default off; public launch also needs consent/legal (design §5.3).
+      AVT_ENABLE_FREE_TIER: "${AVT_ENABLE_FREE_TIER:-false}"
       # Voice CPS auto-calibration after clone (plan v4.3 T1). Default ON;
       # set to "false"/"0"/"no"/"off" to disable. Each successful clone
       # fires 2 background tasks (turbo + hd) — the in-flight registry

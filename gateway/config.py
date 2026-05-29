@@ -100,6 +100,15 @@ class GatewaySettings(BaseSettings):
     # flag NEXT_PUBLIC_ENABLE_POST_EDIT which gates the UI entry points.
     enable_post_edit: bool = False
 
+    # --- MiMo free-tier (Phase 2a, plan 2026-05-29) ---
+    # Backend gate for service_mode="free" job creation. Disabled by
+    # default so the Phase 2a flow lands behind-flag with no public entry.
+    # Mirrors the frontend flag NEXT_PUBLIC_ENABLE_FREE_TIER.
+    # ⚠️ LAUNCH GATE: public free tier ALSO needs consent/legal sign-off
+    # (design §5.3, 《民法典》1023 voice rights). This flag alone does NOT
+    # authorize opening it to the public.
+    enable_free_tier: bool = False
+
     # --- Smart Auto Pipeline kill switch (P2 launch blocker #1) ---
     # Layer 1 of the two-layer kill switch. False (default) means the
     # gateway refuses to create smart jobs AND strips "smart" from every
