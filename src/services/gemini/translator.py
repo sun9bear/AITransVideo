@@ -19,6 +19,7 @@ from services.llm_registry import (
     get_prompt_model as _get_prompt_model,
     resolve_model_id as _resolve_model_id,
     get_fallback_candidates as _get_fallback_candidates,
+    normalize_openai_usage as _normalize_openai_usage_shared,
 )
 
 
@@ -1252,49 +1253,10 @@ class GeminiTranslator:
 
     @staticmethod
     def _normalize_openai_usage(body: dict[str, Any]) -> dict[str, Any]:
-        """Extract provider usage into metering fields (plan 2026-05-27 PR 2).
-
-        Best-effort: returns ``{}`` on any missing/malformed usage so a parsing
-        failure never breaks the main response path.
-
-        OpenAI-compatible providers (MiMo, DeepSeek) report ``prompt_tokens``
-        as the TOTAL input, which already INCLUDES cached and audio tokens.
-        The cost engine bills input/cached/audio additively, so we split here
-        to avoid double-counting:
-            input  = prompt_tokens - cached_tokens - audio_tokens
-            cached = prompt_tokens_details.cached_tokens
-            audio  = prompt_tokens_details.audio_tokens
-            output = completion_tokens
-        See tests/fixtures/provider_responses/README.md.
-        """
-        def _ci(value: object) -> int:
-            try:
-                return int(value)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                return 0
-
-        try:
-            usage = body.get("usage") or {}
-            if not isinstance(usage, dict):
-                return {}
-            prompt = max(0, _ci(usage.get("prompt_tokens")))
-            completion = max(0, _ci(usage.get("completion_tokens")))
-            details = usage.get("prompt_tokens_details") or {}
-            if not isinstance(details, dict):
-                details = {}
-            cached = max(0, _ci(details.get("cached_tokens")))
-            audio = max(0, _ci(details.get("audio_tokens")))
-            text_input = max(0, prompt - cached - audio)
-            if prompt == 0 and completion == 0:
-                return {}
-            return {
-                "input_tokens": text_input,
-                "output_tokens": completion,
-                "cached_input_tokens": cached,
-                "input_audio_tokens": audio,
-            }
-        except Exception:
-            return {}
+        """Delegates to the shared normalizer (single source of truth in
+        ``llm_registry.normalize_openai_usage``). Kept as a thin wrapper so
+        existing call sites and tests keep their import surface (PR 2)."""
+        return _normalize_openai_usage_shared(body)
 
     def _call_task_with_fallback(
         self,

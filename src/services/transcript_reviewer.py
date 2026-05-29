@@ -31,6 +31,7 @@ from services.llm_registry import (
     get_prompt_model as _get_prompt_model,
     resolve_model_id as _resolve_model_id_from_registry,
     get_fallback_candidates,
+    normalize_openai_usage as _normalize_openai_usage,
 )
 from utils.env_flags import env_flag
 
@@ -878,11 +879,13 @@ def _record_llm_usage(
     audio_paths: list[Path] | None = None,
     audio_input_seconds: float = 0.0,
     attempt_label: str = "",
+    usage: dict | None = None,
 ) -> None:
     if usage_meter is None:
         return
     try:
         audio_count, audio_bytes = _audio_paths_stats(audio_paths)
+        u = usage or {}
         usage_meter.record_llm(
             task=task,
             provider=_get_model_provider(review_model),
@@ -890,6 +893,10 @@ def _record_llm_usage(
             model_id=_resolve_model_id(review_model),
             input_text=prompt,
             output_text=response_text,
+            input_tokens=u.get("input_tokens"),
+            output_tokens=u.get("output_tokens"),
+            cached_input_tokens=u.get("cached_input_tokens"),
+            input_audio_tokens=u.get("input_audio_tokens"),
             audio_input_count=audio_count,
             audio_input_bytes=audio_bytes,
             audio_input_seconds=audio_input_seconds,
@@ -1334,11 +1341,13 @@ def _review_pass1_speakers(
             nonlocal response_text
             mimo_key = _get_model_api_key(model_name) or api_key or ""
             mimo_model_id = _resolve_model_id(model_name)
+            _mimo_usage: dict = {}
             response_text = _call_mimo_omni_raw(
                 api_key=mimo_key,
                 prompt=prompt,
                 model_id=mimo_model_id,
                 audio_paths=[audio_path] if audio_path and audio_path.exists() else None,
+                usage_sink=_mimo_usage,
             )
             _record_llm_usage(
                 usage_meter,
@@ -1349,6 +1358,7 @@ def _review_pass1_speakers(
                 audio_paths=[audio_path] if audio_path and audio_path.exists() else None,
                 audio_input_seconds=_line_span_seconds(lines) if audio_path and audio_path.exists() else 0.0,
                 attempt_label=label,
+                usage=_mimo_usage,
             )
             result = json.loads(response_text)
             _dump_retry_response(debug_output_dir, "pass1", 0, label, mimo_model_id, response_text, None)
@@ -2067,9 +2077,11 @@ def review_pass3_voice_profiles(
         def _attempt_mimo_p3(label: str, model_name: str) -> dict:
             nonlocal response_text_p3
             mimo_key = _get_model_api_key(model_name) or api_key or ""
+            _mimo_usage_p3: dict = {}
             response_text_p3 = _call_mimo_omni_raw(
                 api_key=mimo_key, prompt=prompt, model_id=_resolve_model_id(model_name),
                 audio_paths=_clip_paths or None,
+                usage_sink=_mimo_usage_p3,
             )
             _record_llm_usage(
                 usage_meter,
@@ -2080,6 +2092,7 @@ def review_pass3_voice_profiles(
                 audio_paths=_clip_paths or None,
                 audio_input_seconds=_clip_input_seconds,
                 attempt_label=label,
+                usage=_mimo_usage_p3,
             )
             result = json.loads(response_text_p3)
             _dump_retry_response(debug_output_dir, "pass3", 0, label, _resolve_model_id(model_name), response_text_p3, None)
@@ -2554,12 +2567,18 @@ def _call_mimo_omni_raw(
     model_id: str = "",
     audio_paths: list[Path] | None = None,
     max_tokens: int = 8192,
+    usage_sink: dict | None = None,
 ) -> str:
     """Call MiMo-V2-Omni API and return raw response text.
 
     Supports multimodal input: when *audio_paths* is provided, audio files
     are base64-encoded and sent as ``input_audio`` parts (OpenAI-compatible).
     Raises on any failure so callers (retry loops) can classify errors.
+
+    PR 2 (plan 2026-05-27): when ``usage_sink`` is provided, the parsed
+    provider usage (input/cached/audio/output tokens) is written into it
+    best-effort. Return type stays ``str`` so existing callers/tests that
+    don't care about usage are unaffected.
     """
     import base64 as _b64
 
@@ -2603,6 +2622,12 @@ def _call_mimo_omni_raw(
     with urllib.request.urlopen(req, timeout=300) as resp:
         body = json.loads(resp.read().decode("utf-8"))
 
+    if usage_sink is not None:
+        try:
+            usage_sink.update(_normalize_openai_usage(body))
+        except Exception:
+            pass
+
     response_text = body["choices"][0]["message"]["content"]
     if not response_text:
         raise json.JSONDecodeError("empty response from MiMo", "", 0)
@@ -2632,11 +2657,13 @@ def _call_review_mimo_omni(
     Returns (speakers, glossary, corrections) or None on failure.
     """
     try:
+        _mimo_usage_review: dict = {}
         response_text = _call_mimo_omni_raw(
             api_key=api_key,
             prompt=prompt,
             model_id=model_id,
             audio_paths=audio_paths,
+            usage_sink=_mimo_usage_review,
         )
         _record_llm_usage(
             usage_meter,
@@ -2647,6 +2674,7 @@ def _call_review_mimo_omni(
             audio_paths=audio_paths,
             audio_input_seconds=audio_input_seconds,
             attempt_label=attempt_label,
+            usage=_mimo_usage_review,
         )
         result = json.loads(response_text)
         speakers = result.get("speakers", {})

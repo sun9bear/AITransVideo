@@ -450,3 +450,51 @@ def get_all_models_with_status() -> list[dict]:
         })
     result.sort(key=lambda m: m["cost_rank"])
     return result
+
+
+def normalize_openai_usage(body: Any) -> dict[str, Any]:
+    """Extract OpenAI-compatible provider usage into metering fields.
+
+    Shared single source of truth for translator + transcript_reviewer
+    (plan 2026-05-27 PR 2). Best-effort: returns ``{}`` on missing/malformed
+    usage so a parse failure never breaks the response path.
+
+    ``prompt_tokens`` is the TOTAL input and already includes cached + audio
+    tokens. The cost engine bills input/cached/audio additively, so split
+    here to avoid double-counting (verified via Phase 0a spike, see
+    ``tests/fixtures/provider_responses/README.md``):
+
+        input  = prompt_tokens - cached_tokens - audio_tokens
+        cached = prompt_tokens_details.cached_tokens
+        audio  = prompt_tokens_details.audio_tokens
+        output = completion_tokens
+    """
+    def _ci(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    try:
+        if not isinstance(body, dict):
+            return {}
+        usage = body.get("usage") or {}
+        if not isinstance(usage, dict):
+            return {}
+        prompt = max(0, _ci(usage.get("prompt_tokens")))
+        completion = max(0, _ci(usage.get("completion_tokens")))
+        details = usage.get("prompt_tokens_details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        cached = max(0, _ci(details.get("cached_tokens")))
+        audio = max(0, _ci(details.get("audio_tokens")))
+        if prompt == 0 and completion == 0:
+            return {}
+        return {
+            "input_tokens": max(0, prompt - cached - audio),
+            "output_tokens": completion,
+            "cached_input_tokens": cached,
+            "input_audio_tokens": audio,
+        }
+    except Exception:
+        return {}

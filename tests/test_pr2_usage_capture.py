@@ -94,3 +94,64 @@ def test_record_llm_estimate_path_unchanged(tmp_path):
     assert ev["token_count_source"] == "estimated_text_length"
     assert "cached_input_tokens" not in ev
     assert "input_audio_tokens" not in ev
+
+
+# --- PR 2 pt2: transcript_reviewer MiMo audio path ---
+
+def test_reviewer_record_llm_usage_threads_tokens():
+    import services.transcript_reviewer as tr
+
+    captured: dict = {}
+
+    class FakeMeter:
+        def record_llm(self, **kwargs):
+            captured.update(kwargs)
+
+    tr._record_llm_usage(
+        FakeMeter(),
+        task="s2_pass1",
+        review_model="mimo_v25",
+        prompt="p",
+        response_text="r",
+        usage={"input_tokens": 59, "output_tokens": 8,
+               "cached_input_tokens": 192, "input_audio_tokens": 2},
+    )
+    assert captured["input_tokens"] == 59
+    assert captured["output_tokens"] == 8
+    assert captured["cached_input_tokens"] == 192
+    assert captured["input_audio_tokens"] == 2
+
+
+def test_reviewer_call_mimo_omni_raw_fills_usage_sink(monkeypatch):
+    import urllib.request
+    import services.transcript_reviewer as tr
+
+    body = {
+        "choices": [{"message": {"content": json.dumps({"speakers": {}})}}],
+        "usage": {"prompt_tokens": 253, "completion_tokens": 8,
+                  "prompt_tokens_details": {"cached_tokens": 192, "audio_tokens": 2}},
+    }
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(body).encode("utf-8")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: FakeResp())
+
+    usage: dict = {}
+    text = tr._call_mimo_omni_raw(
+        api_key="k", prompt="p", model_id="mimo-v2.5", usage_sink=usage
+    )
+    assert json.loads(text) == {"speakers": {}}
+    assert usage == {
+        "input_tokens": 59,
+        "output_tokens": 8,
+        "cached_input_tokens": 192,
+        "input_audio_tokens": 2,
+    }
