@@ -80,7 +80,7 @@ export interface JobSummary {
    * 驱动 ResultMediaCard / ResultDownloadList / SmartAutoDecisionPanel
    * 的 UI 分支。
    */
-  serviceMode?: 'express' | 'studio' | 'smart'
+  serviceMode?: 'express' | 'studio' | 'smart' | 'free'
   /**
    * Post-edit infra fields (plan 2026-04-18 §3.3). All nullable because
    * jobs created before migration 015 have NULL for these columns until
@@ -171,7 +171,7 @@ export interface CreateTranslationJobInput {
    * — falls through to the "上传视频 YYYY-MM-DD NNN" branch if omitted.
    */
   localFileName?: string
-  service_mode?: 'express' | 'studio' | 'smart'
+  service_mode?: 'express' | 'studio' | 'smart' | 'free'
   /**
    * Phase 4.3a PR3 — Express auto-clone consent (user opt-in checkbox).
    * Only meaningful for ``service_mode === 'express'``. Defaults to false

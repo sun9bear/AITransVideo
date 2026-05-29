@@ -37,7 +37,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [uploadProgress, setUploadProgress] = useState("")
   const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
-  const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart">("express")
+  const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart" | "free">("express")
+  // Phase 2a free tier — entry gated by NEXT_PUBLIC_ENABLE_FREE_TIER (internal
+  // until the consent/legal launch gate clears). Mirrors POST_EDIT_ENABLED.
+  const freeTierEnabled = process.env.NEXT_PUBLIC_ENABLE_FREE_TIER === "1"
   // Phase 4.3a PR3 — Express auto-clone consent. Both default false (opt-in).
   // `expressAutoCloneAvailable` is server-gated (admin flag + allowlist) and
   // fail-closed; the checkbox only renders when express + available.
@@ -406,6 +409,37 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   </div>
                 )}
               </button>
+
+              {/* Free mode — Phase 2a, gated by NEXT_PUBLIC_ENABLE_FREE_TIER */}
+              {freeTierEnabled && (
+                <button
+                  type="button"
+                  className={serviceMode === "free" ? planCardSelectedClass : planCardIdleClass}
+                  style={serviceMode === "free" ? selectedPlanStyle : undefined}
+                  disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  onClick={() => setServiceMode("free")}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-sm font-semibold text-foreground">免费版</span>
+                    <span
+                      className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                      style={{
+                        backgroundColor: "color-mix(in oklab, var(--bamboo) 14%, transparent)",
+                        color: "var(--bamboo)",
+                        border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
+                      }}
+                    >
+                      Free
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">免费保留原声 AI 配音（限时），每日 1 次、单条 ≤10 分钟，成品带水印。</p>
+                  {serviceMode === "free" && (
+                    <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                      <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </div>
+                  )}
+                </button>
+              )}
 
               {/* Studio mode — locked unless plan allows it */}
               {(() => {

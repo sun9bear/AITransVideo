@@ -42,7 +42,7 @@ export interface ApiJobRecord {
    * Studio: full output including editor package).
    * See docs/plans/2026-04-18-express-studio-output-filter-plan.md.
    */
-  service_mode?: 'express' | 'studio'
+  service_mode?: 'express' | 'studio' | 'smart' | 'free'
   /**
    * Post-edit infra fields (migration 015, plan 2026-04-18 §3.1).
    * All nullable because pre-migration jobs don't have these columns set.

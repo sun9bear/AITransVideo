@@ -11,7 +11,7 @@ type ResultDownloadListProps = {
    * docs/plans/2026-04-18-express-studio-output-filter-plan.md），
    * 本层为兜底：即便后端回退仍不会泄露 editor/source 下载入口。
    */
-  serviceMode?: 'express' | 'studio' | 'smart'
+  serviceMode?: 'express' | 'studio' | 'smart' | 'free'
 }
 
 const primaryDownloadKeys = [
@@ -32,7 +32,8 @@ const EXPRESS_VISIBLE_DOWNLOAD_KEYS = new Set<string>([
 ])
 
 export function ResultDownloadList({ items, serviceMode }: ResultDownloadListProps) {
-  const effectiveItems = serviceMode === 'express'
+  // Free shares Express's restricted output layer (dubbed video only).
+  const effectiveItems = (serviceMode === 'express' || serviceMode === 'free')
     ? items.filter((item) => EXPRESS_VISIBLE_DOWNLOAD_KEYS.has(item.key))
     : items
   const orderedPrimaryItems = primaryDownloadKeys

@@ -33,7 +33,7 @@ interface ResultMediaCardProps {
    * "配音视频"下载和"生成视频"fallback。Studio 完整 UI。
    * 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
    */
-  serviceMode?: 'express' | 'studio' | 'smart'
+  serviceMode?: 'express' | 'studio' | 'smart' | 'free'
   /**
    * When provided, renders a "修改" shortcut button at the right end of the
    * download row (ml-auto). Lets the projects-list card move 修改 out of the
@@ -54,7 +54,9 @@ const MATERIAL_OPTIONS = [
 type MaterialItemKey = (typeof MATERIAL_OPTIONS)[number]["key"]
 
 export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCardProps) {
-  const isExpress = serviceMode === 'express'
+  // Free shares Express's restricted media UI (dubbed video only; audio /
+  // materials hidden — those are gated / paid add-ons in Phase 2b).
+  const isExpress = serviceMode === 'express' || serviceMode === 'free'
   const [availability, setAvailability] = useState<MaterialsAvailability | null>(null)
   const [loading, setLoading] = useState(true)
   const [showPackDialog, setShowPackDialog] = useState(false)
