@@ -1,0 +1,10 @@
+{
+  "_note": "Sanitized DeepSeek v4-flash /chat/completions usage shape. Captured 2026-05-29 via Phase 0a spike. DeepSeek exposes both prompt_tokens_details.cached_tokens AND explicit prompt_cache_hit_tokens / prompt_cache_miss_tokens.",
+  "prompt_tokens": 6,
+  "completion_tokens": 8,
+  "total_tokens": 14,
+  "prompt_tokens_details": {"cached_tokens": 0},
+  "completion_tokens_details": {"reasoning_tokens": 8},
+  "prompt_cache_hit_tokens": 0,
+  "prompt_cache_miss_tokens": 6
+}

@@ -1,0 +1,8 @@
+{
+  "_note": "Sanitized MiMo v2.5 /chat/completions usage shape. Captured 2026-05-29 via Phase 0a spike on US host (in-container call). Token counts only; no content, no API key.",
+  "completion_tokens": 8,
+  "prompt_tokens": 249,
+  "total_tokens": 257,
+  "completion_tokens_details": {"reasoning_tokens": 7},
+  "prompt_tokens_details": {"cached_tokens": 192}
+}

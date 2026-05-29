@@ -1,0 +1,8 @@
+{
+  "_note": "Sanitized MiMo v2.5 multimodal (audio input) usage shape. Captured 2026-05-29 via Phase 0a spike (0.3s synthetic silent wav). audio_tokens is nested under prompt_tokens_details; prompt_tokens is the TOTAL input (includes audio_tokens and cached_tokens).",
+  "completion_tokens": 8,
+  "prompt_tokens": 253,
+  "total_tokens": 261,
+  "completion_tokens_details": {"reasoning_tokens": 7},
+  "prompt_tokens_details": {"audio_tokens": 2, "cached_tokens": 192}
+}

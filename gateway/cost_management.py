@@ -34,7 +34,7 @@ JOB_TTS_BUCKETS = {
 }
 
 DEFAULT_PRICE_CATALOG: dict[str, Any] = {
-    "version": "2026-05-21-gemini-31-flash-lite-ga",
+    "version": "2026-05-29-mimo-v2.5-llm",
     "currency": "RMB",
     # Retained for backward compat — ``_rate_to_rmb`` still honors
     # ``_per_million_usd`` fields if present (multiplies by this rate).
@@ -108,6 +108,25 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
             "audio_input_per_million_rmb": 3.60,
             "audio_tokens_per_second": 32,
             "source": "google_gemini_preview_history_compat_rmb_2026-05-21",
+        },
+        # MiMo (Xiaomi) — RMB-direct 官方按量价（2026-05-27 调价，2026-05-29 查官网
+        # 确认）。官方文档未单列音频输入计费：多模态 audio 按通用 input token
+        # 计价，因此 audio_input 与 input 同价（有据，非猜测）。音频 token 数量
+        # 在 PR 2 采集真实 usage 前，沿用引擎默认 25 tokens/s 估算。
+        # mimo_omni（已弃用）也解析到 mimo-v2.5，命中本条目。
+        "mimo:mimo-v2.5": {
+            "input_per_million_rmb": 1.0,
+            "cached_input_per_million_rmb": 0.02,
+            "output_per_million_rmb": 2.0,
+            "audio_input_per_million_rmb": 1.0,
+            "source": "xiaomi_mimo_pay_as_you_go_2026-05-27",
+        },
+        "mimo:mimo-v2.5-pro": {
+            "input_per_million_rmb": 3.0,
+            "cached_input_per_million_rmb": 0.025,
+            "output_per_million_rmb": 6.0,
+            "audio_input_per_million_rmb": 3.0,
+            "source": "xiaomi_mimo_pay_as_you_go_2026-05-27",
         },
     },
     "tts": {

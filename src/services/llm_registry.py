@@ -121,7 +121,7 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "api_key_env": "MIMO_API_KEY",
         "cost_rank": 2,
         "label": "MiMo-V2.5（全模态）",
-        "cost_hint": "Token Plan 1x（音频已验证）",
+        "cost_hint": "¥1.0/¥2.0 每百万 token（缓存 ¥0.02）",
     },
     "mimo_v25_pro": {
         "api_model_id": "mimo-v2.5-pro",
@@ -130,17 +130,21 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "api_key_env": "MIMO_API_KEY",
         "cost_rank": 4,
         "label": "MiMo-V2.5-Pro（Agent 文本）",
-        "cost_hint": "Token Plan 2x（音频 payload 未开放）",
+        "cost_hint": "¥3.0/¥6.0 每百万 token（缓存 ¥0.025）",
     },
-    # Legacy MiMo Omni — keep for existing admin settings and audio fallback paths.
+    # Legacy MiMo Omni — 官方 mimo-v2-omni 于 2026-06-30 下线（2026-06-01 起
+    # 自动转发到 mimo-v2.5）。为不破坏历史 admin settings 保留逻辑名，但
+    # api_model_id 已重指向 mimo-v2.5（迁移方案 A，plan 2026-05-27 Phase 0b）。
+    # 运行时不再解析出 mimo-v2-omni。
     "mimo_omni": {
-        "api_model_id": "mimo-v2-omni",
+        "api_model_id": "mimo-v2.5",
         "provider": "mimo",
         "supports_audio": True,
         "api_key_env": "MIMO_API_KEY",
         "cost_rank": 1,
-        "label": "MiMo-V2-Omni（旧版）",
-        "cost_hint": "旧版",
+        "label": "MiMo-V2-Omni（已弃用 → V2.5）",
+        "cost_hint": "已弃用：自动指向 mimo-v2.5（原 mimo-v2-omni 2026-06-30 下线）",
+        "deprecated": True,
     },
 }
 
@@ -204,6 +208,10 @@ _cache: dict | None = None
 _cache_ts: float = 0
 _CACHE_TTL = 5.0  # seconds
 
+# Dedupe deprecation warnings so a long-running pipeline only logs once per
+# deprecated model name (plan 2026-05-27 Phase 0b — admin 可见性 / 日志).
+_warned_deprecated_models: set[str] = set()
+
 
 def _load_settings() -> dict:
     """Load admin settings with a 5-second TTL cache."""
@@ -264,11 +272,38 @@ def get_prompt_model(mode: str, prompt_key: str) -> str:
     models = settings.get("prompt_models", {}).get(mode, {})
     model = models.get(prompt_key, "")
     if model and model in MODEL_REGISTRY:
-        return model
-    mode_default = _MODE_DEFAULTS.get(mode, {}).get(prompt_key, "")
-    if mode_default and mode_default in MODEL_REGISTRY:
-        return mode_default
-    return _DEFAULTS.get(prompt_key, "gemini")
+        resolved = model
+    else:
+        mode_default = _MODE_DEFAULTS.get(mode, {}).get(prompt_key, "")
+        if mode_default and mode_default in MODEL_REGISTRY:
+            resolved = mode_default
+        else:
+            resolved = _DEFAULTS.get(prompt_key, "gemini")
+    _warn_if_deprecated(resolved, mode=mode, prompt_key=prompt_key)
+    return resolved
+
+
+def _warn_if_deprecated(model_name: str, *, mode: str = "", prompt_key: str = "") -> None:
+    """Log once (per process) when a deprecated model is actively selected.
+
+    Plan 2026-05-27 Phase 0b: migrating ``mimo_omni`` away from the retiring
+    ``mimo-v2-omni`` must stay admin-visible, not silent. The deprecated label
+    surfaces in the model management UI; this warning surfaces in runtime logs.
+    """
+    info = MODEL_REGISTRY.get(model_name, {})
+    if not info.get("deprecated"):
+        return
+    if model_name in _warned_deprecated_models:
+        return
+    _warned_deprecated_models.add(model_name)
+    logger.warning(
+        "[llm_registry] selected model %r is deprecated (mode=%s prompt=%s); "
+        "it now resolves to api_model_id=%s. Update admin settings to a current model.",
+        model_name,
+        mode or "?",
+        prompt_key or "?",
+        info.get("api_model_id", model_name),
+    )
 
 
 def get_api_key(model_name: str) -> str | None:
@@ -392,6 +427,7 @@ def get_available_models_for_prompt(prompt_key: str) -> list[dict]:
             "label": info["label"],
             "cost_hint": info.get("cost_hint", ""),
             "cost_rank": info.get("cost_rank", 99),
+            "deprecated": info.get("deprecated", False),
         })
     result.sort(key=lambda m: m["cost_rank"])
     return result
@@ -410,6 +446,7 @@ def get_all_models_with_status() -> list[dict]:
             "supports_audio": info.get("supports_audio", False),
             "provider": info.get("provider", ""),
             "enabled": name not in disabled,
+            "deprecated": info.get("deprecated", False),
         })
     result.sort(key=lambda m: m["cost_rank"])
     return result

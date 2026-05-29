@@ -130,6 +130,68 @@ def test_build_job_breakdown_falls_back_to_snapshot_when_usage_events_missing(tm
     assert breakdown.llm_rows[0].rate_status == "missing_rate"
 
 
+def test_mimo_v25_llm_cost_text_and_cached():
+    # Plan 2026-05-27 PR 1: MiMo LLM RMB-direct catalog entry.
+    events = [
+        {
+            "kind": "llm",
+            "provider": "mimo",
+            "model_id": "mimo-v2.5",
+            "task": "s3_translate",
+            "phase": "s3",
+            "input_tokens": 1_000_000,
+            "output_tokens": 1_000_000,
+            "cached_input_tokens": 1_000_000,
+            "success": True,
+        },
+    ]
+    breakdown = _aggregate_usage_events(events)
+    apply_costs(breakdown, DEFAULT_PRICE_CATALOG)
+
+    assert len(breakdown.llm_rows) == 1
+    row = breakdown.llm_rows[0]
+    # input 1M*1.0 + output 1M*2.0 + cached 1M*0.02 = 3.02
+    assert row.cost_rmb == 3.02
+    assert row.rate_status == "configured"
+
+
+def test_mimo_v25_pro_llm_rate_configured():
+    events = [
+        {
+            "kind": "llm",
+            "provider": "mimo",
+            "model_id": "mimo-v2.5-pro",
+            "input_tokens": 1_000_000,
+            "output_tokens": 0,
+            "success": True,
+        },
+    ]
+    breakdown = _aggregate_usage_events(events)
+    apply_costs(breakdown, DEFAULT_PRICE_CATALOG)
+
+    assert breakdown.llm_rows[0].cost_rmb == 3.0
+    assert breakdown.llm_rows[0].rate_status == "configured"
+
+
+def test_mimo_omni_alias_bills_against_v25_catalog():
+    # Plan Phase 0b: deprecated mimo_omni resolves to mimo-v2.5, so its
+    # metering rows (model_id=mimo-v2.5) must hit the same catalog entry.
+    events = [
+        {
+            "kind": "llm",
+            "provider": "mimo",
+            "model_id": "mimo-v2.5",
+            "input_tokens": 1_000_000,
+            "output_tokens": 0,
+            "success": True,
+        },
+    ]
+    breakdown = _aggregate_usage_events(events)
+    apply_costs(breakdown, DEFAULT_PRICE_CATALOG)
+    assert breakdown.llm_rows[0].rate_status == "configured"
+    assert breakdown.llm_rows[0].cost_rmb == 1.0
+
+
 def test_job_payload_prefers_ledger_capture_credits_for_revenue():
     payload = _job_payload(
         _job(),
