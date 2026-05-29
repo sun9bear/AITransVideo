@@ -199,10 +199,34 @@ def test_free_in_allowed_modes_when_flag_on():
     assert "free" not in get_effective_allowed_service_modes(user, settings=off)
 
 
-def test_handler_admits_free_past_mode_gates_when_flag_on():
-    """flag on: a non-admin free submission must clear BOTH mode gates — neither
-    free_disabled (Task 0/1 flag gate) nor service_mode_not_allowed (plan gate,
-    CodeX P1). Downstream credits/quota behavior is Task 3/4, not asserted here."""
+# ── Task 3: dual-layer free=0 debit truth (CodeX) ────────────────────────
+
+def test_frozen_debit_rates_free_is_zero():
+    """Frozen fallback layer: free never debits even if pricing_runtime is
+    missing/corrupt (no fallback to DEFAULT_DEBIT_RATE=10)."""
+    from credits_service import DEBIT_RATES
+    assert DEBIT_RATES.get(("free", "standard")) == 0
+
+
+def test_runtime_pricing_default_free_is_zero():
+    """Runtime truth layer: pricing_runtime default carries free.standard=0."""
+    from pricing_runtime import get_runtime_pricing
+    assert get_runtime_pricing().credits.debit_rates.get("free.standard") == 0
+
+
+def test_estimate_credits_free_is_zero():
+    """Resolved rate (runtime -> frozen fallback): a 10-minute free job = 0 pts,
+    never DEFAULT_DEBIT_RATE and never the min-1-credit floor."""
+    from credits_service import estimate_credits
+    assert estimate_credits(10.0, "free", "standard") == 0
+
+
+def test_handler_admits_free_and_forwards_snapshot_when_flag_on():
+    """flag on + free=0 (Task 3): a non-admin free submission clears BOTH mode
+    gates (free_disabled / service_mode_not_allowed) AND the credits reserve
+    (free debits 0), reaches the upstream forward, and the forwarded body
+    carries the free policy snapshot. This is the deferred P3 forward/override
+    assertion (now reachable because free no longer 402s on credits)."""
     _stub_database_module()
     import job_intercept as ji
     user = types.SimpleNamespace(
@@ -211,12 +235,21 @@ def test_handler_admits_free_past_mode_gates_when_flag_on():
         free_jobs_quota_total=5, free_jobs_quota_used=0,
         trial_started_at=None, trial_expires_at=None,
     )
+    proxy_spy = AsyncMock(return_value=MagicMock(status_code=200, body=b"{}"))
     with patch.object(ji.settings, "enable_free_tier", True), \
-         patch.object(ji, "proxy_request", AsyncMock(return_value=MagicMock(status_code=200))):
+         patch.object(ji, "proxy_request", proxy_spy):
         resp = _run_create(_free_job_request("free"), _min_db(), user)
+
     status = getattr(resp, "status_code", None)
     try:
         err = json.loads(resp.body)["error"]
     except Exception:
         err = None
-    assert not (status == 403 and err in {"free_disabled", "service_mode_not_allowed"})
+    assert err not in {"free_disabled", "service_mode_not_allowed", "insufficient_credits"}, \
+        f"free job wrongly blocked: status={status} err={err}"
+
+    assert proxy_spy.called, "free job should reach the upstream forward (proxy_request)"
+    forwarded = json.loads(proxy_spy.call_args.kwargs.get("override_body"))
+    assert forwarded.get("service_mode") == "free"
+    assert forwarded.get("tts_provider") == "mimo"
+    assert forwarded.get("voice_strategy") == "free_voiceclone"

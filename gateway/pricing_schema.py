@@ -202,6 +202,10 @@ def build_default_pricing_payload() -> PricingPayload:
             free_grant_credits=500,
             debit_rates={
                 "express.standard": 10,
+                # Phase 2a free tier — free jobs never debit (credits=0). Runtime
+                # truth (not just policy) so the reserve/settle path computes 0;
+                # mirrored in credits_service.DEBIT_RATES frozen fallback.
+                "free.standard": 0,
                 "studio.standard": 15,
                 "studio.high": 30,
                 "studio.flagship": 50,

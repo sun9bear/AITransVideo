@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 # = 10, under-reserving 10×.
 DEBIT_RATES: dict[tuple[str, str], int] = {
     ("express", "standard"): 10,
+    # Phase 2a free tier — free never debits (credits=0). Frozen mirror of the
+    # pricing_runtime default; without it (free, standard) falls to
+    # DEFAULT_DEBIT_RATE=10 and free users would be wrongly charged 10/min.
+    ("free", "standard"): 0,
     ("studio", "standard"): 15,
     ("studio", "high"): 30,
     ("studio", "flagship"): 50,
@@ -152,6 +156,12 @@ def estimate_credits(
         return 0
     rates = _get_runtime_debit_rates()
     rate = rates.get((service_mode, quality_tier), DEFAULT_DEBIT_RATE)
+    # A genuinely-free mode (rate 0 — e.g. the Phase 2a free tier) costs 0. The
+    # min-1-credit floor below only guards sub-1 rounding for PAID modes; it must
+    # NOT turn a 0 rate into a 1-credit charge. This is the single debit-compute
+    # point (reserve / terminal settle / shadow all call estimate_credits).
+    if rate <= 0:
+        return 0
     return max(1, round(estimated_minutes * rate))
 
 
