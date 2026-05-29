@@ -1495,6 +1495,33 @@ async def intercept_create_job(
         express_consent_parse_error=express_consent_parse_error,
     )
 
+    # Phase 2a free tier — atomic daily-quota admission BEFORE the upstream
+    # forward (CodeX: before expensive stages; independent of legacy quota).
+    # Reserve now; consume on accept / release on reject below. The reserved
+    # row has a TTL + inline-expire, so a crashed create frees the slot.
+    _free_reserved = False
+    if service_mode == "free" and user is not None:
+        from free_service_quota import (
+            FREE_DAILY_CAP,
+            reserve_free_daily,
+            shanghai_day_key,
+        )
+        _free_outcome = await reserve_free_daily(
+            db,
+            user_id=user.id,
+            usage_date=shanghai_day_key(),
+            idempotency_key=idempotency_key,
+            daily_cap=FREE_DAILY_CAP,
+        )
+        if _free_outcome.status != "reserved":
+            return _error_response(
+                403,
+                "free_daily_quota_exceeded",
+                "免费版每天 1 次，今日已用完，请明天再试或升级。",
+                {"requested_mode": "free", "reason": _free_outcome.deny_reason},
+            )
+        _free_reserved = True
+
     # Forward to upstream with modified body
     upstream_response = await proxy_request(
         request=request,
@@ -1554,8 +1581,12 @@ async def intercept_create_job(
                         expires_at=job_expires_at,
                     )
                     db.add(job)
-                    # Reserve quota in the same transaction
-                    reserved = await reserve_quota(db, user.id, job)
+                    # Reserve quota in the same transaction.
+                    # Phase 2a free tier (CodeX P1): free-SERVICE jobs use the
+                    # independent daily ledger (reserved before forward), NOT the
+                    # legacy free-PLAN quota — skip reserve_quota so they never
+                    # consume users.free_jobs_quota_used.
+                    reserved = True if service_mode == "free" else await reserve_quota(db, user.id, job)
                     if not reserved and user_plan == "free":
                         # Quota reservation failed — rollback local record
                         await db.rollback()
@@ -1622,6 +1653,17 @@ async def intercept_create_job(
                 await db.rollback()
             except Exception:
                 pass
+
+    # Phase 2a free tier — settle the daily reservation: consume on upstream
+    # accept, release on reject. TTL + inline-expire is the safety net for
+    # rarer paths (forward exception / local DB error after reserve).
+    if service_mode == "free" and _free_reserved:
+        from free_service_quota import consume_free_daily, release_free_daily
+
+        if upstream_response.status_code in (200, 201, 202) and job_id:
+            await consume_free_daily(db, idempotency_key=idempotency_key, job_id=job_id)
+        else:
+            await release_free_daily(db, idempotency_key=idempotency_key, reason="upstream_rejected")
 
     # Wrap upstream conflict/error into structured error
     if upstream_response.status_code == 409:

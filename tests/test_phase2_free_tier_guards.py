@@ -247,8 +247,16 @@ def test_handler_admits_free_and_forwards_snapshot_when_flag_on():
         free_jobs_quota_total=5, free_jobs_quota_used=0,
         trial_started_at=None, trial_expires_at=None,
     )
+    import free_service_quota as fq
     proxy_spy = AsyncMock(return_value=MagicMock(status_code=200, body=b"{}"))
+    # Stub the daily-quota reserve/settle (Task 4) — this test is about reaching
+    # the forward + snapshot; reserve_free_daily needs a real DB (covered by
+    # test_free_service_quota). Without stubbing, the MagicMock db makes reserve
+    # return user_not_found -> 403 before the forward.
     with patch.object(ji.settings, "enable_free_tier", True), \
+         patch.object(fq, "reserve_free_daily", AsyncMock(return_value=fq.FreeDailyOutcome(status="reserved", row_id="r"))), \
+         patch.object(fq, "consume_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "consumed"))), \
+         patch.object(fq, "release_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "released"))), \
          patch.object(ji, "proxy_request", proxy_spy):
         resp = _run_create(_free_job_request("free"), _min_db(), user)
 
@@ -257,11 +265,64 @@ def test_handler_admits_free_and_forwards_snapshot_when_flag_on():
         err = json.loads(resp.body)["error"]
     except Exception:
         err = None
-    assert err not in {"free_disabled", "service_mode_not_allowed", "insufficient_credits"}, \
-        f"free job wrongly blocked: status={status} err={err}"
+    assert err not in {
+        "free_disabled", "service_mode_not_allowed", "insufficient_credits",
+        "free_daily_quota_exceeded",
+    }, f"free job wrongly blocked: status={status} err={err}"
 
     assert proxy_spy.called, "free job should reach the upstream forward (proxy_request)"
     forwarded = json.loads(proxy_spy.call_args.kwargs.get("override_body"))
     assert forwarded.get("service_mode") == "free"
     assert forwarded.get("tts_provider") == "mimo"
     assert forwarded.get("voice_strategy") == "free_voiceclone"
+
+
+def test_free_job_over_daily_cap_returns_403():
+    """flag on + daily cap reached: reserve_free_daily denies -> 403
+    free_daily_quota_exceeded, and the upstream is NEVER forwarded (gate is
+    before the forward)."""
+    _stub_database_module()
+    import job_intercept as ji
+    import free_service_quota as fq
+    user = types.SimpleNamespace(
+        id=uuid.uuid4(), email="u@t.com", display_name="T",
+        role="user", plan_code="free",
+        free_jobs_quota_total=5, free_jobs_quota_used=0,
+        trial_started_at=None, trial_expires_at=None,
+    )
+    proxy_spy = AsyncMock(return_value=MagicMock(status_code=200, body=b"{}"))
+    denied = fq.FreeDailyOutcome(status="denied", deny_reason="daily_cap_exceeded")
+    with patch.object(ji.settings, "enable_free_tier", True), \
+         patch.object(fq, "reserve_free_daily", AsyncMock(return_value=denied)), \
+         patch.object(ji, "proxy_request", proxy_spy):
+        resp = _run_create(_free_job_request("free"), _min_db(), user)
+    assert resp.status_code == 403
+    assert json.loads(resp.body)["error"] == "free_daily_quota_exceeded"
+    proxy_spy.assert_not_called()
+
+
+def test_free_job_skips_legacy_reserve_quota():
+    """CodeX P1: a free-SERVICE job reserves via the daily ledger and must NOT
+    call the legacy reserve_quota (which would consume users.free_jobs_quota_used)."""
+    _stub_database_module()
+    import job_intercept as ji
+    import free_service_quota as fq
+    user = types.SimpleNamespace(
+        id=uuid.uuid4(), email="u@t.com", display_name="T",
+        role="user", plan_code="free",
+        free_jobs_quota_total=5, free_jobs_quota_used=0,
+        trial_started_at=None, trial_expires_at=None,
+    )
+    reserve_spy = AsyncMock(return_value=fq.FreeDailyOutcome(status="reserved", row_id="r"))
+    legacy_spy = AsyncMock(return_value=True)
+    # job_id in the upstream body so the flow reaches the reserve_quota line.
+    proxy_resp = MagicMock(status_code=200, body=b'{"job_id": "job_free_1", "status": "queued"}')
+    with patch.object(ji.settings, "enable_free_tier", True), \
+         patch.object(fq, "reserve_free_daily", reserve_spy), \
+         patch.object(fq, "consume_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "consumed"))), \
+         patch.object(fq, "release_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "released"))), \
+         patch.object(ji, "reserve_quota", legacy_spy), \
+         patch.object(ji, "proxy_request", AsyncMock(return_value=proxy_resp)):
+        _run_create(_free_job_request("free"), _min_db(), user)
+    assert reserve_spy.called, "free job should reserve via the daily ledger"
+    legacy_spy.assert_not_called()  # legacy free-plan quota (free_jobs_quota_used) untouched
