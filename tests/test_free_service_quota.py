@@ -47,6 +47,7 @@ def _run(coro):
 
 _USER = uuid.UUID("00000000-0000-0000-0000-0000000000c4")
 _UNKNOWN = uuid.UUID("00000000-0000-0000-0000-0000000000fe")
+_USER2 = uuid.UUID("00000000-0000-0000-0000-0000000000c5")
 
 # minimal users stub — reserve does SELECT users.id FOR UPDATE. id column uses
 # PG_UUID(as_uuid=True) (same as models.User.id) so the bind processor matches.
@@ -163,7 +164,7 @@ def test_consumed_still_counts_toward_cap():
                 db, user_id=_USER, usage_date="2026-05-29", idempotency_key="c1", daily_cap=1
             )
         async with sm() as db:
-            con = await q.consume_free_daily(db, idempotency_key="c1", job_id="job_c1")
+            con = await q.consume_free_daily(db, user_id=_USER, idempotency_key="c1", job_id="job_c1")
             assert con.ok and con.status == "consumed"
         async with sm() as db:
             o = await q.reserve_free_daily(
@@ -182,7 +183,7 @@ def test_release_frees_the_daily_slot():
                 db, user_id=_USER, usage_date="2026-05-29", idempotency_key="r1", daily_cap=1
             )
         async with sm() as db:
-            rel = await q.release_free_daily(db, idempotency_key="r1", reason="upstream_failed")
+            rel = await q.release_free_daily(db, user_id=_USER, idempotency_key="r1", reason="upstream_failed")
             assert rel.ok and rel.status == "released"
         async with sm() as db:
             o = await q.reserve_free_daily(
@@ -201,9 +202,9 @@ def test_release_refuses_to_release_consumed():
                 db, user_id=_USER, usage_date="2026-05-29", idempotency_key="x1", daily_cap=1
             )
         async with sm() as db:
-            await q.consume_free_daily(db, idempotency_key="x1", job_id="job_x1")
+            await q.consume_free_daily(db, user_id=_USER, idempotency_key="x1", job_id="job_x1")
         async with sm() as db:
-            rel = await q.release_free_daily(db, idempotency_key="x1", reason="late")
+            rel = await q.release_free_daily(db, user_id=_USER, idempotency_key="x1", reason="late")
             assert not rel.ok and rel.conflict_reason == "already_consumed"
 
     _run(go())
@@ -223,6 +224,55 @@ def test_reserve_inline_expires_stale_reserved():
                 db, user_id=_USER, usage_date="2026-05-29", idempotency_key="s2", daily_cap=1
             )
             assert o.status == "reserved"  # stale reserved inline-expired -> slot free
+
+    _run(go())
+
+
+# ---------------------------------------------------------------------------
+# idempotency invariants (CodeX P1 user-scoping / P2 consumed-retry)
+# ---------------------------------------------------------------------------
+
+def test_reserve_idempotency_isolated_per_user():
+    """Two users sharing the SAME idempotency key must not collide (CodeX P1):
+    user B's reserve must not hit user A's row, and must get B's own slot."""
+    async def go():
+        sm = await _make_sessionmaker()
+        async with sm() as db:
+            await db.execute(_users_stub.insert().values(id=_USER2))
+            await db.commit()
+        async with sm() as db:
+            a = await q.reserve_free_daily(
+                db, user_id=_USER, usage_date="2026-05-29", idempotency_key="shared", daily_cap=1
+            )
+            assert a.status == "reserved" and not a.idempotent_hit
+        async with sm() as db:
+            b = await q.reserve_free_daily(
+                db, user_id=_USER2, usage_date="2026-05-29", idempotency_key="shared", daily_cap=1
+            )
+            # B gets its OWN slot — not an idempotent hit on A's row.
+            assert b.status == "reserved" and not b.idempotent_hit
+            assert b.row_id != a.row_id
+
+    _run(go())
+
+
+def test_reserve_idempotent_after_consume_not_over_cap():
+    """Same user + same key, AFTER the row is consumed, returns an idempotent hit
+    (NOT daily_cap_exceeded) — supports network-timeout retries (CodeX P2)."""
+    async def go():
+        sm = await _make_sessionmaker()
+        async with sm() as db:
+            r = await q.reserve_free_daily(
+                db, user_id=_USER, usage_date="2026-05-29", idempotency_key="kc", daily_cap=1
+            )
+        async with sm() as db:
+            await q.consume_free_daily(db, user_id=_USER, idempotency_key="kc", job_id="job_kc")
+        async with sm() as db:
+            retry = await q.reserve_free_daily(
+                db, user_id=_USER, usage_date="2026-05-29", idempotency_key="kc", daily_cap=1
+            )
+            assert retry.status == "reserved" and retry.idempotent_hit  # NOT denied
+            assert retry.row_id == r.row_id  # same row, no new insert
 
     _run(go())
 

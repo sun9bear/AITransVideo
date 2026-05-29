@@ -13,7 +13,7 @@ rows per ``(user_id, usage_date)`` (Asia/Shanghai natural day). Mirrors
 Indexes:
 1. ``uq_free_daily_active_idem`` (partial UNIQUE where status='reserved'):
    idempotency fail-safe 2nd defense — at most one active reserved row per
-   ``create_idempotency_key``.
+   ``(user_id, create_idempotency_key)`` (CodeX P1: scoped per user).
 2. ``idx_free_daily_user_date_status``: daily cap count query.
 3. ``idx_free_daily_ttl_pending`` (partial where status='reserved'): inline-expire
    / TTL sweeper selection.
@@ -70,12 +70,12 @@ def upgrade() -> None:
     )
 
     # 1. idempotency fail-safe (2nd defense to the users-row lock): at most one
-    #    active(reserved) row per create_idempotency_key. partial unique —
+    #    active(reserved) row per (user_id, create_idempotency_key). partial unique —
     #    consumed/released/expired rows do not hold the slot.
     op.create_index(
         "uq_free_daily_active_idem",
         "free_service_daily_usage",
-        ["create_idempotency_key"],
+        ["user_id", "create_idempotency_key"],
         unique=True,
         postgresql_where=sa.text("status = 'reserved'"),
     )

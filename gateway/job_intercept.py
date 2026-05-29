@@ -1661,9 +1661,9 @@ async def intercept_create_job(
         from free_service_quota import consume_free_daily, release_free_daily
 
         if upstream_response.status_code in (200, 201, 202) and job_id:
-            await consume_free_daily(db, idempotency_key=idempotency_key, job_id=job_id)
+            await consume_free_daily(db, user_id=user.id, idempotency_key=idempotency_key, job_id=job_id)
         else:
-            await release_free_daily(db, idempotency_key=idempotency_key, reason="upstream_rejected")
+            await release_free_daily(db, user_id=user.id, idempotency_key=idempotency_key, reason="upstream_rejected")
 
     # Wrap upstream conflict/error into structured error
     if upstream_response.status_code == 409:

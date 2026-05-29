@@ -5,15 +5,21 @@ Mirrors ``gateway/express_reservation_service.py``. The free tier allows N
 a SEPARATE ledger from ``users.free_jobs_quota_*`` (the free *plan* total) — a
 free-service job MUST NOT consume that legacy quota (CodeX plan review).
 
-Atomicity (CodeX plan review): ``reserve_free_daily`` locks the ``users`` row
-(``SELECT ... FOR UPDATE``) to serialize a user's concurrent free creates (PG);
-inline-expires stale reserved rows (don't rely on a sweeper); counts
-active(reserved|consumed) rows for ``(user, usage_date)``; inserts a reserved row
-when under cap. A partial-unique index on ``create_idempotency_key``
-(``WHERE status='reserved'``) is the idempotency fail-safe 2nd defense. consume on
-upstream accept, release on failure. PG-only FOR UPDATE blocking is left to a
-real-PG test; state machine / idempotency / counting / inline-expire run on
-in-memory sqlite.
+Atomicity: ``reserve_free_daily`` locks the ``users`` row (``SELECT ... FOR
+UPDATE``) to serialize a user's concurrent free creates (PG); inline-expires
+stale reserved rows; counts active(reserved|consumed) rows for
+``(user, usage_date)``; inserts a reserved row when under cap. A partial-unique
+index on ``(user_id, create_idempotency_key)`` (``WHERE status='reserved'``) is
+the idempotency fail-safe 2nd defense.
+
+Idempotency invariants (CodeX review):
+- **Scoped by user_id** (P1): every lookup/transition filters ``user_id`` so two
+  users sharing a client-supplied key never collide / mutate each other's rows.
+- **active = reserved|consumed** (P2): a retry after the row is consumed is an
+  idempotent hit (returns the existing row), NOT a cap-exceeded 403.
+
+PG-only FOR UPDATE blocking is left to a real-PG test; state machine /
+idempotency / counting / inline-expire run on in-memory sqlite.
 """
 from __future__ import annotations
 
@@ -111,22 +117,20 @@ async def _count_active_for_day(db: AsyncSession, user_id, usage_date) -> int:
     return int(result.scalar() or 0)
 
 
-async def _find_reserved_by_key(db: AsyncSession, idempotency_key: str):
+async def _find_active_by_key(db: AsyncSession, user_id, idempotency_key: str):
+    """The user's active (reserved|consumed) row for ``idempotency_key``.
+
+    Scoped by ``user_id`` (CodeX P1 — never collide across users) and matches
+    reserved|consumed (CodeX P2 — a consumed row is an idempotent hit, not
+    over-cap). At most one active row exists per ``(user, key)`` since a row
+    transitions reserved → consumed in place.
+    """
     return (
         await db.execute(
             select(FreeServiceDailyUsage).where(
+                FreeServiceDailyUsage.user_id == user_id,
                 FreeServiceDailyUsage.create_idempotency_key == idempotency_key,
-                FreeServiceDailyUsage.status == RESERVED,
-            )
-        )
-    ).scalar_one_or_none()
-
-
-async def _find_any_by_key(db: AsyncSession, idempotency_key: str):
-    return (
-        await db.execute(
-            select(FreeServiceDailyUsage).where(
-                FreeServiceDailyUsage.create_idempotency_key == idempotency_key
+                FreeServiceDailyUsage.status.in_((RESERVED, CONSUMED)),
             )
         )
     ).scalar_one_or_none()
@@ -145,8 +149,8 @@ async def reserve_free_daily(
 
     Single transaction: lock users row → inline-expire stale → idempotency →
     cap check → INSERT. PG serializes concurrent same-user reserves via the
-    users-row FOR UPDATE; the partial-unique on ``create_idempotency_key`` is the
-    fail-safe 2nd defense (IntegrityError → re-read existing).
+    users-row FOR UPDATE; the partial-unique on ``(user_id, create_idempotency_key)``
+    is the fail-safe 2nd defense (IntegrityError → re-read existing).
     """
     now = _now()
     user_pk = (
@@ -157,7 +161,7 @@ async def reserve_free_daily(
 
     await _expire_stale_for_user(db, user_id, usage_date, now=now)
 
-    existing = await _find_reserved_by_key(db, idempotency_key)
+    existing = await _find_active_by_key(db, user_id, idempotency_key)
     if existing is not None:
         await db.commit()  # persist inline-expire
         return FreeDailyOutcome(status="reserved", row_id=str(existing.id), idempotent_hit=True)
@@ -182,7 +186,7 @@ async def reserve_free_daily(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        existing2 = await _find_reserved_by_key(db, idempotency_key)
+        existing2 = await _find_active_by_key(db, user_id, idempotency_key)
         if existing2 is not None:
             return FreeDailyOutcome(
                 status="reserved", row_id=str(existing2.id), idempotent_hit=True
@@ -192,16 +196,15 @@ async def reserve_free_daily(
 
 
 async def consume_free_daily(
-    db: AsyncSession, *, idempotency_key: str, job_id: str
+    db: AsyncSession, *, user_id: object, idempotency_key: str, job_id: str
 ) -> FreeTransitionOutcome:
-    """reserved → consumed (upstream accepted the job). Idempotent on re-consume."""
-    row = await _find_any_by_key(db, idempotency_key)
+    """reserved → consumed (upstream accepted the job). Idempotent on re-consume.
+    Scoped by ``user_id`` (CodeX P1)."""
+    row = await _find_active_by_key(db, user_id, idempotency_key)
     if row is None:
         return FreeTransitionOutcome(False, "missing", "reservation_not_found")
     if row.status == CONSUMED:
         return FreeTransitionOutcome(True, CONSUMED)  # idempotent
-    if row.status != RESERVED:
-        return FreeTransitionOutcome(False, row.status, "not_reservable")
     row.status = CONSUMED
     row.job_id = job_id
     row.updated_at = _now()
@@ -210,15 +213,14 @@ async def consume_free_daily(
 
 
 async def release_free_daily(
-    db: AsyncSession, *, idempotency_key: str, reason: str
+    db: AsyncSession, *, user_id: object, idempotency_key: str, reason: str
 ) -> FreeTransitionOutcome:
-    """reserved → released (upstream failed / rollback). Idempotent; refuses to
-    release an already-consumed row (that job exists)."""
-    row = await _find_any_by_key(db, idempotency_key)
+    """reserved → released (upstream failed / rollback). Idempotent (no active row
+    → ``"absent"``); refuses to release an already-consumed row. Scoped by
+    ``user_id`` (CodeX P1)."""
+    row = await _find_active_by_key(db, user_id, idempotency_key)
     if row is None:
-        return FreeTransitionOutcome(True, "absent")  # nothing reserved — idempotent
-    if row.status in (RELEASED, EXPIRED):
-        return FreeTransitionOutcome(True, row.status)  # idempotent
+        return FreeTransitionOutcome(True, "absent")  # nothing active — idempotent
     if row.status == CONSUMED:
         return FreeTransitionOutcome(False, CONSUMED, "already_consumed")
     row.status = RELEASED
