@@ -62,6 +62,18 @@ def test_non_numeric_duration_fail_closed():
     assert evaluate_free_duration_cap("not-a-number") == REJECT_UNTRUSTED
 
 
+def test_nan_duration_fail_closed():
+    # CodeX P2: NaN passes float() but fails every comparison -> must be UNTRUSTED,
+    # not silently allowed.
+    assert evaluate_free_duration_cap(float("nan")) == REJECT_UNTRUSTED
+    assert evaluate_free_duration_cap("nan") == REJECT_UNTRUSTED
+
+
+def test_inf_duration_fail_closed():
+    assert evaluate_free_duration_cap(float("inf")) == REJECT_UNTRUSTED
+    assert evaluate_free_duration_cap(float("-inf")) == REJECT_UNTRUSTED
+
+
 def test_custom_cap_respected():
     assert evaluate_free_duration_cap(12 * _MIN, max_minutes=15) is None
     assert evaluate_free_duration_cap(16 * _MIN, max_minutes=15) == REJECT_OVER_CAP

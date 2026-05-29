@@ -11,6 +11,8 @@ allowed).
 """
 from __future__ import annotations
 
+import math
+
 # Free service-mode duration cap (minutes). Mirrors
 # process._PLAN_MAX_DURATION_MINUTES["free"] and plan_catalog free.max_duration_minutes.
 FREE_DURATION_CAP_MINUTES = 10
@@ -29,16 +31,18 @@ def evaluate_free_duration_cap(
     Returns a rejection reason — ``REJECT_UNTRUSTED`` or ``REJECT_OVER_CAP`` — or
     ``None`` to proceed.
 
-    FAIL-CLOSED: a missing / non-positive / non-numeric ``duration_ms`` returns
-    ``REJECT_UNTRUSTED`` (the cost gate cannot be confirmed open, so the job must
-    not enter the paid stages). A ``duration_ms`` exactly at the cap is allowed
-    (strict ``>`` comparison).
+    FAIL-CLOSED: a missing / non-positive / non-finite (NaN / inf) / non-numeric
+    ``duration_ms`` returns ``REJECT_UNTRUSTED`` (the cost gate cannot be
+    confirmed open, so the job must not enter the paid stages). A ``duration_ms``
+    exactly at the cap is allowed (strict ``>`` comparison).
     """
     try:
         ms = float(duration_ms)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return REJECT_UNTRUSTED
-    if ms <= 0:
+    # NaN/inf slip through float() but are not a trusted duration: NaN fails every
+    # comparison (would otherwise return None = allow), so reject all non-finite.
+    if not math.isfinite(ms) or ms <= 0:
         return REJECT_UNTRUSTED
     if (ms / 60_000.0) > float(max_minutes):
         return REJECT_OVER_CAP
