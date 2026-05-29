@@ -84,15 +84,35 @@ EAGER_PUSH_TO_R2_KEYS_EXPRESS: frozenset[str] = frozenset({
 })
 
 
+# === Phase 2a free tier (gate #5) ===
+#
+# Free mirrors EXPRESS's restriction (watermarked finished video + poster only;
+# NO audio / subtitles / drafts / post-edit artifacts) but uses SEPARATE
+# constants and an EXPLICIT branch in all three gate functions — never the
+# Studio default — so a free user cannot smuggle gated artifacts via
+# /stream/audio or the R2 eager-push set. Kept DISTINCT from EXPRESS (not
+# aliased) so a Phase 2b paid unlock can open free independently.
+FREE_ALLOWED_DOWNLOAD_KEYS: frozenset[str] = frozenset({
+    "publish.dubbed_video",
+})
+FREE_ALLOWED_STREAM_KINDS: frozenset[str] = frozenset({"video", "poster"})
+EAGER_PUSH_TO_R2_KEYS_FREE: frozenset[str] = frozenset({
+    "publish.dubbed_video",
+    "publish.dubbed_video_poster",
+})
+
+
 def download_keys_for(service_mode: str | None) -> frozenset[str]:
     """Return the download-permission set for the given service_mode.
 
-    Default (unknown / None) = Studio. Express is the only restrictive
-    branch and it matches src/services/jobs/api.py:_is_express_job
-    (compares to literal ``"express"``).
+    Default (unknown / None) = Studio. Express and free are the restrictive
+    branches (free = Phase 2a gate #5); express matches
+    src/services/jobs/api.py:_is_express_job (literal ``"express"``).
     """
     if service_mode == "express":
         return EXPRESS_ALLOWED_DOWNLOAD_KEYS
+    if service_mode == "free":
+        return FREE_ALLOWED_DOWNLOAD_KEYS
     return STUDIO_ALLOWED_DOWNLOAD_KEYS
 
 
@@ -112,6 +132,8 @@ def stream_kinds_for(service_mode: str | None) -> frozenset[str]:
     """
     if service_mode == "express":
         return EXPRESS_ALLOWED_STREAM_KINDS
+    if service_mode == "free":
+        return FREE_ALLOWED_STREAM_KINDS
     return STUDIO_ALLOWED_STREAM_KINDS
 
 
@@ -142,6 +164,8 @@ def eager_push_keys_for(service_mode: str | None) -> frozenset[str]:
     """
     if service_mode == "express":
         return EAGER_PUSH_TO_R2_KEYS_EXPRESS
+    if service_mode == "free":
+        return EAGER_PUSH_TO_R2_KEYS_FREE
     return EAGER_PUSH_TO_R2_KEYS_STUDIO
 
 
