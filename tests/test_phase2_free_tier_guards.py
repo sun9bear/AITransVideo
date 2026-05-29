@@ -221,6 +221,18 @@ def test_estimate_credits_free_is_zero():
     assert estimate_credits(10.0, "free", "standard") == 0
 
 
+def test_estimate_credits_free_zero_even_with_stale_runtime(monkeypatch):
+    """CodeX P1: a stale pricing_runtime.json missing 'free.standard' must NOT
+    charge free at DEFAULT_DEBIT_RATE=10. _get_runtime_debit_rates overlays
+    runtime on the frozen baseline, so the missing key falls back to frozen 0."""
+    import credits_service
+    from pricing_schema import build_default_pricing_payload
+    payload = build_default_pricing_payload()
+    payload.credits.debit_rates.pop("free.standard", None)  # simulate old snapshot
+    monkeypatch.setattr("pricing_runtime.get_runtime_pricing", lambda *a, **k: payload)
+    assert credits_service.estimate_credits(10.0, "free", "standard") == 0
+
+
 def test_handler_admits_free_and_forwards_snapshot_when_flag_on():
     """flag on + free=0 (Task 3): a non-admin free submission clears BOTH mode
     gates (free_disabled / service_mode_not_allowed) AND the credits reserve

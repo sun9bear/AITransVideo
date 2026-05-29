@@ -100,18 +100,26 @@ class InsufficientCreditsError(Exception):
 
 
 def _get_runtime_debit_rates() -> dict[tuple[str, str], int]:
-    """Derive debit rates from runtime pricing, fallback to frozen constants."""
+    """Runtime pricing OVERLAID on the frozen constants.
+
+    Frozen ``DEBIT_RATES`` is the baseline (spec-correct defaults); runtime is
+    the source of truth only for the keys it actually defines. A stale runtime
+    snapshot missing a newer key (e.g. ``free.standard`` / ``smart.standard``)
+    therefore falls back to the frozen value, NOT ``DEFAULT_DEBIT_RATE`` — so a
+    free job is never silently charged 10/min from an old pricing_runtime.json
+    (CodeX P1).
+    """
+    merged: dict[tuple[str, str], int] = dict(DEBIT_RATES)
     try:
         from pricing_runtime import get_runtime_pricing
         credits = get_runtime_pricing().credits
-        result: dict[tuple[str, str], int] = {}
         for key, value in credits.debit_rates.items():
             parts = key.split(".", 1)
             if len(parts) == 2:
-                result[(parts[0], parts[1])] = value
-        return result if result else DEBIT_RATES
+                merged[(parts[0], parts[1])] = value
     except Exception:
-        return DEBIT_RATES
+        return dict(DEBIT_RATES)
+    return merged
 
 
 def _get_runtime_grant_amounts() -> dict[str, int]:
