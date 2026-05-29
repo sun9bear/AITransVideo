@@ -335,6 +335,34 @@ def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Service-mode resolution + fail-closed gate (Phase 2a free tier, Task 1)
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_SERVICE_MODES = ("express", "studio", "smart", "free")
+
+
+def _gate_service_mode(requested_mode, *, free_enabled: bool):
+    """Resolve service_mode and apply the free-tier fail-closed gate.
+
+    Returns ``(resolved_mode, error_response_or_None)``:
+
+    * Unknown / unsupported modes keep the legacy coercion to ``express``.
+    * ``free`` is recognized (NOT coerced to express) so the flag gate runs:
+      ``free_enabled`` False -> reject (403 ``free_disabled``), never a silent
+      express downgrade; True -> pass through to compute_job_policy free branch.
+    """
+    mode = requested_mode if requested_mode in _SUPPORTED_SERVICE_MODES else "express"
+    if mode == "free" and not free_enabled:
+        return mode, _error_response(
+            403,
+            "free_disabled",
+            "免费版当前未开放。",
+            {"requested_mode": "free"},
+        )
+    return mode, None
+
+
 # --- Plan catalog ---
 # The authoritative plan gate facts now live in ``plan_catalog.py``. The module-level
 # ``PLAN_CATALOG`` name is a frozen import-time snapshot preserved for backward-compatible
@@ -439,6 +467,25 @@ def compute_job_policy(user, service_mode: str) -> dict:
             "role_snapshot": role,
             # Single-tier smart product; "standard" only for compat with
             # the 2D (service_mode, quality_tier) pricing table (§5.1).
+            "quality_tier": "standard",
+        }
+
+    if service_mode == "free":
+        # MiMo free tier (Phase 2a). Reuses Express non-interactive
+        # orchestration; only the TTS voice path differs (MiMo voiceclone,
+        # which preserves the original speaker). credits=0 is enforced via
+        # the pricing_runtime / DEBIT_RATES (free, standard)=0 truth source
+        # (Task 3), not here. MiMo voiceclone uses an inline reference
+        # (no voice_id) so the MiniMax/CosyVoice clone path stays OFF.
+        return {
+            "service_mode": "free",
+            "tts_provider": "mimo",
+            "tts_model": "mimo-v2.5-tts-voiceclone",
+            "requires_review": False,
+            "voice_clone_enabled": False,
+            "voice_strategy": "free_voiceclone",
+            "plan_code_snapshot": plan,
+            "role_snapshot": role,
             "quality_tier": "standard",
         }
 
@@ -1038,9 +1085,12 @@ async def intercept_create_job(
     # service_mode=smart were silently coerced to express, never reaching
     # the smart inline branch. Plan §4.2 lists smart as the third
     # supported service_mode alongside express/studio.
-    service_mode = request_data.get("service_mode", "express")
-    if service_mode not in ("express", "studio", "smart"):
-        service_mode = "express"
+    service_mode, _mode_gate_error = _gate_service_mode(
+        request_data.get("service_mode", "express"),
+        free_enabled=settings.enable_free_tier,
+    )
+    if _mode_gate_error is not None:
+        return _mode_gate_error
 
     # --- Smart kill switch — runs FIRST (Task #23, P2 launch blocker #1) ---
     # Codex audit 2026-05-24: previous implementation put the kill switch
