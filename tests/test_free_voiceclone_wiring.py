@@ -48,3 +48,54 @@ def test_segment_defaults_to_no_reference():
     """No stamp → voiceclone_reference_path is None, so the dispatch in
     _generate_one routes to the base MiMo preset (not voiceclone)."""
     assert _seg().voiceclone_reference_path is None
+
+
+# ── _generate_one dispatch: free/non-free/no-ref three branches (CodeX P2) ──
+
+def _dispatch_gen(voice_strategy):
+    gen = tg.TTSGenerator.__new__(tg.TTSGenerator)  # bypass __init__
+    gen._voice_strategy = voice_strategy
+    return gen
+
+
+def _spy_branches(monkeypatch, gen):
+    calls = []
+
+    def _vc(segment, tts_text, output_root):
+        calls.append("voiceclone")
+        return tg.TTSResult(segment_id=segment.segment_id, audio_path="x", duration_ms=1, voice_id="v")
+
+    def _base(segment, tts_text, output_root):
+        calls.append("base")
+        return tg.TTSResult(segment_id=segment.segment_id, audio_path="x", duration_ms=1, voice_id="v")
+
+    monkeypatch.setattr(gen, "_generate_one_mimo_voiceclone", _vc)
+    monkeypatch.setattr(gen, "_generate_one_mimo", _base)
+    monkeypatch.setattr(gen, "_record_tts_usage", lambda *a, **k: None)
+    return calls
+
+
+def test_dispatch_free_with_reference_uses_voiceclone(monkeypatch, tmp_path):
+    gen = _dispatch_gen("free_voiceclone")
+    calls = _spy_branches(monkeypatch, gen)
+    seg = _seg(tts_provider="mimo", voiceclone_reference_path="/tmp/ref.wav")
+    gen._generate_one(seg, str(tmp_path), provider="mimo")
+    assert calls == ["voiceclone"]
+
+
+def test_dispatch_nonfree_with_reference_uses_base(monkeypatch, tmp_path):
+    """Defense in depth: a non-free job (voice_strategy != free_voiceclone) must
+    NOT clone even if a reference stray-stamped onto the segment."""
+    gen = _dispatch_gen("preset_mapping")
+    calls = _spy_branches(monkeypatch, gen)
+    seg = _seg(tts_provider="mimo", voiceclone_reference_path="/tmp/ref.wav")
+    gen._generate_one(seg, str(tmp_path), provider="mimo")
+    assert calls == ["base"]
+
+
+def test_dispatch_free_without_reference_uses_base(monkeypatch, tmp_path):
+    gen = _dispatch_gen("free_voiceclone")
+    calls = _spy_branches(monkeypatch, gen)
+    seg = _seg(tts_provider="mimo")  # no reference stamped
+    gen._generate_one(seg, str(tmp_path), provider="mimo")
+    assert calls == ["base"]

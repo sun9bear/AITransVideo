@@ -203,9 +203,22 @@ class TTSGenerator:
         self._chars_per_second_by_speaker: dict[str, float] = {}
         self._global_chars_per_second: float | None = None
         self._usage_meter: Any | None = None
+        # Phase 2a free tier — set by the pipeline (set_voice_strategy) before
+        # generate_all. Gates the MiMo voiceclone dispatch: only a
+        # "free_voiceclone" job routes a reference-bearing segment to voiceclone
+        # (defense in depth — a stray voiceclone_reference_path on a non-free
+        # MiMo segment must NOT trigger a clone).
+        self._voice_strategy: str = ""
 
     def set_usage_meter(self, usage_meter: Any | None) -> None:
         self._usage_meter = usage_meter
+
+    def set_voice_strategy(self, voice_strategy: str | None) -> None:
+        """Inject the job's voice_strategy before generate_all (Phase 2a free
+        tier). Gates the MiMo voiceclone dispatch — only ``"free_voiceclone"``
+        jobs clone the original speaker; any other value keeps the base MiMo
+        preset path."""
+        self._voice_strategy = (voice_strategy or "").strip()
 
     def set_speaker_chars_per_second(
         self,
@@ -1316,12 +1329,17 @@ class TTSGenerator:
                 raise TTSGenerationError(f"CosyVoice: {exc}") from exc
         if provider == "mimo":
             try:
-                # Free tier (Phase 2a): when the pipeline stamped a per-speaker
-                # reference clip on this segment, clone the original speaker via
-                # MiMo voiceclone. No reference (extraction skipped/failed) →
-                # base MiMo preset. Gated on the reference, NOT provider alone,
-                # so non-free MiMo segments keep the existing base path.
-                if getattr(segment, "voiceclone_reference_path", None):
+                # Free tier (Phase 2a): clone the original speaker via MiMo
+                # voiceclone ONLY when this is a free_voiceclone job AND the
+                # pipeline stamped a per-speaker reference on the segment.
+                # Requiring the voice_strategy (not the reference alone) is
+                # defense in depth: a stray voiceclone_reference_path on a
+                # non-free MiMo segment can never trigger a clone. No reference
+                # / non-free → base MiMo preset (unchanged for existing jobs).
+                if (
+                    getattr(self, "_voice_strategy", "") == "free_voiceclone"
+                    and getattr(segment, "voiceclone_reference_path", None)
+                ):
                     result = self._generate_one_mimo_voiceclone(segment, tts_text, output_root)
                 else:
                     result = self._generate_one_mimo(segment, tts_text, output_root)
