@@ -387,6 +387,11 @@ class DubbingSegment:
     # 模型混淆）。**严禁** TTSGenerator hardcode；worker 路径头部硬校验非空。
     requires_worker: bool = False
     worker_target_model: str = ""
+    # Phase 2a free tier — per-speaker MiMo voiceclone reference clip path,
+    # stamped by the pipeline (cut from speech_for_asr.wav) BEFORE TTS. When
+    # set, tts_generator routes this segment through _generate_one_mimo_voiceclone
+    # (clone original speaker); None → base MiMo preset. Only free jobs stamp it.
+    voiceclone_reference_path: str | None = None
 
 
 @dataclass(slots=True)

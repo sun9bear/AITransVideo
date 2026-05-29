@@ -510,6 +510,44 @@ class TTSGenerator:
             voice_id=segment.voice_id,
         )
 
+    def _generate_one_mimo_voiceclone(
+        self,
+        segment: DubbingSegment,
+        tts_text: str,
+        output_root: Path,
+    ) -> TTSResult:
+        """Free tier (Phase 2a): clone the original speaker's voice via MiMo
+        voiceclone, using the per-speaker reference clip the pipeline stamped on
+        ``segment.voiceclone_reference_path``. Reuses the Phase 1 provider
+        primitive ``synthesize_voiceclone`` (inline base64 ref + 10MB guard).
+
+        The no-reference case is handled by the caller's dispatch (→ base MiMo
+        preset). Runtime voiceclone *failure* fallback (→ free preset, made
+        visible to user/admin) is Task 6; here a failure propagates as a normal
+        provider error so the caller's existing handling applies.
+        """
+        from services.tts.mimo_tts_provider import synthesize_voiceclone
+
+        output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+        print(
+            f"[MiMo-VoiceClone] ref={segment.voiceclone_reference_path}, "
+            f"text={tts_text[:40]}...",
+            flush=True,
+        )
+
+        audio_bytes = synthesize_voiceclone(
+            tts_text, reference_audio=segment.voiceclone_reference_path
+        )
+        atomic_write_bytes(str(output_path), audio_bytes)
+        duration_ms = _ffprobe_duration_ms(output_path)
+
+        return TTSResult(
+            segment_id=segment.segment_id,
+            audio_path=str(output_path.resolve(strict=False)),
+            duration_ms=duration_ms,
+            voice_id=segment.voice_id,
+        )
+
     def _generate_one_cosyvoice(
         self,
         segment: DubbingSegment,
@@ -1278,7 +1316,15 @@ class TTSGenerator:
                 raise TTSGenerationError(f"CosyVoice: {exc}") from exc
         if provider == "mimo":
             try:
-                result = self._generate_one_mimo(segment, tts_text, output_root)
+                # Free tier (Phase 2a): when the pipeline stamped a per-speaker
+                # reference clip on this segment, clone the original speaker via
+                # MiMo voiceclone. No reference (extraction skipped/failed) →
+                # base MiMo preset. Gated on the reference, NOT provider alone,
+                # so non-free MiMo segments keep the existing base path.
+                if getattr(segment, "voiceclone_reference_path", None):
+                    result = self._generate_one_mimo_voiceclone(segment, tts_text, output_root)
+                else:
+                    result = self._generate_one_mimo(segment, tts_text, output_root)
                 # MiMo: token-based billing, truthful billed_chars unavailable
                 # result.billed_chars stays 0 (default)
                 self._record_tts_usage(
