@@ -107,6 +107,7 @@ def _free_job_request(service_mode="free"):
     body = {
         "service_mode": service_mode,
         "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+        "estimated_duration_seconds": 60,
     }
     req.body = AsyncMock(return_value=json.dumps(body, ensure_ascii=False).encode("utf-8"))
     req.headers = {"content-type": "application/json"}
@@ -121,8 +122,13 @@ def _min_db():
     db = MagicMock()
     result = MagicMock()
     result.scalar = MagicMock(return_value=0)
+    result.scalar_one_or_none = MagicMock(return_value=None)
     result.all = MagicMock(return_value=[])
     db.execute = AsyncMock(return_value=result)
+    db.commit = AsyncMock()
+    db.flush = AsyncMock()
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
     return db
 
 
@@ -172,3 +178,45 @@ def test_compute_job_policy_free_branch():
     assert p["requires_review"] is False
     assert p["quality_tier"] == "standard"
     assert "credits" not in p  # debit lives in DEBIT_RATES, not the policy dict
+
+
+# ── Task 1 (CodeX P1): free must enter allowed-modes when flag on ─────────
+
+def test_free_in_allowed_modes_when_flag_on():
+    """get_effective_allowed_service_modes includes 'free' iff AVT_ENABLE_FREE_TIER
+    is on — so job_intercept's allowed-modes gate ADMITS free (flag on) instead of
+    returning 403 service_mode_not_allowed, and excludes it (flag off)."""
+    _stub_database_module()
+    from entitlements import get_effective_allowed_service_modes
+    user = types.SimpleNamespace(
+        role="user", plan_code="free",
+        free_jobs_quota_total=5, free_jobs_quota_used=0,
+        trial_started_at=None, trial_expires_at=None,
+    )
+    on = types.SimpleNamespace(enable_smart_mode=False, enable_free_tier=True)
+    off = types.SimpleNamespace(enable_smart_mode=False, enable_free_tier=False)
+    assert "free" in get_effective_allowed_service_modes(user, settings=on)
+    assert "free" not in get_effective_allowed_service_modes(user, settings=off)
+
+
+def test_handler_admits_free_past_mode_gates_when_flag_on():
+    """flag on: a non-admin free submission must clear BOTH mode gates — neither
+    free_disabled (Task 0/1 flag gate) nor service_mode_not_allowed (plan gate,
+    CodeX P1). Downstream credits/quota behavior is Task 3/4, not asserted here."""
+    _stub_database_module()
+    import job_intercept as ji
+    user = types.SimpleNamespace(
+        id=uuid.uuid4(), email="u@test.com", display_name="T",
+        role="user", plan_code="free",
+        free_jobs_quota_total=5, free_jobs_quota_used=0,
+        trial_started_at=None, trial_expires_at=None,
+    )
+    with patch.object(ji.settings, "enable_free_tier", True), \
+         patch.object(ji, "proxy_request", AsyncMock(return_value=MagicMock(status_code=200))):
+        resp = _run_create(_free_job_request("free"), _min_db(), user)
+    status = getattr(resp, "status_code", None)
+    try:
+        err = json.loads(resp.body)["error"]
+    except Exception:
+        err = None
+    assert not (status == 403 and err in {"free_disabled", "service_mode_not_allowed"})

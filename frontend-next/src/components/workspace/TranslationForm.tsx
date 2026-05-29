@@ -85,11 +85,13 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const activeJobCount = activeJobs.length
   const isBlockedByConcurrency = !isUnlimitedConcurrency && activeJobCount >= maxConcurrentJobs
   const currentRate =
-    serviceMode === "smart"
-      ? creditRates.smartStandard
-      : serviceMode === "studio"
-        ? creditRates.studioStandard
-        : creditRates.expressStandard
+    serviceMode === "free"
+      ? 0
+      : serviceMode === "smart"
+        ? creditRates.smartStandard
+        : serviceMode === "studio"
+          ? creditRates.studioStandard
+          : creditRates.expressStandard
   const balanceLabel = credits ? `${credits.total_available} 点` : "读取中"
   const rateLabel = currentRate != null ? `${currentRate} 点/分钟` : "读取中"
   // For UI display: show the most recent active job if blocked
@@ -564,7 +566,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               <p className="text-sm font-medium text-foreground">扣点标准</p>
               <p className="text-xs text-muted-foreground">当前可用：{balanceLabel}</p>
             </div>
-            {serviceMode === "express" ? (
+            {serviceMode === "free" ? (
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                免费版当前不扣点（限时免费），保留原声 AI 配音。每日 1 次、单条 ≤10 分钟，成品视频带水印。后续如需「后编辑」或「剪映草稿」为付费 add-on，将另行计点。
+              </p>
+            ) : serviceMode === "express" ? (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                 快捷版按源视频时长扣点，当前标准为 {rateLabel}。创建任务时会按可识别的时长预扣；点数不足会停止创建并提示充值或升级。
               </p>

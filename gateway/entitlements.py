@@ -95,6 +95,13 @@ def get_effective_allowed_service_modes(
     if not (env_enabled and admin_enabled) and "smart" in base:
         base.remove("smart")
 
+    # Phase 2a free tier — when AVT_ENABLE_FREE_TIER is on, "free" is an
+    # allowed mode for everyone (freemium funnel; eligibility is universal,
+    # the daily-quota gate in Task 4 limits usage). Off (default) → not in the
+    # list, so job_intercept's allowed-modes gate rejects free with the flag off.
+    if bool(getattr(settings, "enable_free_tier", False)) and "free" not in base:
+        base.append("free")
+
     return base
 
 
