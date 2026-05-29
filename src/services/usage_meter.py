@@ -156,6 +156,9 @@ class UsageMeter:
         output_text: str = "",
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        cached_input_tokens: int | None = None,
+        input_audio_tokens: int | None = None,
+        token_count_source: str | None = None,
         audio_input_bytes: int = 0,
         audio_input_count: int = 0,
         audio_input_seconds: float = 0.0,
@@ -195,13 +198,23 @@ class UsageMeter:
             "output_text_chars": len(output_text or ""),
             "input_tokens": in_tokens,
             "output_tokens": out_tokens,
-            "token_count_source": "estimated_text_length",
+            "token_count_source": (
+                token_count_source
+                or ("provider_usage" if input_tokens is not None else "estimated_text_length")
+            ),
             "audio_input_bytes": max(0, _coerce_int(audio_input_bytes)),
             "audio_input_count": max(0, _coerce_int(audio_input_count)),
             "audio_input_seconds": max(0.0, _coerce_float(audio_input_seconds)),
             "success": bool(success),
             "error": str(error or "")[:500],
         }
+        # Provider-reported usage components (plan 2026-05-27 PR 2). Only added
+        # when the caller actually parsed them from the provider response, so
+        # estimate-only events keep their historical payload shape.
+        if cached_input_tokens is not None:
+            payload["cached_input_tokens"] = max(0, _coerce_int(cached_input_tokens))
+        if input_audio_tokens is not None:
+            payload["input_audio_tokens"] = max(0, _coerce_int(input_audio_tokens))
         if extra:
             for key, value in extra.items():
                 if key in payload:

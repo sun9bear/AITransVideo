@@ -437,6 +437,10 @@ class GeminiTranslator:
         self._legacy_sdk: Any | None = None
         self._usage_meter: Any | None = None
         self._metering_usage_context = ""
+        # PR 2 (plan 2026-05-27): per-call provider usage captured by the
+        # OpenAI-compatible path (mimo/deepseek/openai). None on Gemini SDK
+        # path or when usage parsing fails (best-effort).
+        self._last_call_usage: dict[str, Any] | None = None
 
         if _skip_init:
             return
@@ -468,10 +472,16 @@ class GeminiTranslator:
         success: bool = True,
         error: str = "",
         extra: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         """Record one LLM attempt (success or failure) into the project's
         UsageMeter. Best-effort: write failures only log a warning so the
         translator's main response path stays intact (plan §B3).
+
+        ``usage`` (PR 2): provider-reported token counts from the
+        OpenAI-compatible path (normalized by ``_normalize_openai_usage``).
+        When present, real tokens are recorded instead of text estimates;
+        when None/empty, ``record_llm`` falls back to estimating from text.
         """
         meter = getattr(self, "_usage_meter", None)
         if meter is None:
@@ -484,6 +494,7 @@ class GeminiTranslator:
                 if model_name in _MODEL_REGISTRY
                 else model_name
             )
+            u = usage or {}
             meter.record_llm(
                 task=task,
                 phase=getattr(self, "_metering_usage_context", "") or "",
@@ -492,6 +503,10 @@ class GeminiTranslator:
                 model_id=resolved_model_id,
                 input_text=prompt,
                 output_text=response_text,
+                input_tokens=u.get("input_tokens"),
+                output_tokens=u.get("output_tokens"),
+                cached_input_tokens=u.get("cached_input_tokens"),
+                input_audio_tokens=u.get("input_audio_tokens"),
                 attempt_label=attempt_label,
                 success=success,
                 error=error,
@@ -1111,6 +1126,11 @@ class GeminiTranslator:
         - deepseek/openai → OpenAI-compatible HTTP call
         - mimo → OpenAI-compatible HTTP call
         """
+        # Reset per-call usage capture. Only the OpenAI-compatible branches
+        # below populate it; the Gemini SDK path and any error leave it None,
+        # so _record_llm_usage falls back to estimated tokens (PR 2).
+        self._last_call_usage = None
+
         info = _MODEL_REGISTRY.get(model_name)
         if info is None:
             raise TranslationError(f"Unknown model: {model_name}")
@@ -1129,10 +1149,14 @@ class GeminiTranslator:
             )
 
         if provider == "mimo":
-            return self._call_mimo_text(api_key=api_key, model_id=api_model_id, prompt=prompt, json_mode=json_mode)
+            text, usage = self._call_mimo_text(
+                api_key=api_key, model_id=api_model_id, prompt=prompt, json_mode=json_mode
+            )
+            self._last_call_usage = usage or None
+            return text
 
         # deepseek / openai — direct HTTP call (no LLMRouter indirection)
-        return self._call_openai_compatible(
+        text, usage = self._call_openai_compatible(
             api_key=api_key,
             model_id=api_model_id,
             provider=provider,
@@ -1140,6 +1164,8 @@ class GeminiTranslator:
             json_mode=json_mode,
             request_overrides=info.get("request_overrides"),
         )
+        self._last_call_usage = usage or None
+        return text
 
     @staticmethod
     def _call_mimo_text(
@@ -1148,8 +1174,8 @@ class GeminiTranslator:
         model_id: str,
         prompt: str,
         json_mode: bool = False,
-    ) -> str:
-        """Call MiMo via OpenAI-compatible HTTP API."""
+    ) -> tuple[str, dict[str, Any]]:
+        """Call MiMo via OpenAI-compatible HTTP API. Returns (text, usage)."""
         import urllib.request
         import urllib.error
         url = "https://api.xiaomimimo.com/v1/chat/completions"
@@ -1171,7 +1197,10 @@ class GeminiTranslator:
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"]
+            return (
+                body["choices"][0]["message"]["content"],
+                GeminiTranslator._normalize_openai_usage(body),
+            )
         except Exception as exc:
             raise TranslationError(f"MiMo API call failed: {exc}") from exc
 
@@ -1184,8 +1213,8 @@ class GeminiTranslator:
         prompt: str,
         json_mode: bool = False,
         request_overrides: object | None = None,
-    ) -> str:
-        """Direct call to OpenAI-compatible API (DeepSeek / OpenAI)."""
+    ) -> tuple[str, dict[str, Any]]:
+        """Direct call to OpenAI-compatible API (DeepSeek / OpenAI). Returns (text, usage)."""
         import urllib.request
         import urllib.error
         base_urls = {
@@ -1214,9 +1243,58 @@ class GeminiTranslator:
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"]
+            return (
+                body["choices"][0]["message"]["content"],
+                GeminiTranslator._normalize_openai_usage(body),
+            )
         except Exception as exc:
             raise TranslationError(f"{provider} API call failed: {exc}") from exc
+
+    @staticmethod
+    def _normalize_openai_usage(body: dict[str, Any]) -> dict[str, Any]:
+        """Extract provider usage into metering fields (plan 2026-05-27 PR 2).
+
+        Best-effort: returns ``{}`` on any missing/malformed usage so a parsing
+        failure never breaks the main response path.
+
+        OpenAI-compatible providers (MiMo, DeepSeek) report ``prompt_tokens``
+        as the TOTAL input, which already INCLUDES cached and audio tokens.
+        The cost engine bills input/cached/audio additively, so we split here
+        to avoid double-counting:
+            input  = prompt_tokens - cached_tokens - audio_tokens
+            cached = prompt_tokens_details.cached_tokens
+            audio  = prompt_tokens_details.audio_tokens
+            output = completion_tokens
+        See tests/fixtures/provider_responses/README.md.
+        """
+        def _ci(value: object) -> int:
+            try:
+                return int(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return 0
+
+        try:
+            usage = body.get("usage") or {}
+            if not isinstance(usage, dict):
+                return {}
+            prompt = max(0, _ci(usage.get("prompt_tokens")))
+            completion = max(0, _ci(usage.get("completion_tokens")))
+            details = usage.get("prompt_tokens_details") or {}
+            if not isinstance(details, dict):
+                details = {}
+            cached = max(0, _ci(details.get("cached_tokens")))
+            audio = max(0, _ci(details.get("audio_tokens")))
+            text_input = max(0, prompt - cached - audio)
+            if prompt == 0 and completion == 0:
+                return {}
+            return {
+                "input_tokens": text_input,
+                "output_tokens": completion,
+                "cached_input_tokens": cached,
+                "input_audio_tokens": audio,
+            }
+        except Exception:
+            return {}
 
     def _call_task_with_fallback(
         self,
@@ -1265,6 +1343,7 @@ class GeminiTranslator:
                         response_text=response_text,
                         attempt_label=attempt_label,
                         success=True,
+                        usage=self._last_call_usage,
                         extra={
                             "provider_response_received": True,
                             "duration_ms": int(time.time() * 1000) - attempt_start_ms,
