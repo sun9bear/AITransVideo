@@ -99,3 +99,39 @@ def test_dispatch_free_without_reference_uses_base(monkeypatch, tmp_path):
     seg = _seg(tts_provider="mimo")  # no reference stamped
     gen._generate_one(seg, str(tmp_path), provider="mimo")
     assert calls == ["base"]
+
+
+# ── Chunk B load-bearing wiring guard (CodeX P2) ──────────────────────────
+# process.py run() is monolithic (~4k lines) and untestable as a unit, and the
+# repo guards it via static source scans (see test_phase1_guards /
+# test_legacy_cleanup_guards). This guards the placement of the free-tier
+# wiring: set_voice_strategy + stamp_segment_references must run BEFORE the TTS
+# execution. Catches anyone who moves or deletes the wiring (the exact risk
+# behavioral tests miss when run() can't be driven). The wiring *logic* is
+# covered by test_voiceclone_reference (stamp) + the dispatch tests above.
+
+def test_process_py_wires_voiceclone_before_tts():
+    from pathlib import Path
+
+    text = (
+        Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+    ).read_text(encoding="utf-8")
+
+    # Slice run()'s body so anchors resolve to the run() call sites, not the
+    # module-level helper def or other methods' calls elsewhere in the file.
+    run_start = text.index("def run(self, config: ProcessConfig)")
+    next_method = text.index("\n    def ", run_start + 1)
+    body = text[run_start:next_method]
+
+    assert "set_voice_strategy(job_voice_strategy)" in body, \
+        "free-tier voice_strategy wiring missing from process.py run()"
+    assert "stamp_segment_references(" in body, \
+        "free-tier reference-stamp wiring missing from process.py run()"
+
+    i_strategy = body.index("set_voice_strategy(job_voice_strategy)")
+    i_stamp = body.index("stamp_segment_references(")
+    i_tts = body.index("_generate_tts_all_with_bucket(")  # first TTS-exec call in run()
+
+    assert i_strategy < i_tts, "set_voice_strategy must run before the TTS execution"
+    assert i_stamp < i_tts, "stamp_segment_references must run before the TTS execution"
+    assert i_strategy < i_stamp, "set_voice_strategy must precede stamp_segment_references"

@@ -43,3 +43,31 @@ def test_extract_speaker_references_writes_per_speaker_skips_short(tmp_path, mon
     refs = vr.extract_speaker_references(segs, speech, out, min_s=3.0, max_s=5.0)
     assert set(refs.keys()) == {"speaker_a"}
     assert refs["speaker_a"].exists()
+
+
+def test_stamp_segment_references_sets_path_by_speaker(tmp_path, monkeypatch):
+    """Phase 2a: stamp each segment's voiceclone_reference_path from the
+    per-speaker extraction result (by speaker_id); unmatched speakers stay
+    None so the TTS dispatch falls back to the base MiMo preset."""
+    from types import SimpleNamespace
+
+    def _seg(sid, spk):
+        return SimpleNamespace(
+            segment_id=sid, speaker_id=spk, start_ms=0, end_ms=6000,
+            voiceclone_reference_path=None,
+        )
+
+    segs = [_seg(1, "speaker_a"), _seg(2, "speaker_a"), _seg(3, "speaker_b")]
+    ref_a = tmp_path / "speaker_a.wav"
+    ref_a.write_bytes(b"\x00" * 100)
+    # Only speaker_a gets a usable reference; speaker_b is skipped by extraction.
+    monkeypatch.setattr(
+        vr, "extract_speaker_references", lambda *a, **k: {"speaker_a": ref_a}
+    )
+
+    stamped = vr.stamp_segment_references(segs, tmp_path / "speech.wav", tmp_path / "refs")
+
+    assert stamped == 2  # both speaker_a segments
+    assert segs[0].voiceclone_reference_path == str(ref_a)
+    assert segs[1].voiceclone_reference_path == str(ref_a)
+    assert segs[2].voiceclone_reference_path is None  # speaker_b unmatched → base preset

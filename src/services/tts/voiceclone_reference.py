@@ -85,3 +85,36 @@ def extract_speaker_references(
         except Exception as exc:  # noqa: BLE001 — best-effort; skip speaker on failure
             logger.warning("[voiceclone-ref] ffmpeg failed for %s: %s", spk, exc)
     return refs
+
+
+def stamp_segment_references(
+    segments,
+    speech_audio_path: str | Path,
+    out_dir: str | Path,
+    **kwargs,
+) -> int:
+    """Free-tier pipeline helper (Phase 2a): extract per-speaker references and
+    stamp each segment's ``voiceclone_reference_path``.
+
+    *segments* are objects carrying ``speaker_id`` / ``start_ms`` / ``end_ms``
+    and a writable ``voiceclone_reference_path`` (e.g. ``DubbingSegment``).
+    Best-effort: speakers without a usable reference leave their segments
+    unstamped (the TTS dispatch then uses the base MiMo preset). Returns the
+    number of segments stamped.
+    """
+    seg_dicts = [
+        {
+            "speaker_id": getattr(s, "speaker_id", None),
+            "start_ms": getattr(s, "start_ms", 0),
+            "end_ms": getattr(s, "end_ms", 0),
+        }
+        for s in segments
+    ]
+    refs = extract_speaker_references(seg_dicts, speech_audio_path, out_dir, **kwargs)
+    stamped = 0
+    for s in segments:
+        ref = refs.get(getattr(s, "speaker_id", None))
+        if ref is not None:
+            s.voiceclone_reference_path = str(ref)
+            stamped += 1
+    return stamped

@@ -5736,6 +5736,29 @@ class ProcessPipeline:
             except Exception as _exc:
                 # Defensive: if the new method is missing (rolling deploy), continue.
                 print(f"[S4] set_speaker_chars_per_second skipped: {_exc}", flush=True)
+            # Phase 2a free tier — tell the generator the job's voice_strategy
+            # (gates the MiMo voiceclone dispatch) and, for free_voiceclone jobs,
+            # stamp each segment with a per-speaker reference clip cut from the
+            # clean speech_for_asr.wav. Best-effort: any failure leaves segments
+            # unstamped → dispatch falls back to the base MiMo preset (free).
+            try:
+                tts_generator.set_voice_strategy(job_voice_strategy)
+                if job_voice_strategy == "free_voiceclone":
+                    from services.tts.voiceclone_reference import stamp_segment_references
+                    _vc_stamped = stamp_segment_references(
+                        translation_result.segments,
+                        final_project_dir / "audio" / "speech_for_asr.wav",
+                        final_project_dir / "audio" / "voiceclone_ref",
+                    )
+                    print(
+                        f"[S4] free voiceclone: stamped {_vc_stamped} segment(s) "
+                        "with per-speaker reference",
+                        flush=True,
+                    )
+            except Exception as _vc_exc:
+                # Never block the pipeline; unstamped segments use the base MiMo
+                # preset (free) via the tts_generator dispatch.
+                print(f"[S4] free voiceclone setup skipped: {_vc_exc}", flush=True)
             tts_dir = (final_project_dir / "tts").resolve(strict=False)
             rewriter_kwargs: dict[str, object] = {}
             custom_rewrite_prompt_template = gemini_config.get("rewrite_prompt_template")
