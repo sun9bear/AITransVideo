@@ -38,6 +38,10 @@ DEFAULT_MIMO_TIMEOUT_SECONDS = 60
 DEFAULT_MIMO_MAX_RETRIES = 5
 DEFAULT_MIMO_RETRY_BACKOFF_SECONDS = 3.0
 DEFAULT_MIMO_RPM = 100
+# Phase 1 free-tier (plan 2026-05-29): zero-shot voiceclone model.
+DEFAULT_MIMO_VOICECLONE_MODEL = "mimo-v2.5-tts-voiceclone"
+# MiMo official: reference audio must be <= 10MB AFTER base64 encoding.
+MAX_REFERENCE_B64_LEN = 10 * 1024 * 1024
 
 
 class MiMoTTSError(Exception):
@@ -114,7 +118,14 @@ def synthesize(
         retry_backoff_seconds=retry_backoff_seconds,
     )
 
-    # Extract base64 audio from response: choices[0].message.audio.data
+    return _extract_audio_bytes(response_data)
+
+
+def _extract_audio_bytes(response_data: dict) -> bytes:
+    """Extract + decode base64 audio from a chat/completions response.
+
+    Shared by ``synthesize`` and ``synthesize_voiceclone`` (DRY).
+    """
     choices = response_data.get("choices")
     if not isinstance(choices, list) or len(choices) == 0:
         raise MiMoTTSError("MiMo TTS response missing choices array.")
@@ -127,18 +138,63 @@ def synthesize(
     audio_b64 = audio_obj.get("data")
     if not audio_b64 or not isinstance(audio_b64, str):
         raise MiMoTTSError("MiMo TTS response missing audio.data (base64).")
-
     try:
         audio_bytes = base64.b64decode(audio_b64)
     except Exception as exc:
         raise MiMoTTSError("MiMo TTS audio payload is not valid base64.") from exc
-
     if len(audio_bytes) < 44:
         raise MiMoTTSError(
             f"MiMo TTS returned suspiciously small audio ({len(audio_bytes)} bytes)."
         )
-
     return audio_bytes
+
+
+def synthesize_voiceclone(
+    text: str,
+    *,
+    reference_audio,                       # bytes | str | Path
+    api_key: str | None = None,
+    endpoint: str = DEFAULT_MIMO_BASE_URL,
+    model: str = DEFAULT_MIMO_VOICECLONE_MODEL,
+    reference_mime: str = "audio/wav",
+    audio_format: str = DEFAULT_MIMO_AUDIO_FORMAT,
+    timeout_seconds: float = DEFAULT_MIMO_TIMEOUT_SECONDS,
+    max_retries: int = DEFAULT_MIMO_MAX_RETRIES,
+    retry_backoff_seconds: float = DEFAULT_MIMO_RETRY_BACKOFF_SECONDS,
+) -> bytes:
+    """Zero-shot clone the voice in *reference_audio* and speak *text*.
+
+    Plan 2026-05-29 free-tier Phase 1. *reference_audio* (bytes or file path)
+    is the original speaker's clean sample; it is inlined as a base64 data URI
+    in ``audio.voice``. Returns synthesized audio bytes. Raises ``MiMoTTSError``
+    on empty text / missing key / oversized reference / bad response.
+    """
+    if not text or not text.strip():
+        raise MiMoTTSError("Text to synthesize is empty.")
+    resolved_key = api_key or os.environ.get("MIMO_API_KEY")
+    if not resolved_key:
+        raise MiMoTTSError("MiMo API key required. Set MIMO_API_KEY or pass api_key.")
+    if isinstance(reference_audio, (str, Path)):
+        ref_bytes = Path(reference_audio).read_bytes()
+    else:
+        ref_bytes = bytes(reference_audio)
+    b64 = base64.b64encode(ref_bytes).decode("ascii")
+    if len(b64) > MAX_REFERENCE_B64_LEN:
+        raise MiMoTTSError(
+            f"reference audio base64 len {len(b64)} exceeds MiMo 10MB limit; use a shorter clip"
+        )
+    payload = {
+        "model": model,
+        "messages": [{"role": "assistant", "content": text}],
+        "modalities": ["audio"],
+        "audio": {"voice": f"data:{reference_mime};base64,{b64}", "format": audio_format},
+    }
+    response_data = _post_json(
+        endpoint=endpoint, api_key=resolved_key, payload=payload,
+        timeout_seconds=timeout_seconds, max_retries=max_retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+    )
+    return _extract_audio_bytes(response_data)
 
 
 # ---------------------------------------------------------------------------
