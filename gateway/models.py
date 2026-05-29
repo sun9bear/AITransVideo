@@ -922,6 +922,53 @@ class ExpressCloneReservation(Base):
     )
 
 
+class FreeServiceDailyUsage(Base):
+    """Phase 2a free tier — per-job daily ledger for the 1/day free-service cap
+    (migration 034). **Independent** of ``users.free_jobs_quota_*`` (that's the
+    free *plan* total, not per-day) — free-service jobs do NOT touch it.
+
+    Daily cap = active(reserved|consumed) rows for ``(user_id, usage_date)`` where
+    ``usage_date`` is the **Asia/Shanghai** natural day. State machine
+    ``reserved → consumed | released | expired`` mirrors ``ExpressCloneReservation``;
+    ``create_idempotency_key`` is the idempotency dimension (partial-unique while
+    reserved). Indexes live in migration 034.
+    """
+
+    __tablename__ = "free_service_daily_usage"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Asia/Shanghai natural day "YYYY-MM-DD" (free_service_quota.shanghai_day_key)
+    usage_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    create_idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reserved'")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    # TTL: reserve fills now + RESERVE_TTL_MINUTES. NOT NULL — a never-expiring
+    # reserved row would block the daily slot forever after a crashed create.
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    released_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class PricingConfigVersion(Base):
     """Versioned pricing configuration for admin publish/draft/archive workflow."""
 
