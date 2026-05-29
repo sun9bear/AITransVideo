@@ -2264,14 +2264,49 @@ def _check_duration_limit(
     *,
     plan_code_snapshot: str = "free",
     role_snapshot: str = "user",
+    service_mode_snapshot: str = "",
 ) -> None:
-    """Check video duration against plan-based limit from snapshot.
+    """Check video duration against the plan / service-mode limit from snapshot.
 
-    Admin users bypass the check entirely.  The primary validation is done
-    by Gateway at creation time; this is a hard safety-net inside the pipeline.
+    Admin users bypass the check entirely.  The primary validation is done by
+    Gateway at creation time; this is a hard safety-net inside the pipeline,
+    AFTER the authoritative ffprobe and BEFORE the expensive ASR/LLM/TTS stages.
+
+    Phase 2a Task 7 (gate #7): ``service_mode == "free"`` is FAIL-CLOSED — the
+    10-min cap holds even when ffprobe cannot be trusted (unknown / zero duration
+    REJECTS, never proceeds, so the cost gate closes). Paid modes keep the legacy
+    lenient plan-based check (a 0 there means "unknown" and is allowed).
     """
     if role_snapshot == "admin":
         return
+
+    if service_mode_snapshot == "free":
+        from utils.free_duration_gate import (
+            FREE_DURATION_CAP_MINUTES,
+            REJECT_OVER_CAP,
+            REJECT_UNTRUSTED,
+            evaluate_free_duration_cap,
+        )
+
+        reason = evaluate_free_duration_cap(
+            duration_ms, max_minutes=FREE_DURATION_CAP_MINUTES
+        )
+        if reason == REJECT_UNTRUSTED:
+            raise RuntimeError(
+                "无法确认视频时长（探测失败或文件损坏）。免费版要求可信时长，"
+                "请重新上传清晰完整的视频文件，或升级套餐。"
+            )
+        if reason == REJECT_OVER_CAP:
+            raise RuntimeError(
+                f"免费版视频时长上限 {FREE_DURATION_CAP_MINUTES:.0f} 分钟，"
+                f"当前 {duration_ms / 60_000:.1f} 分钟。请使用更短的视频，或升级套餐。"
+            )
+        print(
+            f"[S1] 免费版时长 {duration_ms / 60_000:.1f} 分钟，"
+            f"限制 {FREE_DURATION_CAP_MINUTES:.0f} 分钟内。"
+        )
+        return
+
     max_minutes = _PLAN_MAX_DURATION_MINUTES.get(plan_code_snapshot, 10)
     actual_minutes = duration_ms / 60_000
     if actual_minutes > max_minutes:
@@ -2781,6 +2816,7 @@ class ProcessPipeline:
                 actual_duration_ms,
                 plan_code_snapshot=job_plan_code,
                 role_snapshot=job_role,
+                service_mode_snapshot=job_service_mode,
             )
 
             # --- Report actual duration to Gateway (best-effort) ---
