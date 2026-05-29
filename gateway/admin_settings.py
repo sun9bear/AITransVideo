@@ -78,6 +78,16 @@ class AdminSettings(BaseModel):
     skip_translation_config_for_users: bool = True  # Normal users skip translation config step
     skip_all_reviews_for_free_users: bool = True   # Free users: fully automatic pipeline
     free_user_max_duration_minutes: float = 10.0   # Max video duration for free users (minutes)
+    # --- Phase 2a free tier (Task 6, gate #6) — MiMo voiceclone kill-switch ---
+    # Master toggle for the free tier's MiMo voiceclone TTS path. Default True.
+    # When turned OFF (admin emergency switch — e.g. MiMo promo ends or quality
+    # regresses), free jobs DEGRADE to the cheapest preset engine (CosyVoice
+    # preset_mapping) and the free tier KEEPS RUNNING (credits still 0). Plain
+    # bool (not StrictBool) on purpose: the dangerous direction is the OPPOSITE of
+    # the clone-GA flags — turning this OFF only downgrades to a free preset and
+    # never opens a paid API. MiMo voiceclone itself is the free promotional path
+    # (inline reference, no MiniMax/CosyVoice paid clone).
+    free_tier_voiceclone_enabled: bool = True
     enable_pre_tts_rewrite: bool = True            # Pre-TTS rewrite to match target duration
     express_tts_provider: str = "cosyvoice"        # Default TTS provider for express mode
     studio_tts_provider: str = "minimax"           # Default TTS provider for studio mode

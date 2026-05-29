@@ -477,13 +477,31 @@ def compute_job_policy(user, service_mode: str) -> dict:
         # the pricing_runtime / DEBIT_RATES (free, standard)=0 truth source
         # (Task 3), not here. MiMo voiceclone uses an inline reference
         # (no voice_id) so the MiniMax/CosyVoice clone path stays OFF.
+        #
+        # Task 6 (gate #6) kill-switch: admin.free_tier_voiceclone_enabled
+        # (default True) gates the MiMo voiceclone path. When OFF, free
+        # DEGRADES to the cheapest preset engine (CosyVoice preset_mapping)
+        # and the free tier KEEPS RUNNING (credits still 0, service_mode
+        # still "free") — it never fails and never touches a paid clone API.
+        if admin.free_tier_voiceclone_enabled:
+            return {
+                "service_mode": "free",
+                "tts_provider": "mimo",
+                "tts_model": "mimo-v2.5-tts-voiceclone",
+                "requires_review": False,
+                "voice_clone_enabled": False,
+                "voice_strategy": "free_voiceclone",
+                "plan_code_snapshot": plan,
+                "role_snapshot": role,
+                "quality_tier": "standard",
+            }
         return {
             "service_mode": "free",
-            "tts_provider": "mimo",
-            "tts_model": "mimo-v2.5-tts-voiceclone",
+            "tts_provider": "cosyvoice",
+            "tts_model": "cosyvoice-v3-flash",
             "requires_review": False,
             "voice_clone_enabled": False,
-            "voice_strategy": "free_voiceclone",
+            "voice_strategy": "preset_mapping",
             "plan_code_snapshot": plan,
             "role_snapshot": role,
             "quality_tier": "standard",

@@ -101,6 +101,85 @@ def test_dispatch_free_without_reference_uses_base(monkeypatch, tmp_path):
     assert calls == ["base"]
 
 
+# ── Task 6 (gate #6): voiceclone failure -> visible base-preset fallback ──
+
+def test_force_mimo_preset_routes_to_base_even_for_free_voiceclone(monkeypatch, tmp_path):
+    """force_mimo_preset=True makes the dispatch use the BASE MiMo preset even for
+    a free_voiceclone job WITH a reference (this is the fallback path's lever)."""
+    gen = _dispatch_gen("free_voiceclone")
+    calls = _spy_branches(monkeypatch, gen)
+    seg = _seg(tts_provider="mimo", voiceclone_reference_path="/tmp/ref.wav")
+    gen._generate_one(seg, str(tmp_path), provider="mimo", force_mimo_preset=True)
+    assert calls == ["base"]  # NOT voiceclone
+
+
+def test_force_mimo_preset_overrides_drifted_segment_provider(monkeypatch, tmp_path):
+    """CodeX P1: force_mimo_preset must pin provider='mimo' even when
+    segment.tts_provider drifted to a PAID provider (data drift / upstream bug).
+    The free preset fallback must route to MiMo base, never into the paid MiniMax
+    fall-through. calls==['base'] proves the mimo branch returned before the
+    MiniMax default branch could run."""
+    gen = _dispatch_gen("free_voiceclone")
+    calls = _spy_branches(monkeypatch, gen)
+    seg = _seg(tts_provider="minimax", voiceclone_reference_path="/tmp/ref.wav")
+    gen._generate_one(seg, str(tmp_path), provider="mimo", force_mimo_preset=True)
+    assert calls == ["base"]  # routed to MiMo base; MiniMax fall-through never ran
+
+
+def _backoff_gen():
+    gen = tg.TTSGenerator.__new__(tg.TTSGenerator)  # bypass __init__
+    gen._voice_strategy = "free_voiceclone"
+    gen._job_provider = "mimo"
+    gen._OUTER_BACKOFF_SCHEDULE = [0, 0]   # 2 fast attempts (sleep(0) is instant)
+    gen._OUTER_PAUSE_SECONDS = 0
+    return gen
+
+
+def test_voiceclone_failure_falls_back_to_base_preset_visibly(monkeypatch, tmp_path):
+    """When MiMo voiceclone retries are exhausted, the free path DEGRADES to the
+    base MiMo preset (visible via fallback_used_provider='mimo_preset') instead of
+    failing the job."""
+    gen = _backoff_gen()
+    calls = []
+
+    def fake_generate_one(segment, output_dir, *, provider=None,
+                          usage_bucket=tg.TTS_BUCKET_FIRST, force_mimo_preset=False):
+        calls.append((provider, "preset" if force_mimo_preset else "voiceclone"))
+        if force_mimo_preset:
+            return tg.TTSResult(segment_id=segment.segment_id, audio_path="base.wav",
+                                duration_ms=1, voice_id="v")
+        raise tg.TTSGenerationError("voiceclone unstable")
+
+    monkeypatch.setattr(gen, "_generate_one", fake_generate_one)
+    seg = _seg(tts_provider="mimo", voiceclone_reference_path="/tmp/ref.wav")
+    result = gen._generate_one_with_backoff(seg, str(tmp_path))
+
+    assert result.fallback_used_provider == "mimo_preset"  # visible substitution marker
+    assert result.audio_path == "base.wav"
+    assert calls[-1] == ("mimo", "preset")          # ended on the base-preset fallback
+    assert ("mimo", "voiceclone") in calls          # voiceclone was retried first
+
+
+def test_voiceclone_fallback_never_uses_paid_provider(monkeypatch, tmp_path):
+    """CLAUDE.md paid-API constraint: the free voiceclone fallback must only ever
+    call provider='mimo' (free) — never minimax/cosyvoice/volcengine."""
+    gen = _backoff_gen()
+    providers_seen = []
+
+    def fake_generate_one(segment, output_dir, *, provider=None,
+                          usage_bucket=tg.TTS_BUCKET_FIRST, force_mimo_preset=False):
+        providers_seen.append(provider)
+        if force_mimo_preset:
+            return tg.TTSResult(segment_id=segment.segment_id, audio_path="base.wav",
+                                duration_ms=1, voice_id="v")
+        raise tg.TTSGenerationError("voiceclone unstable")
+
+    monkeypatch.setattr(gen, "_generate_one", fake_generate_one)
+    seg = _seg(tts_provider="mimo", voiceclone_reference_path="/tmp/ref.wav")
+    gen._generate_one_with_backoff(seg, str(tmp_path))
+    assert set(providers_seen) == {"mimo"}  # never a paid provider
+
+
 # ── Chunk B load-bearing wiring guard (CodeX P2) ──────────────────────────
 # process.py run() is monolithic (~4k lines) and untestable as a unit, and the
 # repo guards it via static source scans (see test_phase1_guards /

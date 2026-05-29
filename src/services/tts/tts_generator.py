@@ -1179,6 +1179,43 @@ class TTSGenerator:
                     )
                     time.sleep(wait)
 
+        # --- Phase 2a Task 6 (gate #6): free voiceclone -> base MiMo preset ---
+        # MiMo voiceclone is run-to-run unstable on long input (Phase 1 finding).
+        # When a free segment's voiceclone retries are exhausted, DEGRADE to the
+        # base MiMo preset (free, SAME provider) instead of failing the job —
+        # and NEVER to a paid provider/clone (get_fallback_provider("mimo") is
+        # None anyway; this branch runs first and returns). The substitution is
+        # made VISIBLE (logger.warning + console + result.fallback_used_provider)
+        # so user/admin see it — never silent (CLAUDE.md + plan Task 6).
+        if (
+            getattr(self, "_voice_strategy", "") == "free_voiceclone"
+            and getattr(segment, "voiceclone_reference_path", None)
+        ):
+            logger.warning(
+                "free_voiceclone_fallback_to_preset segment=%s reason=%s",
+                segment.segment_id, last_error,
+            )
+            print(
+                f"[S4] 免费版声音克隆段 {segment.segment_id} 重试耗尽，"
+                f"回落 MiMo 基础预设音色（不切换付费引擎）"
+            )
+            try:
+                result = self._generate_one(
+                    segment,
+                    output_dir,
+                    provider="mimo",
+                    usage_bucket=usage_bucket,
+                    force_mimo_preset=True,
+                )
+                result.fallback_used_provider = "mimo_preset"
+                return result
+            except TTSGenerationError as preset_exc:
+                logger.error(
+                    "free_voiceclone_preset_fallback_failed segment=%s error=%s",
+                    segment.segment_id, preset_exc,
+                )
+                # fall through to the generic handling below
+
         # --- Fallback provider ---
         voice_clone_enabled = bool(getattr(segment, "voice_id", None))
         fallback = get_fallback_provider(provider, voice_clone_enabled)
@@ -1247,6 +1284,7 @@ class TTSGenerator:
         *,
         provider: str | None = None,
         usage_bucket: str = TTS_BUCKET_FIRST,
+        force_mimo_preset: bool = False,
     ) -> TTSResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -1261,9 +1299,16 @@ class TTSGenerator:
         # MiMo bills on tokens (not chars) — billed_chars left as 0 (unknown).
         _cn_chars = len(tts_text)
 
-        # Resolve provider: segment override > explicit arg > job-level > legacy
+        # Resolve provider: force_mimo_preset > segment override > explicit arg > job-level > legacy
         segment_provider = getattr(segment, "tts_provider", None)
-        if segment_provider:
+        if force_mimo_preset:
+            # Task 6 (gate #6) hard pin (CodeX P1): the free-voiceclone preset
+            # fallback MUST stay on MiMo (free) regardless of any
+            # segment.tts_provider drift / upstream bug AND regardless of
+            # requires_worker — a stray tts_provider="minimax" must never route
+            # the free fallback into a paid provider / worker (CLAUDE.md).
+            provider = "mimo"
+        elif segment_provider:
             provider = segment_provider
         elif provider is None:
             provider = getattr(self, "_job_provider", None) or get_tts_provider()
@@ -1283,7 +1328,7 @@ class TTSGenerator:
         #   2) ``segment.tts_provider`` 空 / None → 强制 ``provider="cosyvoice"``
         #      覆盖 job-level fallback；clone voice 只能在 cosyvoice provider 下用，
         #      强制锁定不产生歧义。
-        if bool(getattr(segment, "requires_worker", False)):
+        if not force_mimo_preset and bool(getattr(segment, "requires_worker", False)):
             seg_tts_provider = (getattr(segment, "tts_provider", "") or "").strip()
             if seg_tts_provider and seg_tts_provider != "cosyvoice":
                 raise TTSGenerationError(
@@ -1337,7 +1382,8 @@ class TTSGenerator:
                 # non-free MiMo segment can never trigger a clone. No reference
                 # / non-free → base MiMo preset (unchanged for existing jobs).
                 if (
-                    getattr(self, "_voice_strategy", "") == "free_voiceclone"
+                    not force_mimo_preset
+                    and getattr(self, "_voice_strategy", "") == "free_voiceclone"
                     and getattr(segment, "voiceclone_reference_path", None)
                 ):
                     result = self._generate_one_mimo_voiceclone(segment, tts_text, output_root)

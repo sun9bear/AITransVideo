@@ -180,6 +180,35 @@ def test_compute_job_policy_free_branch():
     assert "credits" not in p  # debit lives in DEBIT_RATES, not the policy dict
 
 
+# ── Task 6 (gate #6): free voiceclone kill-switch ────────────────────────
+
+def test_free_voiceclone_kill_switch_downgrades_to_cosyvoice_preset():
+    """admin.free_tier_voiceclone_enabled (default True) gates the MiMo voiceclone
+    path. OFF -> free DEGRADES to the cheapest preset engine (CosyVoice
+    preset_mapping); the free tier KEEPS RUNNING (service_mode still free,
+    voice_clone_enabled False) and never touches a paid clone API."""
+    _stub_database_module()
+    import job_intercept as ji
+    import admin_settings
+    user = types.SimpleNamespace(role="user", plan_code="free")
+    # compute_job_policy does `from admin_settings import load_settings` at call
+    # time, so patch the source module attribute (not job_intercept's namespace).
+    with patch.object(admin_settings, "load_settings",
+                      lambda: types.SimpleNamespace(free_tier_voiceclone_enabled=True)):
+        on = ji.compute_job_policy(user, "free")
+    assert on["service_mode"] == "free"
+    assert on["voice_strategy"] == "free_voiceclone"
+    assert on["tts_provider"] == "mimo"
+    with patch.object(admin_settings, "load_settings",
+                      lambda: types.SimpleNamespace(free_tier_voiceclone_enabled=False)):
+        off = ji.compute_job_policy(user, "free")
+    assert off["service_mode"] == "free"            # tier continues, not a failure
+    assert off["voice_strategy"] == "preset_mapping"
+    assert off["tts_provider"] == "cosyvoice"
+    assert off["tts_model"] == "cosyvoice-v3-flash"
+    assert off["voice_clone_enabled"] is False
+
+
 # ── Task 1 (CodeX P1): free must enter allowed-modes when flag on ─────────
 
 def test_free_in_allowed_modes_when_flag_on():
