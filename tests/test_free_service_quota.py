@@ -213,11 +213,14 @@ def test_release_refuses_to_release_consumed():
 def test_reserve_inline_expires_stale_reserved():
     async def go():
         sm = await _make_sessionmaker()
-        # ttl_minutes=0 -> expires_at == now, so it is stale on the next reserve.
+        # ttl_minutes=-1 -> expires_at strictly in the PAST, so it is
+        # deterministically stale on the next reserve. (ttl_minutes=0 made
+        # expires_at == now, which was clock-tick flaky under fast runs: when the
+        # next reserve landed in the same tick, expires_at < now was False.)
         async with sm() as db:
             await q.reserve_free_daily(
                 db, user_id=_USER, usage_date="2026-05-29",
-                idempotency_key="s1", daily_cap=1, ttl_minutes=0,
+                idempotency_key="s1", daily_cap=1, ttl_minutes=-1,
             )
         async with sm() as db:
             o = await q.reserve_free_daily(
