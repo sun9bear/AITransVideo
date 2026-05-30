@@ -132,6 +132,18 @@ export async function submitTranslationJob(
       client_confirmed_at: optedIn ? new Date().toISOString() : null,
     }
   }
+  // Phase 2a LAUNCH GATE — free voice-rights consent (《民法典》1023). The free
+  // voiceclone reproduces the source speaker's voice; the gateway HARD-fails
+  // (403 consent_required) unless voice_rights_confirmed is true. The form forces
+  // freeVoiceRightsConfirmed false for non-free modes; the server generates the
+  // authoritative confirmation timestamp (client_confirmed_at is audit-assist).
+  if (requestBody.service_mode === 'free') {
+    const confirmed = input.freeVoiceRightsConfirmed === true
+    requestBody.free_consent = {
+      voice_rights_confirmed: confirmed,
+      client_confirmed_at: confirmed ? new Date().toISOString() : null,
+    }
+  }
   const payload = await apiClient.post<ApiJobRecord>('/jobs', {
     body: requestBody,
   })

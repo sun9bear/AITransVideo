@@ -181,6 +181,13 @@ export interface CreateTranslationJobInput {
    * checkbox can never trigger a paid clone (spec §2.6).
    */
   expressAutoVoiceClone?: boolean
+  /**
+   * Phase 2a LAUNCH GATE (《民法典》1023): free voice-rights attestation. Only
+   * meaningful for ``service_mode === 'free'``. Maps to
+   * ``free_consent.voice_rights_confirmed``; the gateway HARD-fails without it.
+   * The submit layer forces this false for non-free modes.
+   */
+  freeVoiceRightsConfirmed?: boolean
 }
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [

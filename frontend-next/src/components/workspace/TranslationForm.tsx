@@ -46,6 +46,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // fail-closed; the checkbox only renders when express + available.
   const [expressAutoCloneAvailable, setExpressAutoCloneAvailable] = useState(false)
   const [expressAutoVoiceClone, setExpressAutoVoiceClone] = useState(false)
+  // Phase 2a LAUNCH GATE: free voice-rights attestation (《民法典》1023). Must be
+  // checked before a free job may be submitted; reset on mode switch.
+  const [freeVoiceRightsConfirmed, setFreeVoiceRightsConfirmed] = useState(false)
   const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
   const [credits, setCredits] = useState<CreditsResponse | null>(null)
   const [creditRates, setCreditRates] = useState<{
@@ -72,12 +75,20 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // UI so users aren't surprised by a mid-job pause.
   const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
 
-  const validationError =
+  const sourceValidationError =
     sourceType === "youtube_url"
       ? validateYoutubeUrl(youtubeUrl)
       : !uploadedFilePath
         ? "请先上传视频文件。"
         : null
+  // Phase 2a LAUNCH GATE: a free job requires the voice-rights attestation
+  // (《民法典》1023). Keep submit blocked until it is checked — the backend
+  // HARD-fails (403 consent_required) otherwise.
+  const validationError =
+    sourceValidationError ??
+    (serviceMode === "free" && !freeVoiceRightsConfirmed
+      ? "请先阅读并勾选免费版声音授权声明。"
+      : null)
 
   const isUnlimitedConcurrency = entitlements?.limits.max_concurrent_jobs === null
   const maxConcurrentJobs = entitlements?.limits.max_concurrent_jobs ?? 1
@@ -176,6 +187,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     }
   }, [serviceMode, expressAutoCloneAvailable])
 
+  // Phase 2a LAUNCH GATE: leaving free mode clears the attestation so a stale
+  // consent can't ride into a later submit.
+  useEffect(() => {
+    if (serviceMode !== "free") {
+      setFreeVoiceRightsConfirmed(false)
+    }
+  }, [serviceMode])
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (validationError) {
@@ -197,6 +216,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         // spec §2.6: force false unless currently in Express, so a stale
         // checkbox (mode switched away then back) can't trigger a paid clone.
         expressAutoVoiceClone: serviceMode === "express" ? expressAutoVoiceClone : false,
+        freeVoiceRightsConfirmed: serviceMode === "free" ? freeVoiceRightsConfirmed : false,
       })
       setActiveJobs((prev) => [createdJob, ...prev])
       setSubmitState("success")
@@ -584,6 +604,37 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             )}
           </section>
+
+          {/* Phase 2a LAUNCH GATE: free voice-rights attestation (《民法典》1023).
+              The free voiceclone reproduces the source speaker's voice; the user
+              must confirm they hold the rights. The backend HARD-fails (403
+              consent_required) without it. NOTE: the wording below is a
+              PLACEHOLDER pending legal sign-off (plan 2026-05-30-launch-gate §4.1). */}
+          {serviceMode === "free" && freeTierEnabled ? (
+            <section
+              className="rounded-xl border p-4"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--bamboo) 8%, transparent)",
+                borderColor: "color-mix(in oklab, var(--bamboo) 32%, transparent)",
+              }}
+            >
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 shrink-0 accent-[color:var(--primary)]"
+                  checked={freeVoiceRightsConfirmed}
+                  disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  onChange={(e) => setFreeVoiceRightsConfirmed(e.target.checked)}
+                />
+                <span className="block space-y-1.5">
+                  <span className="block text-sm font-medium text-foreground">声音授权声明（必读必勾）</span>
+                  <span className="block text-xs leading-relaxed text-muted-foreground">
+                    我确认：我已获得该视频内容及其中所有说话人声音的合法授权，或该使用属于法律允许的范围；因使用本服务声音克隆功能产生的肖像权 / 声音权纠纷由我自行承担。
+                  </span>
+                </span>
+              </label>
+            </section>
+          ) : null}
 
           {/* Phase 4.3a PR3: Express auto-clone consent checkbox. Renders ONLY
               when express mode AND the server reports availability (admin flag +

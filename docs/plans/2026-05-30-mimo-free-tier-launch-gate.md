@@ -81,6 +81,14 @@ without confirmed voice-rights consent must be **rejected**, not silently downgr
 
 ## §3 Frontend (blocking attestation at free job creation)
 
+> ✅ **Implemented** (this batch): `TranslationForm.tsx` renders a blocking
+> 声音授权声明 checkbox when `serviceMode === "free"` (gated by
+> `NEXT_PUBLIC_ENABLE_FREE_TIER`); `validationError` keeps submit disabled until it
+> is checked; the checkbox resets on mode switch; `submitTranslationJob` sends
+> `free_consent` (`voice_rights_confirmed` + `client_confirmed_at`), forced false
+> for non-free. Lint: 0 errors. **The checkbox copy is a PLACEHOLDER pending §4.1
+> legal sign-off.**
+
 Mirror `CosyVoiceConsentModal.tsx` / the `express_consent` collection in
 `TranslationForm.tsx`:
 
