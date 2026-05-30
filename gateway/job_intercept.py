@@ -1191,6 +1191,33 @@ async def intercept_create_job(
                 datetime.now(timezone.utc).isoformat()
             )
 
+    # --- free_consent validation (Phase 2a LAUNCH GATE / 《民法典》1023) ---
+    # The free voiceclone reproduces the SOURCE speaker's voice, so the user must
+    # attest they hold the rights (design §5.3). HARD-fail (unlike express
+    # soft-skip): no confirmed consent -> reject the free job HERE, before any
+    # quota reserve or upstream forward. validate_free_consent returns a payload
+    # ONLY when voice_rights_confirmed is True.
+    free_consent_payload: dict | None = None
+    if service_mode == "free":
+        from free_consent import validate_free_consent
+
+        free_consent_payload, free_consent_reason = validate_free_consent(
+            request_data.get("free_consent")
+        )
+        if free_consent_payload is None:
+            return _error_response(
+                403,
+                "consent_required",
+                "免费版需先确认您对该视频内容及其中说话人声音的使用拥有合法授权。",
+                {"requested_mode": "free", "reason": free_consent_reason},
+            )
+        # Server-side authoritative consent timestamp (client_confirmed_at is
+        # untrusted / forgeable). This is the liability evidence forwarded to the
+        # pipeline / audit.
+        free_consent_payload["server_confirmed_at"] = (
+            datetime.now(timezone.utc).isoformat()
+        )
+
     # --- User context ---
     user_role = getattr(user, "role", "user") or "user" if user else "user"
     user_plan = getattr(user, "plan_code", "free") or "free" if user else "free"
@@ -1512,6 +1539,14 @@ async def intercept_create_job(
         express_consent_payload=express_consent_payload,
         express_consent_parse_error=express_consent_parse_error,
     )
+
+    # Phase 2a LAUNCH GATE: forward only the server-validated free_consent (with
+    # the authoritative server_confirmed_at); strip any client-embedded value so a
+    # forged consent / server_confirmed_at can't reach the pipeline or audit, and
+    # a non-free job can't smuggle a free_consent.
+    request_data.pop("free_consent", None)
+    if free_consent_payload is not None:
+        request_data["free_consent"] = free_consent_payload
 
     # Phase 2a free tier — atomic daily-quota admission BEFORE the upstream
     # forward (CodeX: before expensive stages; independent of legacy quota).

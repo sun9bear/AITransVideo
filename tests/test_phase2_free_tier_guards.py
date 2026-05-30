@@ -102,13 +102,19 @@ def test_known_modes_pass_through():
 # ── Task 1 Step 1(b): handler-level rejection (real security boundary) ────
 # Mirrors tests/test_smart_kill_switch.py's intercept_create_job harness.
 
-def _free_job_request(service_mode="free"):
+def _free_job_request(service_mode="free", with_consent=True):
     req = MagicMock()
     body = {
         "service_mode": service_mode,
         "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
         "estimated_duration_seconds": 60,
     }
+    # LAUNCH GATE: free jobs must carry voice-rights consent or the gate 403s.
+    if with_consent and service_mode == "free":
+        body["free_consent"] = {
+            "voice_rights_confirmed": True,
+            "client_confirmed_at": "2026-05-30T00:00:00Z",
+        }
     req.body = AsyncMock(return_value=json.dumps(body, ensure_ascii=False).encode("utf-8"))
     req.headers = {"content-type": "application/json"}
     req.method = "POST"
@@ -355,3 +361,22 @@ def test_free_job_skips_legacy_reserve_quota():
         _run_create(_free_job_request("free"), _min_db(), user)
     assert reserve_spy.called, "free job should reserve via the daily ledger"
     legacy_spy.assert_not_called()  # legacy free-plan quota (free_jobs_quota_used) untouched
+
+
+def test_free_job_without_consent_returns_403():
+    """LAUNCH GATE (民法典 1023): flag on but no free_consent -> 403
+    consent_required, never forwards (HARD-fail, before the daily reserve)."""
+    _stub_database_module()
+    import job_intercept as ji
+    user = types.SimpleNamespace(
+        id=uuid.uuid4(), email="u@t.com", display_name="T", role="user",
+        plan_code="free", free_jobs_quota_total=5, free_jobs_quota_used=0,
+        trial_started_at=None, trial_expires_at=None,
+    )
+    proxy_spy = AsyncMock(return_value=MagicMock(status_code=200, body=b"{}"))
+    with patch.object(ji.settings, "enable_free_tier", True), \
+         patch.object(ji, "proxy_request", proxy_spy):
+        resp = _run_create(_free_job_request("free", with_consent=False), _min_db(), user)
+    assert resp.status_code == 403
+    assert json.loads(resp.body)["error"] == "consent_required"
+    proxy_spy.assert_not_called()

@@ -38,6 +38,15 @@ preset path is an optional optimization (see §4).
 
 ## §2 Consent gate — engineering design (reuses the established pattern)
 
+> ✅ **Backend implemented** (this batch): `gateway/free_consent.py`
+> `validate_free_consent` (HARD — returns a payload only when
+> `voice_rights_confirmed is True`, strict bool) + `intercept_create_job` free
+> branch gate (403 `consent_required` **before** the daily reserve / forward) +
+> server `server_confirmed_at` stamp + anti-forge re-inject of the validated
+> payload (strips any client-embedded value). Tests: `test_free_consent` (7
+> validator) + handler (free + no consent → 403, never forwards). **Pending: the
+> §3 frontend attestation UI + the §4.1 legal text.**
+
 Mirror the existing validators but with **HARD-fail** semantics (like
 `gateway/smart_consent.py`, NOT the soft-skip `gateway/express_consent.py`): a free job
 without confirmed voice-rights consent must be **rejected**, not silently downgraded.
