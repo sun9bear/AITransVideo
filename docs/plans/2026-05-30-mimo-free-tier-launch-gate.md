@@ -44,8 +44,8 @@ preset path is an optional optimization (see §4).
 > branch gate (403 `consent_required` **before** the daily reserve / forward) +
 > server `server_confirmed_at` stamp + anti-forge re-inject of the validated
 > payload (strips any client-embedded value). Tests: `test_free_consent` (7
-> validator) + handler (free + no consent → 403, never forwards). **Pending: the
-> §3 frontend attestation UI + the §4.1 legal text.**
+> validator) + handler (free + no consent → 403, never forwards). **Frontend
+> attestation is implemented in §3; pending blocker is the §4.1 legal text.**
 
 Mirror the existing validators but with **HARD-fail** semantics (like
 `gateway/smart_consent.py`, NOT the soft-skip `gateway/express_consent.py`): a free job
