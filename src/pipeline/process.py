@@ -6081,9 +6081,13 @@ class ProcessPipeline:
                 stage_snapshot=state_manager.load().get("stages", {}),
                 source_type=source_type,
             )
+            # Phase 2a Task 8 (gate #8): free service-mode jobs get a burned-in
+            # watermark on publish.dubbed_video (paid modes ship clean).
+            from utils.free_watermark import free_watermark_text_for
             output_bundle = self._dispatch_process_output_bundle(
                 project_dir=final_project_dir,
                 build_result=build_result,
+                watermark_text=free_watermark_text_for(job_service_mode),
             )
             assert output_bundle.editor_result is not None
             output_result = output_bundle.editor_result
@@ -10265,6 +10269,7 @@ class ProcessPipeline:
         *,
         project_dir: Path,
         build_result: WorkflowBuildResult,
+        watermark_text: str | None = None,
     ) -> OutputBundleResult:
         return OutputDispatcher().dispatch(
             build_result.localized_project,
@@ -10274,6 +10279,9 @@ class ProcessPipeline:
                 # Pipeline always produces the final video (原视频画面 + 配音 + 背景音).
                 targets=[OutputTarget.PUBLISH],
                 output_dir=str(project_dir.resolve(strict=False)),
+                # Phase 2a Task 8 (gate #8): free jobs carry a watermark text; the
+                # γ resume_publish_only call site leaves this None (Studio, clean).
+                watermark_text=watermark_text,
             ),
         )
 

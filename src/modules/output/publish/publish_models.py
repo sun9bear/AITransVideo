@@ -12,6 +12,10 @@ class PublishRequest:
     output_filename: str = "dubbed_video.mp4"
     ambient_audio_path: str | None = None
     ambient_volume_db: float = -12.0
+    # Phase 2a Task 8 (gate #8): when set (free service mode), the renderer burns
+    # this text into the video via ffmpeg drawtext (forces a re-encode). None /
+    # empty -> clean -c:v copy mux (paid modes).
+    watermark_text: str | None = None
 
 
 @dataclass(slots=True)

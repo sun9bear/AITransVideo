@@ -64,43 +64,14 @@ class VideoRenderer:
             if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
                 ambient_audio_path = candidate
 
-        if ambient_audio_path is not None:
-            # Three-track mix: video + dubbed audio + ambient audio (lowered volume)
-            vol_db = getattr(request, "ambient_volume_db", -12.0)
-            command = [
-                self.ffmpeg_executable,
-                "-y",
-                "-i", str(original_video_path),
-                "-i", str(dubbed_audio_path),
-                "-i", str(ambient_audio_path),
-                "-filter_complex",
-                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo[dub];"
-                f"[2:a]aformat=sample_rates=44100:channel_layouts=stereo,"
-                f"volume={vol_db}dB[amb];"
-                f"[dub][amb]amix=inputs=2:duration=first:dropout_transition=2[aout]",
-                "-map", "0:v:0",
-                "-map", "[aout]",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-shortest",
-                "-movflags", "+faststart",
-                str(output_path),
-            ]
-        else:
-            # Two-track: video + dubbed audio only (no ambient available)
-            command = [
-                self.ffmpeg_executable,
-                "-y",
-                "-i", str(original_video_path),
-                "-i", str(dubbed_audio_path),
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-shortest",
-                "-movflags", "+faststart",
-                str(output_path),
-            ]
+        command = self._build_render_command(
+            original_video_path=original_video_path,
+            dubbed_audio_path=dubbed_audio_path,
+            ambient_audio_path=ambient_audio_path,
+            output_path=output_path,
+            watermark_text=getattr(request, "watermark_text", None),
+            ambient_volume_db=float(getattr(request, "ambient_volume_db", -12.0)),
+        )
         _notify("muxing", 20)
         try:
             self.command_runner(command)
@@ -147,6 +118,78 @@ class VideoRenderer:
             dubbed_audio_path=str(dubbed_audio_path),
             poster_path=poster_str,
         )
+
+    def _build_render_command(
+        self,
+        *,
+        original_video_path: Path,
+        dubbed_audio_path: Path,
+        ambient_audio_path: Path | None,
+        output_path: Path,
+        watermark_text: str | None = None,
+        ambient_volume_db: float = -12.0,
+    ) -> list[str]:
+        """Build the ffmpeg mux command.
+
+        Phase 2a Task 8 (gate #8): when ``watermark_text`` is set (free service
+        mode) a ``drawtext`` video filter is injected and the video stream is
+        RE-ENCODED (``-c:v libx264``) — a drawtext filter is incompatible with
+        ``-c:v copy``. Paid modes keep the fast lossless copy mux unchanged.
+        """
+        wm = (watermark_text or "").strip()
+        video_filter = ""
+        if wm:
+            from utils.free_watermark import WATERMARK_FONTFILE, build_drawtext_filter
+
+            video_filter = build_drawtext_filter(wm, fontfile=WATERMARK_FONTFILE)
+        # drawtext rewrites frames -> must re-encode; otherwise lossless copy.
+        vcodec = (
+            ["-c:v", "libx264", "-pix_fmt", "yuv420p"] if video_filter else ["-c:v", "copy"]
+        )
+
+        command = [
+            self.ffmpeg_executable,
+            "-y",
+            "-i", str(original_video_path),
+            "-i", str(dubbed_audio_path),
+        ]
+
+        if ambient_audio_path is not None:
+            # Three-track mix: video + dubbed audio + ambient audio (lowered volume).
+            command += ["-i", str(ambient_audio_path)]
+            audio_chain = (
+                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo[dub];"
+                f"[2:a]aformat=sample_rates=44100:channel_layouts=stereo,"
+                f"volume={ambient_volume_db}dB[amb];"
+                f"[dub][amb]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            )
+            if video_filter:
+                command += [
+                    "-filter_complex", f"[0:v]{video_filter}[vout];{audio_chain}",
+                    "-map", "[vout]", "-map", "[aout]",
+                ]
+            else:
+                command += [
+                    "-filter_complex", audio_chain,
+                    "-map", "0:v:0", "-map", "[aout]",
+                ]
+        else:
+            # Two-track: video + dubbed audio only (no ambient available).
+            if video_filter:
+                command += [
+                    "-filter_complex", f"[0:v]{video_filter}[vout]",
+                    "-map", "[vout]", "-map", "1:a:0",
+                ]
+            else:
+                command += ["-map", "0:v:0", "-map", "1:a:0"]
+
+        command += vcodec + [
+            "-c:a", "aac",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        return command
 
     @staticmethod
     def _require_existing_file_path(path: str, *, field_name: str) -> Path:

@@ -93,6 +93,7 @@ class OutputDispatcher:
                     dubbed_audio_path=editor_result.dubbed_audio_path,
                     output_dir=str((project_root / "publish").resolve(strict=False)),
                     ambient_audio_path=ambient_path,
+                    watermark_text=request.watermark_text,
                 )
             )
             artifact_index.register("publish.dubbed_video", publish_result.dubbed_video_path)

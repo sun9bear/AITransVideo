@@ -14,6 +14,9 @@ class OutputRequest:
     burn_subtitles: bool = False
     mix_original_audio: bool = False
     output_dir: str | None = None
+    # Phase 2a Task 8 (gate #8): free service-mode watermark text (None = clean).
+    # Carried through to the PublishRequest the dispatcher builds.
+    watermark_text: str | None = None
 
     def __post_init__(self) -> None:
         if not self.targets:
