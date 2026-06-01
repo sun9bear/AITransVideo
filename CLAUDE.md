@@ -48,12 +48,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Graph index: `docs/graphs/README.md`
 - Workflow core: `docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
 - CosyVoice / Mainland Worker: `docs/graphs/GITNEXUS_COSYVOICE_MAINLAND_WORKER_GRAPH.md`
+- Express CosyVoice Auto-Clone: `docs/graphs/GITNEXUS_EXPRESS_COSYVOICE_AUTO_CLONE_GRAPH.md`
 - Smart Auto Review: `docs/graphs/GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
 - Jianying draft delivery: `docs/graphs/GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
 - Review flow: `docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
 - Editing / Post-Edit / Regeneration: `docs/graphs/GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
 - Storage / Delivery / R2: `docs/graphs/GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
 - Commercialization: `docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- Free Tier / MiMo VoiceClone: `docs/graphs/GITNEXUS_FREE_TIER_GRAPH.md`
 - Support / Notifications / Announcements: `docs/graphs/GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md`
 - Admin / Ops / Calibration: `docs/graphs/GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
 - Benchmark / Quality / Cost: `docs/graphs/GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
@@ -135,10 +137,21 @@ No Redux. Each page manages state via `useState` + API fetch. Job status polling
 
 ### 快捷版（Express）音色策略
 
-非交互模式（`wait_for_review=False`）下：
-- **不做** registry lookup / auto-clone（避免付费 API 自动调用）
-- voice_id 留 None，由下游 `voice_reranker` 基于 S2 speaker profile 自动匹配预设音色
-- 用户显式传入 `voice_a` / `voice_b` 仍正常传递
+非交互模式（`wait_for_review=False`）默认仍走预设音色匹配；只有 Express CosyVoice auto-clone canary 同时满足 Gateway availability、server-confirmed `express_consent`、admin 主开关/allowlist/cap、atomic reservation 与 worker runtime gate 时，才允许在 pipeline 内自动克隆。
+
+- gate 不满足、样本不足、reservation denied、worker clone 失败时，Express 必须回预设音色 fallback，不得把失败伪装成克隆成功。
+- 自动克隆成功后写入 `user_voices.is_temporary=true` 与 `temporary_expires_at`，并通过 worker routing 进入 CosyVoice mainland worker TTS。
+- 预约与清理由 `express_clone_reservations`、reservation sweeper、temporary voice cleanup sweeper/CLI 负责；不要新增绕过 reservation 的付费 clone 路径。
+- 用户显式传入 `voice_a` / `voice_b` 仍正常传递。
+
+### 免费档（Free Tier）音色与交付策略
+
+`service_mode="free"` 是独立模式，不是 Express alias。后端必须由 `AVT_ENABLE_FREE_TIER=true` 显式打开，前端入口必须由对应 Next flag 展示；创建任务还必须带 server-validated `free_consent.voice_rights_confirmed=true`。
+
+- 免费档允许的自动 voiceclone 仅限 `voice_strategy=free_voiceclone` 下的 MiMo voiceclone 窄路径：pipeline stamp `voiceclone_reference_path`，`TTSGenerator` 调 `mimo_tts_provider.synthesize_voiceclone`。
+- admin `free_tier_voiceclone_enabled=false` 时，free tier 继续运行但降级到 preset mapping，不应失败或绕到其他 clone provider。
+- free voiceclone fallback 必须强制回 MiMo preset；不得 fallback 到 MiniMax、CosyVoice 或其他付费 voice clone provider。
+- free job 有 10 分钟时长 fail-closed gate、免费水印和下载范围限制；不要让 clean audio、materials pack 或 editor draft 暴露给免费档。
 
 ### TTS & Voice Matching
 

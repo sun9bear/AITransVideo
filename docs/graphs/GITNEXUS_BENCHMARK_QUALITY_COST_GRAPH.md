@@ -12,6 +12,10 @@
 - voice clone / voice reuse / voice candidate rejection 计量
 - CosyVoice mainland worker billed chars 与 worker request id
 - RMB-direct provider/model cost catalog
+- OpenAI-compatible provider usage capture，尤其是 MiMo v2.5 text/audio tokens
+- MiMo TTS v2.5 limited-free promotional pricing
+- MiMo voiceclone usage/cost visibility for free tier
+- free=0 debit truth 与免费档 artifact/watermark observability
 - Smart sidecar trio
 - Smart handoff quality report synthesis
 - Smart admin-only cost summary 与 settlement backfill
@@ -30,9 +34,15 @@
 graph TD
     Workflow["workflow / translation / TTS"] --> Usage["UsageMeter"]
     Translator["gemini/translator.py"] --> Usage
+    Translator --> OpenAIUsage["OpenAI-compatible usage normalizer"]
+    TranscriptReviewer["transcript_reviewer MiMo text/audio"] --> OpenAIUsage
+    OpenAIUsage --> Usage
     VoiceClone["Smart / manual voice clone"] --> Usage
     CosyWorker["CosyVoice mainland worker TTS"] --> Usage
     CosyWorker --> WorkerBilled["worker billed_chars + request_id"]
+    MiMoTTS["MiMo v2.5 TTS provider"] --> Usage
+    FreeVoiceClone["Free tier MiMo voiceclone"] --> Usage
+    FreeWatermark["free watermark / restricted artifacts"] --> JobEvents
     VoiceReuse["same-source UserVoice reuse"] --> Usage
     VoiceReject["possible UserVoice candidate rejected"] --> Usage
     PostEditResynth["post-edit re-synthesis"] --> Usage
@@ -76,6 +86,8 @@ graph TD
     Usage --> VoiceMetrics["voice_clone / voice_reuse / candidate_rejected metrics"]
     Usage --> PostEditMetrics["post_edit_resynth metrics"]
     CostCatalog["gateway cost_management RMB-direct catalog"] --> CostRead["cost / quality / provider read models"]
+    MiMoCatalog["MiMo v2.5 + promotional TTS catalog rows"] --> CostCatalog
+    FreeCatalog["free=0 debit truth"] --> CostCatalog
     ProviderModel --> CostRead["cost / quality / provider read models"]
     VoiceMetrics --> CostRead
     PostEditMetrics --> CostRead
@@ -256,6 +268,26 @@ graph TD
 
 结论：自动复用的价值不只看节省 clone 成本，还要看复用后是否稳定通过用户修改。
 
+### 3.18 MiMo v2.5 成本面从估算升级到 provider usage 优先
+
+- `src/services/llm_registry.py` 中 `mimo_omni` 仍保留逻辑名，但 `api_model_id` 指向 `mimo-v2.5`，避免历史配置直接断裂。
+- `src/services/gemini/translator.py` 的 OpenAI-compatible path 会解析 provider 返回的 usage，优先写入 `UsageMeter.record_llm`。
+- `src/services/transcript_reviewer.py` 的 MiMo 音频/文本路径通过 `usage_sink` 把 input、cached、audio input、output tokens 传入 usage event。
+- `gateway/cost_management.py` 读取 usage events 时优先用 provider usage；缺失时才回退旧估算，并在 warnings 中保留差异。
+- `src/services/tts/mimo_tts_provider.py` 默认模型升级为 `mimo-v2.5-tts`，cost catalog 把 MiMo TTS limited-free 作为 `rate_status=promotional`，不是永久免费价格。
+
+结论：MiMo 成本分析现在要区分 provider-reported tokens、估算 fallback 和 promotional TTS rate，不能只看字符或旧 `mimo_omni` 名称。
+
+### 3.19 Free tier 成本分析要同时看 0 价格与真实资源消耗
+
+- `gateway/credits_service.py` 和 pricing snapshot 保持 free=0 的用户侧 debit truth。
+- `src/services/tts/mimo_tts_provider.py::synthesize_voiceclone` 是免费档可能发生真实资源消耗的主路径，不能因为用户价为 0 就在 admin 成本面忽略。
+- `tests/test_free_tier_paid_api_guard.py` 固定 free voiceclone fallback 只能回 MiMo preset，避免成本归因被其他 provider 污染。
+- `src/services/r2_publisher_lib/downloadable_keys.py` 将 free artifact 面限制到水印视频和 poster；质量/成本分析不能把缺失 materials/editor draft 当成发布失败。
+- `src/utils/free_watermark.py` 和 `video_renderer.py` 的 watermark 行为会导致视频重编码，分析 free 任务耗时时应区别 paid copy path。
+
+结论：free=0 是用户计价事实，不等于内部零成本；admin 成本与质量分析要保留 MiMo voiceclone、水印重编码和受限 artifact 的上下文。
+
 ## 4. 关键证据
 
 - `src/services/smart/sidecar_emitter.py`
@@ -273,6 +305,15 @@ graph TD
   - voice clone / voice reuse / voice candidate rejected metrics
   - provider/model TTS summary
   - post-edit re-synthesis bucket
+- `src/services/gemini/translator.py`
+  - OpenAI-compatible usage normalization and LLM metering
+- `src/services/transcript_reviewer.py`
+  - MiMo text/audio usage sink
+- `src/services/llm_registry.py`
+  - `mimo_omni` to `mimo-v2.5` migration
+- `src/services/tts/mimo_tts_provider.py`
+  - MiMo v2.5 TTS default and env override
+  - MiMo voiceclone primitive
 - `src/services/tts/tts_generator.py`
   - mainland worker TTS billed chars preservation
 - `src/services/tts/segment_regenerate.py`
@@ -285,6 +326,13 @@ graph TD
   - RMB-direct provider/model cost catalog
   - backward-compatible USD conversion fallback
   - Gemini 3.5 Flash and Gemini 3.1 Flash Lite GA pricing
+  - MiMo v2.5 / v2.5-pro and promotional MiMo TTS pricing
+- `gateway/credits_service.py`
+  - free=0 debit truth
+- `src/services/r2_publisher_lib/downloadable_keys.py`
+  - free restricted artifact keys
+- `src/utils/free_watermark.py`
+  - free watermark policy
 - `gateway/admin_smart_analytics_api.py`
   - Smart analytics summary / CSV
   - Phase 1a/1b report analysis endpoints
@@ -337,6 +385,8 @@ graph TD
 - 想做 Smart 自动审核质量分析
 - 想改 Smart sidecar、quality report、cost summary
 - 想改 provider/model RMB 成本目录或 admin 成本读模型
+- 想排查 MiMo v2.5 provider usage、MiMo TTS promotional rate 或 `mimo_omni` 迁移后的成本归因
+- 想排查 free=0 价格、MiMo voiceclone 内部消耗、水印重编码或 free artifact 限制
 - 想看 Smart analytics summary / CSV 的指标来源
 - 想排查 CosyVoice worker billed chars、worker_request_id 或 clone/TTS 成本归因
 - 想评估 Smart 自动复用后是否被人工修改

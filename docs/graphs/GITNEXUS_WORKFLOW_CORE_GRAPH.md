@@ -10,6 +10,8 @@
 - 主对齐路径仍然是 `DSP-first alignment`
 - Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、P5 possible-match auto-reuse、translation audit metrics、handoff、terminal reports
 - Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部读取 app-safe admin policy，优先使用个人音色候选，再决定是否 reuse、clone 或暂停确认
+- Express 快捷版新增可选 CosyVoice 自动克隆分支，必须满足 availability、server-confirmed consent、admin gate、reservation cap 后才会调用 worker
+- Free tier 新增时长 fail-closed、MiMo voiceclone reference stamp、free watermark 与 restricted deliverables
 - Phase 1a/1b reports 是 shadow-first 质量观测，不改变 `SemanticBlock` 和 DSP-first 主线
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
 - `derive_effective_pipeline_mode(...)` 决定 Smart job 是否继续走自动层，还是回到 Studio 控制流
@@ -20,6 +22,8 @@
 graph TD
     Entry["process.py / ProjectWorkflow"] --> Snapshot["JobRecord snapshot"]
     Snapshot --> Effective["derive_effective_pipeline_mode"]
+    Snapshot --> ExpressConsent["express_consent snapshot"]
+    Snapshot --> FreeMode["service_mode = free"]
     Effective --> SmartMode["effective mode = smart"]
     Effective --> StudioMode["effective mode = studio"]
 
@@ -27,6 +31,16 @@ graph TD
     Ingestion --> Media["Media understanding"]
     Media --> Compliance["Content compliance"]
     Compliance --> Transcript["Transcript / speaker prep"]
+    FreeMode --> FreeDurationGate["free 10-min duration fail-closed"]
+    FreeDurationGate --> Transcript
+    Transcript --> ExpressAutoCloneGate["Express maybe_run_express_auto_clone"]
+    ExpressConsent --> ExpressAutoCloneGate
+    ExpressAutoCloneGate --> ExpressNoOp["gate fail/no consent -> preset fallback"]
+    ExpressAutoCloneGate --> ExpressReservation["atomic reservation reserve"]
+    ExpressReservation --> ExpressCloneCore["services.express.auto_clone"]
+    ExpressCloneCore --> ExpressTempVoice["temporary UserVoice + worker routing"]
+    ExpressTempVoice --> VoiceIdPropagation
+    ExpressTempVoice --> ExpressReservationConsume["consume reservation"]
 
     Transcript --> VoiceReviewGate["wait_for_review + job_requires_review"]
     VoiceReviewGate --> SmartVoice["Smart voice review branch"]
@@ -76,7 +90,10 @@ graph TD
     SmartTranslation --> Blocks["SemanticBlock chunking"]
     Advisory --> Blocks
 
-    Blocks --> TTS["TTS"]
+    Blocks --> FreeRefStamp["free_voiceclone reference stamp"]
+    FreeRefStamp --> TTS["TTS"]
+    FreeRefStamp --> MimoVoiceClone["MiMo synthesize_voiceclone narrow path"]
+    MimoVoiceClone --> TTS
     TTS --> CosyWorkerRoute["requires_worker segment -> CosyVoice mainland worker"]
     CosyWorkerRoute --> WorkerBilled["worker billed_chars authoritative"]
     TTS --> Alignment["DSP-first alignment"]
@@ -87,6 +104,8 @@ graph TD
     CueGate --> Validator["cue_validator.py"]
     Validator --> SRT["srt_writer.py"]
     SRT --> Editor["EditorPackageWriter / manifest"]
+    Editor --> FreeWatermark["free watermark_text -> publish video drawtext"]
+    FreeWatermark --> DeliverableEnsure
 
     Editor --> TerminalSmart["terminal smart_state marker"]
     TerminalSmart --> Quality["smart_quality_report.json"]
@@ -191,10 +210,32 @@ graph TD
 
 结论：CosyVoice clone voice 已经不是普通 `voice_id`，而是带 worker routing 的 TTS 分支。
 
+### 3.10 Express 自动克隆挂在主流程，但默认失败非致命
+
+- `src/pipeline/process.py` 在 Express 非交互路径中调用 `maybe_run_express_auto_clone(...)`，它是自动克隆的唯一入口。
+- `maybe_run_express_auto_clone` 先检查 admin 主开关、allowlist、server-confirmed `express_consent` 和主说话人阈值；任一失败都不构造真实 client。
+- 通过 gate 后，`services.express.auto_clone` 依次执行 reserve、sample upload、worker clone、register-smart、consume，并把 worker routing 注入 speaker payload。
+- clone 失败、样本不足、reservation denied、release 失败等都写 audit，但 Express 主任务继续走预设音色 fallback，不把快捷版任务直接打失败。
+- 临时音色的到期删除不在 workflow 内做，而由 Gateway cleanup sweeper / CLI 异步治理。
+
+结论：Express auto-clone 是 workflow 的可选增强层，不改变 `SemanticBlock`、TTS 对齐和剪映交付主线。
+
+### 3.11 Free tier 在 workflow 内是硬 gate + 窄 TTS 分支
+
+- `process.py` 对 `service_mode == "free"` 调用 `evaluate_free_duration_cap(...)`，缺失、非数字、NaN、inf、超 10 分钟都 fail-closed。
+- free voiceclone 只在 `job_voice_strategy == "free_voiceclone"` 时调用 `stamp_segment_references(...)`，给可匹配 speaker 的 segment 写 `voiceclone_reference_path`。
+- `TTSGenerator` 只有在 `_voice_strategy=free_voiceclone`、provider 为 MiMo、segment 有 reference path 时才调用 `_generate_one_mimo_voiceclone(...)`。
+- free voiceclone fallback 必须 `force_mimo_preset=True`，避免 fallback 到 MiniMax/CosyVoice 等其他付费 provider。
+- publish 阶段通过 `free_watermark_text_for(job_service_mode)` 把 watermark text 传入 output request，后续由 video renderer 加 drawtext。
+
+结论：Free tier 不是改变 block/TTS/alignment 基本模型，而是在 workflow 上加时长、reference、MiMo voiceclone 和水印的受控分支。
+
 ## 4. 关键证据
 
 - `src/pipeline/process.py`
   - `derive_effective_pipeline_mode`
+  - `maybe_run_express_auto_clone` 调用点
+  - free duration gate / voiceclone reference stamp / watermark wiring
   - early content compliance gate
   - admin compliance notify-only branch
   - `_fetch_smart_reusable_voice_match`
@@ -216,6 +257,20 @@ graph TD
   - Smart auto clone usage recording
 - `gateway/smart_consent.py`
   - Smart consent schema validator
+- `gateway/express_consent.py`
+  - Express consent schema validator
+- `src/services/express/auto_clone.py`
+  - Express reserve / clone / register / consume orchestration
+- `src/services/express/pipeline_clients.py`
+  - Express auto-clone real dependency wiring and gate
+- `src/utils/free_duration_gate.py`
+  - free 10-minute fail-closed gate
+- `src/services/tts/voiceclone_reference.py`
+  - per-speaker reference extraction and segment stamp
+- `src/services/tts/mimo_tts_provider.py`
+  - MiMo voiceclone primitive
+- `src/utils/free_watermark.py`
+  - free watermark policy
 - `src/services/llm_registry.py`
   - Smart mode prompt model defaults and overrides
 - `src/services/smart/state.py`
@@ -256,6 +311,8 @@ graph TD
 
 - 想改 `process.py` 主流水线
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
+- 想改 Express 自动克隆是否进入 worker clone、什么时候 fallback 到预设音色、reservation 如何消费
+- 想改 free job 的 10 分钟 gate、MiMo voiceclone reference、paid API fallback 或水印传递
 - 想改 Smart voice review、个人音色候选、P5 possible-match auto-reuse、弱匹配暂停、同源音色复用、translation review、handoff、terminal report
 - 想改 CosyVoice clone voice 如何进入 TTS、preview 或 segment regenerate
 - 想改 Phase 1a/1b report sidecars 或 Job API reports 目录

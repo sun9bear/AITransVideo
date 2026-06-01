@@ -10,6 +10,9 @@
 - Smart prompt model settings
 - Smart voice candidate / clone / weak-match policy settings
 - CosyVoice clone 灰度、GA、max voices、sample uploader 与 mainland worker health
+- Express CosyVoice 自动克隆 admin 主开关、allowlist、reservation TTL、临时音色 cleanup 与手动 CLI
+- Free tier feature flag、free voiceclone kill switch、daily quota ledger 与 launch-gate 诊断
+- MiMo v2.5 / MiMo TTS promotional pricing / provider usage capture 的成本诊断
 - Smart analytics、report analysis 与 Phase 1b rollout flags
 - CSRF same-origin guard、production startup guard 与 fake payment gate
 - frontend polling governance
@@ -35,6 +38,7 @@ graph TD
     Gateway --> AdminCost["/api/admin/jobs/{id}/cost"]
     Gateway --> SmartAnalytics["/api/admin/smart-analytics/*"]
     Gateway --> MainlandWorkerAdmin["/api/admin/mainland-voice-worker/*"]
+    Gateway --> AdminCosyVoice["/api/admin/cosyvoice/*"]
     Gateway --> AdminDisk["/api/admin/disk/*"]
     Gateway --> PanAdmin["/api/admin/pan/*"]
     Gateway --> Security["csrf + production safety"]
@@ -45,10 +49,17 @@ graph TD
     Settings --> PromptModels["prompt_models studio/express/smart"]
     Settings --> SmartVoicePolicy["smart_auto_clone / reuse / auto_reuse_possible / pause_on_possible"]
     Settings --> CosyVoicePolicy["cosyvoice clone allowlist / GA / worker / max voices"]
+    Settings --> ExpressPolicy["express auto-clone enabled / allowlist / caps / TTL"]
+    Settings --> FreePolicy["free_tier_voiceclone_enabled kill switch"]
     Settings --> Phase1BFlags["phase1b report flags"]
     PromptModels --> LLMRegistry["llm_registry mode defaults + admin override"]
     SmartVoicePolicy --> SmartRuntime["process.py read_admin_setting"]
     CosyVoicePolicy --> CloneGate["/api/voice/cosyvoice/clone-gate"]
+    ExpressPolicy --> ExpressAvailability["/api/me/express-auto-clone-availability"]
+    ExpressPolicy --> ExpressReservation["express_clone_reservations"]
+    AdminCosyVoice --> ExpressCleanupStatus["temporary voice cleanup dry-run / execute status"]
+    FreePolicy --> FreeQuotaLedger["free_service_daily_usage ledger"]
+    FreePolicy --> FreePaidGuard["free voiceclone -> MiMo-only paid API guard"]
     MainlandWorkerAdmin --> WorkerHealth["status / healthz no secret leak"]
     WorkerHealth --> WorkerClient["build_mainland_voice_worker_client"]
     Phase1BFlags --> RuntimeFlags["services.runtime_flags"]
@@ -76,6 +87,10 @@ graph TD
     MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
     MainLife --> Reconciler["background_task_reconciler"]
     MainLife --> PanSchedulers["pan scheduler loops"]
+    MainLife --> ExpressReservationSweeper["express_reservation_sweeper"]
+    MainLife --> ExpressVoiceCleanupSweeper["express_voice_cleanup_sweeper"]
+    ExpressReservationSweeper --> ExpressReservation
+    ExpressVoiceCleanupSweeper --> ExpressCleanupStatus
     Sweeper --> Mirror["job_terminal_mirror"]
     Mirror --> SmartState["smart_state mirror"]
     Mirror --> Settle["credit/quota settle"]
@@ -107,6 +122,8 @@ graph TD
     Traffic --> Categories["human / search / AI crawler / scanner"]
     Costs --> CostRows["LLM / TTS / voice_clone / smart policy / margin rows"]
     CostCatalog["cost_management RMB-direct catalog"] --> Costs
+    MiMoUsage["MiMo v2.5 provider usage + promotional TTS pricing"] --> CostCatalog
+    FreeCost["free=0 debit truth + MiMo voiceclone cost visibility"] --> CostCatalog
     SmartAnalytics --> SmartSummary["summary / csv"]
     SmartAnalytics --> ReportAnalysis["job-reports summary / csv"]
     SmartAnalytics --> Phase1BFlags
@@ -301,6 +318,35 @@ graph TD
 
 结论：CosyVoice clone 的上线面不是单个按钮，而是 admin 灰度、uploader、worker health、UserVoice schema 和 TTS routing 的组合运维面。
 
+### 3.19 Express CosyVoice control page 成为 canary 与 cleanup 运维入口
+
+- `gateway/admin_settings.py` 增加 Express 自动克隆 9 字段：主开关、allowlist enabled、allowlist、主说话人比例/行数、样本秒数、target model、daily cap、active temp cap、reservation TTL。
+- `/admin/cosyvoice` 聚合 CosyVoice worker/readiness、Express policy、reservation TTL 和临时音色 cleanup dry-run/execute 状态。
+- `gateway/express_reservation_sweeper.py` 在 lifespan 中回收 expired reserved reservation，只动 DB 预约状态，不调 worker。
+- `gateway/express_voice_cleanup_sweeper.py` 在 lifespan 中扫描到期临时音色，调 worker delete 后再 soft-delete `user_voices`。
+- `gateway/cleanup_temp_voices_cli.py` 是手动运维入口，默认 dry-run；`--execute --reset-attempts` 前必须确认 worker 可用，避免复活 give-up 行后无法删除。
+
+结论：Express auto-clone 的风险面已经从“代码路径”提升到 admin 可观测、可灰度、可手动介入的运维面。
+
+### 3.20 MiMo v2.5 与真实 usage capture 进入成本诊断面
+
+- `src/services/llm_registry.py` 保留 `mimo_omni` 逻辑名，但解析到 `mimo-v2.5`，并标记 deprecated，避免历史 admin settings 直接失效。
+- `src/services/gemini/translator.py` 和 `src/services/transcript_reviewer.py` 解析 OpenAI-compatible usage，并写入 `UsageMeter.record_llm` 的 provider usage 字段。
+- `src/services/tts/mimo_tts_provider.py` 默认 `mimo-v2.5-tts`，仍允许 `MIMO_TTS_MODEL` env 回退。
+- `gateway/cost_management.py` 的 cost catalog 增加 MiMo v2.5 / v2.5-pro RMB 价格和 MiMo TTS limited-free promotional rate；cost UI 不把 promotional 0 误读成永久价格。
+
+结论：排查 MiMo 成本时要看 provider usage 是否存在、logical model 是否迁移、TTS rate 是否是 promotional，而不是只看估算 tokens。
+
+### 3.21 Free tier 运维面以开关、ledger 和 guard 为主
+
+- `AVT_ENABLE_FREE_TIER` 是后端总开关，前端还需要 Next flag 露出入口；排查入口不可见要同时看 Gateway env 和 Next build args。
+- `gateway/admin_settings.py::free_tier_voiceclone_enabled` 是免费档 voiceclone kill switch；关闭后 free tier 不失败，而是降级到 preset mapping。
+- `free_service_daily_usage` 是每日免费名额诊断主表，重点看 user/date/status/expires_at/reason，而不是 credits ledger。
+- `gateway/free_consent.py` 的硬门禁会在 quota reserve 前拒绝未确认语音权益的请求，403 不应通过放松 quota 解决。
+- 免费档 paid API guard 应只允许 MiMo voiceclone 窄路径，fallback 必须回 MiMo preset。
+
+结论：Free tier 的运维排查先看 feature flag、consent、daily ledger 和 paid API guard，再看普通 pipeline/TTS 错误。
+
 ## 4. 关键证据
 
 - `gateway/admin_disk_api.py`
@@ -339,9 +385,19 @@ graph TD
 - `gateway/mainland_voice_worker.py`
   - mainland worker status / healthz
   - client factory readiness
+- `gateway/admin_cosyvoice_control_api.py`
+  - CosyVoice / Express admin control surface
 - `gateway/cosyvoice_clone/api.py`
   - clone-gate runtime readiness
   - explicit clone paid worker gate
+- `gateway/express_reservation_service.py`
+  - Express reservation cap state machine
+- `gateway/express_reservation_sweeper.py`
+  - reservation TTL sweeper
+- `gateway/express_voice_cleanup_service.py`
+  - temporary voice cleanup claim-lease state machine
+- `gateway/cleanup_temp_voices_cli.py`
+  - manual cleanup dry-run / execute CLI
 - `frontend-next/src/app/(app)/admin/smart-analytics/page.tsx`
   - admin Smart analytics dashboard
 - `frontend-next/src/app/(app)/admin/report-analysis/page.tsx`
@@ -373,7 +429,14 @@ graph TD
   - prompt model settings
   - Smart voice policy settings
   - CosyVoice clone rollout settings
+  - free tier voiceclone kill switch
   - Phase 1b report rollout flags
+- `gateway/free_consent.py`
+  - free launch-gate voice-rights consent
+- `gateway/free_service_quota.py`
+  - free daily quota reserve / consume / release
+- `gateway/alembic/versions/034_free_service_daily_usage.py`
+  - free daily quota ledger schema
 - `gateway/alembic/versions/030_cosyvoice_clone_metadata.py`
   - UserVoice worker routing schema
 - `gateway/alembic/versions/031_user_voice_temp_expiry.py`
@@ -384,6 +447,13 @@ graph TD
   - env/admin flag resolver
 - `gateway/cost_management.py`
   - RMB-direct provider cost catalog
+  - MiMo v2.5 and promotional TTS pricing
+- `src/services/gemini/translator.py`
+  - OpenAI-compatible usage capture
+- `src/services/transcript_reviewer.py`
+  - MiMo audio/text usage capture
+- `src/services/tts/mimo_tts_provider.py`
+  - MiMo v2.5 TTS default
 - `gateway/csrf.py`
   - same-origin state-change guard
 - `gateway/startup_checks.py`
@@ -412,6 +482,9 @@ graph TD
 - 想排查 P5 possible-match 为什么自动复用或没有暂停
 - 想排查 Smart clone quota / match / register-smart / UserVoice mirror
 - 想排查 CosyVoice clone-gate、mainland worker health、sample uploader 或 worker secret 配置
+- 想排查 Express 自动克隆 admin 开关、allowlist、reservation TTL、临时音色 cleanup、manual cleanup CLI
+- 想排查 Free tier flag、voiceclone kill switch、free daily quota ledger、voice-rights consent 403
+- 想排查 MiMo v2.5、MiMo TTS promotional rate、真实 provider usage 与 admin cost 明细
 - 想看 Smart analytics、report analysis、Phase 1b flags 为什么显示某个统计或开关状态
 - 想排查 CSRF 403、生产启动 safety guard、fake payment 被禁用
 - 想排查前端后台标签页为什么没有持续 polling 或恢复后才刷新

@@ -15,6 +15,8 @@
 - Smart voice policy、possible-match 自动复用、弱匹配暂停提示与候选音色确认边界
 - Smart 全自动产品承诺
 - CosyVoice clone 的用户显式付费触发、allowlist/GA gate 与 worker runtime gate
+- Express CosyVoice 自动克隆的 availability、consent、admin allowlist、reservation cap 与临时音色 cleanup
+- Free tier 的 feature flag、voice-rights consent、free=0 pricing、daily quota 与交付限制
 - entitlements 与 allowed service modes
 - trial 发放边界
 - fake payment production gate
@@ -63,6 +65,17 @@ graph TD
     AllowedModes --> Express["express"]
     AllowedModes --> Studio["studio"]
     AllowedModes --> Smart["smart"]
+    AllowedModes --> Free["free"]
+    Express --> ExpressAutoAvail["Express auto-clone availability"]
+    ExpressAutoAvail --> ExpressConsent["express_consent checkbox"]
+    ExpressConsent --> Submit
+    Submit --> ExpressConsentValidator["Gateway express_consent.py validator"]
+    ExpressConsentValidator --> ExpressReservation["atomic reservation cap gate"]
+    ExpressReservation --> ExpressTempVoice["temporary voice + cleanup obligation"]
+    Free --> FreeConsent["free_consent voice_rights_confirmed"]
+    FreeConsent --> FreeQuota["free daily quota reserve"]
+    FreeQuota --> FreeZeroPrice["free=0 debit truth"]
+    FreeZeroPrice --> Submit
     Workspace --> Estimate["getCreditsEstimate"]
     Estimate --> SmartPrice["smart standard fixed user price"]
     Workspace --> SmartPricingMeta["getVoiceSelectionPricing metadata"]
@@ -85,6 +98,8 @@ graph TD
     CloneGate --> CloneConsent["CosyVoice consent modal"]
     CloneConsent --> ClonePost["POST /api/voice/cosyvoice/clone"]
     ClonePost --> WorkerRuntime["uploader + mainland worker runtime gate"]
+    AdminExpressPolicy["admin Express CosyVoice policy"] --> ExpressAutoAvail
+    AdminExpressPolicy --> ExpressReservation
 
     Billing["billing / checkout"] --> PaymentProviders["payment_providers"]
     PaymentProviders --> FakeGate["fake payment dev/test default"]
@@ -222,6 +237,28 @@ graph TD
 
 结论：CosyVoice clone 的商业边界是“用户知情 + Gateway gate + worker runtime ready”，不是普通后台补救逻辑。
 
+### 3.14 Express auto-clone 是“用户同意 + admin gate + reservation”的受控自动化
+
+- `GET /api/me/express-auto-clone-availability` 根据 admin 主开关、allowlist、当前用户身份与配额事实决定是否展示自动克隆选项。
+- `express_cosyvoice_auto_clone_enabled=False` 时 Express 行为保持原状；allowlist 开启时只允许 admin 或 allowlist 用户，allowlist 关闭时不再限制用户集合。
+- 前端提交的 `express_consent` 需要 Gateway server-confirmed，pipeline 无 consent 时不会构造 worker client。
+- `express_clone_reservations` 承担并发安全成本闸，daily cap 和 active temp cap 都把 active reservations 算进去。
+- 自动克隆成功后生成 `is_temporary=true` 的个人音色，必须有 `temporary_expires_at`，到期后由 cleanup sweeper/CLI 调 worker delete 再 soft-delete。
+- Express 自动克隆失败回预设音色，不改变用户侧 Express 任务交付承诺，也不引入新的前端计价模型。
+
+结论：Express auto-clone 是受控 canary 能力，不是绕过“付费 API 必须用户知情”的隐藏 fallback。
+
+### 3.15 Free tier 是独立商业档位，价格为 0 但边界更硬
+
+- `AVT_ENABLE_FREE_TIER` 关闭时，Gateway 对 `service_mode=free` 返回 `free_disabled`，不会静默降级到 Express。
+- Entitlements 只在 backend flag 开启时暴露 `free`；前端入口还需要 Next flag 显示。
+- `free_consent.voice_rights_confirmed=true` 是免费 MiMo voiceclone 的硬合规门禁，Gateway 只转发 server-confirmed consent。
+- `free_service_daily_usage` 是专用日配额 ledger，reserve/consume/release/expire 在 create flow 内完成，不复用付费 credits quota。
+- pricing/debit 事实保留 `free=0`，但内部 MiMo voiceclone/水印/下载限制仍是商业边界，不允许前端自建第二套免费规则。
+- 免费档只交付水印视频与 poster，不能暴露 paid modes 的 materials pack、clean audio 或 editor draft。
+
+结论：Free tier 是拉新漏斗，不是“无约束的免费 Express”；它的 consent、quota、voiceclone、duration、watermark 和 artifact 限制都是商业事实的一部分。
+
 ## 4. 关键证据
 
 - `gateway/plan_catalog.py`
@@ -230,6 +267,8 @@ graph TD
 - `gateway/entitlements.py`
   - entitlement response
   - Smart kill switch allowed modes
+  - Express auto-clone availability
+  - Free allowed service mode
 - `gateway/credits_service.py`
   - estimate and debit rates
 - `gateway/job_intercept.py`
@@ -240,8 +279,20 @@ graph TD
 - `gateway/smart_consent.py`
   - Smart consent schema and allowed budget policy
   - `fail_and_refund` deferred blocker
+- `gateway/express_consent.py`
+  - Express consent schema and server confirmation
+- `gateway/free_consent.py`
+  - Free voice-rights consent schema and server confirmation
+- `gateway/free_service_quota.py`
+  - Free daily quota reserve / consume / release
 - `gateway/admin_settings.py`
   - Smart voice policy settings
+  - Express CosyVoice auto-clone policy settings
+  - Free voiceclone kill switch
+- `gateway/express_reservation_service.py`
+  - Express atomic reservation cap gate
+- `gateway/express_voice_cleanup_service.py`
+  - temporary voice cleanup state machine
 - `gateway/cosyvoice_clone/api.py`
   - CosyVoice clone-gate and explicit clone
 - `gateway/mainland_voice_worker.py`
@@ -290,6 +341,8 @@ graph TD
 
 - 想改 pricing / trial / billing truth
 - 想改 Smart 可售入口、固定价、allowed service modes
+- 想改 Express auto-clone availability、consent、allowlist、reservation cap 或临时音色 cleanup
+- 想改 Free tier 入口、free=0 pricing、voice-rights consent、daily quota 或免费交付限制
 - 想改 Smart consent、预算耗尽策略、admin voice policy、possible-match auto-reuse、voice library quota 预检
 - 想排查 Smart 为什么被 kill switch 下线、为什么 `fail_and_refund` 被拒
 - 想排查 CosyVoice clone 为什么不可用、为什么必须用户显式触发

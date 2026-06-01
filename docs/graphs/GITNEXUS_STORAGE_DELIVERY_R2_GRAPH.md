@@ -14,6 +14,7 @@
 - terminal mirror、R2 parity、cleanup 与 observability
 - Pan archive 后的本地 project_dir / R2 artifacts 删除与恢复边界
 - CosyVoice clone sample uploader 与交付 R2 registry 的边界
+- Free tier downloadable keys、stream/eager-push 限制与水印成片交付边界
 - materials pack / job subresource 写路由的 CSRF same-origin guard
 
 ## 2. 主图
@@ -33,8 +34,11 @@ graph TD
     OnDiskSrt --> PackZip["materials_{task_id}.zip"]
 
     Video --> DownloadKey["/download/{key}"]
+    Video --> FreeWatermarked["free watermarked publish.dubbed_video"]
     JDraft --> DownloadKey
     PackZip --> DownloadKey
+    FreeWatermarked --> FreeKeys["downloadable_keys free: video + poster only"]
+    FreeKeys --> DownloadKey
     DownloadKey --> Gateway["Gateway resolve"]
     Gateway --> Router["storage/backend_router.py"]
     Router --> Registry["r2_artifacts registry + download_keys_for"]
@@ -149,6 +153,14 @@ graph TD
 
 结论：CosyVoice sample storage 是 worker 输入通道，和用户结果交付/R2 parity 是不同域。
 
+### 3.9 Free tier 的 artifact 面必须比 paid modes 窄
+
+- `src/services/r2_publisher_lib/downloadable_keys.py` 对 `service_mode="free"` 单独限制 download / stream / eager-push keys。
+- free 只放行水印后的 `publish.dubbed_video` 与 poster，不暴露 clean audio、materials pack、editor draft zip 等 paid deliverables。
+- `src/utils/free_watermark.py` 与 publish video renderer 保证 free 成片带水印；storage 层不要把缺少 materials/editor draft 误判为发布失败。
+
+结论：Free tier 的交付限制是商业边界，不只是前端隐藏按钮。
+
 ## 4. 关键证据
 
 - `gateway/r2_artifact_sweeper.py`
@@ -170,6 +182,10 @@ graph TD
   - lazy fallback
 - `gateway/cosyvoice_clone/sample_uploader.py`
   - CosyVoice clone sample upload backend
+- `src/services/r2_publisher_lib/downloadable_keys.py`
+  - free downloadable key restriction
+- `src/utils/free_watermark.py`
+  - free watermark policy feeding publish output
 - `gateway/materials_api.py`
   - CSRF-protected materials-pack generation route
 - `gateway/main.py`
@@ -186,6 +202,7 @@ graph TD
 
 - 想改结果页下载面
 - 想加新的 downloadable key
+- 想确认 free tier 能下载/stream/eager-push 哪些 artifact
 - 想排查为什么成功任务没有被主动推上 R2
 - 想判断 cleanup 为什么没有删除某个过期项目
 - 想看 R2 redirect / fallback 的观测口径
