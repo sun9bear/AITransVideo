@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Iterator
@@ -20,6 +21,79 @@ from typing import Iterator
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+# 2026-06-01 production fix. Baidu Pan API takes access_token as a URL
+# *query parameter* (their API design, not ours), so the full URL with
+# token ends up inside requests.HTTPError.str() — and from there into
+# BackgroundTask.error and gateway logs. Production diagnose of c31b
+# (11 GB / 400 Bad Request) surfaced this: token bytes were sitting in
+# the DB error_message column. Redact at the boundary so neither logs
+# nor DB rows carry the secret.
+#
+# Pattern covers both URL-style (key=value) and JSON-body-style
+# ("key": "value") leakage shapes. ``refresh_token`` covered for
+# defense-in-depth even though it only travels via POST body today.
+_TOKEN_URL_RE = re.compile(
+    r'(access_token|refresh_token)=([^&\s\'"]+)',
+    re.IGNORECASE,
+)
+_TOKEN_JSON_RE = re.compile(
+    r"(['\"](?:access_token|refresh_token)['\"]\s*:\s*)['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+
+
+def _redact_token(text: str) -> str:
+    """Replace ``access_token`` / ``refresh_token`` values with
+    ``<redacted>`` everywhere in ``text``.
+
+    Idempotent + safe to apply to already-redacted strings. Used at every
+    raise / log boundary where a Baidu API response or URL might surface
+    a token. Cheap (~µs); call liberally.
+    """
+    text = _TOKEN_URL_RE.sub(r'\1=<redacted>', text)
+    text = _TOKEN_JSON_RE.sub(r'\1"<redacted>"', text)
+    return text
+
+
+def _raise_for_status_safe(resp: requests.Response, context: str) -> None:
+    """Like ``resp.raise_for_status()`` but the raised ``HTTPError`` has:
+
+    1. The ``access_token`` query parameter in the URL **redacted**.
+    2. Up to 500 chars of the response body appended to the message
+       (so Baidu's ``errno`` + ``errmsg`` is captured for diagnostics
+       — the 2026-06-01 c31b 11 GB / 400 incident had a generic
+       "400 Client Error" with no body, blinding root-cause analysis).
+    3. The original ``Response`` attached as ``exc.response`` so
+       upstream 5xx-vs-4xx logic still works (status_code-based retry
+       decisions in ``_upload_chunk`` / ``verify_remote_tail``).
+
+    Use this instead of ``resp.raise_for_status()`` for **every** Baidu
+    API call that puts ``access_token`` in the URL query string.
+    """
+    if 200 <= resp.status_code < 400:
+        return
+    # resp.text reads the body; safe for our payload sizes (Baidu errors
+    # are JSON in tens of bytes). Truncate defensively.
+    body_excerpt = ''
+    try:
+        if resp.text:
+            body_excerpt = resp.text[:500]
+    except Exception:  # noqa: BLE001  — best-effort; never let logging cause a different failure
+        body_excerpt = '<body unreadable>'
+
+    # ``resp.url`` is always set on real requests.Response, but unit-test
+    # mocks may not have it — fall back gracefully so the helper never
+    # fails BECAUSE of the helper itself.
+    raw_url = getattr(resp, 'url', None) or '<url unavailable>'
+    safe_url = _redact_token(raw_url)
+    safe_body = _redact_token(body_excerpt) if body_excerpt else ''
+    msg = (
+        f"{context}: HTTP {resp.status_code} for url {safe_url}"
+        + (f"  body={safe_body}" if safe_body else "")
+    )
+    raise requests.HTTPError(msg, response=resp)
 
 # Production 2026-05-20: cross-border (US gateway → Baidu PCS) 4MB chunk
 # uploads occasionally hit urllib3's default 30s read-timeout when the
@@ -97,10 +171,10 @@ class BaiduPanClient:
             },
             timeout=30,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "precreate")
         body = resp.json()
         if body.get('errno', 0) != 0:
-            raise RuntimeError(f"Baidu precreate failed: {body}")
+            raise RuntimeError(_redact_token(f"Baidu precreate failed: {body}"))
         return body['uploadid']
 
     def _upload_chunk(self, path: Path, chunk_idx: int, chunk_data: bytes,
@@ -153,12 +227,14 @@ class BaiduPanClient:
                         f"PCS chunk upload returned 5xx {resp.status_code}",
                         response=resp,
                     )
-                resp.raise_for_status()
+                _raise_for_status_safe(
+                    resp, f"PCS chunk upload (partseq={chunk_idx})"
+                )
                 body = resp.json()
                 if 'md5' not in body:
-                    raise RuntimeError(
+                    raise RuntimeError(_redact_token(
                         f"Baidu chunk PUT failed (no md5 returned): {body}"
-                    )
+                    ))
                 if attempt > 0:
                     logger.info(
                         "PCS chunk upload succeeded on attempt %d/%d "
@@ -216,10 +292,10 @@ class BaiduPanClient:
             },
             timeout=60,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "create_finalize")
         body = resp.json()
         if body.get('errno', 0) != 0:
-            raise RuntimeError(f"Baidu finalize failed: {body}")
+            raise RuntimeError(_redact_token(f"Baidu finalize failed: {body}"))
         return {'fs_id': body['fs_id'], 'size': body['size'], 'md5': body['md5']}
 
     def upload(self, local_path: Path, remote_path: str, *, access_token: str) -> dict:
@@ -276,7 +352,7 @@ class BaiduPanClient:
             },
             timeout=15,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "filemetas")
         body = resp.json()
         items = body.get('list', [])
         if not items:
@@ -326,7 +402,7 @@ class BaiduPanClient:
                         f"verify_remote_tail returned 5xx {resp.status_code}",
                         response=resp,
                     )
-                resp.raise_for_status()
+                _raise_for_status_safe(resp, "verify_remote_tail")
                 if attempt > 0:
                     logger.info(
                         "verify_remote_tail succeeded on attempt %d/%d "
@@ -378,7 +454,7 @@ class BaiduPanClient:
         sha = hashlib.sha256()
         size = 0
         with requests.get(dlink, stream=True, timeout=300) as r:
-            r.raise_for_status()
+            _raise_for_status_safe(r, "download")
             with local_path.open('wb') as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
@@ -400,10 +476,10 @@ class BaiduPanClient:
             },
             timeout=30,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "list")
         body = resp.json()
         if body.get('errno', 0) != 0:
-            raise RuntimeError(f"Baidu list failed: {body}")
+            raise RuntimeError(_redact_token(f"Baidu list failed: {body}"))
         return [
             {'path': item['path'], 'size': item['size'], 'fs_id': item['fs_id']}
             for item in body.get('list', [])
@@ -427,18 +503,20 @@ class BaiduPanClient:
             data={'async': 0, 'filelist': _json.dumps([remote_path])},
             timeout=30,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "delete")
         body = resp.json()
         top_errno = body.get('errno', 0)
         if top_errno not in (0, -9):
-            raise RuntimeError(f"Baidu delete failed (top errno={top_errno}): {body}")
+            raise RuntimeError(_redact_token(
+                f"Baidu delete failed (top errno={top_errno}): {body}"
+            ))
         # Per-file info[] check — Baidu may return top=0 with per-file failure.
         for entry in (body.get('info') or []):
             per_errno = entry.get('errno', 0)
             if per_errno not in (0, -9):
-                raise RuntimeError(
+                raise RuntimeError(_redact_token(
                     f"Baidu delete failed (per-file errno={per_errno}): {body}"
-                )
+                ))
 
     def get_quota(self, *, access_token: str) -> dict:
         """Return {'total', 'used', 'free'} in bytes.
@@ -452,11 +530,13 @@ class BaiduPanClient:
             params={'access_token': access_token, 'checkfree': 1, 'checkexpire': 1},
             timeout=15,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "get_quota")
         body = resp.json()
         errno = body.get('errno', 0)
         if errno != 0:
-            raise RuntimeError(f"Baidu get_quota failed (errno={errno}): {body}")
+            raise RuntimeError(_redact_token(
+                f"Baidu get_quota failed (errno={errno}): {body}"
+            ))
         total = body.get('total', 0)
         used = body.get('used', 0)
         return {'total': total, 'used': used, 'free': total - used}
@@ -477,10 +557,12 @@ class BaiduPanClient:
             },
             timeout=15,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "oauth exchange_code")
         body = resp.json()
         if 'error' in body:
-            raise RuntimeError(f"Baidu OAuth code exchange failed: {body}")
+            raise RuntimeError(_redact_token(
+                f"Baidu OAuth code exchange failed: {body}"
+            ))
         # Baidu returns scope as space-separated string
         return {
             'access_token': body['access_token'],
@@ -505,10 +587,12 @@ class BaiduPanClient:
             },
             timeout=15,
         )
-        resp.raise_for_status()
+        _raise_for_status_safe(resp, "oauth refresh")
         body = resp.json()
         if 'error' in body:
-            raise RuntimeError(f"Baidu OAuth refresh failed: {body}")
+            raise RuntimeError(_redact_token(
+                f"Baidu OAuth refresh failed: {body}"
+            ))
         return {
             'access_token': body['access_token'],
             'refresh_token': body['refresh_token'],

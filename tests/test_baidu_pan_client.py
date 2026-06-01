@@ -1692,3 +1692,140 @@ def test_upload_chunk_retries_on_5xx(monkeypatch, tmp_path):
     # 503 then 200 — 2 attempts total, retry triggered.
     assert attempts['chunk'] == 2
     assert result['md5'] == 'final_md5'
+
+
+# =========================================================================
+# 2026-06-01 production fix — access_token redaction in exceptions
+# =========================================================================
+#
+# Diagnosis of c31b 11 GB / 400 Bad Request surfaced that Baidu's
+# requirement to put access_token in URL query → resp.url ends up in
+# requests.HTTPError.str() → BackgroundTask.error column had verbatim
+# token bytes ("access_token=121.228303e..."). User confirmed they want
+# this redacted. _redact_token + _raise_for_status_safe handle the
+# leaks at the boundary. These tests pin the contract.
+
+
+def test_redact_token_url_query():
+    """``access_token=<token>`` in URL query is replaced."""
+    from gateway.pan.baidu_pan_client import _redact_token
+
+    dirty = (
+        "HTTPError for url "
+        "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2?method=upload"
+        "&access_token=121.228303e394c3305cca41df6d44f456c2.Y_ZiUQpU8GzVQ8b"
+        "&partseq=0"
+    )
+    clean = _redact_token(dirty)
+    assert "121.228303e394c3305cca41df6d44f456c2" not in clean
+    assert "access_token=<redacted>" in clean
+    # Other params survive.
+    assert "method=upload" in clean
+    assert "partseq=0" in clean
+
+
+def test_redact_token_json_body():
+    """``"access_token": "<token>"`` JSON shape also redacted."""
+    from gateway.pan.baidu_pan_client import _redact_token
+
+    dirty = '{"errno": 0, "access_token": "121.abc.def.ghi", "expires_in": 2592000}'
+    clean = _redact_token(dirty)
+    assert "121.abc.def.ghi" not in clean
+    assert '"<redacted>"' in clean
+    # Non-secret fields survive.
+    assert '"errno": 0' in clean
+    assert '"expires_in": 2592000' in clean
+
+
+def test_redact_token_refresh_token_also_covered():
+    """``refresh_token`` value redacted (defense-in-depth)."""
+    from gateway.pan.baidu_pan_client import _redact_token
+
+    dirty = '{"refresh_token": "122.xyz123", "access_token": "121.abc"}'
+    clean = _redact_token(dirty)
+    assert "122.xyz123" not in clean
+    assert "121.abc" not in clean
+
+
+def test_redact_token_idempotent():
+    """Already-redacted text passes through unchanged."""
+    from gateway.pan.baidu_pan_client import _redact_token
+
+    once = _redact_token("access_token=121.secret&foo=bar")
+    twice = _redact_token(once)
+    assert once == twice
+
+
+def test_redact_token_no_secret_no_change():
+    """No-op when input has no token."""
+    from gateway.pan.baidu_pan_client import _redact_token
+
+    plain = "https://example.com/foo?bar=baz"
+    assert _redact_token(plain) == plain
+
+
+def test_raise_for_status_safe_4xx_redacts_url(monkeypatch):
+    """Real production path: 400 Bad Request from Baidu PCS chunk upload
+    raises HTTPError with token stripped + body preview included."""
+    from gateway.pan.baidu_pan_client import _raise_for_status_safe
+    import requests
+
+    class FakeResp:
+        status_code = 400
+        url = ("https://d.pcs.baidu.com/rest/2.0/pcs/superfile2"
+               "?method=upload"
+               "&access_token=121.228303e394c3305cca41df6d44f456c2.SECRET"
+               "&partseq=42")
+        text = '{"error_code": 31064, "error_msg": "file does not exist"}'
+        @property
+        def reason(self):
+            return "Bad Request"
+
+    resp = FakeResp()
+    with pytest.raises(requests.HTTPError) as ei:
+        _raise_for_status_safe(resp, "PCS chunk upload (partseq=42)")
+
+    msg = str(ei.value)
+    # Secret stripped.
+    assert "121.228303e394c3305cca41df6d44f456c2" not in msg
+    assert "SECRET" not in msg
+    assert "access_token=<redacted>" in msg
+    # Diagnosis data preserved (THIS is what we need for c31b root cause).
+    assert "31064" in msg
+    assert "file does not exist" in msg
+    # exc.response still set so upstream 5xx-vs-4xx logic works.
+    assert ei.value.response is resp
+    # Context label included.
+    assert "PCS chunk upload (partseq=42)" in msg
+
+
+def test_raise_for_status_safe_passes_2xx():
+    """200 OK is a no-op (no raise)."""
+    from gateway.pan.baidu_pan_client import _raise_for_status_safe
+
+    class FakeOk:
+        status_code = 200
+        url = "https://example.com/?access_token=secret"
+        text = '{"ok": true}'
+
+    # Should not raise.
+    _raise_for_status_safe(FakeOk(), "test")
+
+
+def test_raise_for_status_safe_5xx_also_redacts():
+    """5xx path also redacts (defense-in-depth — upstream might also log)."""
+    from gateway.pan.baidu_pan_client import _raise_for_status_safe
+    import requests
+
+    class FakeResp:
+        status_code = 503
+        url = "https://example.com/?access_token=121.SECRETBYTES"
+        text = '<html>upstream connect error</html>'
+
+    with pytest.raises(requests.HTTPError) as ei:
+        _raise_for_status_safe(FakeResp(), "test 5xx")
+
+    msg = str(ei.value)
+    assert "SECRETBYTES" not in msg
+    assert "access_token=<redacted>" in msg
+    assert "upstream connect error" in msg
