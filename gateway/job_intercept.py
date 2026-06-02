@@ -3867,6 +3867,32 @@ async def _record_post_edit_commit_usage(
     _save_post_edit_usage(root_job, usage)
 
 
+async def _check_post_edit_tts_usage(
+    db: AsyncSession,
+    job: Job,
+    user: User | None,
+    *,
+    segments: int,
+    chars: int,
+    batch_start: bool,
+    now_utc: datetime,
+) -> None:
+    root_job, limits = await _enforce_post_edit_access(
+        db, job, user, subpath="regenerate-tts", now_utc=now_utc,
+    )
+    usage = _post_edit_usage(root_job)
+    if segments <= 0:
+        return
+    if batch_start and _post_edit_limit_exceeded(
+        usage, "batch_regenerates", 1, limits["batch_regenerates"]
+    ):
+        raise HTTPException(status_code=403, detail="本项目免费批量重合成次数已用完。")
+    if _post_edit_limit_exceeded(usage, "tts_segments", segments, limits["tts_segments"]):
+        raise HTTPException(status_code=403, detail="本项目免费重合成段数已用完。")
+    if _post_edit_limit_exceeded(usage, "tts_chars", chars, limits["tts_chars"]):
+        raise HTTPException(status_code=403, detail="本项目免费重合成字数已用完。")
+
+
 async def _consume_post_edit_tts_usage(
     db: AsyncSession,
     job: Job,
@@ -4138,10 +4164,9 @@ async def _post_edit_mutation_with_policy(
             db, job, user, segments=segments, chars=chars, batch_start=True, now_utc=now_utc,
         )
 
-    # Phase 4.2 E.1 PR #15 P1 三轮 fix (Codex 2026-05-27): editing/voice-map
-    # CosyVoice clone routing enrichment. We intercept ONLY the voice-map
-    # POST (not GET, not other editing subpaths) and ONLY when the body
-    # carries a cosyvoice voice. Other paths fall through unchanged.
+    selected_regen_usage: tuple[int, int] | None = None
+    selected_regen_body: bytes | None = None
+
     if subpath == "regenerate-selected-tts":
         payload = await _read_json_body(request)
         raw_segment_ids = payload.get("segment_ids")
@@ -4163,10 +4188,16 @@ async def _post_edit_mutation_with_policy(
                 status_code=400,
                 detail=f"单次批量重合成最多支持 {batch_segment_limit} 段。",
             )
-        await _consume_post_edit_tts_usage(
+        await _check_post_edit_tts_usage(
             db, job, user, segments=segments, chars=chars, batch_start=True, now_utc=now_utc,
         )
+        selected_regen_usage = (segments, chars)
+        selected_regen_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
+    # Phase 4.2 E.1 PR #15 P1 三轮 fix (Codex 2026-05-27): editing/voice-map
+    # CosyVoice clone routing enrichment. We intercept ONLY the voice-map
+    # POST (not GET, not other editing subpaths) and ONLY when the body
+    # carries a cosyvoice voice. Other paths fall through unchanged.
     forwarded_body: bytes | None = None
     if subpath == "editing/voice-map" or subpath == "voice-map":
         # Note: subpath here comes from the call site which already
@@ -4197,6 +4228,29 @@ async def _post_edit_mutation_with_policy(
                 # Re-serialize so upstream Job API sees the routing
                 # fields (and the stripped-client-supplied state).
                 forwarded_body = json.dumps(enriched, ensure_ascii=False).encode("utf-8")
+
+    if selected_regen_usage is not None:
+        response = await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+            override_body=selected_regen_body,
+        )
+        if 200 <= response.status_code < 300:
+            segments, chars = selected_regen_usage
+            await _consume_post_edit_tts_usage(
+                db,
+                job,
+                user,
+                segments=segments,
+                chars=chars,
+                batch_start=True,
+                now_utc=now_utc,
+            )
+            await db.commit()
+        else:
+            await db.rollback()
+        return response
 
     await db.commit()
     if forwarded_body is not None:
