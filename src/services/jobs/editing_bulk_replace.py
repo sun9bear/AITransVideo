@@ -229,6 +229,24 @@ def _normalise_expected_segment_ids(value: object) -> list[str] | None:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _normalise_expected_before_texts(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("expected_matches must be a list")
+    expected: dict[str, str] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("expected_matches items must be objects")
+        sid = str(item.get("segment_id") or "").strip()
+        if not sid:
+            raise ValueError("expected_matches items must include segment_id")
+        if "before_text" not in item:
+            raise ValueError("expected_matches items must include before_text")
+        expected[sid] = str(item.get("before_text") or "")
+    return expected
+
+
 def apply_bulk_replace_terms(
     project_dir: str | Path,
     *,
@@ -237,6 +255,7 @@ def apply_bulk_replace_terms(
     field: str = "cn_text",
     expected_segment_ids: object = None,
     expected_total_matches: int | None = None,
+    expected_matches: object = None,
 ) -> dict[str, Any]:
     find, replace, field = _normalise_request(
         find=find,
@@ -244,6 +263,7 @@ def apply_bulk_replace_terms(
         field=field,
     )
     expected_ids = _normalise_expected_segment_ids(expected_segment_ids)
+    expected_before_texts = _normalise_expected_before_texts(expected_matches)
     project_path = Path(project_dir)
 
     with file_lock(_editing_lock_anchor(project_path)):
@@ -267,6 +287,21 @@ def apply_bulk_replace_terms(
             raise EditingConflictError(
                 "bulk replace match count changed; refresh the preview before applying"
             )
+        if expected_before_texts is not None:
+            current_before_texts = {
+                str(item["segment_id"]): str(item["before_text"])
+                for item in preview["matches"]
+            }
+            if (
+                set(expected_before_texts) != set(current_before_texts)
+                or any(
+                    expected_before_texts[sid] != current_before_texts[sid]
+                    for sid in expected_before_texts
+                )
+            ):
+                raise EditingConflictError(
+                    "bulk replace matched text changed; refresh the preview before applying"
+                )
         if not current_ids:
             return {
                 **preview,

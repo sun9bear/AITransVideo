@@ -857,6 +857,7 @@ class JobService:
         field: str = "cn_text",
         expected_segment_ids: object = None,
         expected_total_matches: int | None = None,
+        expected_matches: object = None,
     ) -> dict:
         """Apply a confirmed terminology replacement and mark affected TTS stale."""
         from services.jobs.editing import touch_editing as _touch_editing
@@ -870,6 +871,7 @@ class JobService:
             field=field,
             expected_segment_ids=expected_segment_ids,
             expected_total_matches=expected_total_matches,
+            expected_matches=expected_matches,
         )
         _touch_editing(record, self.store)
 
@@ -1454,7 +1456,11 @@ class JobService:
         """Async re-TTS for an explicit subset of dirty editing segments."""
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.input_validators import validate_segment_id
-        from services.jobs.regenerate_all_async import start_regen_all_async
+        from services.jobs.editing import EditingConflictError
+        from services.jobs.regenerate_all_async import (
+            RegenBatchAlreadyActiveError,
+            start_regen_all_async,
+        )
 
         normalised: list[str] = []
         seen: set[str] = set()
@@ -1470,12 +1476,18 @@ class JobService:
 
         record = self._require_editing(job_id)
         caller = tts_caller or getattr(self, "_segment_tts_caller", None)
-        task_id = start_regen_all_async(
-            project_dir=record.project_dir,
-            tts_caller=caller,
-            default_tts_model=record.tts_model,
-            segment_ids=normalised,
-        )
+        try:
+            task_id = start_regen_all_async(
+                project_dir=record.project_dir,
+                tts_caller=caller,
+                default_tts_model=record.tts_model,
+                segment_ids=normalised,
+                reject_if_active=True,
+            )
+        except RegenBatchAlreadyActiveError as exc:
+            raise EditingConflictError(
+                "another batch regeneration task is already active; wait for it to finish"
+            ) from exc
         _touch_editing(record, self.store)
         return {"task_id": task_id, "status": "running"}
 

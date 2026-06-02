@@ -890,6 +890,10 @@ export default function VideoEditPage() {
         replace: bulkReplacePreview.replace,
         expected_segment_ids: segmentIds,
         expected_total_matches: bulkReplacePreview.total_matches,
+        expected_matches: bulkReplacePreview.matches.map((match) => ({
+          segment_id: match.segment_id,
+          before_text: match.before_text,
+        })),
       })
       setResource((prev) =>
         prev
@@ -1712,8 +1716,7 @@ function BulkReplaceModal({
   onApply,
   onClose,
 }: BulkReplaceModalProps) {
-  const shown = preview?.matches.slice(0, 20) ?? []
-  const extraCount = preview ? Math.max(0, preview.matches.length - shown.length) : 0
+  const shown = preview?.matches ?? []
   return (
     <div
       className="fixed inset-0 z-[115] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
@@ -1803,9 +1806,6 @@ function BulkReplaceModal({
                   </div>
                 )
               })
-            )}
-            {extraCount > 0 && (
-              <div className="p-3 text-muted-foreground">还有 {extraCount} 段未显示。</div>
             )}
           </div>
         )}

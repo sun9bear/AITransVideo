@@ -42,6 +42,7 @@ from services.jobs.editing_segments import (
     mark_segment_status,
 )
 from services.jobs.regenerate_all_async import (
+    RegenBatchAlreadyActiveError,
     read_regen_all_status,
     start_regen_all_async,
     status_file_path,
@@ -205,6 +206,34 @@ def test_per_segment_failure_does_not_abort_batch(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # stale task_id + concurrency
 # ---------------------------------------------------------------------------
+
+
+def test_selected_regen_rejects_existing_active_batch(tmp_path: Path) -> None:
+    """Selected-scope callers must not reuse a live all-dirty batch task.
+
+    The existing worker has already snapshotted its eligible segment list, so a
+    later selected request may target freshly dirtied segments that the live
+    worker will never visit.
+    """
+    project = _make_project(tmp_path, ["seg_001", "seg_002"])
+    barrier = threading.Event()
+
+    def slow_caller(segment_dict: dict[str, Any], output_path: Path) -> None:
+        barrier.wait(timeout=1.0)
+        output_path.write_bytes(b"W")
+
+    task_id = start_regen_all_async(project_dir=project, tts_caller=slow_caller)
+    assert task_id
+
+    with pytest.raises(RegenBatchAlreadyActiveError):
+        start_regen_all_async(
+            project_dir=project,
+            tts_caller=_happy_tts_caller,
+            segment_ids=["seg_002"],
+            reject_if_active=True,
+        )
+
+    barrier.set()
 
 
 def test_read_status_returns_mismatch_for_stale_task_id(tmp_path: Path) -> None:

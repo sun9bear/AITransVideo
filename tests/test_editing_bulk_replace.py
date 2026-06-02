@@ -137,3 +137,34 @@ def test_apply_bulk_replace_rejects_stale_preview(tmp_path: Path) -> None:
             expected_segment_ids=["2"],
             expected_total_matches=1,
         )
+
+
+def test_apply_bulk_replace_rejects_changed_confirmed_text(tmp_path: Path) -> None:
+    project_dir = _seed_project(tmp_path)
+    preview = preview_bulk_replace_terms(
+        project_dir,
+        find="token",
+        replace="term",
+    )
+    assert preview["segment_count"] == 1
+    match = preview["matches"][0]
+
+    segments_path = project_dir / EDITING_SUBDIR / "segments.json"
+    segments = json.loads(segments_path.read_text(encoding="utf-8"))
+    segments[0]["cn_text"] = "updated token"
+    _write_json(segments_path, segments)
+
+    with pytest.raises(Exception, match="matched text changed"):
+        apply_bulk_replace_terms(
+            project_dir,
+            find="token",
+            replace="term",
+            expected_segment_ids=[match["segment_id"]],
+            expected_total_matches=preview["total_matches"],
+            expected_matches=[
+                {
+                    "segment_id": match["segment_id"],
+                    "before_text": match["before_text"],
+                }
+            ],
+        )

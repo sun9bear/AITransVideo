@@ -1050,6 +1050,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         field=str(payload.get("field") or "cn_text"),
                         expected_segment_ids=payload.get("expected_segment_ids"),
                         expected_total_matches=expected_total_matches,
+                        expected_matches=payload.get("expected_matches"),
                     )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return

@@ -308,6 +308,7 @@ export async function applyBulkReplaceTerms(
     field?: "cn_text"
     expected_segment_ids: string[]
     expected_total_matches: number
+    expected_matches: Array<Pick<BulkReplaceMatch, "segment_id" | "before_text">>
   },
 ): Promise<BulkReplaceApplyResponse> {
   return apiClient.post(

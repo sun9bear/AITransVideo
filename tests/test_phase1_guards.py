@@ -287,9 +287,12 @@ def test_gateway_knows_every_post_edit_endpoint() -> None:
     })
     EXPECTED_SIMPLE_MUTATIONS = frozenset({
         "regenerate-all-tts",
+        "regenerate-selected-tts",
         "regenerate-all-tts/cancel",
         "editing/voice-map",
         "editing/revert-unsynced-text",
+        "editing/bulk-replace/preview",
+        "editing/bulk-replace/apply",
         "editing/speakers",
     })
     EXPECTED_SEGMENT_ACTIONS = frozenset({
