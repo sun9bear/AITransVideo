@@ -71,6 +71,12 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/projects
         target: /opt/aivideotrans/app/projects
+      # Gateway uploads local video files under /opt/aivideotrans/app/uploads
+      # and passes that absolute path to the app process. Keep this shared
+      # with the gateway container so local_video ingestion can read it.
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/uploads
+        target: /opt/aivideotrans/app/uploads
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/jobs
         target: /opt/aivideotrans/app/jobs
@@ -195,6 +201,11 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/projects
         target: /opt/aivideotrans/app/projects
+      # Shared local-upload staging. handle_upload_video writes here and the
+      # app container later reads the same absolute path via --source-ref.
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/uploads
+        target: /opt/aivideotrans/app/uploads
       # Phase 2 R2 download backend (plan 2026-04-23) needs jobs_dir to:
       #   (a) append download.* JSONL events that Job API already reads via
       #       JobStore.load_events (same on-disk schema), and
@@ -363,7 +374,9 @@ services:
       AVT_PAN_AUTO_ARCHIVE_MAX_PER_RUN: "${AVT_PAN_AUTO_ARCHIVE_MAX_PER_RUN:-5}"
       AVT_PAN_AUTO_ARCHIVE_DRY_RUN: "${AVT_PAN_AUTO_ARCHIVE_DRY_RUN:-true}"
       AVT_PAN_ORPHAN_CLEANUP_WEEKDAY: "${AVT_PAN_ORPHAN_CLEANUP_WEEKDAY:-5}"
-      AVT_PAN_UPLOAD_CHUNK_BYTES: "${AVT_PAN_UPLOAD_CHUNK_BYTES:-4194304}"
+      # 2026-06-01 production fix: 4 MB → 16 MB. Lifts single-upload
+      # ceiling from 8 GB (= 4 MB × 2048 partseq cap) → 32 GB.
+      AVT_PAN_UPLOAD_CHUNK_BYTES: "${AVT_PAN_UPLOAD_CHUNK_BYTES:-16777216}"
       AVT_PAN_TASK_STALE_HOURS: "${AVT_PAN_TASK_STALE_HOURS:-4}"
       # 2026-05-26 postmortem P0b/P0c. Global serialization timeout +
       # tar staging dir off the container overlay.
