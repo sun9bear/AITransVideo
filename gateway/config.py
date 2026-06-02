@@ -188,7 +188,17 @@ class GatewaySettings(BaseSettings):
     pan_auto_archive_max_per_run: int = 5            # per-cron enqueue cap
     pan_auto_archive_dry_run: bool = True            # log candidates only, no enqueue
     pan_orphan_cleanup_weekday: int = 5              # 0=Mon ... 5=Sat
-    pan_upload_chunk_bytes: int = 4 * 1024 * 1024    # Baidu Pan 4MB chunk size
+    # 2026-06-01 production fix. Baidu PCS superfile2 API caps partseq at
+    # 2048 (errno 31299 "Invalid param part_id" beyond that). At 4 MB
+    # chunk size that's a 8 GB single-upload ceiling — Boris Cherny
+    # (8.61 GB) and c31b (11 GB) both hit it. Bump default to 16 MB:
+    # 16 MB * 2048 partseq = 32 GB single-upload ceiling, covers every
+    # project we've seen. Baidu docs cap single chunk at 16 MB for
+    # standard API, so this is the safe top end of the published range.
+    # Trade-off: each chunk takes ~4x as long to upload, but chunk
+    # count drops by ~4x — total wall-clock essentially unchanged,
+    # and fewer round-trips mean fewer odds of hitting transient 5xx.
+    pan_upload_chunk_bytes: int = 16 * 1024 * 1024   # Baidu Pan 16MB chunk size
     pan_task_stale_hours: int = 4                    # heartbeat staleness threshold
 
     # 2026-05-26 postmortem P0b v2 (Codex 2nd-round). Global serialization

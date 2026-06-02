@@ -44,7 +44,11 @@ def test_pan_settings_defaults(monkeypatch):
     assert s.pan_orphan_cleanup_weekday == 5
 
     # Upload + reap params
-    assert s.pan_upload_chunk_bytes == 4 * 1024 * 1024  # 4 MB
+    # 2026-06-01 production fix. Default bumped 4 MB → 16 MB. Baidu PCS
+    # superfile2 partseq caps at 2048; 4 MB × 2048 = 8 GB single-upload
+    # ceiling that Boris Cherny (8.61 GB) + c31b (11 GB) both blew past
+    # (errno 31299 "Invalid param part_id"). 16 MB × 2048 = 32 GB now.
+    assert s.pan_upload_chunk_bytes == 16 * 1024 * 1024  # 16 MB
     assert s.pan_task_stale_hours == 4
 
     # Baidu OAuth — empty (must be set before flag enabled)

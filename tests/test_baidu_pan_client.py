@@ -564,8 +564,17 @@ def _make_upload_mocker(monkeypatch, expected_size: int):
 
 
 def test_upload_full_flow_5mb_two_chunks(monkeypatch, tmp_path):
-    """5MB file with 4MB chunk size → 2 chunks (4MB + 1MB) + precreate + finalize."""
+    """5MB file with 4MB chunk size → 2 chunks (4MB + 1MB) + precreate + finalize.
+
+    Note: pins chunk size to 4 MB explicitly via monkeypatch so this test
+    is decoupled from ``settings.pan_upload_chunk_bytes`` default (which
+    was bumped 4 MB → 16 MB on 2026-06-01 — at 16 MB this 5 MB file
+    would produce just 1 chunk and the two-chunk math wouldn't fire).
+    """
     from gateway.pan.baidu_pan_client import BaiduPanClient
+    from config import settings as _settings
+    monkeypatch.setattr(_settings, 'pan_upload_chunk_bytes',
+                        4 * 1024 * 1024, raising=False)
 
     test_file = tmp_path / 'test.tar.gz'
     test_file.write_bytes(b'A' * (5 * 1024 * 1024))
