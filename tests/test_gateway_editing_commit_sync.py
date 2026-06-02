@@ -117,6 +117,7 @@ class _FakeSession:
     ) -> None:
         self.added_rows: list[Any] = []
         self.committed = False
+        self.rolled_back = False
         idempotency_value = (
             _FakeJobRow(job_id="existing") if new_id_already_exists else None
         )
@@ -141,6 +142,9 @@ class _FakeSession:
 
     async def commit(self):
         self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
 
 
 def _upstream_response(body: dict, status: int = 200) -> Response:
@@ -515,6 +519,86 @@ def test_single_regenerate_allows_long_text_and_records_usage(
     assert usage["tts_segments"] == 1
     assert usage["tts_chars"] == 862
     assert session.committed is True
+
+
+def test_selected_regenerate_does_not_record_usage_when_upstream_rejects(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_dir = tmp_path / "project"
+    editing_dir = project_dir / "editor" / "editing"
+    editing_dir.mkdir(parents=True)
+    (editing_dir / "segments.json").write_text(
+        json.dumps(
+            [
+                {"segment_id": "seg_001", "cn_text": "词元一"},
+                {"segment_id": "seg_002", "cn_text": "词元二"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (editing_dir / "segment_status.json").write_text(
+        json.dumps({"seg_001": "text_dirty", "seg_002": "voice_dirty"}),
+        encoding="utf-8",
+    )
+    initial_usage = {
+        "batch_regenerates": 0,
+        "tts_segments": 0,
+        "tts_chars": 0,
+    }
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="editing",
+        project_dir=str(project_dir),
+        metering_snapshot={
+            job_intercept.POST_EDIT_USAGE_KEY: dict(initial_usage),
+        },
+    )
+    session = _FakeSession()
+    session._execute_queue = [_FakeResult(value=source)]
+    user = _FakeUser(plan_code="plus")
+    payload = {"segment_ids": ["seg_001", "seg_002"]}
+    enforce_calls: list[str] = []
+    proxy_calls: list[dict[str, Any]] = []
+
+    class _Request:
+        async def body(self):
+            return json.dumps(payload).encode("utf-8")
+
+    async def fake_enforce(db, job, passed_user, *, subpath: str, now_utc: datetime):
+        assert db is session
+        assert job is source
+        assert passed_user is user
+        enforce_calls.append(subpath)
+        return source, job_intercept.POST_EDIT_LIMITS["plus"]
+
+    async def fake_proxy_request(**kwargs):
+        proxy_calls.append(kwargs)
+        assert source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY] == initial_usage
+        return _upstream_response({"detail": "active batch"}, status=409)
+
+    monkeypatch.setattr(job_intercept, "_enforce_post_edit_access", fake_enforce)
+    monkeypatch.setattr(job_intercept, "proxy_request", fake_proxy_request)
+
+    response = asyncio.run(
+        job_intercept._post_edit_mutation_with_policy(
+            _Request(),
+            "job_src",
+            session,
+            user,
+            subpath="regenerate-selected-tts",
+        )
+    )
+
+    assert response.status_code == 409
+    assert enforce_calls == ["regenerate-selected-tts", "regenerate-tts"]
+    assert len(proxy_calls) == 1
+    forwarded = json.loads(proxy_calls[0]["override_body"].decode("utf-8"))
+    assert forwarded == payload
+    assert source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY] == initial_usage
+    assert session.committed is False
+    assert session.rolled_back is True
 
 
 def test_consume_post_edit_tts_usage_records_trial_allowance(monkeypatch) -> None:

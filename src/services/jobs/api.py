@@ -1023,6 +1023,38 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # BaseHTTPRequestHandler's do_PATCH wiring is non-trivial; body
                 # shape mirrors a PATCH payload.)
                 if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing"
+                        and path_parts[3] == "bulk-replace"
+                        and path_parts[4] == "preview"):
+                    payload = self._read_json_payload()
+                    result = service.preview_bulk_replace_terms(
+                        path_parts[1],
+                        find=str(payload.get("find") or ""),
+                        replace=str(payload.get("replace") or ""),
+                        field=str(payload.get("field") or "cn_text"),
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing"
+                        and path_parts[3] == "bulk-replace"
+                        and path_parts[4] == "apply"):
+                    payload = self._read_json_payload()
+                    expected_total_matches = payload.get("expected_total_matches")
+                    if expected_total_matches is not None:
+                        expected_total_matches = int(expected_total_matches)
+                    result = service.apply_bulk_replace_terms(
+                        path_parts[1],
+                        find=str(payload.get("find") or ""),
+                        replace=str(payload.get("replace") or ""),
+                        field=str(payload.get("field") or "cn_text"),
+                        expected_segment_ids=payload.get("expected_segment_ids"),
+                        expected_total_matches=expected_total_matches,
+                        expected_matches=payload.get("expected_matches"),
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
                         and path_parts[2] == "segments" and path_parts[4] == "update"):
                     job_id = path_parts[1]
                     segment_id = path_parts[3]
@@ -1230,6 +1262,23 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # {"cancelled": bool}: True means the flag was written and
                 # the worker will transition to stage='cancelled' on its
                 # next tick; False means no matching live batch.
+                if (len(path_parts) == 3 and path_parts[0] == "jobs"
+                        and path_parts[2] == "regenerate-selected-tts"):
+                    payload = self._read_json_payload()
+                    raw_segment_ids = payload.get("segment_ids")
+                    if not isinstance(raw_segment_ids, list):
+                        raise ValueError("segment_ids must be a list")
+                    segment_ids = [
+                        str(item).strip()
+                        for item in raw_segment_ids
+                        if str(item).strip()
+                    ]
+                    result = service.regenerate_selected_dirty_segments_async(
+                        path_parts[1],
+                        segment_ids=segment_ids,
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "regenerate-all-tts"
                         and path_parts[3] == "cancel"):

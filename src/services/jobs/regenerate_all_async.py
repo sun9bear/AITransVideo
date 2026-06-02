@@ -37,11 +37,17 @@ from services.jobs.editing_tts import SegmentTTSCaller, regenerate_segment_tts
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "RegenBatchAlreadyActiveError",
+    "has_active_regen_task",
     "read_regen_all_status",
     "request_regen_all_cancel",
     "start_regen_all_async",
     "status_file_path",
 ]
+
+
+class RegenBatchAlreadyActiveError(RuntimeError):
+    """Raised when a caller requires a fresh batch but one is already active."""
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +82,12 @@ def _project_key(project_dir: Path) -> str:
 
 def _new_task_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def has_active_regen_task(project_dir: str | Path) -> bool:
+    project_key = _project_key(Path(project_dir))
+    with _active_tasks_lock:
+        return project_key in _active_tasks
 
 
 def status_file_path(project_dir: str | Path) -> Path:
@@ -235,6 +247,8 @@ def start_regen_all_async(
     project_dir: str | Path,
     tts_caller: SegmentTTSCaller | None = None,
     default_tts_model: str | None = None,
+    segment_ids: list[str] | None = None,
+    reject_if_active: bool = False,
 ) -> str:
     """Spawn a daemon thread that batches re-TTS over dirty segments.
 
@@ -245,6 +259,8 @@ def start_regen_all_async(
 
     Single-flight: if a batch is already in flight for this project, the
     existing ``task_id`` is returned (no new thread, no new TTS calls).
+    Selected-scope callers may set ``reject_if_active`` because reusing an
+    older task would not include their newly dirtied segment_ids.
     The slot is released in ``_run_batch`` when the batch reaches its
     terminal state.
     """
@@ -254,6 +270,10 @@ def start_regen_all_async(
     with _active_tasks_lock:
         existing = _active_tasks.get(project_key)
         if existing is not None:
+            if reject_if_active:
+                raise RegenBatchAlreadyActiveError(
+                    "another batch regeneration task is already active"
+                )
             return existing
         task_id = _new_task_id()
         _active_tasks[project_key] = task_id
@@ -271,6 +291,7 @@ def start_regen_all_async(
                 "tts_caller": tts_caller,
                 "default_tts_model": default_tts_model,
                 "project_key": project_key,
+                "segment_ids": segment_ids,
             },
             daemon=True,
         )
@@ -299,6 +320,7 @@ def _run_batch(
     tts_caller: SegmentTTSCaller | None,
     default_tts_model: str | None,
     project_key: str | None = None,
+    segment_ids: list[str] | None = None,
 ) -> None:
     """Thread body. Mirrors ``regenerate_all_dirty_segments`` semantics
     but writes per-segment progress to the status file and distinguishes
@@ -326,10 +348,21 @@ def _run_batch(
             )
             return
 
-        eligible = sorted(
-            sid for sid, status in status_map.items()
-            if status in BATCH_REGENERATE_TRIGGER_STATUSES
-        )
+        if segment_ids is None:
+            eligible = sorted(
+                sid for sid, status in status_map.items()
+                if status in BATCH_REGENERATE_TRIGGER_STATUSES
+            )
+        else:
+            seen: set[str] = set()
+            eligible = []
+            for raw_sid in segment_ids:
+                sid = str(raw_sid).strip()
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                if status_map.get(sid) in BATCH_REGENERATE_TRIGGER_STATUSES:
+                    eligible.append(sid)
         total = len(eligible)
         succeeded: list[str] = []
         failed_ids: list[str] = []

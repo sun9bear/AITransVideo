@@ -3498,9 +3498,12 @@ _POST_EDIT_TRANSITION_SUBPATHS: frozenset[str] = frozenset({
 # per-segment action allowlist in ``_is_post_edit_mutation_subpath``.
 _POST_EDIT_SIMPLE_MUTATION_SUBPATHS: frozenset[str] = frozenset({
     "regenerate-all-tts",           # T1-6 batch (async start)
+    "regenerate-selected-tts",      # targeted batch after bulk terminology replace
     "regenerate-all-tts/cancel",    # 2026-04-21 D39 user-initiated cancel
     "editing/voice-map",            # T1-6 set/clear voice override (POST only)
     "editing/revert-unsynced-text", # discard text edits without matching TTS
+    "editing/bulk-replace/preview", # confirmation preview before text mutation
+    "editing/bulk-replace/apply",   # confirmed literal text mutation
     "editing/speakers",             # Task 3 (plan 2026-05-04): create new
                                     # editing-mode speaker (POST only; GET is
                                     # read-only and falls through to proxy).
@@ -3750,6 +3753,44 @@ def _batch_regen_scope(project_dir: str | None) -> tuple[int, int]:
     return len(eligible), total_chars
 
 
+def _selected_regen_scope(
+    project_dir: str | None,
+    segment_ids: list[str],
+) -> tuple[int, int]:
+    if not project_dir:
+        return 0, 0
+    requested: list[str] = []
+    seen: set[str] = set()
+    for raw_sid in segment_ids:
+        sid = str(raw_sid).strip()
+        if not sid or sid in seen:
+            continue
+        requested.append(sid)
+        seen.add(sid)
+    if not requested:
+        return 0, 0
+    status_path = Path(project_dir) / "editor" / "editing" / "segment_status.json"
+    try:
+        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception:
+        status_data = {}
+    if not isinstance(status_data, dict):
+        status_data = {}
+    eligible = {
+        sid
+        for sid in requested
+        if str(status_data.get(sid)) in POST_EDIT_BATCH_TRIGGER_STATUSES
+    }
+    if not eligible:
+        return 0, 0
+    total_chars = 0
+    for segment in _read_post_edit_segments(project_dir):
+        sid = str(segment.get("segment_id"))
+        if sid in eligible:
+            total_chars += len(str(segment.get("cn_text") or "").strip())
+    return len(eligible), total_chars
+
+
 async def _read_json_body(request: Request) -> dict:
     try:
         raw = await request.body()
@@ -3824,6 +3865,32 @@ async def _record_post_edit_commit_usage(
     elif strategy == "copy_as_new":
         _post_edit_increment(usage, "copy_as_new")
     _save_post_edit_usage(root_job, usage)
+
+
+async def _check_post_edit_tts_usage(
+    db: AsyncSession,
+    job: Job,
+    user: User | None,
+    *,
+    segments: int,
+    chars: int,
+    batch_start: bool,
+    now_utc: datetime,
+) -> None:
+    root_job, limits = await _enforce_post_edit_access(
+        db, job, user, subpath="regenerate-tts", now_utc=now_utc,
+    )
+    usage = _post_edit_usage(root_job)
+    if segments <= 0:
+        return
+    if batch_start and _post_edit_limit_exceeded(
+        usage, "batch_regenerates", 1, limits["batch_regenerates"]
+    ):
+        raise HTTPException(status_code=403, detail="本项目免费批量重合成次数已用完。")
+    if _post_edit_limit_exceeded(usage, "tts_segments", segments, limits["tts_segments"]):
+        raise HTTPException(status_code=403, detail="本项目免费重合成段数已用完。")
+    if _post_edit_limit_exceeded(usage, "tts_chars", chars, limits["tts_chars"]):
+        raise HTTPException(status_code=403, detail="本项目免费重合成字数已用完。")
 
 
 async def _consume_post_edit_tts_usage(
@@ -4059,6 +4126,22 @@ async def _post_edit_mutation_with_policy(
                 detail=f"单段译文字数不能超过 {POST_EDIT_MAX_SEGMENT_SAVE_CHARS} 字，请拆分后再保存。",
             )
 
+    if subpath == "editing/bulk-replace/apply":
+        payload = await _read_json_body(request)
+        find_text = str(payload.get("find") or "")
+        replace_text = str(payload.get("replace") or "")
+        if find_text:
+            for segment in _read_post_edit_segments(job.project_dir):
+                current = str(segment.get("cn_text") or "")
+                if find_text not in current:
+                    continue
+                after = current.replace(find_text, replace_text)
+                if len(after.strip()) > POST_EDIT_MAX_SEGMENT_SAVE_CHARS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"单段译文字数不能超过 {POST_EDIT_MAX_SEGMENT_SAVE_CHARS} 字，请拆分后再保存。",
+                    )
+
     if len(parts) == 3 and parts[0] == "segments" and parts[2] == "regenerate-tts":
         chars = _segment_cn_chars(job.project_dir, parts[1])
         await _consume_post_edit_tts_usage(
@@ -4080,6 +4163,36 @@ async def _post_edit_mutation_with_policy(
         await _consume_post_edit_tts_usage(
             db, job, user, segments=segments, chars=chars, batch_start=True, now_utc=now_utc,
         )
+
+    selected_regen_usage: tuple[int, int] | None = None
+    selected_regen_body: bytes | None = None
+
+    if subpath == "regenerate-selected-tts":
+        payload = await _read_json_body(request)
+        raw_segment_ids = payload.get("segment_ids")
+        if not isinstance(raw_segment_ids, list):
+            raise HTTPException(status_code=400, detail="segment_ids must be a list")
+        segment_ids = [
+            str(item).strip()
+            for item in raw_segment_ids
+            if str(item).strip()
+        ]
+        segments, chars = _selected_regen_scope(job.project_dir, segment_ids)
+        batch_segment_limit = (
+            POST_EDIT_BATCH_MAX_SEGMENTS_PRO
+            if _post_edit_policy_key(user) in {"pro", "admin"}
+            else POST_EDIT_BATCH_MAX_SEGMENTS_DEFAULT
+        )
+        if segments > batch_segment_limit:
+            raise HTTPException(
+                status_code=400,
+                detail=f"单次批量重合成最多支持 {batch_segment_limit} 段。",
+            )
+        await _check_post_edit_tts_usage(
+            db, job, user, segments=segments, chars=chars, batch_start=True, now_utc=now_utc,
+        )
+        selected_regen_usage = (segments, chars)
+        selected_regen_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     # Phase 4.2 E.1 PR #15 P1 三轮 fix (Codex 2026-05-27): editing/voice-map
     # CosyVoice clone routing enrichment. We intercept ONLY the voice-map
@@ -4115,6 +4228,29 @@ async def _post_edit_mutation_with_policy(
                 # Re-serialize so upstream Job API sees the routing
                 # fields (and the stripped-client-supplied state).
                 forwarded_body = json.dumps(enriched, ensure_ascii=False).encode("utf-8")
+
+    if selected_regen_usage is not None:
+        response = await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+            override_body=selected_regen_body,
+        )
+        if 200 <= response.status_code < 300:
+            segments, chars = selected_regen_usage
+            await _consume_post_edit_tts_usage(
+                db,
+                job,
+                user,
+                segments=segments,
+                chars=chars,
+                batch_start=True,
+                now_utc=now_utc,
+            )
+            await db.commit()
+        else:
+            await db.rollback()
+        return response
 
     await db.commit()
     if forwarded_body is not None:
