@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import {
   acceptSegmentDraft,
   cancelEditing,
+  applyBulkReplaceTerms,
   commitEditing,
   discardSegmentDraft,
   enterEditing,
@@ -24,10 +25,12 @@ import {
   getVoiceMap,
   listEditingSpeakers,
   patchSegmentText,
+  previewBulkReplaceTerms,
   previewEditingSegmentSource,
   buildPreviewSourceStreamUrl,
   regenerateSegmentTts,
   regenerateAllDirtyTts,
+  regenerateSelectedDirtyTts,
   retryEditingSpeakerProfile,
   revertUnsyncedTextSegments,
   getRegenerateAllStatus,
@@ -35,6 +38,7 @@ import {
   splitEditingSegment,
   splitEditingSegmentMany,
   type CommitStrategy,
+  type BulkReplacePreviewResponse,
   type EditingSegment,
   type EditingSegmentsResponse,
   type EditingSpeaker,
@@ -121,6 +125,12 @@ export default function VideoEditPage() {
   const [isBatchRegenerating, setIsBatchRegenerating] = useState(false)
   // D39 cancel: store the in-flight task_id so the "取消批量合成" button
   // can reach the backend cancel endpoint. null when no batch is running.
+  const [bulkReplaceOpen, setBulkReplaceOpen] = useState(false)
+  const [bulkReplaceFind, setBulkReplaceFind] = useState("")
+  const [bulkReplaceValue, setBulkReplaceValue] = useState("")
+  const [bulkReplacePreview, setBulkReplacePreview] = useState<BulkReplacePreviewResponse | null>(null)
+  const [isBulkReplacePreviewing, setIsBulkReplacePreviewing] = useState(false)
+  const [isBulkReplaceApplying, setIsBulkReplaceApplying] = useState(false)
   const [batchTaskId, setBatchTaskId] = useState<string | null>(null)
   // Optimistic state: set true the instant the cancel button is clicked
   // so the UI doesn't keep showing "正在合成" while the signal propagates
@@ -842,6 +852,139 @@ export default function VideoEditPage() {
     }
   }, [batchTaskId, isCancellingBatch, jobId])
 
+  const handleBulkReplacePreview = useCallback(async () => {
+    const find = bulkReplaceFind
+    if (!find) {
+      toast.error("请输入要查找的词")
+      return
+    }
+    setIsBulkReplacePreviewing(true)
+    try {
+      const preview = await previewBulkReplaceTerms(jobId, {
+        find,
+        replace: bulkReplaceValue,
+      })
+      setBulkReplacePreview(preview)
+      if (preview.segment_count === 0) {
+        toast.info("没有找到匹配段落")
+      }
+    } catch (error) {
+      toast.error(`预览失败: ${getErrorMessage(error)}`)
+    } finally {
+      setIsBulkReplacePreviewing(false)
+    }
+  }, [bulkReplaceFind, bulkReplaceValue, jobId])
+
+  const handleBulkReplaceApply = useCallback(async () => {
+    if (!bulkReplacePreview || isBulkReplaceApplying || isBatchRegenerating) return
+    const segmentIds = bulkReplacePreview.matches.map((item) => item.segment_id)
+    if (segmentIds.length === 0) return
+    setIsBulkReplaceApplying(true)
+    setIsBatchRegenerating(true)
+    setIsCancellingBatch(false)
+    const toastId = "batch-regen"
+    toast.loading(`正在替换并合成 ${segmentIds.length} 段...`, { id: toastId })
+    try {
+      const applied = await applyBulkReplaceTerms(jobId, {
+        find: bulkReplacePreview.find,
+        replace: bulkReplacePreview.replace,
+        expected_segment_ids: segmentIds,
+        expected_total_matches: bulkReplacePreview.total_matches,
+      })
+      setResource((prev) =>
+        prev
+          ? {
+              ...prev,
+              segments: applied.segments,
+              segment_status: applied.segment_status,
+            }
+          : prev,
+      )
+      if (applied.replaced_segment_ids.length === 0) {
+        toast.info("没有需要替换的段落", { id: toastId })
+        setBulkReplaceOpen(false)
+        return
+      }
+
+      const { task_id: taskId } = await regenerateSelectedDirtyTts(
+        jobId,
+        applied.replaced_segment_ids,
+      )
+      setBatchTaskId(taskId)
+
+      const POLL_INTERVAL_MS = 1000
+      const MAX_POLLS = 30 * 60
+      let polls = 0
+      let lastDisplayedProgress = ""
+      while (polls < MAX_POLLS) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        if (typeof document !== "undefined" && document.hidden) {
+          continue
+        }
+        polls += 1
+        const status = await getRegenerateAllStatus(jobId, taskId)
+        if (status.mismatch) {
+          toast.warning("检测到新的合成任务，已停止跟踪当前进度", { id: toastId })
+          break
+        }
+        if (status.stage === "completed") {
+          const result = status.result
+          if (result && result.failed_count > 0) {
+            toast.warning(
+              `替换完成，音频合成成功 ${result.succeeded_count} 段，失败 ${result.failed_count} 段`,
+              { id: toastId },
+            )
+          } else {
+            toast.success(`已替换并合成 ${applied.replaced_segment_ids.length} 段`, {
+              id: toastId,
+            })
+          }
+          break
+        }
+        if (status.stage === "failed") {
+          toast.error(`合成失败: ${status.error ?? "未知错误"}`, { id: toastId })
+          break
+        }
+        if (status.stage === "cancelled") {
+          const succeeded = status.result?.succeeded_count ?? status.succeeded_count
+          toast.info(`已取消：完成 ${succeeded} 段`, { id: toastId })
+          break
+        }
+        const done = status.succeeded_count + status.failed_count
+        const total = status.total || applied.replaced_segment_ids.length
+        const currentSuffix = status.current_segment_id
+          ? ` · 段 ${status.current_segment_id}`
+          : ""
+        const progressText = `正在合成替换段落 ${done}/${total}${currentSuffix}`
+        if (progressText !== lastDisplayedProgress) {
+          toast.loading(progressText, { id: toastId })
+          lastDisplayedProgress = progressText
+        }
+      }
+      if (polls >= MAX_POLLS) {
+        toast.error("合成超过 30 分钟未完成，已停止跟踪。刷新页面可查看状态。", {
+          id: toastId,
+        })
+      }
+      setBulkReplaceOpen(false)
+      setBulkReplacePreview(null)
+      await loadData()
+    } catch (error) {
+      toast.error(`批量替换失败: ${getErrorMessage(error)}`, { id: toastId })
+    } finally {
+      setIsBulkReplaceApplying(false)
+      setIsBatchRegenerating(false)
+      setBatchTaskId(null)
+      setIsCancellingBatch(false)
+    }
+  }, [
+    bulkReplacePreview,
+    isBulkReplaceApplying,
+    isBatchRegenerating,
+    jobId,
+    loadData,
+  ])
+
   // ---- Abandon / Commit ----
 
   const handleAbandon = useCallback(async () => {
@@ -1351,6 +1494,18 @@ export default function VideoEditPage() {
             </div>
             <div className="flex items-center gap-2">
               <button
+                className="rounded-md border border-border px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 hover:bg-muted"
+                onClick={() => {
+                  setBulkReplacePreview(null)
+                  setBulkReplaceOpen(true)
+                }}
+                disabled={isBatchRegenerating}
+                type="button"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                批量替换术语
+              </button>
+              <button
                 className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
                 onClick={handleBatchRegenerate}
                 disabled={isBatchRegenerating || dirtyCount === 0}
@@ -1462,6 +1617,31 @@ export default function VideoEditPage() {
         }}
       />
 
+      {bulkReplaceOpen && (
+        <BulkReplaceModal
+          find={bulkReplaceFind}
+          replace={bulkReplaceValue}
+          preview={bulkReplacePreview}
+          speakerNameMap={speakerNameMap}
+          isPreviewing={isBulkReplacePreviewing}
+          isApplying={isBulkReplaceApplying || isBatchRegenerating}
+          onFindChange={(value) => {
+            setBulkReplaceFind(value)
+            setBulkReplacePreview(null)
+          }}
+          onReplaceChange={(value) => {
+            setBulkReplaceValue(value)
+            setBulkReplacePreview(null)
+          }}
+          onPreview={handleBulkReplacePreview}
+          onApply={handleBulkReplaceApply}
+          onClose={() => {
+            if (isBulkReplaceApplying) return
+            setBulkReplaceOpen(false)
+          }}
+        />
+      )}
+
       {commitModalOpen && (
         <CommitModal
           strategy={commitStrategy}
@@ -1504,6 +1684,153 @@ export default function VideoEditPage() {
 // ---------------------------------------------------------------------------
 // CommitModal
 // ---------------------------------------------------------------------------
+
+interface BulkReplaceModalProps {
+  find: string
+  replace: string
+  preview: BulkReplacePreviewResponse | null
+  speakerNameMap: Record<string, string>
+  isPreviewing: boolean
+  isApplying: boolean
+  onFindChange: (value: string) => void
+  onReplaceChange: (value: string) => void
+  onPreview: () => void
+  onApply: () => void
+  onClose: () => void
+}
+
+function BulkReplaceModal({
+  find,
+  replace,
+  preview,
+  speakerNameMap,
+  isPreviewing,
+  isApplying,
+  onFindChange,
+  onReplaceChange,
+  onPreview,
+  onApply,
+  onClose,
+}: BulkReplaceModalProps) {
+  const shown = preview?.matches.slice(0, 20) ?? []
+  const extraCount = preview ? Math.max(0, preview.matches.length - shown.length) : 0
+  return (
+    <div
+      className="fixed inset-0 z-[115] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="bulk-replace-modal-title"
+    >
+      <div className="w-full max-w-3xl max-h-[calc(100vh-2rem)] overflow-y-auto rounded-xl border border-border bg-card p-5 text-card-foreground shadow-2xl ring-1 ring-black/10 space-y-4 dark:ring-white/10">
+        <div className="flex items-center justify-between gap-3">
+          <h2 id="bulk-replace-modal-title" className="text-base font-bold">批量替换术语</h2>
+          <button onClick={onClose} type="button" className="text-muted-foreground hover:text-foreground" disabled={isApplying}>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1 text-sm">
+            <span className="font-medium">查找</span>
+            <input
+              className="form-input w-full text-sm"
+              value={find}
+              onChange={(event) => onFindChange(event.currentTarget.value)}
+              placeholder="令牌"
+              disabled={isApplying}
+            />
+          </label>
+          <label className="space-y-1 text-sm">
+            <span className="font-medium">替换为</span>
+            <input
+              className="form-input w-full text-sm"
+              value={replace}
+              onChange={(event) => onReplaceChange(event.currentTarget.value)}
+              placeholder="词元"
+              disabled={isApplying}
+            />
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs text-muted-foreground">
+            {preview
+              ? `命中 ${preview.segment_count} 段，${preview.total_matches} 处`
+              : "先预览，再确认替换并合成对应段落音频"}
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onPreview}
+            disabled={isPreviewing || isApplying || !find}
+          >
+            {isPreviewing ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+            )}
+            预览替换
+          </Button>
+        </div>
+        {preview && (
+          <div className="max-h-[44vh] overflow-y-auto rounded-lg border border-border bg-background/60 text-xs">
+            {shown.length === 0 ? (
+              <div className="p-3 text-muted-foreground">没有匹配段落。</div>
+            ) : (
+              shown.map((match) => {
+                const speakerName =
+                  speakerNameMap[match.speaker_id] ||
+                  match.speaker_display_name ||
+                  match.speaker_id ||
+                  "未命名说话人"
+                return (
+                  <div key={match.segment_id} className="border-b border-border/70 p-3 last:border-b-0">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-medium text-foreground">
+                      <span>段落 {match.segment_id}</span>
+                      <span>说话人 {speakerName}</span>
+                      <span>音色 {match.provider || "默认"} / {match.voice_id || "默认"}</span>
+                      {match.tts_model_key && <span>模型 {match.tts_model_key}</span>}
+                    </div>
+                    <div className="mt-2 grid gap-2 md:grid-cols-2">
+                      <div className="break-words rounded-md bg-muted/60 p-2">
+                        <div className="mb-1 text-muted-foreground">替换前</div>
+                        {match.before_text}
+                      </div>
+                      <div className="break-words rounded-md bg-muted/60 p-2">
+                        <div className="mb-1 text-muted-foreground">替换后</div>
+                        {match.after_text}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })
+            )}
+            {extraCount > 0 && (
+              <div className="p-3 text-muted-foreground">还有 {extraCount} 段未显示。</div>
+            )}
+          </div>
+        )}
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={isApplying}>
+            取消
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={onApply}
+            disabled={isApplying || !preview || preview.segment_count === 0}
+          >
+            {isApplying ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="mr-1 h-3.5 w-3.5" />
+            )}
+            确认替换并合成 {preview?.segment_count ?? 0} 段
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 interface AudioSyncConflictModalProps {
   segments: UnsyncedTextSegment[]

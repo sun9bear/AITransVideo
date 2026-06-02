@@ -235,6 +235,7 @@ def start_regen_all_async(
     project_dir: str | Path,
     tts_caller: SegmentTTSCaller | None = None,
     default_tts_model: str | None = None,
+    segment_ids: list[str] | None = None,
 ) -> str:
     """Spawn a daemon thread that batches re-TTS over dirty segments.
 
@@ -271,6 +272,7 @@ def start_regen_all_async(
                 "tts_caller": tts_caller,
                 "default_tts_model": default_tts_model,
                 "project_key": project_key,
+                "segment_ids": segment_ids,
             },
             daemon=True,
         )
@@ -299,6 +301,7 @@ def _run_batch(
     tts_caller: SegmentTTSCaller | None,
     default_tts_model: str | None,
     project_key: str | None = None,
+    segment_ids: list[str] | None = None,
 ) -> None:
     """Thread body. Mirrors ``regenerate_all_dirty_segments`` semantics
     but writes per-segment progress to the status file and distinguishes
@@ -326,10 +329,21 @@ def _run_batch(
             )
             return
 
-        eligible = sorted(
-            sid for sid, status in status_map.items()
-            if status in BATCH_REGENERATE_TRIGGER_STATUSES
-        )
+        if segment_ids is None:
+            eligible = sorted(
+                sid for sid, status in status_map.items()
+                if status in BATCH_REGENERATE_TRIGGER_STATUSES
+            )
+        else:
+            seen: set[str] = set()
+            eligible = []
+            for raw_sid in segment_ids:
+                sid = str(raw_sid).strip()
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                if status_map.get(sid) in BATCH_REGENERATE_TRIGGER_STATUSES:
+                    eligible.append(sid)
         total = len(eligible)
         succeeded: list[str] = []
         failed_ids: list[str] = []

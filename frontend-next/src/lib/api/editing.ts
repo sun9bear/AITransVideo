@@ -92,6 +92,35 @@ export interface VoiceMapResponse {
   voice_map: Record<string, VoiceMapEntry>
 }
 
+export interface BulkReplaceMatch {
+  segment_id: string
+  speaker_id: string
+  speaker_display_name?: string
+  provider?: string | null
+  voice_id?: string | null
+  tts_model_key?: string | null
+  match_count: number
+  before_text: string
+  after_text: string
+  start_ms?: number
+  end_ms?: number
+}
+
+export interface BulkReplacePreviewResponse {
+  field: "cn_text"
+  find: string
+  replace: string
+  segment_count: number
+  total_matches: number
+  matches: BulkReplaceMatch[]
+}
+
+export interface BulkReplaceApplyResponse extends BulkReplacePreviewResponse {
+  replaced_segment_ids: string[]
+  segments: EditingSegment[]
+  segment_status: Record<string, SegmentStatus>
+}
+
 export interface BatchRegenerateResponse {
   total: number
   succeeded_count: number
@@ -254,6 +283,36 @@ export async function patchSegmentText(
   return apiClient.post(
     `/jobs/${jobId}/segments/${segmentId}/update`,
     { body: patch },
+  )
+}
+
+export async function previewBulkReplaceTerms(
+  jobId: string,
+  body: {
+    find: string
+    replace: string
+    field?: "cn_text"
+  },
+): Promise<BulkReplacePreviewResponse> {
+  return apiClient.post(
+    `/jobs/${jobId}/editing/bulk-replace/preview`,
+    { body: { field: "cn_text", ...body } },
+  )
+}
+
+export async function applyBulkReplaceTerms(
+  jobId: string,
+  body: {
+    find: string
+    replace: string
+    field?: "cn_text"
+    expected_segment_ids: string[]
+    expected_total_matches: number
+  },
+): Promise<BulkReplaceApplyResponse> {
+  return apiClient.post(
+    `/jobs/${jobId}/editing/bulk-replace/apply`,
+    { body: { field: "cn_text", ...body } },
   )
 }
 
@@ -466,6 +525,16 @@ export async function regenerateAllDirtyTts(
   return apiClient.post<BatchRegenerateStartResponse>(
     `/jobs/${jobId}/regenerate-all-tts`,
     { body: {} },
+  )
+}
+
+export async function regenerateSelectedDirtyTts(
+  jobId: string,
+  segmentIds: string[],
+): Promise<BatchRegenerateStartResponse> {
+  return apiClient.post<BatchRegenerateStartResponse>(
+    `/jobs/${jobId}/regenerate-selected-tts`,
+    { body: { segment_ids: segmentIds } },
   )
 }
 
