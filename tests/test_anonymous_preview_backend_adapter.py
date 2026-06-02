@@ -271,6 +271,32 @@ def test_local_upload_happy_path_returns_ready_for_mode(
     )
 
 
+def test_happy_path_normalizes_wire_string_pass_compliance_status(
+    adapter, temp_upload_dir
+):
+    # A compliance provider that emits the wire-level ``"pass"`` string
+    # instead of the enum must still land as ``ComplianceStatus.PASS`` on
+    # the resulting PreviewRecord — the intake helper normalizes via
+    # ``dataclasses.replace`` so the adapter never leaks a raw str.
+    def wire_string_pass_compliance(_probe: ProbeResult) -> ComplianceResult:
+        return ComplianceResult(
+            status="pass",  # type: ignore[arg-type]
+            reason="prefilter ok; teaser ASR ok; LLM compliance ok",
+            audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+            blocked_media_retained=False,
+        )
+
+    wired = replace(adapter, compliance_fn=wire_string_pass_compliance)
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_wire_pass")
+
+    record = wired.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.READY_FOR_MODE
+    assert record.compliance_status is ComplianceStatus.PASS
+    assert type(record.compliance_status) is ComplianceStatus
+
+
 # ---------------------------------------------------------------------------
 # Behavior contract — IntakeRejected translated to status-only record.
 # ---------------------------------------------------------------------------
@@ -389,6 +415,36 @@ def test_compliance_exception_fails_closed_no_silent_fallback(
 
     assert record.status is PreviewStatus.FAILED
     assert "compliance error (fail closed)" in record.status_reason
+
+
+def test_probed_duration_over_cap_returns_rejected(adapter, temp_upload_dir, config):
+    # admit_upload accepts the *claimed* duration (matches config cap), but
+    # probe reports a true duration above the cap — the adapter must fail
+    # closed and not advance to READY_FOR_MODE.
+    def over_cap_probe(upload: UploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=config.max_source_duration_seconds + 5,
+            source_hash=upload.source_hash,
+            media_type="video/mp4",
+            audio_present=True,
+            audio_quality_score=0.9,
+            teaser_candidate_range=(0.0, 180.0),
+            failure_reason=None,
+        )
+
+    over = replace(adapter, probe_fn=over_cap_probe)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir,
+        duration_seconds=float(config.max_source_duration_seconds),
+        source_hash="src_hash_probe_over_cap",
+    )
+
+    record = over.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.REJECTED
+    assert "probed duration" in record.status_reason
+    assert "exceeds intake cap" in record.status_reason
 
 
 def test_invalid_upload_extension_returns_rejected(adapter, temp_upload_dir):
@@ -580,6 +636,69 @@ def test_youtube_free_rejected(adapter):
 
     assert record.status is PreviewStatus.REJECTED
     assert "youtube_url" in record.status_reason
+
+
+def test_failure_record_preserves_configured_ttl(counter_store, temp_upload_dir):
+    custom_ttl = 47 * 3600
+    custom_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        preview_record_ttl_seconds=custom_ttl,
+    )
+    custom = AnonymousPreviewBackendAdapter(
+        config=custom_config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    # YouTube reject path: status-only record built via _status_only_failure.
+    youtube_request = _make_request(
+        source_type=SourceType.YOUTUBE_URL,
+        is_free_user=False,
+        youtube_url="https://example.invalid/anything",
+    )
+    yt_record = custom.handle_intake(youtube_request, upload=None)
+
+    assert yt_record.status is PreviewStatus.REJECTED
+    assert yt_record.expires_at - yt_record.created_at == timedelta(
+        seconds=custom_ttl
+    )
+
+    # Rate-limit-overflow path also goes through _status_only_failure.
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_custom_ttl_rl")
+    first = custom.handle_intake(request, upload)
+    second = custom.handle_intake(request, upload)
+    assert first.status is PreviewStatus.READY_FOR_MODE
+    assert second.status is PreviewStatus.RATE_LIMITED
+    assert second.expires_at - second.created_at == timedelta(seconds=custom_ttl)
+
+
+def test_failure_record_falls_back_to_default_ttl_when_config_missing(
+    counter_store, temp_upload_dir
+):
+    # When config is None we cannot read preview_record_ttl_seconds, so the
+    # adapter must still emit a status-only record with the pinned default
+    # TTL (24h) — proving the fallback is bounded and known.
+    bad = AnonymousPreviewBackendAdapter(
+        config=None,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_no_cfg_ttl")
+
+    record = bad.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
 
 
 def test_local_upload_with_missing_upload_facts_fails_closed(adapter):

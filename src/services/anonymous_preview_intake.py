@@ -27,11 +27,11 @@ upload handlers, probe and compliance providers stay outside.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -309,15 +309,54 @@ def evaluate_probe_result(probe_result: ProbeResult) -> ProbeResult:
     return probe_result
 
 
+def _find_media_bytes_path(
+    value: Any, path: str = ""
+) -> Optional[Tuple[str, str]]:
+    """Recursively scan a value for ``bytes`` / ``bytearray`` / ``memoryview``
+    inside ``Mapping`` / ``list`` / ``tuple`` / ``set`` / ``frozenset``
+    containers. Returns ``(path, type_name)`` for the first offender or
+    ``None`` when the value tree is clean.
+
+    Strings are intentionally treated as scalars even though they are
+    iterable — only raw media byte types are forbidden.
+    """
+
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return (path or "<root>", type(value).__name__)
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            sub_path = f"{path}.{key}" if path else str(key)
+            hit = _find_media_bytes_path(child, sub_path)
+            if hit is not None:
+                return hit
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for index, child in enumerate(value):
+            sub_path = f"{path}[{index}]" if path else f"[{index}]"
+            hit = _find_media_bytes_path(child, sub_path)
+            if hit is not None:
+                return hit
+    return None
+
+
 def evaluate_compliance_result(result: ComplianceResult) -> ComplianceResult:
     """Convert a ComplianceResult to a fail-closed decision (C15–C18).
 
     Rules:
 
     * ``blocked_media_retained=True`` is a contract violation → ``FAILED``;
+    * ``audit_metadata`` containing ``bytes`` / ``bytearray`` / ``memoryview``
+      anywhere in the value tree (including nested ``Mapping`` / ``list`` /
+      ``tuple`` / ``set`` / ``frozenset`` containers) is a contract
+      violation → ``FAILED``;
+    * ``status`` that does not coerce to ``ComplianceStatus`` is a contract
+      violation → ``FAILED`` (wire-string ``"block"`` is normalized to the
+      enum so identity checks below cannot silently misroute it to ``PASS``);
     * ``BLOCK`` → ``REJECTED``;
     * ``NEEDS_MANUAL_REVIEW`` → ``SOFT_REJECTED`` (anonymous soft reject);
-    * ``PASS`` → return unchanged.
+    * ``PASS`` → return a ``ComplianceResult`` whose ``status`` is the
+      ``ComplianceStatus.PASS`` enum (the caller's object is not mutated;
+      when the input was already the enum the original instance is
+      returned unchanged).
 
     Exceptions / timeouts raised by upstream compliance providers must be
     converted to a ``FAILED`` ``IntakeRejected`` by the caller — this
@@ -329,17 +368,39 @@ def evaluate_compliance_result(result: ComplianceResult) -> ComplianceResult:
             PreviewStatus.FAILED,
             "blocked media bytes must not be retained",
         )
-    if result.status is ComplianceStatus.BLOCK:
+    hit = _find_media_bytes_path(result.audit_metadata)
+    if hit is not None:
+        offending_path, type_name = hit
+        raise IntakeRejected(
+            PreviewStatus.FAILED,
+            f"compliance audit metadata must not retain raw media bytes "
+            f"(path={offending_path!r}, type={type_name})",
+        )
+    status_input = result.status
+    if isinstance(status_input, ComplianceStatus):
+        status = status_input
+        normalized = result
+    else:
+        try:
+            status = ComplianceStatus(status_input)
+        except (TypeError, ValueError) as exc:
+            raise IntakeRejected(
+                PreviewStatus.FAILED,
+                f"compliance status is not a recognized ComplianceStatus "
+                f"({status_input!r})",
+            ) from exc
+        normalized = replace(result, status=status)
+    if status is ComplianceStatus.BLOCK:
         raise IntakeRejected(
             PreviewStatus.REJECTED,
             f"compliance block: {result.reason}",
         )
-    if result.status is ComplianceStatus.NEEDS_MANUAL_REVIEW:
+    if status is ComplianceStatus.NEEDS_MANUAL_REVIEW:
         raise IntakeRejected(
             PreviewStatus.SOFT_REJECTED,
             "anonymous needs_manual_review treated as soft reject",
         )
-    return result
+    return normalized
 
 
 def fail_closed_from_exception(

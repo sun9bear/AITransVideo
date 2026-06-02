@@ -183,14 +183,20 @@ class AnonymousPreviewBackendAdapter:
             )
             probe_result = self._safe_probe(upload)
             evaluate_probe_result(probe_result)
+            if probe_result.duration_seconds > config.max_source_duration_seconds:
+                raise IntakeRejected(
+                    PreviewStatus.REJECTED,
+                    f"probed duration {probe_result.duration_seconds} "
+                    f"exceeds intake cap",
+                )
             compliance_result = self._safe_compliance(probe_result)
-            evaluate_compliance_result(compliance_result)
+            normalized_compliance = evaluate_compliance_result(compliance_result)
             return build_preview_record(
                 config,
                 session=session,
                 upload=intake,
                 probe_result=probe_result,
-                compliance_result=compliance_result,
+                compliance_result=normalized_compliance,
                 source_type=request.source_type,
                 now=self.now_fn(),
             )
@@ -290,6 +296,11 @@ class AnonymousPreviewBackendAdapter:
         now = self.now_fn()
         source_hash = upload.source_hash if upload is not None else ""
         session_id_hash = self.hasher("sess", request.raw_session_id)
+        ttl_seconds = (
+            self.config.preview_record_ttl_seconds
+            if self.config is not None
+            else DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+        )
         return PreviewRecord(
             record_id=_default_record_id(source_hash),
             session_id_hash=session_id_hash,
@@ -303,8 +314,7 @@ class AnonymousPreviewBackendAdapter:
             compliance_status=None,
             compliance_audit_metadata={},
             created_at=now,
-            expires_at=now
-            + timedelta(seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS),
+            expires_at=now + timedelta(seconds=ttl_seconds),
             selected_mode_placeholder=None,
             recommended_mode_placeholder=None,
             claim_token_placeholder=None,

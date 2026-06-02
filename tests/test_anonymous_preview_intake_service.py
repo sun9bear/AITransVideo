@@ -415,6 +415,217 @@ def test_compliance_unknown_status_does_not_pass():
     assert evaluate_compliance_result(pass_result).status is ComplianceStatus.PASS
 
 
+def test_compliance_status_wire_string_block_is_normalized_and_rejected():
+    # Real compliance wrappers occasionally pass the wire-level string
+    # value instead of the ComplianceStatus enum. The pure helper must
+    # normalize before the identity check so ``"block"`` cannot silently
+    # skip past BLOCK / NEEDS_MANUAL_REVIEW and reach PASS.
+    result = ComplianceResult(
+        status="block",  # type: ignore[arg-type]
+        reason="prohibited content from wire-level wrapper",
+        audit_metadata={"matched_rule": "demo_rule"},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.REJECTED
+    assert "compliance block" in excinfo.value.reason
+
+
+def test_compliance_status_wire_string_needs_manual_review_is_soft_reject():
+    result = ComplianceResult(
+        status="needs_manual_review",  # type: ignore[arg-type]
+        reason="LLM unsure",
+        audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.SOFT_REJECTED
+
+
+def test_compliance_status_unrecognized_value_fails_closed():
+    result = ComplianceResult(
+        status="totally_unknown_state",  # type: ignore[arg-type]
+        reason="provider returned a value outside the contract",
+        audit_metadata={"layers": ("local_prefilter",)},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "compliance status" in excinfo.value.reason
+
+
+def test_compliance_status_non_string_value_fails_closed():
+    result = ComplianceResult(
+        status=42,  # type: ignore[arg-type]
+        reason="provider returned an int",
+        audit_metadata={},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+
+
+@pytest.mark.parametrize(
+    "media_value",
+    [b"\x00\x01raw media bytes\xff", bytearray(b"more bytes"), memoryview(b"buf")],
+)
+def test_compliance_audit_metadata_with_media_bytes_fails_closed(media_value):
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok; teaser ASR ok; LLM compliance ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            "teaser_audio": media_value,
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "audit metadata" in excinfo.value.reason
+    assert "teaser_audio" in excinfo.value.reason
+
+
+def test_compliance_audit_metadata_pure_strings_pass():
+    # Sanity check: the new fail-closed gate only triggers on raw byte
+    # types, not on legitimate string / tuple / number metadata.
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            "score": 0.97,
+            "model_id": "compliance-v1",
+        },
+        blocked_media_retained=False,
+    )
+    assert evaluate_compliance_result(result) is result
+
+
+def test_compliance_audit_metadata_nested_dict_bytes_fails_closed():
+    # bytes hidden one level deep inside a nested Mapping must still trip
+    # the recursive guard, not just the top-level keys.
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            "nested": {"audio": b"\x00\x01raw\xff"},
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "audit metadata" in excinfo.value.reason
+    assert "nested.audio" in excinfo.value.reason
+
+
+def test_compliance_audit_metadata_nested_list_memoryview_fails_closed():
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "samples": [
+                {"label": "ok"},
+                {"buffer": memoryview(b"snippet")},
+            ],
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "memoryview" in excinfo.value.reason
+    assert "samples" in excinfo.value.reason
+
+
+def test_compliance_audit_metadata_nested_tuple_bytearray_fails_closed():
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "evidence": (
+                "asr_text_only",
+                ("inner_label", bytearray(b"raw teaser bytes")),
+            ),
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "bytearray" in excinfo.value.reason
+    assert "evidence" in excinfo.value.reason
+
+
+def test_compliance_audit_metadata_nested_set_bytes_fails_closed():
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "rule_hashes": frozenset({b"hash-bytes-1"}),
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "rule_hashes" in excinfo.value.reason
+
+
+def test_compliance_audit_metadata_nested_textual_passes():
+    # Deeply nested but byte-free metadata — strings, numbers, tuples of
+    # strings — must continue to pass through the recursive guard.
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            "scores": {"prefilter": 0.99, "llm": 0.93},
+            "evidence": [
+                {"label": "ok"},
+                ("inner", "values"),
+                frozenset({"rule_a", "rule_b"}),
+            ],
+        },
+        blocked_media_retained=False,
+    )
+    assert evaluate_compliance_result(result) is result
+
+
+def test_compliance_pass_wire_string_returns_normalized_enum_status():
+    # The PASS path used to leak a raw "pass" string through to the
+    # PreviewRecord. The pure helper must normalize to the enum without
+    # mutating the caller's ComplianceResult instance.
+    result = ComplianceResult(
+        status="pass",  # type: ignore[arg-type]
+        reason="prefilter ok; teaser ASR ok; LLM compliance ok",
+        audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+        blocked_media_retained=False,
+    )
+    decision = evaluate_compliance_result(result)
+    assert decision.status is ComplianceStatus.PASS
+    assert decision is not result, "PASS normalization must not mutate caller"
+    assert result.status == "pass", "caller's instance must remain untouched"
+    assert decision.reason == result.reason
+    assert decision.audit_metadata == result.audit_metadata
+    assert decision.blocked_media_retained is False
+
+
+def test_compliance_pass_enum_status_returns_caller_instance():
+    # When the caller already passed a ComplianceStatus enum, the helper
+    # short-circuits and returns the original instance (no replace churn).
+    result = _passing_compliance()
+    decision = evaluate_compliance_result(result)
+    assert decision is result
+    assert decision.status is ComplianceStatus.PASS
+
+
 # ---------------------------------------------------------------------------
 # PreviewRecord — behavior #10 (status-only, no leaked fields).
 # ---------------------------------------------------------------------------
