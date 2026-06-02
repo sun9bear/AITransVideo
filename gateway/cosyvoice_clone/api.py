@@ -30,7 +30,7 @@ worker 回包 ``target_model`` → 写 ``user_voices`` row → 返回 voice meta
     11. SampleUploader 拿 short-TTL URL
 
     [跨境网络 + 付费 API ★]
-    12. client.clone(WorkerCloneRequest) — **唯一付费触发点**
+    12. client.clone(WorkerCloneRequest) — **唯一外部 clone API 触发点**
 
     [worker 回包契约校验]
     13. clone_resp.target_model == request.target_model（mismatch → 502 +
@@ -74,7 +74,7 @@ for _candidate in [
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from admin_settings import _is_admin, load_settings
@@ -107,7 +107,7 @@ from mainland_voice_worker import (
     build_mainland_voice_worker_client,
     is_mainland_voice_worker_config_ready,
 )
-from models import User
+from models import Job, User
 from user_voice_service import add_user_voice, count_active_voices_for_user_and_provider
 
 # Phase 1 worker contract（worker 端是部署到武汉的，但 client / dataclass
@@ -998,14 +998,14 @@ async def cosyvoice_clone(
             clone_worker_request_id=clone_resp.worker_request_id,
         )
     except Exception as exc:  # noqa: BLE001
-        # ⚠️ worker.clone 已经成功扣了 ¥0.01 但 DB 写失败：用户能在阿里云后台
+        # ⚠️ worker.clone 已经成功创建了免费 CosyVoice 音色但 DB 写失败：用户能在阿里云后台
         # 看到 voice_id 存在但 Gateway 看不到。这是 Phase 4.1 边界情况，需要
         # admin 后续手动同步或对账触发 reconcile。当前打 ERROR log + retryable
         # tombstone（plan §Voice Delete Flow 同款机制）。
         logger.error(
             "[cosyvoice_clone] CRITICAL: worker.clone succeeded (voice_id=%s, "
             "provider_request_id=%s) but DB write failed: %s. "
-            "User has been charged but voice not in library.",
+            "Provider voice exists but voice not in library.",
             clone_resp.voice_id,
             clone_resp.provider_request_id,
             exc,
@@ -1039,6 +1039,21 @@ async def cosyvoice_clone(
             float(validation.duration_ms) / 1000.0
             if validation.duration_ms else None
         ),
+    )
+    await _record_cosyvoice_clone_usage(
+        db,
+        source_job_id=(source_job_id or "").strip(),
+        speaker_id=speaker_id,
+        voice_id=clone_resp.voice_id,
+        target_model=target_model,
+        source_audio_seconds=(
+            float(validation.duration_ms) / 1000.0
+            if validation.duration_ms else 0.0
+        ),
+        source_audio_bytes=len(transcoded),
+        selected_segment_count=len(parsed_segments),
+        worker_request_id=clone_resp.worker_request_id,
+        provider_request_id=clone_resp.provider_request_id,
     )
 
     # === 成功响应 ===
@@ -1508,7 +1523,7 @@ def _log_clone_audit(
         "worker_request_id": worker_request_id,
         "provider_request_id": provider_request_id,
         "billed_units": 1,
-        "expected_cost_cny": 0.01,
+        "expected_cost_cny": 0.0,
         "clone_sample_seconds": clone_sample_seconds,
         "status": "succeeded",
         "created_at": _utc_now_iso(),
@@ -1516,3 +1531,70 @@ def _log_clone_audit(
     # 输出到 stdout（生产 docker logs 已经 bind-mount）；Phase 4.1 G 替换为
     # credits_ledger insert。注意 ``audit`` 关键字让运维 grep 容易。
     logger.info("[cosyvoice_clone_audit] %s", json.dumps(payload, ensure_ascii=False))
+
+
+async def _resolve_project_dir_for_metering(
+    db: AsyncSession,
+    source_job_id: str,
+) -> str | None:
+    job_id = (source_job_id or "").strip()
+    if not job_id:
+        return None
+    try:
+        result = await db.execute(select(Job.project_dir).where(Job.job_id == job_id))
+        project_dir = result.scalar_one_or_none()
+    except Exception:
+        logger.warning(
+            "CosyVoice clone usage metering skipped for job=%s: project_dir lookup failed",
+            job_id,
+            exc_info=True,
+        )
+        return None
+    value = str(project_dir or "").strip()
+    return value or None
+
+
+async def _record_cosyvoice_clone_usage(
+    db: AsyncSession,
+    *,
+    source_job_id: str,
+    speaker_id: str,
+    voice_id: str,
+    target_model: str,
+    source_audio_seconds: float,
+    source_audio_bytes: int,
+    selected_segment_count: int,
+    worker_request_id: str,
+    provider_request_id: str | None,
+) -> None:
+    project_dir = await _resolve_project_dir_for_metering(db, source_job_id)
+    if not project_dir:
+        return
+    try:
+        from services.usage_meter import UsageMeter
+
+        UsageMeter(project_dir, job_id=source_job_id).record_voice_clone(
+            provider=PROVIDER_COSYVOICE_VOICE_CLONE,
+            model=target_model,
+            voice_id=voice_id,
+            speaker_id=speaker_id,
+            source_audio_seconds=source_audio_seconds,
+            source_audio_bytes=source_audio_bytes,
+            selected_segment_count=selected_segment_count,
+            clone_count=1,
+            billable=False,
+            success=True,
+            extra={
+                "billing_policy": "cosyvoice_voice_enrollment_free",
+                "clone_api_model": CLONE_API_MODEL,
+                "worker_request_id": worker_request_id,
+                "provider_request_id": provider_request_id or "",
+            },
+        )
+    except Exception:
+        logger.warning(
+            "CosyVoice clone usage metering skipped for job=%s speaker=%s",
+            source_job_id,
+            speaker_id,
+            exc_info=True,
+        )

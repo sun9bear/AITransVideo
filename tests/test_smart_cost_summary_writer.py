@@ -381,40 +381,67 @@ class TestCostSummaryWiringAtHandoffSites:
                 f"Pre-call region (last 1500 chars):\n{pre_call[-1500:]}"
             )
 
-    def test_quota_brake_handoff_writes_cost_summary(self):
-        """Codex 第三十六轮 P1 explicitly called out quota-brake as a
-        failure case. Pin that the quota-unavailable handoff branch
-        (around the ``voice_library_quota_unavailable`` /
-        ``smart_handoff_quota_unavailable`` reason codes) writes
-        cost_summary.
+    def test_quota_lookup_failure_is_fail_open_not_handoff(self):
+        """Codex 第三十六轮 P1 originally called out quota-brake as a
+        failure case that must write cost_summary. The 2026-05-20
+        full-auto change (commit 7aa0abcb) deliberately *removed* the
+        old fail-closed quota handoff: the voice-library quota *lookup
+        failure* path no longer hands off to studio with the
+        ``smart_handoff_quota_unavailable`` execution_mode /
+        ``voice_library_quota_unavailable`` reason code. It now fails
+        OPEN — emits a ``quota_lookup_degraded`` audit and CONTINUES the
+        pipeline with an unlimited fallback quota — because lookup
+        failures are almost always transient infra, and Smart mode is
+        fully automatic. Its cost visibility therefore comes from the
+        eventual main-run terminal cost_summary (covered by
+        ``test_main_run_terminal_emits_cost_summary``), not a handoff.
 
-        Sources of truth: handoff site identified by the
-        ``smart_handoff_quota_unavailable`` execution_mode marker
-        downstream + ``voice_library_quota_unavailable`` reason text.
+        This test pins that deliberate decision and guards against an
+        accidental reintroduction of a fail-closed handoff that would
+        terminate WITHOUT writing cost_summary (the exact Codex
+        第三十六轮 P1 / terminal-settlement-single-entry concern).
+
+        The surviving real quota gate — MiniMax quota exhausted
+        *mid-flight* (``provider_quota_exhausted_mid_flight`` in
+        auto_voice_review) — routes through the generic voice_review
+        PAUSED handoff, whose cost_summary emission is already covered
+        by ``test_every_smart_handoff_site_writes_cost_summary``.
         """
         source = self._source()
 
-        # Find the quota-brake handoff region by its unique downstream
-        # marker.
-        quota_anchor = source.find("smart_handoff_quota_unavailable")
-        assert quota_anchor >= 0, (
-            "Quota-brake handoff marker not found; pipeline shape changed."
+        # The old fail-closed quota handoff marker must stay gone. If it
+        # reappears, the branch MUST also write cost_summary — re-pin
+        # this test against the new shape rather than reverting blindly.
+        assert "smart_handoff_quota_unavailable" not in source, (
+            "Old fail-closed quota handoff (smart_handoff_quota_unavailable) "
+            "reintroduced into process.py. If quota-lookup failure must hand "
+            "off again, that branch MUST write cost_summary (Codex 第三十六轮 "
+            "P1 / feedback_terminal_state_single_entry)."
         )
 
-        # Walk back to the enclosing emit_handoff_markers call.
-        upstream = source[max(0, quota_anchor - 4000) : quota_anchor]
-        assert "emit_handoff_markers(" in upstream, (
-            "Could not locate emit_handoff_markers call upstream of "
-            "quota-brake marker."
+        # Anchor on the fail-open continuation audit emitted when the
+        # quota lookup returns None.
+        degraded_anchor = source.find("quota_lookup_failed_continuing")
+        assert degraded_anchor >= 0, (
+            "Fail-open quota-lookup-degraded path not found "
+            "(quota_lookup_failed_continuing); pipeline shape changed — "
+            "re-derive the quota cost-visibility contract before editing."
         )
 
-        # Walk forward from the handoff site through the return.
-        # The cost_summary call must be in the window from the upstream
-        # handoff call to ~500 chars past the quota marker.
-        window = source[max(0, quota_anchor - 4000) : quota_anchor + 1000]
-        assert "_emit_smart_cost_summary" in window, (
-            "Quota-brake handoff branch does not call _emit_smart_cost_summary. "
-            "Codex 第三十六轮 P1 specifically required quota-brake regression "
-            "coverage:\n"
-            f"Window:\n{window}"
+        # From the degraded audit, the pipeline must resume into the
+        # voice-review evaluation WITHOUT an intervening handoff. A
+        # handoff here would terminate the job at a point that — per the
+        # original P1 concern — would need its own cost_summary write.
+        resume_idx = source.find("evaluate_voice_review(", degraded_anchor)
+        assert resume_idx > degraded_anchor, (
+            "Could not find the evaluate_voice_review continuation after "
+            "the quota-lookup-degraded audit."
+        )
+        between = source[degraded_anchor:resume_idx]
+        assert "emit_handoff_markers(" not in between, (
+            "The quota-lookup-failure path emits a handoff before resuming "
+            "into voice review. It must fail OPEN and continue (2026-05-20 "
+            "full-auto). A handoff here without a cost_summary write would "
+            "leave a terminal-settled job with no admin cost visibility.\n"
+            f"Region between degraded audit and voice review:\n{between}"
         )

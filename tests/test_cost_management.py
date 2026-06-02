@@ -104,6 +104,95 @@ def test_aggregate_and_apply_costs_split_llm_and_tts_buckets():
     assert breakdown.voice_clone_rows[0].cost_rmb == 9.9
 
 
+def test_cosyvoice_v35_tts_rates_and_free_clone_cost():
+    events = [
+        {
+            "kind": "tts",
+            "bucket": "first_tts",
+            "provider": "cosyvoice",
+            "model": "cosyvoice-v3.5-flash",
+            "billed_chars": 10_000,
+        },
+        {
+            "kind": "tts",
+            "bucket": "first_tts",
+            "provider": "cosyvoice",
+            "model": "cosyvoice-v3.5-plus",
+            "billed_chars": 10_000,
+        },
+        {
+            "kind": "voice_clone",
+            "bucket": "voice_clone",
+            "provider": "cosyvoice_voice_clone",
+            "model": "cosyvoice-v3.5-flash",
+            "clone_count": 1,
+            "billable": False,
+            "success": True,
+        },
+    ]
+
+    breakdown = _aggregate_usage_events(events)
+    apply_costs(breakdown, DEFAULT_PRICE_CATALOG)
+
+    costs_by_model = {row.model: row.cost_rmb for row in breakdown.tts_rows}
+    assert costs_by_model["cosyvoice-v3.5-flash"] == 0.8
+    assert costs_by_model["cosyvoice-v3.5-plus"] == 1.5
+    clone = breakdown.voice_clone_rows[0]
+    assert clone.provider == "cosyvoice"
+    assert clone.billable_clones == 0
+    assert clone.cost_rmb == 0.0
+    assert clone.rate_status == "configured"
+
+
+def test_cosyvoice_historical_wrong_model_infers_v35_from_voice_id():
+    events = [
+        {
+            "kind": "tts",
+            "bucket": "first_tts",
+            "provider": "cosyvoice",
+            "model": "speech-2.8-turbo",
+            "selected_voice": "cosyvoice-v3.5-flash-avtspeak-abc",
+            "billed_chars": 10_000,
+        },
+    ]
+
+    breakdown = _aggregate_usage_events(
+        events,
+        default_tts_provider="cosyvoice",
+        default_tts_model="cosyvoice-v3-flash",
+    )
+    apply_costs(breakdown, DEFAULT_PRICE_CATALOG)
+
+    row = breakdown.tts_rows[0]
+    assert row.model == "cosyvoice-v3.5-flash"
+    assert row.cost_rmb == 0.8
+    assert any(
+        "inferred_tts_model_from_voice:"
+        "cosyvoice:speech-2.8-turbo->cosyvoice-v3.5-flash" in warning
+        for warning in breakdown.warnings
+    )
+
+
+def test_cosyvoice_historical_v3_default_infers_v35_plus_from_worker_target_model():
+    events = [
+        {
+            "kind": "tts",
+            "bucket": "first_tts",
+            "provider": "cosyvoice",
+            "model": "cosyvoice-v3-flash",
+            "worker_target_model": "cosyvoice-v3.5-plus",
+            "billed_chars": 10_000,
+        },
+    ]
+
+    breakdown = _aggregate_usage_events(events)
+    apply_costs(breakdown, DEFAULT_PRICE_CATALOG)
+
+    row = breakdown.tts_rows[0]
+    assert row.model == "cosyvoice-v3.5-plus"
+    assert row.cost_rmb == 1.5
+
+
 def test_build_job_breakdown_falls_back_to_snapshot_when_usage_events_missing(tmp_path):
     snapshot = {
         "first_tts_billed_chars": 10_000,
@@ -128,6 +217,66 @@ def test_build_job_breakdown_falls_back_to_snapshot_when_usage_events_missing(tm
     assert breakdown.tts_rows[0].cost_rmb == 3.5
     assert len(breakdown.llm_rows) == 1
     assert breakdown.llm_rows[0].rate_status == "missing_rate"
+
+
+def test_snapshot_breakdown_uses_llm_model_distribution(tmp_path):
+    snapshot = {
+        "llm_input_tokens": 1_010_000,
+        "llm_output_tokens": 101_000,
+        "llm_model_call_distribution": {
+            "gemini:gemini-3.5-flash:s3_translate": 2,
+            "gemini:gemini-3.1-pro-preview:s2_pass1": 1,
+        },
+        "s3_translate_llm_input_tokens": 1_000_000,
+        "s3_translate_llm_output_tokens": 100_000,
+        "s2_pass1_llm_input_tokens": 10_000,
+        "s2_pass1_llm_output_tokens": 1_000,
+    }
+
+    breakdown = build_job_breakdown(
+        project_dir=str(tmp_path),
+        snapshot=snapshot,
+        default_tts_provider="minimax",
+        default_tts_model="speech-2.8-hd",
+        catalog=DEFAULT_PRICE_CATALOG,
+    )
+
+    rows = {(row.provider, row.model_id, row.task): row for row in breakdown.llm_rows}
+    assert rows[("gemini", "gemini-3.5-flash", "s3_translate")].rate_status == "configured"
+    assert rows[("gemini", "gemini-3.5-flash", "s3_translate")].cost_rmb == 17.28
+    assert rows[("gemini", "gemini-3.1-pro-preview", "s2_pass1")].rate_status == "configured"
+    assert rows[("gemini", "gemini-3.1-pro-preview", "s2_pass1")].cost_rmb == 0.2304
+    assert all(row.provider != "unknown" for row in breakdown.llm_rows)
+    assert any("snapshot_llm_model_distribution_fallback" in warning for warning in breakdown.warnings)
+
+
+def test_snapshot_breakdown_allocates_llm_residual_tokens_to_distribution_gap(tmp_path):
+    snapshot = {
+        "llm_input_tokens": 1_001_000,
+        "llm_output_tokens": 100_100,
+        "llm_model_call_distribution": {
+            "gemini:gemini-3.5-flash:s3_translate": 2,
+            "gemini:gemini-3.1-flash-lite:content_compliance": 1,
+        },
+        "s3_translate_llm_input_tokens": 1_000_000,
+        "s3_translate_llm_output_tokens": 100_000,
+    }
+
+    breakdown = build_job_breakdown(
+        project_dir=str(tmp_path),
+        snapshot=snapshot,
+        default_tts_provider="minimax",
+        default_tts_model="speech-2.8-hd",
+        catalog=DEFAULT_PRICE_CATALOG,
+    )
+
+    rows = {(row.provider, row.model_id, row.task): row for row in breakdown.llm_rows}
+    residual = rows[("gemini", "gemini-3.1-flash-lite", "content_compliance")]
+    assert residual.input_tokens == 1000
+    assert residual.output_tokens == 100
+    assert residual.rate_status == "configured"
+    assert residual.cost_rmb == 0.00288
+    assert any("snapshot_llm_residual_tokens_allocated" in warning for warning in breakdown.warnings)
 
 
 def test_mimo_v25_llm_cost_text_and_cached():

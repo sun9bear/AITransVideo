@@ -3,19 +3,19 @@
 **调用顺序（不可乱）**：
 
     consent gate → main speaker → sample(extract+validate)
-      → ★ ATOMIC RESERVE ★  （最终成本闸；之后才有付费动作）
-      → upload sample → worker clone(付费) → register-smart → consume
+      → ★ ATOMIC RESERVE ★  （最终外部调用闸；之后才有 provider 副作用）
+      → upload sample → worker clone(provider API) → register-smart → consume
 
 **失败路径（Codex PR2-E）**：
 
-| 失败点 | reservation | 付费副作用清理 | routing |
+| 失败点 | reservation | provider 副作用清理 | routing |
 |---|---|---|---|
 | consent/main-speaker/sample | （未 reserve）无 | 无 | 预设 |
 | reserve denied/error | 无 | 无（未 upload/worker） | 预设 |
 | upload 失败 | **release** | 无 | 预设 |
 | worker clone 失败 | **release** | 无（worker 未成功） | 预设 |
 | register 失败（worker 已成功）| **release** | best-effort **delete_voice** 孤儿清理 | 预设 |
-| consume 失败（已 clone+register）| 留给 TTL sweeper | 无（voice 可用） | **注入**（不浪费已付费 clone）+ audit |
+| consume 失败（已 clone+register）| 留给 TTL sweeper | 无（voice 可用） | **注入**（不浪费已创建 voice）+ audit |
 | release 自身失败 | 记 audit + TTL 兜底 | — | — |
 
 **绝不调 MiniMax**：任何失败 ``speaker_voices`` 保持不变 → 下游 voice
@@ -314,6 +314,31 @@ def run_express_auto_clone(
             else "register_failed_orphan_cleanup_failed"
         )
         return _finish(decision, "register_failed", cloned=False)
+
+    try:
+        from services.usage_meter import UsageMeter
+
+        UsageMeter(project_dir, job_id=job_id).record_voice_clone(
+            provider="cosyvoice_voice_clone",
+            model=target_model,
+            voice_id=clone_res.voice_id,
+            speaker_id=main_speaker_id,
+            source_audio_seconds=float(sample.duration_s or 0.0),
+            source_audio_bytes=0,
+            selected_segment_count=len(sample.segment_ids),
+            clone_count=1,
+            billable=False,
+            success=True,
+            extra={
+                "billing_policy": "cosyvoice_voice_enrollment_free",
+                "service_mode": "express",
+                "worker_request_id": clone_res.worker_request_id or "",
+                "provider_request_id": clone_res.provider_request_id or "",
+                "reservation_id": reservation_id,
+            },
+        )
+    except Exception:
+        logger.warning("express clone usage metering skipped job=%s", job_id, exc_info=True)
 
     # === consume reservation（成功路径）===
     reservation_status_final = "consumed"

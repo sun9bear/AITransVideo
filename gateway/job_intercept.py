@@ -226,16 +226,48 @@ def _resolved_upload_source_path(candidate: Path, uploads_root: Path) -> Path | 
     return resolved
 
 
+def _resolve_existing_upload_source_path(source_value: str) -> Path | None:
+    uploads_root = (_project_root_for_uploaded_sources() / "uploads").resolve(strict=False)
+    for candidate in _candidate_local_source_paths(source_value):
+        resolved = _resolved_upload_source_path(candidate, uploads_root)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _resolve_existing_upload_source_by_id(
+    upload_id: str,
+    *,
+    user_id: str | None,
+) -> Path | None:
+    cleaned = re.sub(r"[^a-zA-Z0-9_\-]", "_", (upload_id or "").strip())
+    if not cleaned:
+        return None
+    uploads_root = (_project_root_for_uploaded_sources() / "uploads").resolve(strict=False)
+    search_root = uploads_root
+    if user_id:
+        safe_user_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(user_id).strip())
+        search_root = uploads_root / safe_user_id
+    if not search_root.exists():
+        return None
+    for candidate in sorted(search_root.glob(f"{cleaned}_*")):
+        if candidate.name.endswith(".asset.json") or candidate.name.endswith(".asset.json.tmp"):
+            continue
+        resolved = _resolved_upload_source_path(candidate, uploads_root)
+        if resolved is not None:
+            return resolved
+    return None
+
+
 async def _compute_source_content_hash(source_type: str, source_value: str) -> str | None:
     normalized_type = (source_type or "").strip().lower()
     if normalized_type == "youtube_url":
         return canonicalize_youtube_source_content_hash(source_value)
     if normalized_type == "local_video":
         uploads_root = (_project_root_for_uploaded_sources() / "uploads").resolve(strict=False)
-        for candidate in _candidate_local_source_paths(source_value):
-            resolved = _resolved_upload_source_path(candidate, uploads_root)
-            if resolved is not None:
-                return await asyncio.to_thread(_sha256_content_hash_for_file, resolved)
+        resolved = _resolve_existing_upload_source_path(source_value)
+        if resolved is not None:
+            return await asyncio.to_thread(_sha256_content_hash_for_file, resolved)
         logger.warning(
             "source_content_hash: no valid upload found inside %s for %s",
             uploads_root,
@@ -1370,7 +1402,9 @@ async def intercept_create_job(
     source = request_data.get("source", {})
     source_type = str(source.get("type", "")).strip() if isinstance(source, dict) else ""
     source_value = str(source.get("value", "")).strip() if isinstance(source, dict) else ""
-    if not source_type or not source_value:
+    source_upload_id = str(source.get("upload_id", "")).strip() if isinstance(source, dict) else ""
+    has_local_upload_id = source_type in {"local_file", "local_video"} and bool(source_upload_id)
+    if not source_type or (not source_value and not has_local_upload_id):
         return _error_response(
             400, "invalid_source",
             "缺少视频来源信息。",
@@ -1382,6 +1416,24 @@ async def intercept_create_job(
         source_type = "local_video"
         if isinstance(source, dict):
             source["type"] = "local_video"
+
+    if source_type == "local_video" and not source_value and source_upload_id:
+        resolved_upload = _resolve_existing_upload_source_by_id(
+            source_upload_id,
+            user_id=str(user.id) if user is not None else None,
+        )
+        if resolved_upload is not None:
+            source_value = str(resolved_upload)
+            if isinstance(source, dict):
+                source["value"] = source_value
+
+    if source_type == "local_video" and _resolve_existing_upload_source_path(source_value) is None:
+        return _error_response(
+            400,
+            "upload_source_missing",
+            "上传文件不存在或已过期，请重新上传视频后再创建任务。",
+            {"reason": "missing_or_outside_uploads"},
+        )
 
     source_content_hash = await _compute_source_content_hash(source_type, source_value)
 

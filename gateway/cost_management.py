@@ -34,7 +34,7 @@ JOB_TTS_BUCKETS = {
 }
 
 DEFAULT_PRICE_CATALOG: dict[str, Any] = {
-    "version": "2026-05-29-mimo-v2.5-llm-tts",
+    "version": "2026-05-31-cosyvoice-v35-mimo-voiceclone-costs",
     "currency": "RMB",
     # Retained for backward compat — ``_rate_to_rmb`` still honors
     # ``_per_million_usd`` fields if present (multiplies by this rate).
@@ -49,7 +49,8 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
         "2026-05-18 audit: LLM rates switched from USD to direct RMB "
         "to match billing currency. 2026-05-20: Gemini 3.5 Flash added; "
         "2026-05-21: Gemini 3.1 Flash Lite preview migrated to the GA "
-        "gemini-3.1-flash-lite endpoint."
+        "gemini-3.1-flash-lite endpoint. 2026-05-31: CosyVoice v3.5 "
+        "TTS rates and free voice enrollment metering added."
     ),
     "llm": {
         # DeepSeek 直接 RMB 计价。把原 USD 报价乘以基准汇率 7.2
@@ -149,7 +150,15 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
         },
         "cosyvoice:cosyvoice-v3-flash": {
             "rmb_per_10k_billed_chars": 1.0,
-            "source": "cost_metering_plan",
+            "source": "aliyun_bailian_model_pricing_2026-05-31",
+        },
+        "cosyvoice:cosyvoice-v3.5-flash": {
+            "rmb_per_10k_billed_chars": 0.8,
+            "source": "aliyun_bailian_model_pricing_2026-05-31",
+        },
+        "cosyvoice:cosyvoice-v3.5-plus": {
+            "rmb_per_10k_billed_chars": 1.5,
+            "source": "aliyun_bailian_model_pricing_2026-05-31",
         },
         "volcengine:seed-tts-2.0": {
             "rmb_per_10k_billed_chars": 3.0,
@@ -162,8 +171,8 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
         # MiMo TTS — 官方 2026-05-27 公告"限时免费"、无失效日期（plan Phase 3）。
         # token-based billing 且当前免费，billed_chars 保持 0；用 promotional
         # 标记让 admin 成本页显示"限免"而非 missing_rate / 长期 0 成本误导。
-        # 三个 key 覆盖事件解析的几种 model 取值（resolver 默认 mimo-tts +
-        # 实际 v2.5/v2 名）。
+        # 多个 key 覆盖事件解析的几种 model 取值（resolver 默认 mimo-tts +
+        # 实际 v2.5/v2 名，以及免费版 voiceclone 模型名）。
         "mimo:mimo-tts": {
             "rmb_per_10k_billed_chars": 0.0,
             "promotional": True,
@@ -171,6 +180,12 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
             "source": "xiaomi_mimo_limited_free_2026-05-27",
         },
         "mimo:mimo-v2.5-tts": {
+            "rmb_per_10k_billed_chars": 0.0,
+            "promotional": True,
+            "promotional_note": "限时免费，失效日期未知/待确认",
+            "source": "xiaomi_mimo_limited_free_2026-05-27",
+        },
+        "mimo:mimo-v2.5-tts-voiceclone": {
             "rmb_per_10k_billed_chars": 0.0,
             "promotional": True,
             "promotional_note": "限时免费，失效日期未知/待确认",
@@ -188,6 +203,11 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
             "rmb_per_clone": 9.9,
             "source": "minimax_paygo_pricing_voice_cloning_2026-05-05",
             "billing_policy": "charged on first T2A synthesis with cloned voice",
+        },
+        "cosyvoice:voice_clone": {
+            "rmb_per_clone": 0.0,
+            "source": "aliyun_bailian_cosyvoice_voice_enrollment_free_2026-05-31",
+            "billing_policy": "cosyvoice voice enrollment is free; TTS is billed per character",
         },
     },
 }
@@ -294,7 +314,7 @@ def _norm_provider(value: object) -> str:
     raw = _norm(value)
     if raw in {"minimax_tts", "minimax_voice_clone"}:
         return "minimax"
-    if raw in {"cosyvoice_tts", "dashscope", "aliyun"}:
+    if raw in {"cosyvoice_tts", "cosyvoice_voice_clone", "dashscope", "aliyun"}:
         return "cosyvoice"
     if raw in {"volcengine_tts", "doubao"}:
         return "volcengine"
@@ -338,6 +358,154 @@ def _model_belongs_to_provider(provider: str, model: str) -> bool:
     if provider == "mimo":
         return model.startswith("mimo")
     return True
+
+
+def _infer_cosyvoice_model_from_event(event: dict[str, Any]) -> str:
+    for field in ("worker_target_model", "target_model", "selected_voice", "voice_id"):
+        value = _norm(event.get(field))
+        if not value:
+            continue
+        if value.startswith("cosyvoice-v3.5-plus"):
+            return "cosyvoice-v3.5-plus"
+        if value.startswith("cosyvoice-v3.5-flash"):
+            return "cosyvoice-v3.5-flash"
+    return ""
+
+
+def _allocate_int(total: int, weights: list[int]) -> list[int]:
+    total = max(0, _coerce_int(total))
+    positive_weights = [max(0, _coerce_int(weight)) for weight in weights]
+    weight_sum = sum(positive_weights)
+    if total <= 0 or weight_sum <= 0:
+        return [0 for _ in positive_weights]
+    raw_values = [total * weight / weight_sum for weight in positive_weights]
+    base_values = [int(value) for value in raw_values]
+    remainder = total - sum(base_values)
+    if remainder > 0:
+        order = sorted(
+            range(len(base_values)),
+            key=lambda index: raw_values[index] - base_values[index],
+            reverse=True,
+        )
+        for index in order[:remainder]:
+            base_values[index] += 1
+    return base_values
+
+
+def _snapshot_llm_distribution_rows(
+    snapshot: dict[str, Any],
+    warnings: list[str],
+) -> list[LLMRow]:
+    distribution = snapshot.get("llm_model_call_distribution")
+    if not isinstance(distribution, dict):
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for raw_key, raw_calls in distribution.items():
+        calls = _coerce_int(raw_calls)
+        if calls <= 0:
+            continue
+        parts = str(raw_key or "").split(":", 2)
+        if len(parts) != 3:
+            warnings.append(f"snapshot_llm_distribution_key_unparseable:{raw_key}")
+            continue
+        provider, model_id, task = parts
+        provider_key = _norm_provider(provider)
+        model_key = _norm_model(model_id)
+        task_key = _norm(task) or "unknown"
+        if provider_key == "unknown" or model_key == "unknown":
+            warnings.append(f"snapshot_llm_distribution_key_unparseable:{raw_key}")
+            continue
+        entries.append(
+            {
+                "provider": provider_key,
+                "model": model_key,
+                "model_id": model_key,
+                "task": task_key,
+                "calls": calls,
+            }
+        )
+
+    if not entries:
+        return []
+
+    rows: list[LLMRow] = []
+    missing_token_entries: list[dict[str, Any]] = []
+    allocated_input = 0
+    allocated_output = 0
+
+    tasks = sorted({str(entry["task"]) for entry in entries})
+    for task in tasks:
+        task_entries = [entry for entry in entries if entry["task"] == task]
+        weights = [_coerce_int(entry["calls"]) for entry in task_entries]
+        task_input = _coerce_int(snapshot.get(f"{task}_llm_input_tokens"))
+        task_output = _coerce_int(snapshot.get(f"{task}_llm_output_tokens"))
+        if task_input <= 0 and task_output <= 0:
+            missing_token_entries.extend(task_entries)
+            continue
+
+        input_allocations = _allocate_int(task_input, weights)
+        output_allocations = _allocate_int(task_output, weights)
+        allocated_input += sum(input_allocations)
+        allocated_output += sum(output_allocations)
+        for entry, input_tokens, output_tokens in zip(
+            task_entries,
+            input_allocations,
+            output_allocations,
+            strict=False,
+        ):
+            rows.append(
+                LLMRow(
+                    provider=str(entry["provider"]),
+                    model=str(entry["model"]),
+                    model_id=str(entry["model_id"]),
+                    task=task,
+                    phase="",
+                    calls=_coerce_int(entry["calls"]),
+                    success_calls=_coerce_int(entry["calls"]),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            )
+
+    remaining_input = max(0, _coerce_int(snapshot.get("llm_input_tokens")) - allocated_input)
+    remaining_output = max(0, _coerce_int(snapshot.get("llm_output_tokens")) - allocated_output)
+    if missing_token_entries and (remaining_input > 0 or remaining_output > 0):
+        weights = [_coerce_int(entry["calls"]) for entry in missing_token_entries]
+        input_allocations = _allocate_int(remaining_input, weights)
+        output_allocations = _allocate_int(remaining_output, weights)
+        for entry, input_tokens, output_tokens in zip(
+            missing_token_entries,
+            input_allocations,
+            output_allocations,
+            strict=False,
+        ):
+            rows.append(
+                LLMRow(
+                    provider=str(entry["provider"]),
+                    model=str(entry["model"]),
+                    model_id=str(entry["model_id"]),
+                    task=str(entry["task"]),
+                    phase="",
+                    calls=_coerce_int(entry["calls"]),
+                    success_calls=_coerce_int(entry["calls"]),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            )
+        warnings.append(
+            "snapshot_llm_residual_tokens_allocated:"
+            f"input={remaining_input},output={remaining_output}"
+        )
+    elif remaining_input > 0 or remaining_output > 0:
+        warnings.append(
+            "snapshot_llm_tokens_unallocated:"
+            f"input={remaining_input},output={remaining_output}"
+        )
+
+    if rows:
+        warnings.append("snapshot_llm_model_distribution_fallback")
+    return sorted(rows, key=lambda row: (row.provider, row.model_id, row.task, row.phase))
 
 
 def _resolve_tts_event_model(
@@ -594,9 +762,21 @@ def _aggregate_usage_events(
             row.audio_input_bytes += _coerce_int(event.get("audio_input_bytes"))
         elif kind == "tts":
             provider = _norm_provider(event.get("provider") or default_tts_provider)
+            event_model = event.get("model")
+            inferred_model = (
+                _infer_cosyvoice_model_from_event(event)
+                if provider == "cosyvoice"
+                else ""
+            )
+            if inferred_model and _norm_model(event_model) != inferred_model:
+                breakdown.warnings.append(
+                    "inferred_tts_model_from_voice:"
+                    f"{provider}:{_norm_model(event_model)}->{inferred_model}"
+                )
+                event_model = inferred_model
             model = _resolve_tts_event_model(
                 provider,
-                event.get("model"),
+                event_model,
                 default_tts_provider=default_tts_provider,
                 default_tts_model=default_tts_model,
                 warnings=breakdown.warnings,
@@ -675,7 +855,8 @@ def _snapshot_breakdown(
     )
     input_tokens = _coerce_int(snapshot.get("llm_input_tokens"))
     output_tokens = _coerce_int(snapshot.get("llm_output_tokens"))
-    if input_tokens or output_tokens:
+    breakdown.llm_rows = _snapshot_llm_distribution_rows(snapshot, breakdown.warnings)
+    if (input_tokens or output_tokens) and not breakdown.llm_rows:
         breakdown.llm_rows.append(
             LLMRow(
                 provider="unknown",

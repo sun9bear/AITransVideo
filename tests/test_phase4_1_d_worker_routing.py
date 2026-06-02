@@ -196,6 +196,36 @@ def test_requires_worker_true_routes_to_worker(
     assert result.voice_id == "cosyvoice_custom_test"
 
 
+def test_worker_path_records_actual_target_model_in_usage_meter(
+    monkeypatch, make_generator, worker_segment, tmp_path
+):
+    worker_segment.worker_target_model = "cosyvoice-v3.5-plus"
+    fake = _FakeClient(response=_make_batch_response(target_model="cosyvoice-v3.5-plus"))
+    monkeypatch.setattr(
+        "services.mainland_worker.client_factory.build_client_from_env",
+        lambda: fake,
+    )
+
+    class _Meter:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def record_tts(self, **kwargs):
+            self.calls.append(kwargs)
+
+    meter = _Meter()
+    gen = make_generator()
+    gen._usage_meter = meter
+
+    gen._generate_one(worker_segment, str(tmp_path), provider="cosyvoice")
+
+    assert len(meter.calls) == 1
+    call = meter.calls[0]
+    assert call["provider"] == "cosyvoice"
+    assert call["model"] == "cosyvoice-v3.5-plus"
+    assert call["billed_chars"] == 26
+
+
 def test_requires_worker_false_keeps_legacy_dashscope_path(
     monkeypatch, make_generator, base_segment, tmp_path
 ):

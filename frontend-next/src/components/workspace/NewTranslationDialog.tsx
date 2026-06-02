@@ -18,6 +18,11 @@ interface NewTranslationDialogProps {
   onJobCreated?: () => void
   /** Pre-fill source URL for "recreate" from failed job */
   initialSourceUrl?: string
+  initialLocalUpload?: {
+    filePath: string
+    fileName?: string
+    uploadId?: string
+  }
 }
 
 export function NewTranslationDialog({
@@ -25,6 +30,7 @@ export function NewTranslationDialog({
   onOpenChange,
   onJobCreated,
   initialSourceUrl,
+  initialLocalUpload,
 }: NewTranslationDialogProps) {
   return (
     <Dialog open={open} onOpenChange={(value) => onOpenChange(value)}>
@@ -39,6 +45,7 @@ export function NewTranslationDialog({
             onOpenChange={onOpenChange}
             onJobCreated={onJobCreated}
             initialSourceUrl={initialSourceUrl}
+            initialLocalUpload={initialLocalUpload}
           />
         )}
       </DialogContent>
@@ -50,10 +57,16 @@ function DialogBody({
   onOpenChange,
   onJobCreated,
   initialSourceUrl,
+  initialLocalUpload,
 }: {
   onOpenChange: (open: boolean) => void
   onJobCreated?: () => void
   initialSourceUrl?: string
+  initialLocalUpload?: {
+    filePath: string
+    fileName?: string
+    uploadId?: string
+  }
 }) {
   const [showSuccess, setShowSuccess] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -82,5 +95,12 @@ function DialogBody({
     )
   }
 
-  return <TranslationForm mode="dialog" onCreated={handleCreated} initialSourceUrl={initialSourceUrl} />
+  return (
+    <TranslationForm
+      mode="dialog"
+      onCreated={handleCreated}
+      initialSourceUrl={initialSourceUrl}
+      initialLocalUpload={initialLocalUpload}
+    />
+  )
 }

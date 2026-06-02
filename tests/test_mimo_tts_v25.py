@@ -59,6 +59,19 @@ def test_mimo_tts_promotional_rate_status():
     assert "limited_free" in row.rate_source
 
 
+def test_mimo_voiceclone_tts_promotional_rate_status():
+    events = [
+        {"kind": "tts", "bucket": "first_tts", "provider": "mimo",
+         "model": "mimo-v2.5-tts-voiceclone", "billed_chars": 0},
+    ]
+    breakdown = _aggregate_usage_events(events)
+    apply_costs(breakdown, DEFAULT_PRICE_CATALOG)
+    row = breakdown.tts_rows[0]
+    assert row.rate_status == "promotional"
+    assert row.cost_rmb == 0.0
+    assert "limited_free" in row.rate_source
+
+
 def test_minimax_tts_still_configured_not_promotional():
     # Guard: the promotional branch must not leak to paid providers.
     events = [

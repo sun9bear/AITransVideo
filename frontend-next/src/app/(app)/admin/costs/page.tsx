@@ -268,12 +268,12 @@ export default function AdminCostManagementPage() {
             <MetricCard label="任务数" value={fmt(data.totals.jobs)} sub={`${fmt(data.totals.jobs_with_usage_events)} 个有 usage_events`} />
             <MetricCard label="总成本" value={fmtMoney(data.totals.total_cost_rmb)} sub={perMinute(data.totals.cost_per_minute_rmb)} />
             <MetricCard
-              label="预估收入"
+              label="点数面值收入"
               value={fmtMoney(data.totals.revenue_estimate_rmb)}
-              sub={`按 ${fmtMoney(data.totals.point_price_rmb)} / 点`}
+              sub={`${fmtMoney(data.totals.point_price_rmb)} / 点 · 非现金确认`}
             />
             <MetricCard
-              label="预估毛利率"
+              label="面值毛利率"
               value={fmtPercent(data.totals.gross_margin_pct)}
               sub={`毛利 ${fmtMoney(data.totals.gross_profit_rmb)} · 含服务器估算`}
               warn={(data.totals.gross_margin_pct ?? 100) < 50}
@@ -290,13 +290,18 @@ export default function AdminCostManagementPage() {
           </div>
 
           <div className="rounded-lg border border-border bg-card px-4 py-3 text-xs text-muted-foreground">
-            价格版本：<span className="text-foreground">{data.pricing_version}</span>
-            <span className="mx-2 text-border">|</span>
-            价格表：<span className="text-foreground">{data.catalog_path}</span>
-            <span className="mx-2 text-border">|</span>
-            收入口径：<span className="text-foreground">实扣/预估点数 × {fmtMoney(data.totals.point_price_rmb)} / 点</span>
-            <span className="mx-2 text-border">|</span>
-            服务器估算：<span className="text-foreground">{fmtMoney(data.totals.server_cost_per_min_rmb)} / 分钟</span>
+            <div>
+              价格版本：<span className="text-foreground">{data.pricing_version}</span>
+              <span className="mx-2 text-border">|</span>
+              价格表：<span className="text-foreground">{data.catalog_path}</span>
+              <span className="mx-2 text-border">|</span>
+              收入口径：<span className="text-foreground">实扣/预估点数 × {fmtMoney(data.totals.point_price_rmb)} / 点</span>
+              <span className="mx-2 text-border">|</span>
+              服务器估算：<span className="text-foreground">{fmtMoney(data.totals.server_cost_per_min_rmb)} / 分钟</span>
+            </div>
+            <div className="mt-2 text-[color:var(--ochre)]">
+              收入和毛利为点数面值口径，用于 unit economics；赠点和套餐点不等同现金收入，不能直接作为财务收入确认。
+            </div>
           </div>
 
           <div className="overflow-hidden rounded-lg border border-border bg-card">
@@ -312,8 +317,8 @@ export default function AdminCostManagementPage() {
                     <Th right>TTS</Th>
                     <Th right>克隆</Th>
                     <Th right>总成本</Th>
-                    <Th right>预估收入</Th>
-                    <Th right>毛利率</Th>
+                    <Th right>点数面值</Th>
+                    <Th right>面值毛利率</Th>
                     <Th right>每分钟</Th>
                     <Th right>事件</Th>
                     <Th right>缺价</Th>
@@ -455,12 +460,12 @@ function JobDetails({ job, onClose }: { job: CostJob; onClose: () => void }) {
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-7">
             <MetricCard label="总成本" value={fmtMoney(job.total_cost_rmb)} sub={perMinute(job.cost_per_minute_rmb)} />
             <MetricCard
-              label="预估收入"
+              label="点数面值收入"
               value={fmtMoney(job.revenue_estimate_rmb)}
               sub={`${fmt(job.credits_charged ?? 0)} 点 · ${creditsSourceLabel(job.credits_source)}`}
             />
             <MetricCard
-              label="预估毛利率"
+              label="面值毛利率"
               value={fmtPercent(job.gross_margin_pct)}
               sub={`毛利 ${fmtMoney(job.gross_profit_rmb)}`}
               warn={(job.gross_margin_pct ?? 100) < 50}
@@ -472,7 +477,7 @@ function JobDetails({ job, onClose }: { job: CostJob; onClose: () => void }) {
           </div>
 
           <div className="rounded-lg border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
-            收入估算：{creditsSourceLabel(job.credits_source)}
+            点数面值收入：{creditsSourceLabel(job.credits_source)}
             {job.credits_charged == null ? "" : ` ${fmt(job.credits_charged)} 点`}
             <span className="mx-2 text-border">|</span>
             点数单价：<span className="text-foreground">{fmtMoney(job.point_price_rmb)} / 点</span>
@@ -482,6 +487,9 @@ function JobDetails({ job, onClose }: { job: CostJob; onClose: () => void }) {
             毛利成本基数：<span className="text-foreground">{fmtMoney(job.margin_cost_rmb)}</span>
             <span className="mx-2 text-border">|</span>
             套餐快照：<span className="text-foreground">{job.plan_code_snapshot || "-"}</span>
+            <div className="mt-2 text-[color:var(--ochre)]">
+              该金额是点数面值估算，非现金收入或财务收入确认。
+            </div>
           </div>
 
           {job.warnings.length > 0 && (

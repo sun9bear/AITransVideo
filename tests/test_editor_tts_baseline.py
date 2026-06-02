@@ -168,6 +168,44 @@ def test_backfill_skips_segments_missing_from_legacy_tts(tmp_path: Path) -> None
     assert not (project / "editor" / "tts_segments" / "2.wav").exists()
 
 
+def test_backfill_copies_keep_original_wavs_without_aligned_file(
+    tmp_path: Path,
+) -> None:
+    """Keep-original segments use source-audio slices, not aligned TTS wavs.
+
+    They still need an editor/tts_segments/{sid}.wav baseline for post-edit
+    resume publishing.
+    """
+    project = tmp_path / "project"
+    _build_legacy_project(project, [1, 2])
+    (project / "tts" / "segment_002_aligned.wav").unlink()
+    original_wav = project / "tts" / "segment_002_speaker_d_original.wav"
+    _write_wav(original_wav, b"original-2")
+
+    import json
+
+    segments_path = project / "editor" / "segments.json"
+    segments = json.loads(segments_path.read_text(encoding="utf-8"))
+    segments[1].update(
+        {
+            "cn_text": "",
+            "dubbing_mode": "keep_original",
+            "alignment_method": "keep_original",
+            "tts_provider": "original",
+            "selected_voice": "original_audio",
+            "tts_audio_path": str(original_wav),
+            "aligned_audio_path": str(original_wav),
+        }
+    )
+    segments_path.write_text(json.dumps(segments), encoding="utf-8")
+
+    result = ensure_editor_tts_segments_baseline(project)
+
+    assert sorted(result["backfilled_segment_ids"]) == ["1", "2"]
+    assert result["missing_legacy_segment_ids"] == []
+    assert (project / "editor" / "tts_segments" / "2.wav").read_bytes() == b"original-2"
+
+
 # ---------------------------------------------------------------------------
 # refusal: tts/ dir entirely absent
 # ---------------------------------------------------------------------------

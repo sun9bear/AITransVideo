@@ -6,6 +6,7 @@ import json
 import logging
 import math
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import sys
@@ -39,7 +40,7 @@ class LoudnessMatchPolicy:
 
 @dataclass(frozen=True, slots=True)
 class LoudnessPair:
-    segment_id: int
+    segment_id: int | str
     speaker_id: str
     source_dbfs: float
     output_dbfs: float
@@ -48,7 +49,7 @@ class LoudnessPair:
 
 @dataclass(frozen=True, slots=True)
 class SegmentGain:
-    segment_id: int
+    segment_id: int | str
     speaker_id: str
     source_dbfs: float | None
     output_dbfs: float | None
@@ -75,7 +76,7 @@ def match_segment_loudness_to_source(
     *,
     project_dir: Path,
     segments: Sequence[AlignedSegment],
-    segment_paths: Mapping[int, str],
+    segment_paths: Mapping[int | str, str],
     output_root: Path,
     policy: LoudnessMatchPolicy = _DEFAULT_POLICY,
 ) -> Path:
@@ -116,7 +117,7 @@ def match_segment_loudness_to_source(
     gains: list[SegmentGain] = []
     sorted_segments = sorted(
         segments,
-        key=lambda item: (item.start_ms, item.segment_id),
+        key=lambda item: (item.start_ms, _segment_sort_key(item.segment_id)),
     )
     for segment in sorted_segments:
         segment_path_raw = segment_paths.get(segment.segment_id)
@@ -220,7 +221,7 @@ def match_segment_loudness_to_source(
             )
         )
 
-    gains.sort(key=lambda item: item.segment_id)
+    gains.sort(key=lambda item: _segment_sort_key(item.segment_id))
     _write_report(
         report_path,
         reference_audio_path=str(reference_path),
@@ -250,6 +251,18 @@ def calculate_speaker_gains(
             policy=policy,
         ).items()
     }
+
+
+def _segment_sort_key(segment_id: int | str) -> tuple[object, ...]:
+    if isinstance(segment_id, int):
+        return (0, segment_id)
+    raw_id = str(segment_id).strip()
+    if raw_id.isdigit():
+        return (0, int(raw_id))
+    match = re.match(r"^(\d+)(.*)$", raw_id)
+    if match:
+        return (1, int(match.group(1)), match.group(2))
+    return (2, raw_id)
 
 
 def calculate_speaker_gain_plans(

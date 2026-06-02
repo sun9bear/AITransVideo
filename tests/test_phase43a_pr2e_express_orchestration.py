@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import sys
 import urllib.error
 from pathlib import Path
@@ -296,13 +297,23 @@ def captured_audit(monkeypatch):
     return records
 
 
-def _run(rec, captured_audit, *, clients=None, speaker_voices=None, speaker_routing=None, consent=_CONSENT_OK, transcript=_TRANSCRIPT):
+def _run(
+    rec,
+    captured_audit,
+    *,
+    clients=None,
+    speaker_voices=None,
+    speaker_routing=None,
+    consent=_CONSENT_OK,
+    transcript=_TRANSCRIPT,
+    project_dir=None,
+):
     sv = speaker_voices if speaker_voices is not None else {}
     sr = speaker_routing if speaker_routing is not None else {}
     outcome = run_express_auto_clone(
         user_id="user-1",
         job_id="job-1",
-        project_dir="/tmp/proj",
+        project_dir=project_dir,
         transcript_lines=transcript,
         speaker_voices=sv,
         speaker_routing=sr,
@@ -322,6 +333,24 @@ def test_happy_path_order_and_routing(captured_audit):
     assert sr["speaker_a"] == {"requires_worker": True, "worker_target_model": "cosyvoice-v3.5-flash"}
     # 必写一行决策 audit
     assert any(r.get("decision") == "cloned" for r in captured_audit)
+
+
+def test_happy_path_records_free_cosyvoice_clone_usage(captured_audit, tmp_path):
+    rec: list = []
+    _run(rec, captured_audit, project_dir=str(tmp_path))
+
+    events_path = tmp_path / "metering" / "usage_events.jsonl"
+    event = json.loads(events_path.read_text(encoding="utf-8").splitlines()[0])
+    assert event["kind"] == "voice_clone"
+    assert event["job_id"] == "job-1"
+    assert event["provider"] == "cosyvoice_voice_clone"
+    assert event["model"] == "cosyvoice-v3.5-flash"
+    assert event["speaker_id"] == "speaker_a"
+    assert event["voice_id"] == "cosyvoice-v3.5-flash-xyz"
+    assert event["source_audio_seconds"] == 14.2
+    assert event["selected_segment_count"] == 3
+    assert event["billable"] is False
+    assert event["billing_policy"] == "cosyvoice_voice_enrollment_free"
 
 
 def test_consent_not_given_skips_everything(captured_audit):

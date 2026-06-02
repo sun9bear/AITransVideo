@@ -71,19 +71,20 @@ class EditorPackageWriter:
             needs_review_count=sum(1 for segment in output.segments if segment.needs_review),
         )
 
-    def _copy_segment_files(self, output: ProjectOutput) -> dict[int, str]:
+    def _copy_segment_files(self, output: ProjectOutput) -> dict[int | str, str]:
         segments_root = self._resolve_output_root(output) / "segments"
         segments_root.mkdir(parents=True, exist_ok=True)
 
-        copied_paths: dict[int, str] = {}
+        copied_paths: dict[int | str, str] = {}
         for segment in self._sorted_segments(output):
             source_path = Path(segment.aligned_audio_path).resolve(strict=False)
             if not source_path.exists():
                 raise FileNotFoundError(f"缺少对齐后音频文件：{source_path}")
             speaker_dir = segments_root / segment.speaker_id
             speaker_dir.mkdir(parents=True, exist_ok=True)
+            segment_label = self._format_segment_id(segment.segment_id)
             destination_path = speaker_dir / (
-                f"segment_{segment.segment_id:03d}_"
+                f"segment_{segment_label}_"
                 f"{self._format_filename_timestamp(segment.start_ms)}_"
                 f"{self._format_filename_timestamp(segment.end_ms)}.wav"
             )
@@ -102,7 +103,7 @@ class EditorPackageWriter:
         )
         return copied_paths
 
-    def _compose_full_audio(self, output: ProjectOutput, segment_paths: dict[int, str]) -> str:
+    def _compose_full_audio(self, output: ProjectOutput, segment_paths: dict[int | str, str]) -> str:
         """Compose the complete dubbed audio by streaming segments via
         ffmpeg's amix/adelay graph.
 
@@ -168,7 +169,7 @@ class EditorPackageWriter:
     def _compose_full_audio_with_ffmpeg(
         self,
         output: ProjectOutput,
-        segment_paths: dict[int, str],
+        segment_paths: dict[int | str, str],
         output_path: Path,
     ) -> None:
         duration_seconds = max(output.total_duration_ms, 0) / 1000
@@ -560,7 +561,7 @@ class EditorPackageWriter:
             for segment in review_segments:
                 lines.append(
                     "  "
-                    f"segment_{segment.segment_id:03d}  "
+                    f"segment_{self._format_segment_id(segment.segment_id)}  "
                     f"{self._format_speaker_label(segment.speaker_id)}  "
                     f"{self._format_clock_timestamp(segment.start_ms)} → {self._format_clock_timestamp(segment.end_ms)}  "
                     f"[{self._build_review_reason(segment)}]"
@@ -654,7 +655,34 @@ class EditorPackageWriter:
         fit_audio_to_slot(wav_path, slot_duration_ms=slot_duration_ms)
 
     def _sorted_segments(self, output: ProjectOutput) -> list[AlignedSegment]:
-        return sorted(output.segments, key=lambda segment: (segment.start_ms, segment.segment_id))
+        return sorted(
+            output.segments,
+            key=lambda segment: (
+                segment.start_ms,
+                self._segment_sort_key(segment.segment_id),
+            ),
+        )
+
+    @staticmethod
+    def _format_segment_id(segment_id: int | str) -> str:
+        if isinstance(segment_id, int):
+            return f"{segment_id:03d}"
+        raw_id = str(segment_id).strip()
+        if raw_id.isdigit():
+            return f"{int(raw_id):03d}"
+        return re.sub(r"[^A-Za-z0-9_-]+", "_", raw_id).strip("_") or "unknown"
+
+    @staticmethod
+    def _segment_sort_key(segment_id: int | str) -> tuple[object, ...]:
+        if isinstance(segment_id, int):
+            return (0, segment_id)
+        raw_id = str(segment_id).strip()
+        if raw_id.isdigit():
+            return (0, int(raw_id))
+        match = re.match(r"^(\d+)(.*)$", raw_id)
+        if match:
+            return (1, int(match.group(1)), match.group(2))
+        return (2, raw_id)
 
     def _build_subtitle_slices(self, segment: AlignedSegment) -> list[_SubtitleSlice]:
         """Build subtitle slices with zh as primary split, en following proportionally.

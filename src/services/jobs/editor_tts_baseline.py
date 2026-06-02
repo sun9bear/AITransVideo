@@ -66,9 +66,9 @@ class EditorTtsBaselineError(Exception):
     """
 
 
-def _read_segment_ids(project_dir: Path) -> list[str]:
-    """Return segment_ids as strings, reading from editor/segments.json
-    first (modern), falling back to translation/segments.json (legacy).
+def _read_segment_records(project_dir: Path) -> list[dict[str, Any]]:
+    """Return segment records, reading from editor/segments.json first
+    (modern), falling back to translation/segments.json (legacy).
 
     Returns an empty list if neither file is present. Caller decides
     whether that's fatal.
@@ -93,15 +93,20 @@ def _read_segment_ids(project_dir: Path) -> list[str]:
         if isinstance(inner, list):
             raw_records = inner
 
-    sids: list[str] = []
+    records: list[dict[str, Any]] = []
     for rec in raw_records:
         if not isinstance(rec, dict):
             continue
         sid = rec.get("segment_id")
         if sid is None:
             continue
-        sids.append(str(sid))
-    return sids
+        records.append(rec)
+    return records
+
+
+def _read_segment_ids(project_dir: Path) -> list[str]:
+    """Return segment_ids as strings."""
+    return [str(rec.get("segment_id")) for rec in _read_segment_records(project_dir)]
 
 
 def _legacy_aligned_wav_path(project_dir: Path, sid_str: str) -> Path | None:
@@ -116,6 +121,67 @@ def _legacy_aligned_wav_path(project_dir: Path, sid_str: str) -> Path | None:
     except (TypeError, ValueError):
         return None
     return project_dir / "tts" / f"segment_{sid_int:03d}_aligned.wav"
+
+
+def _is_keep_original_segment(record: dict[str, Any]) -> bool:
+    values = (
+        record.get("dubbing_mode"),
+        record.get("alignment_method"),
+        record.get("tts_provider"),
+        record.get("selected_voice"),
+    )
+    normalized = {str(value).strip().lower() for value in values if value is not None}
+    return bool(
+        {
+            "keep_original",
+            "original",
+            "original_audio",
+        }
+        & normalized
+    )
+
+
+def _metadata_wav_path(project_dir: Path, record: dict[str, Any]) -> Path | None:
+    project_root = project_dir.resolve(strict=False)
+    for key in ("aligned_audio_path", "tts_audio_path"):
+        raw_path = record.get(key)
+        if not raw_path:
+            continue
+        candidate = Path(str(raw_path))
+        if not candidate.is_absolute():
+            candidate = project_dir / candidate
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(project_root)
+        except ValueError:
+            continue
+        if resolved.is_file() and resolved.suffix.lower() == ".wav":
+            return resolved
+    return None
+
+
+def _legacy_original_wav_path(project_dir: Path, sid_str: str) -> Path | None:
+    try:
+        sid_int = int(sid_str)
+    except (TypeError, ValueError):
+        return None
+    pattern = f"segment_{sid_int:03d}_*_original.wav"
+    matches = sorted((project_dir / "tts").glob(pattern))
+    return matches[0] if matches else None
+
+
+def _legacy_audio_wav_path(
+    project_dir: Path, sid_str: str, record: dict[str, Any]
+) -> Path | None:
+    aligned = _legacy_aligned_wav_path(project_dir, sid_str)
+    if aligned is not None and aligned.is_file():
+        return aligned
+    if not _is_keep_original_segment(record):
+        return None
+    metadata_path = _metadata_wav_path(project_dir, record)
+    if metadata_path is not None:
+        return metadata_path
+    return _legacy_original_wav_path(project_dir, sid_str)
 
 
 def ensure_editor_tts_segments_baseline(project_dir: Path) -> dict[str, Any]:
@@ -144,14 +210,15 @@ def ensure_editor_tts_segments_baseline(project_dir: Path) -> dict[str, Any]:
         When the task has no viable audio source (no ``tts/`` dir AND no
         pre-existing ``editor/tts_segments/`` content).
     """
-    segment_ids = _read_segment_ids(project_dir)
+    segment_records = _read_segment_records(project_dir)
 
     editor_tts_dir = project_dir / "editor" / "tts_segments"
     editor_tts_dir.mkdir(parents=True, exist_ok=True)
 
     legacy_tts_dir = project_dir / "tts"
-    has_legacy = legacy_tts_dir.is_dir() and any(
-        legacy_tts_dir.glob("segment_*_aligned.wav")
+    has_legacy = legacy_tts_dir.is_dir() and (
+        any(legacy_tts_dir.glob("segment_*_aligned.wav"))
+        or any(legacy_tts_dir.glob("segment_*_original.wav"))
     )
     has_existing_baseline = any(editor_tts_dir.glob("*.wav"))
 
@@ -165,12 +232,13 @@ def ensure_editor_tts_segments_baseline(project_dir: Path) -> dict[str, Any]:
     skipped_existing: list[str] = []
     missing_legacy: list[str] = []
 
-    for sid_str in segment_ids:
+    for record in segment_records:
+        sid_str = str(record.get("segment_id"))
         dst = editor_tts_dir / f"{sid_str}.wav"
         if dst.is_file():
             skipped_existing.append(sid_str)
             continue
-        src = _legacy_aligned_wav_path(project_dir, sid_str)
+        src = _legacy_audio_wav_path(project_dir, sid_str, record)
         if src is None or not src.is_file():
             missing_legacy.append(sid_str)
             continue

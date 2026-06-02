@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import io
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -361,6 +362,40 @@ def test_happy_path_writes_user_voice_with_phase4_fields(
     assert row["tts_provider"] == TTS_PROVIDER_COSYVOICE
     assert row["platform"] == PLATFORM_DASHSCOPE_MAINLAND
     assert row["clone_api_model"] == "voice-enrollment"
+
+
+@pytest.mark.asyncio
+async def test_cosyvoice_clone_usage_metering_writes_free_clone_event(
+    tmp_path, monkeypatch
+) -> None:
+    async def _fake_project_dir(db, source_job_id):
+        assert source_job_id == "job-1"
+        return str(tmp_path)
+
+    monkeypatch.setattr(clone_api, "_resolve_project_dir_for_metering", _fake_project_dir)
+
+    await clone_api._record_cosyvoice_clone_usage(
+        object(),
+        source_job_id="job-1",
+        speaker_id="speaker_a",
+        voice_id="cosyvoice_custom_test",
+        target_model="cosyvoice-v3.5-flash",
+        source_audio_seconds=15.0,
+        source_audio_bytes=320_000,
+        selected_segment_count=3,
+        worker_request_id="wrk_test",
+        provider_request_id="dashscope_req_test",
+    )
+
+    events_path = tmp_path / "metering" / "usage_events.jsonl"
+    event = json.loads(events_path.read_text(encoding="utf-8").splitlines()[0])
+    assert event["kind"] == "voice_clone"
+    assert event["job_id"] == "job-1"
+    assert event["provider"] == PROVIDER_COSYVOICE_VOICE_CLONE
+    assert event["model"] == "cosyvoice-v3.5-flash"
+    assert event["billable"] is False
+    assert event["clone_count"] == 1
+    assert event["billing_policy"] == "cosyvoice_voice_enrollment_free"
 
 
 def test_happy_path_invokes_worker_with_correct_payload(

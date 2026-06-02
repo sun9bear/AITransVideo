@@ -511,7 +511,13 @@ app.include_router(notifications_internal_router)
 
 # --- Gateway-native upload endpoint (before catch-all) ---
 
-from upload import handle_upload_video
+from upload import (
+    handle_upload_video,
+    handle_upload_video_chunk,
+    handle_upload_video_complete,
+    handle_upload_video_session,
+    handle_upload_video_session_status,
+)
 
 
 async def _gateway_upload_video(
@@ -520,6 +526,48 @@ async def _gateway_upload_video(
 ) -> Response:
     return await handle_upload_video(request, user=_user)
 
+
+async def _gateway_upload_video_session(
+    request: Request,
+    _user: User | None = Depends(require_auth),
+) -> Response:
+    return await handle_upload_video_session(request, user=_user)
+
+
+async def _gateway_upload_video_session_status(
+    upload_id: str,
+    _user: User | None = Depends(require_auth),
+) -> Response:
+    return await handle_upload_video_session_status(upload_id, user=_user)
+
+
+async def _gateway_upload_video_chunk(
+    request: Request,
+    _user: User | None = Depends(require_auth),
+) -> Response:
+    return await handle_upload_video_chunk(request, user=_user)
+
+
+async def _gateway_upload_video_complete(
+    request: Request,
+    _user: User | None = Depends(require_auth),
+) -> Response:
+    return await handle_upload_video_complete(request, user=_user)
+
+
+app.post(
+    "/gateway/upload-video/session",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(_gateway_upload_video_session)
+app.get("/gateway/upload-video/session/{upload_id}")(_gateway_upload_video_session_status)
+app.post(
+    "/gateway/upload-video/chunk",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(_gateway_upload_video_chunk)
+app.post(
+    "/gateway/upload-video/complete",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(_gateway_upload_video_complete)
 app.post(
     "/gateway/upload-video",
     dependencies=[Depends(require_same_origin_state_change)],

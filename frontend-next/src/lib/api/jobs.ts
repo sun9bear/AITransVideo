@@ -80,6 +80,9 @@ export async function submitTranslationJob(
   if (sourceType === 'local_video' && input.localFileName) {
     source.filename = input.localFileName
   }
+  if (sourceType === 'local_video' && input.localUploadId) {
+    source.upload_id = input.localUploadId
+  }
 
   const requestBody: Record<string, unknown> = {
     job_type: 'localize_video',

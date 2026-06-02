@@ -1354,17 +1354,26 @@ class TTSGenerator:
                     result = self._generate_one_cosyvoice_via_worker(
                         segment, tts_text, output_root,
                     )
+                    metered_model = _normalize_optional_text(
+                        getattr(segment, "worker_target_model", None)
+                    )
                     # HC#2：worker 路径保留 worker 返回的 billed_chars（来自
                     # Phase 4.0b billing_character_count，DashScope 真实计费规则）。
                     # 不 overwrite。
                 else:
+                    from services.tts.cosyvoice_provider import (
+                        DEFAULT_MODEL as cosyvoice_default_model,
+                    )
+
                     result = self._generate_one_cosyvoice(segment, tts_text, output_root)
+                    metered_model = cosyvoice_default_model
                     # Legacy 国际 DashScope 路径：阿里云百炼 1 汉字 = 2 计费字符
                     result.billed_chars = _cn_chars * 2
                 self._record_tts_usage(
                     result,
                     bucket=usage_bucket,
                     provider="cosyvoice",
+                    model=metered_model,
                     text=tts_text,
                 )
                 return result

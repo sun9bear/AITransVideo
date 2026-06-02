@@ -499,7 +499,7 @@ def test_tts_generator_does_not_fallback_from_cosyvoice_to_mimo(
 
     attempted_providers: list[str] = []
 
-    def _fake_generate_one(segment, output_dir, *, provider=None):
+    def _fake_generate_one(segment, output_dir, *, provider=None, usage_bucket=None, **kwargs):
         attempted_providers.append(str(provider))
         if len(attempted_providers) == 1:
             raise TTSGenerationError("primary failed")

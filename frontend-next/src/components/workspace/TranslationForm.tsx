@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useRef, useState, type FormEvent } from "react"
 import { toast } from "sonner"
 
 import { StatusBadge } from "@/components/status-badge"
@@ -26,15 +26,290 @@ export interface TranslationFormProps {
   mode: "page" | "dialog"
   /** Pre-fill YouTube URL (e.g., from "recreate" on a failed job) */
   initialSourceUrl?: string
+  /** Reuse a previously uploaded local source when recreating a failed job. */
+  initialLocalUpload?: {
+    filePath: string
+    fileName?: string
+    uploadId?: string
+  }
 }
 
-export function TranslationForm({ onCreated, mode, initialSourceUrl }: TranslationFormProps) {
-  const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">("youtube_url")
+interface UploadVideoResponse {
+  upload_id?: string
+  file_path: string
+  file_name?: string
+  file_size_mb?: number
+  sha256?: string
+  expires_at?: string
+}
+
+interface UploadSessionResponse {
+  upload_id: string
+  file_name: string
+  file_size: number
+  chunk_size: number
+  total_chunks: number
+  received_chunks: number[]
+  completed: boolean
+  expires_at?: string
+  asset?: UploadVideoResponse
+}
+
+const RESUMABLE_UPLOAD_THRESHOLD_BYTES = 32 * 1024 * 1024
+const RESUMABLE_UPLOAD_STORAGE_PREFIX = "avt.resumableUpload"
+
+class UploadRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message)
+  }
+}
+
+function formatUploadMb(bytes: number) {
+  return (bytes / (1024 * 1024)).toFixed(1)
+}
+
+function resumableUploadStorageKey(file: File) {
+  return `${RESUMABLE_UPLOAD_STORAGE_PREFIX}:${file.name}:${file.size}:${file.lastModified}`
+}
+
+function getStoredUploadId(file: File): string | null {
+  try {
+    return localStorage.getItem(resumableUploadStorageKey(file))
+  } catch {
+    return null
+  }
+}
+
+function setStoredUploadId(file: File, uploadId: string) {
+  try {
+    localStorage.setItem(resumableUploadStorageKey(file), uploadId)
+  } catch {}
+}
+
+function clearStoredUploadId(file: File) {
+  try {
+    localStorage.removeItem(resumableUploadStorageKey(file))
+  } catch {}
+}
+
+async function parseUploadError(response: Response, fallback: string) {
+  let payload: Record<string, unknown> = {}
+  try {
+    payload = await response.json()
+  } catch {
+    payload = {}
+  }
+  return typeof payload.detail === "string"
+    ? payload.detail
+    : typeof payload.error === "string"
+      ? payload.error
+      : fallback
+}
+
+function uploadProgressMessage(
+  file: File,
+  uploadedBytes: number,
+  totalBytes: number,
+  completedChunks: number,
+  totalChunks: number,
+) {
+  const percent = Math.min(99, Math.floor((uploadedBytes / totalBytes) * 100))
+  return `正在上传 ${file.name} · ${percent}% · ${completedChunks}/${totalChunks} 分片 · ${formatUploadMb(uploadedBytes)}/${formatUploadMb(totalBytes)} MB`
+}
+
+async function createUploadSession(
+  file: File,
+  uploadId: string | null,
+  signal: AbortSignal,
+): Promise<UploadSessionResponse> {
+  const response = await fetch("/gateway/upload-video/session", {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      file_name: file.name,
+      file_size: file.size,
+      ...(uploadId ? { upload_id: uploadId } : {}),
+    }),
+    signal,
+  })
+  if (!response.ok) {
+    throw new UploadRequestError(
+      await parseUploadError(response, `上传会话创建失败（HTTP ${response.status}）`),
+      response.status,
+    )
+  }
+  return (await response.json()) as UploadSessionResponse
+}
+
+async function uploadVideoChunk(
+  file: File,
+  session: UploadSessionResponse,
+  chunkIndex: number,
+  signal: AbortSignal,
+) {
+  const start = chunkIndex * session.chunk_size
+  const end = Math.min(file.size, start + session.chunk_size)
+  const formData = new FormData()
+  formData.append("upload_id", session.upload_id)
+  formData.append("chunk_index", String(chunkIndex))
+  formData.append("total_chunks", String(session.total_chunks))
+  formData.append("chunk", file.slice(start, end), `${chunkIndex}.part`)
+
+  const response = await fetch("/gateway/upload-video/chunk", {
+    method: "POST",
+    credentials: "include",
+    body: formData,
+    signal,
+  })
+  if (!response.ok) {
+    throw new UploadRequestError(
+      await parseUploadError(response, `分片上传失败（HTTP ${response.status}）`),
+      response.status,
+    )
+  }
+}
+
+async function completeUploadSession(
+  session: UploadSessionResponse,
+  signal: AbortSignal,
+): Promise<UploadVideoResponse> {
+  const response = await fetch("/gateway/upload-video/complete", {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      upload_id: session.upload_id,
+      total_chunks: session.total_chunks,
+    }),
+    signal,
+  })
+  if (!response.ok) {
+    throw new UploadRequestError(
+      await parseUploadError(response, `上传合并失败（HTTP ${response.status}）`),
+      response.status,
+    )
+  }
+  return (await response.json()) as UploadVideoResponse
+}
+
+async function uploadVideoFileResumable(
+  file: File,
+  signal: AbortSignal,
+  onProgress: (message: string) => void,
+): Promise<UploadVideoResponse> {
+  try {
+    let storedUploadId = getStoredUploadId(file)
+    let session: UploadSessionResponse
+    try {
+      session = await createUploadSession(file, storedUploadId, signal)
+    } catch (error) {
+      if (!storedUploadId || !(error instanceof UploadRequestError) || error.status !== 409) {
+        throw error
+      }
+      clearStoredUploadId(file)
+      storedUploadId = null
+      session = await createUploadSession(file, null, signal)
+    }
+
+    setStoredUploadId(file, session.upload_id)
+    if (session.completed && session.asset) {
+      clearStoredUploadId(file)
+      return session.asset
+    }
+
+    const received = new Set(session.received_chunks)
+    let uploadedBytes = 0
+    for (const chunkIndex of received) {
+      const start = chunkIndex * session.chunk_size
+      uploadedBytes += Math.max(0, Math.min(file.size, start + session.chunk_size) - start)
+    }
+    onProgress(uploadProgressMessage(file, uploadedBytes, file.size, received.size, session.total_chunks))
+
+    for (let chunkIndex = 0; chunkIndex < session.total_chunks; chunkIndex += 1) {
+      if (received.has(chunkIndex)) continue
+      await uploadVideoChunk(file, session, chunkIndex, signal)
+      received.add(chunkIndex)
+      const start = chunkIndex * session.chunk_size
+      uploadedBytes += Math.max(0, Math.min(file.size, start + session.chunk_size) - start)
+      onProgress(uploadProgressMessage(file, uploadedBytes, file.size, received.size, session.total_chunks))
+    }
+
+    onProgress(`正在合并上传文件 ${file.name}…`)
+    const result = await completeUploadSession(session, signal)
+    clearStoredUploadId(file)
+    return result
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("上传已取消")
+    }
+    throw error
+  }
+}
+
+function uploadVideoFile(
+  file: File,
+  xhr: XMLHttpRequest,
+  onProgress: (message: string) => void,
+): Promise<UploadVideoResponse> {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData()
+    formData.append("file", file)
+
+    xhr.open("POST", "/gateway/upload-video")
+    xhr.withCredentials = true
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        const percent = Math.min(99, Math.floor((event.loaded / event.total) * 100))
+        onProgress(`正在上传 ${file.name} · ${percent}% · ${formatUploadMb(event.loaded)}/${formatUploadMb(event.total)} MB`)
+      } else {
+        onProgress(`正在上传 ${file.name} · 已上传 ${formatUploadMb(event.loaded)} MB`)
+      }
+    }
+
+    xhr.onload = () => {
+      let payload: Record<string, unknown> = {}
+      try {
+        payload = xhr.responseText ? JSON.parse(xhr.responseText) : {}
+      } catch {
+        payload = {}
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload as unknown as UploadVideoResponse)
+        return
+      }
+
+      const message =
+        typeof payload.detail === "string"
+          ? payload.detail
+          : typeof payload.error === "string"
+            ? payload.error
+            : `上传失败（HTTP ${xhr.status}）`
+      reject(new Error(message))
+    }
+
+    xhr.onerror = () => reject(new Error("网络中断，上传失败"))
+    xhr.onabort = () => reject(new Error("上传已取消"))
+    xhr.send(formData)
+  })
+}
+
+export function TranslationForm({ onCreated, mode, initialSourceUrl, initialLocalUpload }: TranslationFormProps) {
+  const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">(
+    initialLocalUpload ? "local_video" : "youtube_url",
+  )
   const [youtubeUrl, setYoutubeUrl] = useState(initialSourceUrl ?? "")
-  const [uploadedFilePath, setUploadedFilePath] = useState("")
-  const [uploadFileName, setUploadFileName] = useState("")
+  const [uploadedFilePath, setUploadedFilePath] = useState(initialLocalUpload?.filePath ?? "")
+  const [uploadFileName, setUploadFileName] = useState(initialLocalUpload?.fileName ?? "")
+  const [uploadedFileId, setUploadedFileId] = useState(initialLocalUpload?.uploadId ?? "")
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState("")
+  const uploadAbortRef = useRef<(() => void) | null>(null)
   const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
   const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart" | "free">("express")
@@ -132,6 +407,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   usePollingTask(() => loadActiveJobs(!isLoadingGuard), { intervalMs: 5000 })
 
   useEffect(() => {
+    return () => {
+      uploadAbortRef.current?.()
+    }
+  }, [])
+
+  useEffect(() => {
     getVoiceLibrary()
       .then((lib) => setSavedVoices(lib.voices))
       .catch(() => {})
@@ -211,6 +492,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         sourceType,
         localFilePath: sourceType === "local_video" ? uploadedFilePath : undefined,
         localFileName: sourceType === "local_video" ? (uploadFileName || undefined) : undefined,
+        localUploadId: sourceType === "local_video" ? (uploadedFileId || undefined) : undefined,
         transcriptionMethod: sourceType === "local_video" ? "assemblyai" : transcriptionMethod,
         service_mode: serviceMode,
         // spec §2.6: force false unless currently in Express, so a stale
@@ -336,7 +618,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   </span>
                   <button
                     className="text-xs text-muted-foreground transition hover:text-[color:var(--cinnabar)]"
-                    onClick={() => { setUploadedFilePath(""); setUploadFileName("") }}
+                    onClick={() => { setUploadedFilePath(""); setUploadFileName(""); setUploadedFileId("") }}
                     type="button"
                   >
                     移除
@@ -353,36 +635,34 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       const file = event.target.files?.[0]
                       if (!file) return
                       setIsUploading(true)
-                      setUploadProgress(`正在上传 ${file.name}…`)
+                      setUploadProgress(
+                        file.size >= RESUMABLE_UPLOAD_THRESHOLD_BYTES
+                          ? `准备续传 ${file.name}…`
+                          : `正在上传 ${file.name}…`,
+                      )
                       try {
-                        const formData = new FormData()
-                        formData.append("file", file)
-                        // P2-18E (audit 2026-05-07, F-HIGH-3): send the
-                        // session cookie. Pre-fix the upload-video fetch
-                        // omitted ``credentials``, which on browsers
-                        // configured to NOT send cookies cross-site by
-                        // default (Safari ITP, some Chromium privacy
-                        // modes, Edge with strict tracking prevention)
-                        // landed at gateway as anonymous → 401. Other
-                        // mutating endpoints in this codebase already
-                        // pass ``credentials: 'include'``; aligning
-                        // here closes the inconsistency.
-                        const response = await fetch("/gateway/upload-video", {
-                          method: "POST",
-                          credentials: "include",
-                          body: formData,
-                        })
-                        if (!response.ok) {
-                          const err = await response.json().catch(() => ({ error: "上传失败" }))
-                          throw new Error(err.error || "上传失败")
-                        }
-                        const result = await response.json()
+                        const result =
+                          file.size >= RESUMABLE_UPLOAD_THRESHOLD_BYTES
+                            ? await (async () => {
+                                const controller = new AbortController()
+                                uploadAbortRef.current = () => controller.abort()
+                                return uploadVideoFileResumable(file, controller.signal, setUploadProgress)
+                              })()
+                            : await (async () => {
+                                const xhr = new XMLHttpRequest()
+                                uploadAbortRef.current = () => xhr.abort()
+                                // XHR gives us progress/cancel while still sending the auth cookie.
+                                return uploadVideoFile(file, xhr, setUploadProgress)
+                              })()
                         setUploadedFilePath(result.file_path)
                         setUploadFileName(file.name)
+                        setUploadedFileId(result.upload_id ?? "")
                         setUploadProgress("")
                       } catch (err) {
                         setUploadProgress(err instanceof Error ? err.message : "上传失败")
                       } finally {
+                        event.currentTarget.value = ""
+                        uploadAbortRef.current = null
                         setIsUploading(false)
                       }
                     }}
@@ -391,6 +671,15 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               )}
               {uploadProgress ? (
                 <p className="text-xs text-muted-foreground">{uploadProgress}</p>
+              ) : null}
+              {isUploading ? (
+                <button
+                  className="text-xs text-muted-foreground transition hover:text-[color:var(--cinnabar)]"
+                  onClick={() => uploadAbortRef.current?.()}
+                  type="button"
+                >
+                  取消上传
+                </button>
               ) : null}
             </div>
           )}

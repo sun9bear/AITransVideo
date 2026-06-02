@@ -110,6 +110,12 @@ function cardTimestamp(job: JobSummary): string {
   return job.updatedAt
 }
 
+function localUploadFileName(sourceRef: string, fallback: string) {
+  const basename = sourceRef.split(/[\\/]/).filter(Boolean).pop()
+  if (!basename) return fallback
+  return basename.replace(/^[a-f0-9]{12}_/i, "") || fallback
+}
+
 /** Pick at most MAX_AUTO_EXPAND jobs to auto-expand. */
 function computeDefaultExpanded(jobs: JobSummary[]): Set<string> {
   // Expand all jobs by default. Lazy loading inside ResultMediaCard
@@ -156,6 +162,9 @@ function ProjectsContent() {
   const [cancellingId, setCancellingId] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [dialogInitialUrl, setDialogInitialUrl] = useState<string | undefined>(undefined)
+  const [dialogInitialLocalUpload, setDialogInitialLocalUpload] = useState<
+    { filePath: string; fileName?: string } | undefined
+  >(undefined)
   const [isAdminView, setIsAdminView] = useState(false)
   // Rename dialog state (plan §6.5 / D16). Tracks the target job + its
   // pre-fill title so the Modal can open over any card without re-sorting.
@@ -302,19 +311,27 @@ function ProjectsContent() {
     return () => observer.disconnect()
   }, [hasMoreJobs, loadMoreJobs])
 
+  // ---- Handlers ----
+
+  const openNewDialog = useCallback(() => {
+    setDialogInitialUrl(undefined)
+    setDialogInitialLocalUpload(undefined)
+    setDialogOpen(true)
+  }, [])
+
   // ?new=1 auto-open
   useEffect(() => {
     if (searchParams.get("new") === "1") {
-      setDialogOpen(true)
+      openNewDialog()
     }
-  }, [searchParams])
-
-  // ---- Handlers ----
+  }, [searchParams, openNewDialog])
 
   const handleDialogChange = useCallback(
     (open: boolean) => {
       setDialogOpen(open)
       if (!open) {
+        setDialogInitialUrl(undefined)
+        setDialogInitialLocalUpload(undefined)
         // Remove ?new=1 from URL
         const params = new URLSearchParams(searchParams.toString())
         params.delete("new")
@@ -373,9 +390,19 @@ function ProjectsContent() {
   )
 
   const handleReCreate = useCallback((job: JobSummary) => {
-    // Pre-fill URL for youtube sources; local_video can't be recovered
-    const url = job.sourceType === "youtube_url" ? (job.sourceRef ?? undefined) : undefined
-    setDialogInitialUrl(url)
+    if (job.sourceType === "youtube_url") {
+      setDialogInitialUrl(job.sourceRef ?? undefined)
+      setDialogInitialLocalUpload(undefined)
+    } else if (job.sourceType === "local_video" && job.sourceRef) {
+      setDialogInitialUrl(undefined)
+      setDialogInitialLocalUpload({
+        filePath: job.sourceRef,
+        fileName: localUploadFileName(job.sourceRef, getJobDisplayTitle(job)),
+      })
+    } else {
+      setDialogInitialUrl(undefined)
+      setDialogInitialLocalUpload(undefined)
+    }
     setDialogOpen(true)
   }, [])
 
@@ -495,7 +522,7 @@ function ProjectsContent() {
       <div className="space-y-6">
         <PageHeader
           activeTask={null}
-          onNewClick={() => { setDialogInitialUrl(undefined); setDialogOpen(true) }}
+          onNewClick={openNewDialog}
         />
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
@@ -516,7 +543,7 @@ function ProjectsContent() {
       <div className="space-y-6">
         <PageHeader
           activeTask={null}
-          onNewClick={() => { setDialogInitialUrl(undefined); setDialogOpen(true) }}
+          onNewClick={openNewDialog}
         />
         <div className="max-w-md mx-auto mt-12 rounded-2xl border border-red-200 bg-red-50 dark:border-red-500/20 dark:bg-red-500/5 p-8 text-center space-y-4">
           <p className="text-sm font-medium text-red-600 dark:text-red-400">{loadError}</p>
@@ -526,9 +553,10 @@ function ProjectsContent() {
         </div>
         <NewTranslationDialog
           open={dialogOpen}
-          onOpenChange={(v) => { setDialogOpen(v); if (!v) setDialogInitialUrl(undefined) }}
+          onOpenChange={handleDialogChange}
           onJobCreated={() => loadJobs()}
           initialSourceUrl={dialogInitialUrl}
+          initialLocalUpload={dialogInitialLocalUpload}
         />
       </div>
     )
@@ -541,7 +569,7 @@ function ProjectsContent() {
       <div className="space-y-6">
         <PageHeader
           activeTask={null}
-          onNewClick={() => { setDialogInitialUrl(undefined); setDialogOpen(true) }}
+          onNewClick={openNewDialog}
         />
         <div className="max-w-md mx-auto mt-12 rounded-2xl border border-border bg-card p-8 text-center space-y-4">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted">
@@ -553,7 +581,7 @@ function ProjectsContent() {
           <p className="text-sm text-muted-foreground">
             创建第一个翻译任务，开始体验视频翻译。
           </p>
-          <Button onClick={() => setDialogOpen(true)} className="mt-2">
+          <Button onClick={openNewDialog} className="mt-2">
             <Plus className="h-4 w-4 mr-1" />
             新建翻译
           </Button>
@@ -563,6 +591,7 @@ function ProjectsContent() {
           open={dialogOpen}
           onOpenChange={handleDialogChange}
           onJobCreated={handleJobCreated}
+          initialLocalUpload={dialogInitialLocalUpload}
         />
       </div>
     )
@@ -574,7 +603,7 @@ function ProjectsContent() {
     <div className="space-y-6">
       <PageHeader
         activeTask={activeTask}
-        onNewClick={() => { setDialogInitialUrl(undefined); setDialogOpen(true) }}
+        onNewClick={openNewDialog}
       />
 
       {/* Retention notice */}
@@ -688,6 +717,7 @@ function ProjectsContent() {
         onOpenChange={handleDialogChange}
         onJobCreated={handleJobCreated}
         initialSourceUrl={dialogInitialUrl}
+        initialLocalUpload={dialogInitialLocalUpload}
       />
 
       <RenameJobDialog

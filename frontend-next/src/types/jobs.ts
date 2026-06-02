@@ -171,6 +171,7 @@ export interface CreateTranslationJobInput {
    * — falls through to the "上传视频 YYYY-MM-DD NNN" branch if omitted.
    */
   localFileName?: string
+  localUploadId?: string
   service_mode?: 'express' | 'studio' | 'smart' | 'free'
   /**
    * Phase 4.3a PR3 — Express auto-clone consent (user opt-in checkbox).

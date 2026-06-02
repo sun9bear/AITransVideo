@@ -41,7 +41,7 @@ def _export_custom_wav(
 
 def _build_segment(
     *,
-    segment_id: int,
+    segment_id: int | str,
     speaker_id: str,
     display_name: str,
     start_ms: int,
@@ -143,6 +143,33 @@ def test_project_output_single_speaker_creates_only_speaker_a_directory(tmp_path
     assert speaker_a_dir.is_dir()
     assert not (Path(result.segments_dir) / "speaker_b").exists()
     assert len(list(speaker_a_dir.glob("*.wav"))) == 1
+
+
+def test_project_output_accepts_split_string_segment_ids(tmp_path: Path) -> None:
+    source_audio = _export_silent_wav(tmp_path / "sources" / "segment_70_a.wav", duration_ms=800)
+    output = _build_output(
+        tmp_path,
+        segments=[
+            _build_segment(
+                segment_id="70_a",
+                speaker_id="speaker_a",
+                display_name="Speaker A",
+                start_ms=1_000,
+                end_ms=1_800,
+                cn_text="拆分后的第一段。",
+                aligned_audio_path=source_audio,
+                needs_review=True,
+            )
+        ],
+        total_duration_ms=2_500,
+        project_name="split_string_segment_id",
+    )
+
+    result = ProjectOutputWriter().write(output)
+
+    exported_paths = list((Path(result.segments_dir) / "speaker_a").glob("segment_70_a_*.wav"))
+    assert len(exported_paths) == 1
+    assert "segment_70_a" in Path(result.alignment_report_path).read_text(encoding="utf-8")
 
 
 def test_project_output_two_speakers_creates_both_directories_and_full_audio_matches_duration(

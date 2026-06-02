@@ -279,6 +279,51 @@ class TestCreateJobRejections:
         assert body["error"] == "invalid_source"
 
 
+    def test_missing_local_upload_rejected_before_upstream(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AIVIDEOTRANS_PROJECTS_DIR", str(tmp_path))
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "local_file", "value": "uploads/uid-1/missing.mp4"},
+        })
+        db = _make_db_session(active_job_count=0)
+        user = _make_user(plan_code="free")
+
+        with patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
+            resp = _run(intercept_create_job(req, db, user))
+
+        body = json.loads(resp.body)
+        assert resp.status_code == 400
+        assert body["error"] == "upload_source_missing"
+        proxy.assert_not_awaited()
+
+    def test_local_upload_id_resolves_to_existing_upload_before_upstream(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AIVIDEOTRANS_PROJECTS_DIR", str(tmp_path))
+        upload_path = tmp_path / "uploads" / "uid-1" / "asset123_sample.mp4"
+        upload_path.parent.mkdir(parents=True)
+        upload_path.write_bytes(b"video")
+        captured_body = {}
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success("job_upload_id")
+
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "local_file", "value": "", "upload_id": "asset123"},
+            "estimated_duration_seconds": 300,
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert captured_body["source"]["type"] == "local_video"
+        assert captured_body["source"]["value"] == str(upload_path.resolve(strict=False))
+
+
 # ===================================================================
 # intercept_create_job — success path, snapshot in downstream payload
 # ===================================================================
@@ -603,9 +648,13 @@ class TestCreateJobSuccess:
 
         assert captured_body["create_idempotency_key"] == "frontend-uuid-123"
 
-    def test_local_file_normalized_to_local_video(self):
+    def test_local_file_normalized_to_local_video(self, tmp_path, monkeypatch):
         """Frontend sends source.type='local_file'; Gateway normalizes to 'local_video'."""
         captured_body = {}
+        upload_path = tmp_path / "uploads" / "video.mp4"
+        upload_path.parent.mkdir(parents=True)
+        upload_path.write_bytes(b"video")
+        monkeypatch.setenv("AIVIDEOTRANS_PROJECTS_DIR", str(tmp_path))
 
         async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
             if override_body:

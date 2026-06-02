@@ -17,7 +17,7 @@ ALIGNMENT_METHOD_LABELS = {
 
 @dataclass(slots=True)
 class AlignedSegment:
-    segment_id: int
+    segment_id: int | str
     speaker_id: str
     display_name: str
     start_ms: int
