@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "RegenBatchAlreadyActiveError",
+    "has_active_regen_task",
     "read_regen_all_status",
     "request_regen_all_cancel",
     "start_regen_all_async",
@@ -81,6 +82,12 @@ def _project_key(project_dir: Path) -> str:
 
 def _new_task_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def has_active_regen_task(project_dir: str | Path) -> bool:
+    project_key = _project_key(Path(project_dir))
+    with _active_tasks_lock:
+        return project_key in _active_tasks
 
 
 def status_file_path(project_dir: str | Path) -> Path:

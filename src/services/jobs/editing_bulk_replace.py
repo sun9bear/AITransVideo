@@ -26,6 +26,7 @@ from services.jobs.editing_segments import (
 )
 from services.jobs.editing_speakers import load_baseline_speakers, load_speakers
 from services.jobs.editing_voice_map import load_voice_map
+from services.jobs.regenerate_all_async import has_active_regen_task
 
 __all__ = [
     "apply_bulk_replace_terms",
@@ -267,6 +268,11 @@ def apply_bulk_replace_terms(
     project_path = Path(project_dir)
 
     with file_lock(_editing_lock_anchor(project_path)):
+        if has_active_regen_task(project_path):
+            raise EditingConflictError(
+                "another batch regeneration task is already active; "
+                "wait for it to finish before applying bulk replace"
+            )
         segments = load_editing_segments(project_path)
         preview = _build_preview(
             project_path,

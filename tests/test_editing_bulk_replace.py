@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import services.jobs.editing_bulk_replace as editing_bulk_replace
 from services.jobs.editing import EDITING_SUBDIR
 from services.jobs.editing_bulk_replace import (
     apply_bulk_replace_terms,
@@ -137,6 +138,37 @@ def test_apply_bulk_replace_rejects_stale_preview(tmp_path: Path) -> None:
             expected_segment_ids=["2"],
             expected_total_matches=1,
         )
+
+
+def test_apply_bulk_replace_rejects_active_batch_before_mutating(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_dir = _seed_project(tmp_path)
+    segments_path = project_dir / EDITING_SUBDIR / "segments.json"
+    status_path = project_dir / EDITING_SUBDIR / "segment_status.json"
+    draft_path = project_dir / EDITING_SUBDIR / "tts_segments_draft" / "1.wav"
+    before_segments = segments_path.read_text(encoding="utf-8")
+    before_status = status_path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(
+        editing_bulk_replace,
+        "has_active_regen_task",
+        lambda _path: True,
+    )
+
+    with pytest.raises(Exception, match="batch regeneration task is already active"):
+        apply_bulk_replace_terms(
+            project_dir,
+            find="浠ょ墝",
+            replace="璇嶅厓",
+            expected_segment_ids=["1", "2"],
+            expected_total_matches=3,
+        )
+
+    assert segments_path.read_text(encoding="utf-8") == before_segments
+    assert status_path.read_text(encoding="utf-8") == before_status
+    assert draft_path.exists()
 
 
 def test_apply_bulk_replace_rejects_changed_confirmed_text(tmp_path: Path) -> None:
