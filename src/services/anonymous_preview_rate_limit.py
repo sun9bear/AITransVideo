@@ -43,7 +43,7 @@ the dependency direction pointing the other way.
 from __future__ import annotations
 
 import threading
-from typing import Mapping
+from typing import Mapping, Tuple
 
 
 __all__ = [
@@ -103,6 +103,44 @@ class InMemoryRateLimitCounterStore:
             self._counts[valid_key] = new_value
             return new_value
 
+    def try_acquire(self, key: str, cap: int) -> Tuple[bool, int]:
+        """Atomically check-and-increment ``key`` against ``cap``.
+
+        Holds the per-store lock around the read and the write so two
+        concurrent callers cannot both observe a value below the cap and
+        both increment past it. Returns ``(True, new_value)`` when the
+        caller is admitted, ``(False, current)`` when the current count
+        is already at or above the cap (no increment performed).
+        """
+
+        valid_key = _require_key(key)
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+            raise RateLimitCounterUnavailable(
+                f"cap must be a non-negative int, got {cap!r}"
+            )
+        with self._lock:
+            current = int(self._counts.get(valid_key, 0))
+            if current >= cap:
+                return (False, current)
+            new_value = current + 1
+            self._counts[valid_key] = new_value
+            return (True, new_value)
+
+    def decrement(self, key: str) -> int:
+        """Best-effort rollback of a prior admission.
+
+        Floors at zero so a stray rollback can never produce a negative
+        counter. Used by the adapter's multi-key rollback path; callers
+        outside that path normally have no reason to invoke this.
+        """
+
+        valid_key = _require_key(key)
+        with self._lock:
+            current = int(self._counts.get(valid_key, 0))
+            new_value = current - 1 if current > 0 else 0
+            self._counts[valid_key] = new_value
+            return new_value
+
     def snapshot(self) -> Mapping[str, int]:
         """Return a frozen copy of the current counts.
 
@@ -132,4 +170,10 @@ class UnavailableRateLimitCounterStore:
         raise RateLimitCounterUnavailable(self._reason)
 
     def increment(self, key: str) -> int:
+        raise RateLimitCounterUnavailable(self._reason)
+
+    def try_acquire(self, key: str, cap: int) -> Tuple[bool, int]:
+        raise RateLimitCounterUnavailable(self._reason)
+
+    def decrement(self, key: str) -> int:
         raise RateLimitCounterUnavailable(self._reason)

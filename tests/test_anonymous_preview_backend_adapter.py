@@ -83,6 +83,8 @@ class FakeCounterStore:
 
     def __init__(self, path: Optional[Path]):
         self._path = path
+        import threading as _t
+        self._lock = _t.RLock()
 
     def _load(self) -> MutableMapping[str, int]:
         if self._path is None:
@@ -114,10 +116,36 @@ class FakeCounterStore:
         return int(self._load().get(key, 0))
 
     def increment(self, key: str) -> int:
-        data = self._load()
-        data[key] = int(data.get(key, 0)) + 1
-        self._save(data)
-        return data[key]
+        with self._lock:
+            data = self._load()
+            data[key] = int(data.get(key, 0)) + 1
+            self._save(data)
+            return data[key]
+
+    def try_acquire(self, key: str, cap: int):
+        with self._lock:
+            data = self._load()
+            current = int(data.get(key, 0))
+            if current >= cap:
+                return (False, current)
+            data[key] = current + 1
+            self._save(data)
+            return (True, current + 1)
+
+    def decrement(self, key: str) -> int:
+        with self._lock:
+            try:
+                data = self._load()
+            except FakeRateLimitUnavailable:
+                return 0
+            current = int(data.get(key, 0))
+            new_value = current - 1 if current > 0 else 0
+            data[key] = new_value
+            try:
+                self._save(data)
+            except FakeRateLimitUnavailable:
+                pass
+            return new_value
 
 
 def _hash_token(prefix: str, value: str) -> str:
@@ -708,6 +736,247 @@ def test_local_upload_with_missing_upload_facts_fails_closed(adapter):
 
     assert record.status is PreviewStatus.FAILED
     assert "upload facts missing" in record.status_reason
+
+
+# ---------------------------------------------------------------------------
+# Behavior contract — atomic rate-limit admission + multi-key rollback.
+# ---------------------------------------------------------------------------
+
+
+class _LegacyNonAtomicStore:
+    """Legacy injected store with only ``get`` / ``increment`` — no
+    ``try_acquire``. The adapter must fail closed instead of silently
+    falling back to the non-atomic flow."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, int] = {}
+
+    def get(self, key: str) -> int:
+        return self._data.get(key, 0)
+
+    def increment(self, key: str) -> int:
+        self._data[key] = self._data.get(key, 0) + 1
+        return self._data[key]
+
+
+class _RecordingCounterStore:
+    """In-memory store that records the order of ``try_acquire`` and
+    ``decrement`` calls so rollback semantics can be asserted without
+    standing up a real backend."""
+
+    def __init__(self, deny_at: str) -> None:
+        self._counts: dict[str, int] = {}
+        self._deny_at = deny_at
+        self.try_acquire_calls: list[str] = []
+        self.decrement_calls: list[str] = []
+
+    def get(self, key: str) -> int:
+        return self._counts.get(key, 0)
+
+    def increment(self, key: str) -> int:
+        self._counts[key] = self._counts.get(key, 0) + 1
+        return self._counts[key]
+
+    def try_acquire(self, key: str, cap: int):
+        self.try_acquire_calls.append(key)
+        if key.startswith(self._deny_at):
+            return (False, cap)
+        self._counts[key] = self._counts.get(key, 0) + 1
+        return (True, self._counts[key])
+
+    def decrement(self, key: str) -> int:
+        self.decrement_calls.append(key)
+        current = self._counts.get(key, 0)
+        new = current - 1 if current > 0 else 0
+        self._counts[key] = new
+        return new
+
+
+def test_rate_limit_later_key_denial_rolls_back_earlier_admissions(
+    config, temp_upload_dir
+):
+    # Source-hash is the last key checked. We let global / ip / device
+    # admit, then deny on the source key, and verify earlier counters are
+    # rolled back via ``decrement`` so a denied request never leaves the
+    # counters over-claimed.
+    store = _RecordingCounterStore(deny_at="source:")
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_late_deny")
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.RATE_LIMITED
+    # The denial occurred on the source key.
+    assert "source:src_hash_late_deny" in record.status_reason
+    # try_acquire was attempted on all four keys in order, until the
+    # source-key denial.
+    assert store.try_acquire_calls[0].startswith("global:")
+    assert store.try_acquire_calls[1].startswith("ip:")
+    assert store.try_acquire_calls[2].startswith("device:")
+    assert store.try_acquire_calls[3].startswith("source:")
+    # Earlier admissions (global / ip / device) were rolled back; the
+    # source key was never admitted so it must not appear in decrements.
+    assert any(k.startswith("global:") for k in store.decrement_calls)
+    assert any(k.startswith("ip:") for k in store.decrement_calls)
+    assert any(k.startswith("device:") for k in store.decrement_calls)
+    assert all(not k.startswith("source:") for k in store.decrement_calls)
+    # Net effect: earlier counters are back at zero.
+    assert all(value == 0 for value in store._counts.values())
+
+
+def test_store_without_try_acquire_fails_closed(config, temp_upload_dir):
+    # A legacy injected store missing ``try_acquire`` must not silently
+    # downgrade to a non-atomic get/increment flow — the adapter fails
+    # closed via the outer ``except Exception`` branch.
+    legacy = _LegacyNonAtomicStore()
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=legacy,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_legacy_store")
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    # The fail-closed translation surfaces the underlying error type so
+    # audit trails can identify the legacy-store cause.
+    assert "fail closed" in record.status_reason.lower()
+
+
+def test_unexpected_hasher_exception_translated_to_failed_status(
+    config, counter_store, temp_upload_dir
+):
+    # Any unexpected adapter-owned dependency exception (here: the hasher
+    # raising) must be caught by the outer ``except Exception`` branch and
+    # translated to a status-only ``FAILED`` record — never re-raised to
+    # the caller.
+    def crashing_hasher(prefix: str, value: str) -> str:
+        raise RuntimeError("hasher backend offline")
+
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=crashing_hasher,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_hasher_crash")
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    # Outer branch labels the failure as adapter-owned.
+    assert "adapter error (fail closed)" in record.status_reason
+    assert "RuntimeError" in record.status_reason
+    # Raw exception message must never leak into the persisted status
+    # reason — only the exception type name is allowed.
+    assert "hasher backend offline" not in record.status_reason
+
+
+def test_unexpected_exception_scrubs_sensitive_dependency_message(
+    config, counter_store, temp_upload_dir
+):
+    # Injected dependencies may embed raw secrets, tokens, provider
+    # payloads, file paths, or raw media bytes in their exception
+    # messages. ``PreviewRecord.status_reason`` is a persisted, low-trust
+    # audit field; the outer ``except Exception`` branch must surface
+    # only the exception **type name** plus a stable fail-closed prefix,
+    # never ``str(exc)`` / ``repr(exc)`` / provider payload fragments.
+    sensitive_message = (
+        "secret=sk_live_AbCdEfGhIjKlMnOpQrStUvWx "
+        "token=Bearer.ey.payload.signature "
+        "raw=b'\\x00\\xffBINARY_MEDIA' "
+        "path=/var/lib/uploads/anon/clip.mp4"
+    )
+
+    def leaky_hasher(prefix: str, value: str) -> str:
+        raise RuntimeError(sensitive_message)
+
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=leaky_hasher,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_sensitive_leak"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    # Fail-closed status-only translation.
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    # Stable, low-sensitivity failure source preserved.
+    assert "RuntimeError" in reason
+    assert "fail closed" in reason.lower()
+    assert "adapter error" in reason
+    # No raw secret / token / media / path fragment may appear.
+    forbidden_fragments = (
+        "sk_live",
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+        "Bearer",
+        "ey.payload",
+        "raw=",
+        "BINARY_MEDIA",
+        "\\x00",
+        "/var/lib/uploads",
+        "clip.mp4",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"status_reason leaked dependency-payload fragment: "
+            f"{fragment!r} in {reason!r}"
+        )
+    # And the full sensitive message must never appear verbatim.
+    assert sensitive_message not in reason
+
+
+def test_unexpected_clock_exception_does_not_break_failure_record(
+    config, counter_store, temp_upload_dir
+):
+    # If the injected clock raises, ``_status_only_failure`` must still
+    # render a status-only record (using the conservative ``_FALLBACK_NOW``
+    # epoch) rather than re-raise.
+    def crashing_clock() -> datetime:
+        raise RuntimeError("clock backend offline")
+
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=crashing_clock,
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_clock_crash")
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    # TTL fallback respects the configured value because config is present.
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
 
 
 # ---------------------------------------------------------------------------

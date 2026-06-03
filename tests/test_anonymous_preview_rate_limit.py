@@ -127,6 +127,102 @@ def test_unavailable_store_increment_raises_readable_exception() -> None:
     assert "unavailable" in str(excinfo.value).lower()
 
 
+def test_unavailable_store_try_acquire_raises() -> None:
+    store = UnavailableRateLimitCounterStore("redis socket closed")
+    with pytest.raises(RateLimitCounterUnavailable) as excinfo:
+        store.try_acquire("any-key", 5)
+    assert "redis socket closed" in str(excinfo.value)
+
+
+def test_unavailable_store_decrement_raises() -> None:
+    store = UnavailableRateLimitCounterStore()
+    with pytest.raises(RateLimitCounterUnavailable):
+        store.decrement("any-key")
+
+
+# ---------------------------------------------------------------------------
+# Behavior — try_acquire atomic check-and-increment.
+# ---------------------------------------------------------------------------
+
+
+def test_try_acquire_admits_when_below_cap() -> None:
+    store = InMemoryRateLimitCounterStore()
+    admitted, value = store.try_acquire("ip:hashed-x:2026-06-02", cap=3)
+    assert admitted is True
+    assert value == 1
+    assert store.get("ip:hashed-x:2026-06-02") == 1
+
+
+def test_try_acquire_denies_at_cap_without_incrementing() -> None:
+    store = InMemoryRateLimitCounterStore()
+    # Bring counter up to cap.
+    store.try_acquire("source:abc:2026-06-02", cap=1)
+    admitted, value = store.try_acquire("source:abc:2026-06-02", cap=1)
+    assert admitted is False
+    assert value == 1
+    # Counter must not have advanced past the cap.
+    assert store.get("source:abc:2026-06-02") == 1
+
+
+def test_try_acquire_rejects_negative_cap() -> None:
+    store = InMemoryRateLimitCounterStore()
+    with pytest.raises(RateLimitCounterUnavailable):
+        store.try_acquire("k", cap=-1)
+    with pytest.raises(RateLimitCounterUnavailable):
+        store.try_acquire("k", cap=True)  # type: ignore[arg-type]
+
+
+def test_try_acquire_invalid_key_raises_unavailable() -> None:
+    store = InMemoryRateLimitCounterStore()
+    with pytest.raises(RateLimitCounterUnavailable):
+        store.try_acquire("", 5)
+
+
+def test_decrement_floors_at_zero_and_rolls_back_admission() -> None:
+    store = InMemoryRateLimitCounterStore()
+    store.try_acquire("k", cap=5)
+    store.try_acquire("k", cap=5)
+    assert store.get("k") == 2
+
+    assert store.decrement("k") == 1
+    assert store.decrement("k") == 0
+    # Floor at zero — extra decrement must not produce a negative count.
+    assert store.decrement("k") == 0
+    assert store.get("k") == 0
+
+
+def test_try_acquire_serializes_concurrent_admissions() -> None:
+    """Threads racing on the same key must never both observe a count
+    below the cap and both increment past it. Run many threads against a
+    cap=N store and verify exactly N admissions succeed."""
+
+    import threading as _t
+
+    store = InMemoryRateLimitCounterStore()
+    cap = 50
+    total_threads = 200
+    admitted_count = 0
+    admitted_lock = _t.Lock()
+    start_barrier = _t.Barrier(total_threads)
+
+    def worker() -> None:
+        nonlocal admitted_count
+        start_barrier.wait()
+        ok, _ = store.try_acquire("shared", cap)
+        if ok:
+            with admitted_lock:
+                admitted_count += 1
+
+    threads = [_t.Thread(target=worker) for _ in range(total_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert admitted_count == cap
+    assert store.get("shared") == cap
+
+
 # ---------------------------------------------------------------------------
 # Adapter wiring — structural compatibility with the backend adapter.
 # ---------------------------------------------------------------------------

@@ -37,10 +37,9 @@ changing this adapter.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional, Protocol, Sequence, Tuple
+from typing import Callable, List, Optional, Protocol, Sequence, Tuple
 
 from src.services.anonymous_preview_intake import (
     DEFAULT_PREVIEW_RECORD_TTL_SECONDS,
@@ -114,13 +113,29 @@ class CounterStore(Protocol):
     """Rate-limit counter store protocol.
 
     Implementations may be backed by Redis, a JSON file, a DB, or an
-    in-memory fake. The adapter only consumes ``get`` / ``increment`` and
-    treats any raised exception as a fail-closed signal.
+    in-memory fake. The adapter consumes the atomic ``try_acquire`` method
+    on the admission path so a single check-and-increment cannot race
+    between concurrent callers. ``get`` / ``increment`` remain on the
+    protocol for diagnostics and best-effort rollback; the adapter treats
+    any raised exception as a fail-closed signal.
+
+    ``try_acquire(key, cap)`` MUST atomically:
+
+    * return ``(False, current)`` without mutating state when
+      ``current >= cap``;
+    * otherwise increment the counter and return
+      ``(True, new_value)`` where ``new_value == current + 1``.
+
+    Optional ``decrement(key)`` is consulted by the adapter for best-effort
+    multi-key rollback when a later key denies after earlier keys were
+    admitted.
     """
 
     def get(self, key: str) -> int: ...
 
     def increment(self, key: str) -> int: ...
+
+    def try_acquire(self, key: str, cap: int) -> Tuple[bool, int]: ...
 
 
 ProbeFn = Callable[[UploadFacts], ProbeResult]
@@ -136,6 +151,9 @@ ClockFn = Callable[[], datetime]
 
 def _default_record_id(source_hash: str) -> str:
     return f"prv_{source_hash[:12]}" if source_hash else "prv_rejected_no_upload"
+
+
+_FALLBACK_NOW = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 @dataclass
@@ -202,6 +220,20 @@ class AnonymousPreviewBackendAdapter:
             )
         except IntakeRejected as exc:
             return self._status_only_failure(request, upload, exc)
+        except Exception as exc:  # noqa: BLE001 — adapter-owned dependency/config/runtime errors must fail closed
+            # Translate any unexpected adapter-owned dependency / config /
+            # runtime exception into a status-only ``FAILED`` record. We
+            # only surface the exception **type name** — never ``str(exc)``
+            # or ``repr(exc)`` — because injected dependencies may embed
+            # raw secrets, tokens, provider payloads, file paths, or raw
+            # media bytes in their exception messages, and ``status_reason``
+            # is a persisted, low-trust audit field. The type name alone
+            # gives audit traces a stable, low-sensitivity failure source.
+            failure = IntakeRejected(
+                PreviewStatus.FAILED,
+                f"adapter error (fail closed): dependency {type(exc).__name__}",
+            )
+            return self._status_only_failure(request, upload, failure)
 
     # -- Internal helpers ---------------------------------------------------
 
@@ -234,6 +266,19 @@ class AnonymousPreviewBackendAdapter:
         *,
         day_key: str,
     ) -> None:
+        """Atomic rate-limit admission.
+
+        Each key is checked-and-incremented via the store's ``try_acquire``
+        method so a single call cannot race between the read and the
+        write. If a later key denies after earlier keys were admitted, the
+        earlier admissions are rolled back best-effort via the optional
+        ``decrement`` method so a denied request never leaves counters
+        over-claimed. Stores that do not implement ``try_acquire`` raise
+        ``AttributeError`` here — caught and translated to a fail-closed
+        ``FAILED`` record so non-atomic shared-store behavior is never
+        silently allowed.
+        """
+
         if self.counter_store is None:
             raise IntakeRejected(
                 PreviewStatus.FAILED,
@@ -254,9 +299,12 @@ class AnonymousPreviewBackendAdapter:
                 config.rate_limit_per_source_hash_per_day,
             ),
         )
+        admitted: List[str] = []
         try:
             for key, cap in keys:
-                if self.counter_store.get(key) >= cap:
+                ok, _count = self.counter_store.try_acquire(key, cap)
+                if not ok:
+                    self._rollback_admitted(admitted)
                     session.escalated_to_login = (
                         config.escalate_to_login_after_rate_limit
                     )
@@ -264,12 +312,36 @@ class AnonymousPreviewBackendAdapter:
                         PreviewStatus.RATE_LIMITED,
                         f"rate limit exceeded for {key}",
                     )
-            for key, _cap in keys:
-                self.counter_store.increment(key)
+                admitted.append(key)
         except IntakeRejected:
             raise
         except Exception as exc:  # noqa: BLE001 — fail closed on any error
+            self._rollback_admitted(admitted)
             raise fail_closed_from_exception("rate-limit", exc) from exc
+
+    def _rollback_admitted(self, admitted: Sequence[str]) -> None:
+        """Best-effort rollback of previously admitted keys.
+
+        Looks up ``decrement`` on the counter store and calls it for each
+        admitted key. Any exception raised by ``decrement`` is swallowed:
+        the alternative is to surface a confusing secondary failure on
+        what is already a denied admission. Stores that do not provide a
+        ``decrement`` skip rollback — a deliberate reservation/decrement
+        is the documented strategy, callers that need stricter semantics
+        must implement ``decrement``.
+        """
+
+        store = self.counter_store
+        if store is None:
+            return
+        decrement = getattr(store, "decrement", None)
+        if decrement is None:
+            return
+        for key in admitted:
+            try:
+                decrement(key)
+            except Exception:  # noqa: BLE001 — rollback is best-effort
+                pass
 
     def _safe_probe(self, upload: UploadFacts) -> ProbeResult:
         try:
@@ -287,15 +359,31 @@ class AnonymousPreviewBackendAdapter:
         except Exception as exc:  # noqa: BLE001 — fail closed on any error
             raise fail_closed_from_exception("compliance", exc) from exc
 
+    def _safe_now(self) -> datetime:
+        try:
+            return self.now_fn()
+        except Exception:  # noqa: BLE001 — fail closed on clock error
+            return _FALLBACK_NOW
+
+    def _safe_hash(self, prefix: str, value: str) -> str:
+        try:
+            return self.hasher(prefix, value)
+        except Exception:  # noqa: BLE001 — fail closed on hasher error
+            return f"{prefix}_unavailable"
+
     def _status_only_failure(
         self,
         request: RequestFacts,
         upload: Optional[UploadFacts],
         exc: IntakeRejected,
     ) -> PreviewRecord:
-        now = self.now_fn()
+        now = self._safe_now()
         source_hash = upload.source_hash if upload is not None else ""
-        session_id_hash = self.hasher("sess", request.raw_session_id)
+        try:
+            raw_session_id = request.raw_session_id
+        except Exception:  # noqa: BLE001
+            raw_session_id = ""
+        session_id_hash = self._safe_hash("sess", raw_session_id)
         ttl_seconds = (
             self.config.preview_record_ttl_seconds
             if self.config is not None

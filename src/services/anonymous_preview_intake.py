@@ -239,9 +239,27 @@ def admit_source(
     is_free_user: bool,
 ) -> None:
     """Reject YouTube for anonymous and Free paths (C19). APF2 also rejects
-    Trial/Paid YouTube — those land in a later phase."""
+    Trial/Paid YouTube — those land in a later phase.
 
-    if source_type is SourceType.YOUTUBE_URL:
+    ``source_type`` is normalized via value comparison so that both the
+    ``SourceType.YOUTUBE_URL`` enum and the raw wire-level ``"youtube_url"``
+    string land on the same rejection. An unrecognized value fails closed
+    via ``PreviewStatus.FAILED`` — it must not silently pass as a local
+    upload.
+    """
+
+    if isinstance(source_type, SourceType):
+        normalized = source_type
+    else:
+        try:
+            normalized = SourceType(source_type)
+        except (TypeError, ValueError) as exc:
+            raise IntakeRejected(
+                PreviewStatus.FAILED,
+                f"source_type is not a recognized SourceType "
+                f"({source_type!r})",
+            ) from exc
+    if normalized is SourceType.YOUTUBE_URL:
         if (
             not config.youtube_enabled_for_anonymous
             or (is_free_user and not config.youtube_enabled_for_free)

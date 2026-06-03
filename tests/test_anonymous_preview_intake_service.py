@@ -195,6 +195,56 @@ def test_local_upload_source_admitted(config):
     )
 
 
+def test_youtube_wire_string_rejected(config):
+    # A future upload handler may forward the raw wire-level value instead
+    # of the SourceType enum. ``admit_source`` must normalize and reject
+    # both, otherwise YouTube intake would silently slip through.
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_source(
+            config,
+            source_type="youtube_url",  # type: ignore[arg-type]
+            is_free_user=False,
+        )
+    assert excinfo.value.status is PreviewStatus.REJECTED
+    assert "youtube_url" in excinfo.value.reason
+
+
+def test_local_upload_wire_string_admitted(config):
+    # Normal ``"local_upload"`` wire value must not raise — it normalizes
+    # to ``SourceType.LOCAL_UPLOAD`` and passes the gate just like the enum.
+    admit_source(
+        config,
+        source_type="local_upload",  # type: ignore[arg-type]
+        is_free_user=False,
+    )
+
+
+def test_unknown_source_type_string_fails_closed(config):
+    # Anything that is not a recognized ``SourceType`` value must fail
+    # closed via ``PreviewStatus.FAILED`` rather than be silently admitted
+    # as a local upload.
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_source(
+            config,
+            source_type="totally_unknown_kind",  # type: ignore[arg-type]
+            is_free_user=False,
+        )
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "source_type" in excinfo.value.reason
+    assert "totally_unknown_kind" in excinfo.value.reason
+
+
+def test_non_string_source_type_fails_closed(config):
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_source(
+            config,
+            source_type=42,  # type: ignore[arg-type]
+            is_free_user=False,
+        )
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "source_type" in excinfo.value.reason
+
+
 # ---------------------------------------------------------------------------
 # Upload gate — covers behaviors #2-#5 (extension, size, duration, chunked).
 # ---------------------------------------------------------------------------
