@@ -426,7 +426,12 @@ def test_probe_exception_fails_closed_no_silent_fallback(
     record = crashed.handle_intake(request, upload)
 
     assert record.status is PreviewStatus.FAILED
-    assert "probe error (fail closed)" in record.status_reason
+    # P1 scrub: reason carries the stage + exception type + fail-closed
+    # marker but not the raw exception message.
+    assert "probe" in record.status_reason
+    assert "RuntimeError" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    assert "ffmpeg segfaulted" not in record.status_reason
 
 
 def test_compliance_exception_fails_closed_no_silent_fallback(
@@ -442,7 +447,166 @@ def test_compliance_exception_fails_closed_no_silent_fallback(
     record = crashed.handle_intake(request, upload)
 
     assert record.status is PreviewStatus.FAILED
-    assert "compliance error (fail closed)" in record.status_reason
+    # P1 scrub: provider message text must not leak.
+    assert "compliance" in record.status_reason
+    assert "TimeoutError" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    assert "LLM compliance timed out" not in record.status_reason
+
+
+def test_probe_dependency_exception_scrubs_sensitive_message(
+    adapter, temp_upload_dir
+):
+    # P1: a probe provider raising with secrets / tokens / paths / raw
+    # media markers in its message must not have any of those fragments
+    # land on the persisted ``status_reason`` audit field.
+    sensitive = (
+        "secret=sk_live_AbCdEfGhIjKlMnOpQrStUvWx "
+        "token=Bearer.ey.payload.signature "
+        "raw=b'\\x00\\xffBINARY_MEDIA' "
+        "path=/var/lib/uploads/anon/clip.mp4"
+    )
+
+    def leaky_probe(_upload: UploadFacts) -> ProbeResult:
+        raise RuntimeError(sensitive)
+
+    crashed = replace(adapter, probe_fn=leaky_probe)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_probe_leak"
+    )
+
+    record = crashed.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "probe" in reason
+    assert "RuntimeError" in reason
+    forbidden_fragments = (
+        "sk_live",
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+        "Bearer",
+        "ey.payload",
+        "raw=",
+        "BINARY_MEDIA",
+        "\\x00",
+        "/var/lib/uploads",
+        "clip.mp4",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"probe status_reason leaked sensitive fragment {fragment!r} "
+            f"in reason={reason!r}"
+        )
+    assert sensitive not in reason
+
+
+def test_compliance_dependency_exception_scrubs_sensitive_message(
+    adapter, temp_upload_dir
+):
+    # P1: same scrub guarantee on the compliance branch.
+    sensitive = (
+        "compliance provider returned "
+        "secret=sk_live_AbCdEfGhIjKlMnOpQrStUvWx "
+        "Bearer ey.payload.signature "
+        "raw_media=b'\\x00\\xffBINARY_MEDIA' "
+        "from /var/lib/uploads/anon/clip.mp4"
+    )
+
+    def leaky_compliance(_probe: ProbeResult) -> ComplianceResult:
+        raise ValueError(sensitive)
+
+    crashed = replace(adapter, compliance_fn=leaky_compliance)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_comp_leak"
+    )
+
+    record = crashed.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "compliance" in reason
+    assert "ValueError" in reason
+    forbidden_fragments = (
+        "sk_live",
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+        "Bearer",
+        "ey.payload",
+        "raw_media",
+        "BINARY_MEDIA",
+        "\\x00",
+        "/var/lib/uploads",
+        "clip.mp4",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"compliance status_reason leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+    assert sensitive not in reason
+
+
+def test_rate_limit_dependency_exception_scrubs_sensitive_message(
+    config, temp_upload_dir
+):
+    # P1: rate-limit counter stores can also surface sensitive text
+    # (DSNs, bearer tokens). ``_enforce_rate_limits`` catches and
+    # translates via ``fail_closed_from_exception("rate-limit", exc)`` —
+    # the resulting ``status_reason`` must not carry the raw message.
+    sensitive = (
+        "redis connection refused at "
+        "rediss://user:Bearer.sk_live_AbCdEfGhIjKlMnOp@10.0.0.5:6379/0 "
+        "raw=b'\\x00\\xffBINARY_PAYLOAD' "
+        "path=/var/run/redis/redis.sock"
+    )
+
+    class LeakyCounterStore:
+        def get(self, key: str) -> int:
+            return 0
+
+        def increment(self, key: str) -> int:
+            raise RuntimeError(sensitive)
+
+        def try_acquire(self, key: str, cap: int):
+            raise RuntimeError(sensitive)
+
+    leaky = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=LeakyCounterStore(),
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_rate_leak"
+    )
+
+    record = leaky.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "rate-limit" in reason
+    assert "RuntimeError" in reason
+    forbidden_fragments = (
+        "sk_live",
+        "AbCdEfGhIjKlMnOp",
+        "Bearer",
+        "rediss://",
+        "10.0.0.5",
+        "raw=",
+        "BINARY_PAYLOAD",
+        "\\x00",
+        "/var/run/redis",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"rate-limit status_reason leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+    assert sensitive not in reason
 
 
 def test_probed_duration_over_cap_returns_rejected(adapter, temp_upload_dir, config):
@@ -620,7 +784,9 @@ def test_counter_store_unreadable_fails_closed(config, temp_upload_dir, tmp_path
     record = bad.handle_intake(request, upload)
 
     assert record.status is PreviewStatus.FAILED
-    assert "rate-limit error (fail closed)" in record.status_reason
+    assert "rate-limit" in record.status_reason
+    assert "FakeRateLimitUnavailable" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
 
 
 def test_rate_limit_overflow_returns_rate_limited(adapter, temp_upload_dir):
@@ -726,6 +892,94 @@ def test_failure_record_falls_back_to_default_ttl_when_config_missing(
     assert record.status is PreviewStatus.FAILED
     assert record.expires_at - record.created_at == timedelta(
         seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_ttl",
+    [
+        None,
+        "47",
+        47.0,
+        0,
+        -1,
+        -3600,
+        True,
+        False,
+    ],
+)
+def test_failure_record_falls_back_to_default_when_ttl_invalid(
+    counter_store, temp_upload_dir, bad_ttl
+):
+    # P2: ``_status_only_failure`` must validate
+    # ``IntakeConfig.preview_record_ttl_seconds`` before threading it
+    # into ``timedelta(seconds=...)``. None / non-int / non-positive /
+    # ``bool`` values must fall back to the pinned default rather than
+    # bubbling up a ``TypeError`` (or building a ``timedelta`` with
+    # surprising semantics like ``True`` → 1 second).
+    base_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+    )
+    bad_config = replace(
+        base_config,
+        preview_record_ttl_seconds=bad_ttl,  # type: ignore[arg-type]
+    )
+    custom = AnonymousPreviewBackendAdapter(
+        config=bad_config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    # Drive the YouTube reject path → ``_status_only_failure`` is the
+    # only emitter of the failure record.
+    youtube_request = _make_request(
+        source_type=SourceType.YOUTUBE_URL,
+        is_free_user=False,
+        youtube_url="https://example.invalid/anything",
+    )
+
+    record = custom.handle_intake(youtube_request, upload=None)
+
+    assert isinstance(record, PreviewRecord)
+    assert record.status is PreviewStatus.REJECTED
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
+
+
+def test_failure_record_uses_configured_ttl_when_positive_int(
+    counter_store, temp_upload_dir
+):
+    # P2 positive control: a legitimately configured positive int TTL
+    # still flows through ``_status_only_failure`` unchanged.
+    custom_ttl = 11 * 3600
+    custom_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        preview_record_ttl_seconds=custom_ttl,
+    )
+    custom = AnonymousPreviewBackendAdapter(
+        config=custom_config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    youtube_request = _make_request(
+        source_type=SourceType.YOUTUBE_URL,
+        is_free_user=False,
+        youtube_url="https://example.invalid/anything",
+    )
+
+    record = custom.handle_intake(youtube_request, upload=None)
+
+    assert record.status is PreviewStatus.REJECTED
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=custom_ttl
     )
 
 

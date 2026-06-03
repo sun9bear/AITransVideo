@@ -368,8 +368,47 @@ def test_fail_closed_helper_builds_failed_rejection():
     exc = RuntimeError("counter store unwritable")
     rejection = fail_closed_from_exception("rate-limit", exc)
     assert rejection.status is PreviewStatus.FAILED
-    assert "rate-limit error (fail closed)" in rejection.reason
-    assert "counter store unwritable" in rejection.reason
+    # Reason exposes only stage label + exception type name + fail-closed
+    # marker. The raw exception message must never leak into
+    # ``PreviewRecord.status_reason`` because injected dependencies often
+    # embed secrets / tokens / paths / raw media bytes in their messages.
+    assert "rate-limit" in rejection.reason
+    assert "RuntimeError" in rejection.reason
+    assert "fail closed" in rejection.reason.lower()
+    assert "counter store unwritable" not in rejection.reason
+
+
+def test_fail_closed_helper_scrubs_sensitive_exception_message():
+    # Pin the P1 scrub: secrets / tokens / paths / raw media markers in
+    # exception messages must never reach ``IntakeRejected.reason``.
+    sensitive = (
+        "secret=sk_live_AbCdEfGhIjKlMnOpQrStUvWx "
+        "token=Bearer.ey.payload.signature "
+        "raw=b'\\x00\\xffBINARY_MEDIA' "
+        "path=/var/lib/uploads/anon/clip.mp4"
+    )
+    rejection = fail_closed_from_exception("probe", RuntimeError(sensitive))
+    assert rejection.status is PreviewStatus.FAILED
+    reason = rejection.reason
+    assert "probe" in reason
+    assert "RuntimeError" in reason
+    forbidden_fragments = (
+        "sk_live",
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+        "Bearer",
+        "ey.payload",
+        "raw=",
+        "BINARY_MEDIA",
+        "\\x00",
+        "/var/lib/uploads",
+        "clip.mp4",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"fail_closed_from_exception leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+    assert sensitive not in reason
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +490,11 @@ def test_compliance_exception_translates_to_failed():
     exc = TimeoutError("LLM compliance timed out")
     rejection = fail_closed_from_exception("compliance", exc)
     assert rejection.status is PreviewStatus.FAILED
-    assert "compliance error (fail closed)" in rejection.reason
+    assert "compliance" in rejection.reason
+    assert "TimeoutError" in rejection.reason
+    assert "fail closed" in rejection.reason.lower()
+    # P1: provider payload text must not survive into ``status_reason``.
+    assert "LLM compliance timed out" not in rejection.reason
 
 
 def test_compliance_unknown_status_does_not_pass():

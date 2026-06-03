@@ -586,7 +586,12 @@ def test_adapter_probe_exception_translated_to_status_only_record(
     record = crash_adapter.handle_intake(request, upload)
 
     assert record.status is PreviewStatus.FAILED
-    assert "probe error (fail closed)" in record.status_reason
+    # P1: ``fail_closed_from_exception`` exposes only stage label +
+    # exception type name; the raw provider message is scrubbed.
+    assert "probe" in record.status_reason
+    assert "RuntimeError" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    assert "ffmpeg segfaulted" not in record.status_reason
 
 
 def test_adapter_compliance_exception_translated_to_status_only_record(
@@ -602,7 +607,11 @@ def test_adapter_compliance_exception_translated_to_status_only_record(
     record = crash_adapter.handle_intake(request, upload)
 
     assert record.status is PreviewStatus.FAILED
-    assert "compliance error (fail closed)" in record.status_reason
+    # P1: same scrub guarantee on the compliance branch.
+    assert "compliance" in record.status_reason
+    assert "TimeoutError" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    assert "LLM compliance timed out" not in record.status_reason
 
 
 # (3) Missing config / temp storage unavailable / counter unavailable fail
@@ -706,7 +715,10 @@ def test_adapter_counter_store_unreadable_fails_closed(
     record = bad_adapter.handle_intake(request, upload)
 
     assert record.status is PreviewStatus.FAILED
-    assert "rate-limit error (fail closed)" in record.status_reason
+    # P1: stage label + exception type name only, no raw provider text.
+    assert "rate-limit" in record.status_reason
+    assert "FakeRateLimitUnavailable" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
 
 
 def test_adapter_rate_limit_overflow_returns_rate_limited(

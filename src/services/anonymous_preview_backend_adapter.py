@@ -371,6 +371,31 @@ class AnonymousPreviewBackendAdapter:
         except Exception:  # noqa: BLE001 — fail closed on hasher error
             return f"{prefix}_unavailable"
 
+    def _safe_preview_record_ttl_seconds(self) -> int:
+        """Return a validated positive ``int`` TTL, falling back to the
+        pinned ``DEFAULT_PREVIEW_RECORD_TTL_SECONDS`` whenever
+        ``self.config`` is missing or its ``preview_record_ttl_seconds``
+        field is missing / ``None`` / non-int / non-positive / ``bool``.
+
+        Prevents ``TypeError`` from ``timedelta(seconds=...)`` during
+        the fail-closed status-only path when a misconfigured caller
+        sets ``preview_record_ttl_seconds`` to ``None`` or to a value of
+        a type the standard library refuses to accept. ``bool`` is
+        rejected explicitly because it is a subclass of ``int`` but
+        carrying ``True`` / ``False`` as a TTL is a configuration bug,
+        not a legitimate value.
+        """
+
+        config = self.config
+        if config is None:
+            return DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+        candidate = getattr(config, "preview_record_ttl_seconds", None)
+        if isinstance(candidate, bool):
+            return DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+        if not isinstance(candidate, int) or candidate <= 0:
+            return DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+        return candidate
+
     def _status_only_failure(
         self,
         request: RequestFacts,
@@ -384,11 +409,7 @@ class AnonymousPreviewBackendAdapter:
         except Exception:  # noqa: BLE001
             raw_session_id = ""
         session_id_hash = self._safe_hash("sess", raw_session_id)
-        ttl_seconds = (
-            self.config.preview_record_ttl_seconds
-            if self.config is not None
-            else DEFAULT_PREVIEW_RECORD_TTL_SECONDS
-        )
+        ttl_seconds = self._safe_preview_record_ttl_seconds()
         return PreviewRecord(
             record_id=_default_record_id(source_hash),
             session_id_hash=session_id_hash,

@@ -425,8 +425,24 @@ def fail_closed_from_exception(
     stage: str, exc: BaseException
 ) -> IntakeRejected:
     """Build a ``FAILED`` ``IntakeRejected`` for upstream exceptions
-    raised during probe or compliance evaluation. Callers should
-    ``raise fail_closed_from_exception(...) from exc``.
+    raised during probe / compliance / rate-limit evaluation. Callers
+    should ``raise fail_closed_from_exception(...) from exc``.
+
+    Only the ``stage`` label and the exception's **type name** are
+    surfaced on ``IntakeRejected.reason``. The exception's ``str`` /
+    ``repr`` is intentionally not included because injected dependencies
+    (ffprobe wrappers, compliance providers, rate-limit stores) routinely
+    embed raw secrets, bearer tokens, provider payloads, filesystem
+    paths, or raw media markers inside their exception messages, and
+    ``PreviewRecord.status_reason`` is a persisted, low-trust audit
+    field. Surfacing only the type name keeps audit traces useful while
+    failing closed without leaking dependency payload.
+
+    The reason format ``"{stage} error (fail closed): dependency
+    {ExceptionType}"`` is load-bearing: existing rate-limit and adapter
+    contract tests pin the ``"{stage} error (fail closed)"`` substring,
+    while ``dependency {ExceptionType}`` preserves the exception-type
+    audit fragment without ever interpolating ``str(exc)`` / ``repr(exc)``.
 
     This is intentionally a builder (not a raiser) so the caller can
     preserve ``from exc`` chaining at the call site.
@@ -434,7 +450,7 @@ def fail_closed_from_exception(
 
     return IntakeRejected(
         PreviewStatus.FAILED,
-        f"{stage} error (fail closed): {exc}",
+        f"{stage} error (fail closed): dependency {type(exc).__name__}",
     )
 
 
