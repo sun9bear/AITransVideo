@@ -182,7 +182,22 @@ class PreviewRecord:
     """Status-only intake record. APF2 callers must NOT extend this with
     preview media / download / clone / pricing / payment fields. The
     ``FORBIDDEN_PREVIEW_RECORD_FIELDS`` set above documents the explicit
-    deny list."""
+    deny list.
+
+    ``login_escalation_hint`` is a status-only signal (not preview /
+    clone / pricing surface) that the caller — typically a future
+    frontend or claim/UX layer — uses to decide whether to render a
+    "log in to keep trying" affordance after a ``RATE_LIMITED`` reply.
+    The pure intake module never reads it; the adapter populates it via
+    ``IntakeRejected.login_escalation_hint`` so that the rendered
+    ``PreviewRecord`` distinguishes
+    ``IntakeConfig.escalate_to_login_after_rate_limit=True`` from
+    ``False`` instead of only mutating a transient ``AnonymousSession``.
+    APF2 contract C23 ("rate-limit overflow may escalate to login but
+    must not introduce a captcha / third-party dependency") is honored
+    by surfacing only this boolean — no opaque token, no redirect URL,
+    no third-party challenge.
+    """
 
     record_id: str
     session_id_hash: str
@@ -200,6 +215,7 @@ class PreviewRecord:
     selected_mode_placeholder: Optional[str] = None
     recommended_mode_placeholder: Optional[str] = None
     claim_token_placeholder: Optional[str] = None
+    login_escalation_hint: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -209,12 +225,28 @@ class PreviewRecord:
 
 class IntakeRejected(Exception):
     """Raised by any contract gate that fails — carries a ``PreviewStatus``
-    so the caller can translate it to a status-only preview record."""
+    so the caller can translate it to a status-only preview record.
 
-    def __init__(self, status: PreviewStatus, reason: str):
+    ``login_escalation_hint`` threads APF2 C23's login-escalation signal
+    from the rate-limit decision site through the exception so the
+    adapter's status-only ``PreviewRecord`` can carry the hint without
+    relying on a transient ``AnonymousSession`` mutation. The pure
+    intake helpers leave it ``None`` everywhere except the rate-limit
+    branch wired by the adapter; the field stays optional so all
+    existing call sites keep working unchanged.
+    """
+
+    def __init__(
+        self,
+        status: PreviewStatus,
+        reason: str,
+        *,
+        login_escalation_hint: Optional[bool] = None,
+    ):
         super().__init__(f"{status.value}: {reason}")
         self.status = status
         self.reason = reason
+        self.login_escalation_hint = login_escalation_hint
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +407,13 @@ def evaluate_compliance_result(result: ComplianceResult) -> ComplianceResult:
       ``ComplianceStatus.PASS`` enum (the caller's object is not mutated;
       when the input was already the enum the original instance is
       returned unchanged).
+    * ``failure_reason`` non-empty (even when ``status=PASS``) →
+      ``FAILED``. A populated ``failure_reason`` is a contract-level
+      "the compliance layer is not healthy" marker that must NEVER be
+      ignored, even if the wrapper also reports ``PASS`` — fail closed.
+      The actual ``failure_reason`` string is not echoed into
+      ``status_reason`` to avoid leaking provider payloads / tokens /
+      paths / raw media markers.
 
     Exceptions / timeouts raised by upstream compliance providers must be
     converted to a ``FAILED`` ``IntakeRejected`` by the caller — this
@@ -385,6 +424,23 @@ def evaluate_compliance_result(result: ComplianceResult) -> ComplianceResult:
         raise IntakeRejected(
             PreviewStatus.FAILED,
             "blocked media bytes must not be retained",
+        )
+    if result.failure_reason:
+        # Fail closed on any non-empty ``failure_reason`` regardless of
+        # the reported ``status``. A compliance wrapper that returns
+        # ``ComplianceResult(status=PASS, failure_reason=...)`` must
+        # never advance to ``READY_FOR_MODE`` — the failure reason is a
+        # contract-level signal that the upstream compliance layer hit
+        # an unrecoverable problem, even if it also chose to label the
+        # row ``PASS``. The raw ``failure_reason`` is intentionally NOT
+        # interpolated into ``status_reason`` because compliance
+        # provider payloads, raw media markers, paths, tokens or
+        # exception text routinely land there, and ``status_reason`` is
+        # a persisted, low-trust audit field (matches R7b's redacted
+        # fail-closed style).
+        raise IntakeRejected(
+            PreviewStatus.FAILED,
+            "compliance failure_reason present (fail closed)",
         )
     hit = _find_media_bytes_path(result.audit_metadata)
     if hit is not None:
@@ -508,6 +564,7 @@ def build_preview_record(
         selected_mode_placeholder=None,
         recommended_mode_placeholder=None,
         claim_token_placeholder=None,
+        login_escalation_hint=None,
     )
 
 

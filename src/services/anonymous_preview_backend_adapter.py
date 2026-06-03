@@ -308,9 +308,19 @@ class AnonymousPreviewBackendAdapter:
                     session.escalated_to_login = (
                         config.escalate_to_login_after_rate_limit
                     )
+                    # Thread the login-escalation hint through the
+                    # exception so the status-only ``PreviewRecord``
+                    # rendered by ``_status_only_failure`` carries the
+                    # signal — the caller must not have to inspect the
+                    # transient ``AnonymousSession`` to decide whether
+                    # to suggest login (PR #22 external review P2,
+                    # APF2 C23).
                     raise IntakeRejected(
                         PreviewStatus.RATE_LIMITED,
                         f"rate limit exceeded for {key}",
+                        login_escalation_hint=(
+                            config.escalate_to_login_after_rate_limit
+                        ),
                     )
                 admitted.append(key)
         except IntakeRejected:
@@ -427,6 +437,9 @@ class AnonymousPreviewBackendAdapter:
             selected_mode_placeholder=None,
             recommended_mode_placeholder=None,
             claim_token_placeholder=None,
+            login_escalation_hint=getattr(
+                exc, "login_escalation_hint", None
+            ),
         )
 
 

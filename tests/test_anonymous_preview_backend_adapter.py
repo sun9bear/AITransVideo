@@ -1265,6 +1265,149 @@ def test_failure_record_omits_forbidden_fields(adapter):
 
 
 # ---------------------------------------------------------------------------
+# P2 — login_escalation_hint (PR #22 review discussion_r3345414997).
+# ---------------------------------------------------------------------------
+
+
+def test_happy_path_login_escalation_hint_is_none(adapter, temp_upload_dir):
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_hint_happy")
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.READY_FOR_MODE
+    assert record.login_escalation_hint is None
+
+
+def test_rate_limit_overflow_emits_login_escalation_hint_true(
+    adapter, temp_upload_dir
+):
+    # Default config has escalate_to_login_after_rate_limit=True.
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_hint_true")
+
+    first = adapter.handle_intake(request, upload)
+    second = adapter.handle_intake(request, upload)
+
+    assert first.status is PreviewStatus.READY_FOR_MODE
+    assert first.login_escalation_hint is None
+    assert second.status is PreviewStatus.RATE_LIMITED
+    assert second.login_escalation_hint is True
+
+
+def test_rate_limit_overflow_emits_login_escalation_hint_false(
+    counter_store, temp_upload_dir
+):
+    cfg = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        escalate_to_login_after_rate_limit=False,
+    )
+    adapter = AnonymousPreviewBackendAdapter(
+        config=cfg,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_hint_false")
+
+    first = adapter.handle_intake(request, upload)
+    second = adapter.handle_intake(request, upload)
+
+    assert first.status is PreviewStatus.READY_FOR_MODE
+    assert second.status is PreviewStatus.RATE_LIMITED
+    assert second.login_escalation_hint is False
+
+
+def test_non_rate_limit_failures_emit_hint_none(adapter, temp_upload_dir):
+    # YouTube rejection — non-rate-limit failure path.
+    youtube_request = _make_request(
+        source_type=SourceType.YOUTUBE_URL,
+        is_free_user=False,
+        youtube_url="https://example.invalid/x",
+    )
+    record_yt = adapter.handle_intake(youtube_request, upload=None)
+    assert record_yt.status is PreviewStatus.REJECTED
+    assert record_yt.login_escalation_hint is None
+
+    # Bad upload extension — REJECTED, no hint.
+    bad_request = _make_request()
+    bad_upload = _make_upload(
+        temp_upload_dir,
+        file_name="clip.exe",
+        source_hash="src_hash_hint_ext",
+    )
+    record_ext = adapter.handle_intake(bad_request, bad_upload)
+    assert record_ext.status is PreviewStatus.REJECTED
+    assert record_ext.login_escalation_hint is None
+
+
+def test_login_escalation_hint_not_a_forbidden_field(adapter, temp_upload_dir):
+    # Defense-in-depth: the new field is status-only signal, must not
+    # collide with preview / download / clone / pricing / payment fields.
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_hint_disjoint")
+    record = adapter.handle_intake(request, upload)
+
+    assert "login_escalation_hint" in record.__dict__
+    assert "login_escalation_hint" not in FORBIDDEN_PREVIEW_RECORD_FIELDS
+    assert FORBIDDEN_PREVIEW_RECORD_FIELDS.isdisjoint(record.__dict__)
+
+
+# ---------------------------------------------------------------------------
+# P2 — compliance PASS + failure_reason fail closes through adapter
+# (PR #22 review discussion_r3345414999).
+# ---------------------------------------------------------------------------
+
+
+def test_compliance_pass_with_failure_reason_adapter_fails_closed(
+    adapter, temp_upload_dir
+):
+    sensitive = (
+        "provider=upstream tok=Bearer.sk_live_RTU "
+        "raw=b'\\x00\\xffBINARY_MEDIA' path=/var/lib/uploads/x.mp4"
+    )
+
+    def pass_but_unhealthy(_probe: ProbeResult) -> ComplianceResult:
+        return ComplianceResult(
+            status=ComplianceStatus.PASS,
+            reason="LLM compliance ok wrapper",
+            audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+            blocked_media_retained=False,
+            failure_reason=sensitive,
+        )
+
+    bad = replace(adapter, compliance_fn=pass_but_unhealthy)
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash="src_hash_pass_fail")
+
+    record = bad.handle_intake(request, upload)
+
+    # Must NOT reach READY_FOR_MODE despite PASS label.
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "compliance failure_reason" in reason
+    assert "fail closed" in reason.lower()
+    # Raw provider payload / token / path / media markers must not leak.
+    for fragment in (
+        sensitive,
+        "Bearer",
+        "sk_live_RTU",
+        "BINARY_MEDIA",
+        "\\x00",
+        "/var/lib/uploads",
+        "x.mp4",
+    ):
+        assert fragment not in reason, (
+            f"PASS+failure_reason status_reason leaked sensitive fragment "
+            f"{fragment!r} in {reason!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Import guard — adapter module only imports stdlib + intake contract.
 # ---------------------------------------------------------------------------
 

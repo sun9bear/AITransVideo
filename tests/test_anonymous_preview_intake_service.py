@@ -508,6 +508,123 @@ def test_compliance_unknown_status_does_not_pass():
     assert evaluate_compliance_result(pass_result).status is ComplianceStatus.PASS
 
 
+# ---------------------------------------------------------------------------
+# P2 — compliance PASS + failure_reason MUST fail closed (pure helper).
+# Mirrors PR #22 external review comment discussion_r3345414999.
+# ---------------------------------------------------------------------------
+
+
+def test_compliance_pass_with_failure_reason_fails_closed():
+    sensitive_failure = (
+        "provider=minimax-clone tok=Bearer.sk_live_XYZ "
+        "raw=b'\\x00\\xffBINARY' path=/var/lib/uploads/x.mp4"
+    )
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok; teaser ASR ok; LLM compliance ok",
+        audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+        blocked_media_retained=False,
+        failure_reason=sensitive_failure,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "compliance failure_reason" in reason
+    assert "fail closed" in reason.lower()
+    for fragment in (
+        sensitive_failure,
+        "Bearer",
+        "sk_live_XYZ",
+        "BINARY",
+        "\\x00",
+        "/var/lib/uploads",
+        "x.mp4",
+    ):
+        assert fragment not in reason, (
+            f"PASS+failure_reason status_reason leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+
+
+def test_compliance_pass_with_none_or_empty_failure_reason_still_passes():
+    clean = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok",
+        audit_metadata={"layers": ()},
+        blocked_media_retained=False,
+        failure_reason=None,
+    )
+    assert evaluate_compliance_result(clean) is clean
+    empty = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok",
+        audit_metadata={"layers": ()},
+        blocked_media_retained=False,
+        failure_reason="",
+    )
+    assert evaluate_compliance_result(empty) is empty
+
+
+def test_compliance_block_with_failure_reason_fails_closed_before_block():
+    result = ComplianceResult(
+        status=ComplianceStatus.BLOCK,
+        reason="prohibited content",
+        audit_metadata={"matched_rule": "demo_rule"},
+        blocked_media_retained=False,
+        failure_reason="upstream provider 5xx with payload secret=sk_live_AAA",
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "compliance failure_reason" in excinfo.value.reason
+    assert "sk_live_AAA" not in excinfo.value.reason
+
+
+# ---------------------------------------------------------------------------
+# P2 — login_escalation_hint default + forbidden-field invariants.
+# Mirrors PR #22 external review comment discussion_r3345414997.
+# ---------------------------------------------------------------------------
+
+
+def test_preview_record_login_escalation_hint_defaults_to_none(
+    config, temp_upload_dir, session
+):
+    upload = _make_upload(temp_upload_dir)
+    record = build_preview_record(
+        config,
+        session=session,
+        upload=upload,
+        probe_result=_passing_probe(upload),
+        compliance_result=_passing_compliance(),
+        now=_FROZEN_NOW,
+    )
+    assert record.login_escalation_hint is None
+
+
+def test_login_escalation_hint_not_in_forbidden_fields():
+    # The hint is a status-only signal — explicitly NOT preview /
+    # download / clone / pricing / payment surface.
+    assert "login_escalation_hint" not in FORBIDDEN_PREVIEW_RECORD_FIELDS
+
+
+def test_intake_rejected_accepts_login_escalation_hint_kwarg():
+    rejection_true = IntakeRejected(
+        PreviewStatus.RATE_LIMITED,
+        "rate limit exceeded for source:abc",
+        login_escalation_hint=True,
+    )
+    assert rejection_true.login_escalation_hint is True
+    rejection_false = IntakeRejected(
+        PreviewStatus.RATE_LIMITED,
+        "rate limit exceeded",
+        login_escalation_hint=False,
+    )
+    assert rejection_false.login_escalation_hint is False
+    plain = IntakeRejected(PreviewStatus.FAILED, "some failure")
+    assert plain.login_escalation_hint is None
+
+
 def test_compliance_status_wire_string_block_is_normalized_and_rejected():
     # Real compliance wrappers occasionally pass the wire-level string
     # value instead of the ComplianceStatus enum. The pure helper must
