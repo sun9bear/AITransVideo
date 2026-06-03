@@ -208,11 +208,42 @@ class AnonymousPreviewBackendAdapter:
             session = self._build_session(config, request)
             intake = self._build_upload_intake(upload)
             admit_upload(config, intake)
+            # APF2c R8v fix #2 (PR #22 external review P2,
+            # discussion_r3347732874): a non-int / non-positive /
+            # ``bool`` ``preview_record_ttl_seconds`` must fail closed
+            # **before** any rate-limit counter mutation, probe call or
+            # compliance call. Otherwise a misconfigured TTL leaks
+            # downstream as a ``TypeError`` from ``timedelta(...)`` or
+            # produces an immediately-expired record, after the
+            # adapter has already paid the cost of rate-limit
+            # accounting and the expensive probe / compliance
+            # round-trips. The raw config value is intentionally NOT
+            # interpolated into ``status_reason`` (persisted, low-trust
+            # audit field).
+            self._require_preview_record_ttl_seconds(config)
             self._enforce_rate_limits(
                 config, session, intake, day_key=request.day_key
             )
             probe_result = self._safe_probe(upload)
             evaluate_probe_result(probe_result)
+            # APF2c R8v fix #1 (PR #22 external review P2,
+            # discussion_r3347732869): the injected probe may return a
+            # ``ProbeResult`` whose ``source_hash`` no longer matches
+            # the upload intake — typical causes are a stale cached
+            # probe entry or a temp-path mix-up across concurrent
+            # uploads. If we let such a probe through, the resulting
+            # ``PreviewRecord`` would attribute the probe's duration /
+            # audio / (post-compliance) decision to a *different*
+            # upload. Fail closed before duration cap, compliance and
+            # record write. The actual hash values are intentionally
+            # NOT interpolated into ``status_reason`` (persisted,
+            # low-trust audit field) — only the structural marker
+            # ``probe source_hash mismatch`` + ``fail closed``.
+            if probe_result.source_hash != intake.source_hash:
+                raise IntakeRejected(
+                    PreviewStatus.FAILED,
+                    "probe source_hash mismatch (fail closed)",
+                )
             if probe_result.duration_seconds > config.max_source_duration_seconds:
                 raise IntakeRejected(
                     PreviewStatus.REJECTED,
@@ -428,6 +459,42 @@ class AnonymousPreviewBackendAdapter:
             return self.hasher(prefix, value)
         except Exception:  # noqa: BLE001 — fail closed on hasher error
             return f"{prefix}_unavailable"
+
+    @staticmethod
+    def _require_preview_record_ttl_seconds(config: IntakeConfig) -> int:
+        """Fail closed when ``config.preview_record_ttl_seconds`` is not a
+        positive ``int``.
+
+        Called from the success path **before** rate-limit accounting,
+        probe and compliance so a misconfigured TTL never advances to
+        counter mutation or expensive provider calls. ``bool`` is
+        rejected explicitly because it is a subclass of ``int`` but
+        carrying ``True`` / ``False`` is a configuration bug, not a
+        legitimate TTL value.
+
+        The raw config value is intentionally NOT interpolated into
+        ``status_reason`` — that string lands on
+        ``PreviewRecord.status_reason``, a persisted, low-trust audit
+        field, and even configuration values can carry surprising
+        operator strings. Mirrors the R7b / R8l / R8o redaction style.
+
+        ``self.config is None`` is handled earlier by
+        ``require_config(self.config)`` and intentionally not duplicated
+        here; the per-test contract for missing config is
+        ``"IntakeConfig is missing (fail closed)"``.
+        """
+
+        candidate = getattr(config, "preview_record_ttl_seconds", None)
+        if (
+            isinstance(candidate, bool)
+            or not isinstance(candidate, int)
+            or candidate <= 0
+        ):
+            raise IntakeRejected(
+                PreviewStatus.FAILED,
+                "preview_record_ttl_seconds is invalid (fail closed)",
+            )
+        return candidate
 
     def _safe_preview_record_ttl_seconds(self) -> int:
         """Return a validated positive ``int`` TTL, falling back to the

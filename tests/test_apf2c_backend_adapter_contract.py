@@ -213,9 +213,24 @@ class FakeBackendAdapter:
             session = self._build_session(config, request)
             intake = self._build_upload_intake(upload)
             admit_upload(config, intake)
+            # APF2c R8v contract mirror (PR #22 external review P2,
+            # discussion_r3347732874): bad ``preview_record_ttl_seconds``
+            # must fail closed before rate-limit counter mutation,
+            # probe and compliance.
+            self._require_preview_record_ttl_seconds(config)
             self._enforce_rate_limits(session, intake, day_key=request.day_key)
             probe_result = self._safe_probe(upload)
             evaluate_probe_result(probe_result)
+            # APF2c R8v contract mirror (PR #22 external review P2,
+            # discussion_r3347732869): a stale / mixed-up probe whose
+            # ``source_hash`` no longer matches the upload intake must
+            # not attribute another upload's duration / audio /
+            # compliance to this record.
+            if probe_result.source_hash != intake.source_hash:
+                raise IntakeRejected(
+                    PreviewStatus.FAILED,
+                    "probe source_hash mismatch (fail closed)",
+                )
             compliance_result = self._safe_compliance(probe_result)
             evaluate_compliance_result(compliance_result)
             return build_preview_record(
@@ -252,6 +267,20 @@ class FakeBackendAdapter:
             stored_path=upload.stored_path,
             is_chunked=upload.is_chunked,
         )
+
+    @staticmethod
+    def _require_preview_record_ttl_seconds(config: IntakeConfig) -> int:
+        candidate = getattr(config, "preview_record_ttl_seconds", None)
+        if (
+            isinstance(candidate, bool)
+            or not isinstance(candidate, int)
+            or candidate <= 0
+        ):
+            raise IntakeRejected(
+                PreviewStatus.FAILED,
+                "preview_record_ttl_seconds is invalid (fail closed)",
+            )
+        return candidate
 
     def _enforce_rate_limits(
         self,
@@ -934,6 +963,181 @@ def test_adapter_source_module_has_no_preview_or_clone_callables():
     assert offenders == [], (
         f"pure intake module exposes forbidden surface: {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Contract mirror — APF2c R8v fail-closed gates (PR #22 external review P2,
+# discussion_r3347732869 + discussion_r3347732874).
+# ---------------------------------------------------------------------------
+
+
+def _mismatch_probe_factory(returned_hash: str):
+    def mismatch_probe(upload: FakeUploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=upload.duration_seconds,
+            source_hash=returned_hash,
+            media_type=f"video/{Path(upload.file_name).suffix.lstrip('.').lower()}",
+            audio_present=True,
+            audio_quality_score=0.8,
+            teaser_candidate_range=(0.0, min(upload.duration_seconds, 180.0)),
+            failure_reason=None,
+        )
+
+    return mismatch_probe
+
+
+def test_adapter_probe_source_hash_mismatch_fails_closed(
+    adapter, temp_upload_dir
+):
+    upload_hash = "src_hash_upload_a"
+    stale_hash = "src_hash_probe_stale_b"
+    mismatched = replace(
+        adapter, probe_fn=_mismatch_probe_factory(stale_hash)
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash=upload_hash)
+
+    record = mismatched.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "probe source_hash mismatch" in reason
+    assert "fail closed" in reason.lower()
+    # Neither hash leaks into the persisted audit field.
+    assert upload_hash not in reason
+    assert stale_hash not in reason
+    assert mismatched.forbidden_calls == []
+
+
+def test_adapter_probe_source_hash_mismatch_skips_compliance(
+    config, counter_store, temp_upload_dir
+):
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    adapter = FakeBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_mismatch_probe_factory("src_hash_probe_stale_c"),
+        compliance_fn=spy_compliance,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_upload_c"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert "probe source_hash mismatch" in record.status_reason
+    assert compliance_calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_ttl",
+    [
+        None,
+        "47",
+        47.0,
+        0,
+        -1,
+        True,
+        False,
+    ],
+)
+def test_adapter_invalid_preview_ttl_fails_closed_before_rate_limit_probe_compliance(
+    counter_path, temp_upload_dir, bad_ttl
+):
+    probe_calls: list[FakeUploadFacts] = []
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_probe(upload: FakeUploadFacts) -> ProbeResult:
+        probe_calls.append(upload)
+        return _passing_probe(upload)
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    base_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+    )
+    bad_config = replace(
+        base_config,
+        preview_record_ttl_seconds=bad_ttl,  # type: ignore[arg-type]
+    )
+    counter_store = FakeCounterStore(counter_path)
+    adapter = FakeBackendAdapter(
+        config=bad_config,
+        counter_store=counter_store,
+        probe_fn=spy_probe,
+        compliance_fn=spy_compliance,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_contract_bad_ttl"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert "preview_record_ttl_seconds" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    assert probe_calls == []
+    assert compliance_calls == []
+    # No rate-limit counter mutation: FakeCounterStore writes JSON only
+    # on ``increment``. The file must not exist after a TTL-gate
+    # fail-closed.
+    assert not counter_path.exists()
+    # Status-only record TTL still defaults to the pinned constant in
+    # the contract scaffold.
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
+
+
+def test_adapter_invalid_preview_ttl_reason_does_not_leak_raw_value(
+    counter_store, temp_upload_dir
+):
+    base_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+    )
+    sensitive_ttl = "leak_token=Bearer.sk_live_AbCdEf"
+    bad_config = replace(
+        base_config,
+        preview_record_ttl_seconds=sensitive_ttl,  # type: ignore[arg-type]
+    )
+    adapter = FakeBackendAdapter(
+        config=bad_config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_contract_ttl_leak"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "preview_record_ttl_seconds" in reason
+    assert "fail closed" in reason.lower()
+    for fragment in ("Bearer", "sk_live", "AbCdEf", "leak_token"):
+        assert fragment not in reason, (
+            f"contract scaffold leaked sensitive ttl fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+    assert sensitive_ttl not in reason
 
 
 # ---------------------------------------------------------------------------

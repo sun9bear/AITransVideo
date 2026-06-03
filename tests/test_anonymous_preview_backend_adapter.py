@@ -1817,6 +1817,368 @@ def test_adapter_module_does_not_reference_provider_modules():
 
 
 # ---------------------------------------------------------------------------
+# P2 — probe source_hash mismatch fails closed (PR #22 external review P2,
+# discussion_r3347732869, R8v).
+# ---------------------------------------------------------------------------
+
+
+def _mismatch_probe_factory(returned_hash: str):
+    def mismatch_probe(upload: UploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=upload.duration_seconds,
+            source_hash=returned_hash,
+            media_type=f"video/{Path(upload.file_name).suffix.lstrip('.').lower()}",
+            audio_present=True,
+            audio_quality_score=0.9,
+            teaser_candidate_range=(0.0, min(upload.duration_seconds, 180.0)),
+            failure_reason=None,
+        )
+
+    return mismatch_probe
+
+
+def test_probe_source_hash_mismatch_fails_closed_with_low_sensitive_reason(
+    adapter, temp_upload_dir
+):
+    # A probe that returns a different ``source_hash`` than the upload
+    # intake (stale cached probe or temp-path mix-up) must fail closed
+    # before duration cap, compliance, and record write — otherwise the
+    # resulting ``PreviewRecord`` would attribute the probe's duration /
+    # audio / compliance decision to a different upload.
+    upload_hash = "src_hash_upload_real"
+    stale_hash = "src_hash_probe_stale_cached"
+    mismatched = replace(
+        adapter, probe_fn=_mismatch_probe_factory(stale_hash)
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash=upload_hash)
+
+    record = mismatched.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    # Structural fail-closed markers are present.
+    assert "probe source_hash mismatch" in reason
+    assert "fail closed" in reason.lower()
+    # The actual upload hash and the actual probe hash must NOT leak —
+    # ``status_reason`` is a persisted, low-trust audit field.
+    assert upload_hash not in reason
+    assert stale_hash not in reason
+
+
+def test_probe_source_hash_mismatch_skips_compliance(
+    config, counter_store, temp_upload_dir
+):
+    # When probe hash mismatch fails closed, the compliance dependency
+    # must never be invoked — that confirms the mismatch gate sits
+    # between probe and compliance and short-circuits the path.
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    upload_hash = "src_hash_upload_skip"
+    stale_hash = "src_hash_probe_stale_skip"
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_mismatch_probe_factory(stale_hash),
+        compliance_fn=spy_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(temp_upload_dir, source_hash=upload_hash)
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert "probe source_hash mismatch" in record.status_reason
+    # Compliance must NOT have been called.
+    assert compliance_calls == []
+
+
+def test_probe_source_hash_mismatch_status_only_record_low_sensitive_payload(
+    adapter, temp_upload_dir
+):
+    # Defense-in-depth: even when the probe's returned hash carries an
+    # attacker-controlled value (provider payload, bearer token,
+    # filesystem path, raw media marker), the persisted
+    # ``status_reason`` must not echo it.
+    sensitive_probe_hash = (
+        "provider=upstream token=Bearer.sk_live_AbCdEf "
+        "raw=b'BINARY_MEDIA' path=/var/lib/uploads/x.mp4"
+    )
+    sensitive_upload_hash = (
+        "upload_secret=Bearer.sk_live_ZyXwVu "
+        "media=b'\\x00\\xffMEDIA' path=/var/lib/uploads/y.mp4"
+    )
+    leaky = replace(
+        adapter, probe_fn=_mismatch_probe_factory(sensitive_probe_hash)
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash=sensitive_upload_hash
+    )
+
+    record = leaky.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "probe source_hash mismatch" in reason
+    assert "fail closed" in reason.lower()
+    forbidden_fragments = (
+        "Bearer",
+        "sk_live",
+        "AbCdEf",
+        "ZyXwVu",
+        "BINARY_MEDIA",
+        "MEDIA",
+        "\\x00",
+        "/var/lib/uploads",
+        "x.mp4",
+        "y.mp4",
+        "provider=",
+        "token=",
+        "path=",
+        "raw=",
+        "media=",
+        "upload_secret=",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"probe source_hash mismatch status_reason leaked sensitive "
+            f"fragment {fragment!r} in reason={reason!r}"
+        )
+    assert sensitive_probe_hash not in reason
+    assert sensitive_upload_hash not in reason
+
+
+# ---------------------------------------------------------------------------
+# P2 — preview_record_ttl_seconds fails closed before rate-limit / probe /
+# compliance (PR #22 external review P2, discussion_r3347732874, R8v).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_ttl",
+    [
+        None,
+        "47",
+        47.0,
+        0,
+        -1,
+        -3600,
+        True,
+        False,
+    ],
+)
+def test_invalid_preview_ttl_fails_closed_before_rate_limit_probe_compliance(
+    counter_path, temp_upload_dir, bad_ttl
+):
+    # Success-path TTL gate: an invalid ``preview_record_ttl_seconds``
+    # (None / non-int / non-positive / ``bool``) must fail closed in the
+    # success path **before** any rate-limit counter mutation, probe call
+    # or compliance call. Spies + a counter-file-existence assertion
+    # together pin "no expensive / state-changing side effects" along
+    # the rejection path.
+    probe_calls: list[UploadFacts] = []
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_probe(upload: UploadFacts) -> ProbeResult:
+        probe_calls.append(upload)
+        return _passing_probe(upload)
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    base_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+    )
+    bad_config = replace(
+        base_config,
+        preview_record_ttl_seconds=bad_ttl,  # type: ignore[arg-type]
+    )
+    counter_store = FakeCounterStore(counter_path)
+    adapter = AnonymousPreviewBackendAdapter(
+        config=bad_config,
+        counter_store=counter_store,
+        probe_fn=spy_probe,
+        compliance_fn=spy_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_bad_ttl_gate"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert isinstance(record, PreviewRecord)
+    assert record.status is PreviewStatus.FAILED
+    assert "preview_record_ttl_seconds" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    # No expensive side effects whatsoever.
+    assert probe_calls == []
+    assert compliance_calls == []
+    # No rate-limit counter mutation: FakeCounterStore only writes the
+    # JSON file on ``increment`` / ``try_acquire`` admission. The file
+    # must not exist after a TTL-gate fail-closed.
+    assert not counter_path.exists()
+    # The status-only failure record still falls back to the pinned
+    # default TTL so the record is bounded and known.
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_ttl",
+    [
+        None,
+        "leak_token=Bearer.sk_live_AbCdEf",
+        -424242,
+        0,
+    ],
+)
+def test_invalid_preview_ttl_reason_does_not_leak_raw_value(
+    counter_store, temp_upload_dir, bad_ttl
+):
+    # Even if the misconfigured TTL value carries an operator string
+    # (accidentally pasted secret / path / token), the persisted
+    # ``status_reason`` must not echo it.
+    base_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+    )
+    bad_config = replace(
+        base_config,
+        preview_record_ttl_seconds=bad_ttl,  # type: ignore[arg-type]
+    )
+    adapter = AnonymousPreviewBackendAdapter(
+        config=bad_config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_ttl_leak"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    # Stable structured marker only.
+    assert "preview_record_ttl_seconds" in reason
+    assert "fail closed" in reason.lower()
+    # Raw operator payload must never appear.
+    assert str(bad_ttl) not in reason
+    forbidden_fragments = (
+        "Bearer",
+        "sk_live",
+        "AbCdEf",
+        "leak_token",
+        "-424242",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"preview_record_ttl_seconds status_reason leaked fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+
+
+def test_invalid_preview_ttl_does_not_mutate_rate_limit_counter(
+    counter_path, temp_upload_dir
+):
+    # Defense-in-depth on a recording counter store: a bad TTL must not
+    # cause any ``try_acquire`` / ``increment`` / ``decrement`` calls.
+    class RecordingCounterStore:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get(self, key: str) -> int:
+            self.calls.append(f"get:{key}")
+            return 0
+
+        def increment(self, key: str) -> int:
+            self.calls.append(f"increment:{key}")
+            return 1
+
+        def try_acquire(self, key: str, cap: int):
+            self.calls.append(f"try_acquire:{key}")
+            return (True, 1)
+
+        def decrement(self, key: str) -> int:
+            self.calls.append(f"decrement:{key}")
+            return 0
+
+    base_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+    )
+    bad_config = replace(
+        base_config,
+        preview_record_ttl_seconds=0,
+    )
+    store = RecordingCounterStore()
+    adapter = AnonymousPreviewBackendAdapter(
+        config=bad_config,
+        counter_store=store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_ttl_no_counter_mutation"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert "preview_record_ttl_seconds" in record.status_reason
+    # The TTL gate must fire **before** rate-limit accounting — zero
+    # store interactions of any kind.
+    assert store.calls == []
+
+
+def test_missing_config_still_emits_intakeconfig_missing_reason(
+    counter_store, temp_upload_dir
+):
+    # The TTL gate must not change the semantics of the missing-config
+    # branch: ``self.config is None`` still resolves through
+    # ``require_config`` and reports ``"IntakeConfig is missing"``, not
+    # the TTL-invalid reason.
+    bad = AnonymousPreviewBackendAdapter(
+        config=None,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_missing_config_check"
+    )
+
+    record = bad.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert "IntakeConfig is missing" in record.status_reason
+    assert "preview_record_ttl_seconds" not in record.status_reason
+
+
+# ---------------------------------------------------------------------------
 # Test-self guards — no skip / xfail markers, AST scan of this file.
 # ---------------------------------------------------------------------------
 
