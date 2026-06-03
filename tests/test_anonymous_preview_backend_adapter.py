@@ -1408,6 +1408,78 @@ def test_compliance_pass_with_failure_reason_adapter_fails_closed(
 
 
 # ---------------------------------------------------------------------------
+# P2 — unrecognized compliance status fail-closed through adapter scrubs
+# sensitive payload (PR #22 external review P2 discussion_r3346860799,
+# APF2c R8o).
+# ---------------------------------------------------------------------------
+
+
+def test_unrecognized_compliance_status_adapter_fails_closed_scrubs_payload(
+    adapter, temp_upload_dir
+):
+    # External review (R8o) warning: when an injected compliance provider
+    # returns an unrecognized ``status`` string, ``evaluate_compliance_result``
+    # used to interpolate the raw value into ``IntakeRejected.reason`` and
+    # the adapter persisted it onto ``PreviewRecord.status_reason``. A
+    # malicious or unhealthy provider could thus leak bearer tokens /
+    # provider payloads / filesystem paths / raw media markers through a
+    # persisted, low-trust audit field. The adapter-layer regression here
+    # exercises the full path end-to-end: injected ``compliance_fn``
+    # returns a malicious unknown status → adapter → record.
+    sensitive_status = (
+        "bad token=Bearer secret provider=upstream "
+        "raw=b'BINARY_MEDIA' path=/tmp/raw.mp4"
+    )
+
+    def malicious_unknown_status_compliance(
+        _probe: ProbeResult,
+    ) -> ComplianceResult:
+        return ComplianceResult(
+            status=sensitive_status,  # type: ignore[arg-type]
+            reason="provider returned attacker-controlled status string",
+            audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+            blocked_media_retained=False,
+        )
+
+    bad = replace(adapter, compliance_fn=malicious_unknown_status_compliance)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_unknown_compliance_status"
+    )
+
+    record = bad.handle_intake(request, upload)
+
+    # Fail-closed contract: never advance to READY_FOR_MODE on an
+    # unrecognized compliance status.
+    assert record.status is PreviewStatus.FAILED
+
+    reason = record.status_reason
+    # Stable low-sensitivity diagnostic fragments are present...
+    assert "compliance status" in reason
+    assert "recognized" in reason
+    assert "fail closed" in reason.lower()
+
+    # ...and none of the raw provider payload fragments leak onto the
+    # persisted audit field. Asserted per-fragment so any regression
+    # pinpoints the exact leak.
+    forbidden_fragments = (
+        "Bearer",
+        "secret",
+        "provider",
+        "raw=",
+        "BINARY_MEDIA",
+        "/tmp/raw.mp4",
+        "bad token",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"unrecognized compliance status record.status_reason leaked "
+            f"sensitive fragment {fragment!r} in reason={reason!r}"
+        )
+    assert sensitive_status not in reason
+
+
+# ---------------------------------------------------------------------------
 # P2 — wire-string source_type normalized before record write
 # (PR #22 review discussion_r3345886349).
 # ---------------------------------------------------------------------------

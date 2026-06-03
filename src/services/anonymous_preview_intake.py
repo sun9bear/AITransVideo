@@ -482,10 +482,20 @@ def evaluate_compliance_result(result: ComplianceResult) -> ComplianceResult:
         try:
             status = ComplianceStatus(status_input)
         except (TypeError, ValueError) as exc:
+            # The raw ``status_input`` is intentionally NOT interpolated
+            # into ``IntakeRejected.reason``. Injected compliance
+            # providers can surface attacker-controlled or accidentally
+            # leaky strings (bearer tokens, provider payloads, filesystem
+            # paths, raw media markers) inside an unrecognized
+            # ``status`` value, and that reason lands on
+            # ``PreviewRecord.status_reason`` — a persisted, low-trust
+            # audit field. Matches the R7b / R8l fail-closed redaction
+            # style applied to probe / compliance ``failure_reason`` and
+            # the unrecognized ``source_type`` branch.
             raise IntakeRejected(
                 PreviewStatus.FAILED,
-                f"compliance status is not a recognized ComplianceStatus "
-                f"({status_input!r})",
+                "compliance status is not a recognized ComplianceStatus "
+                "(fail closed)",
             ) from exc
         normalized = replace(result, status=status)
     if status is ComplianceStatus.BLOCK:

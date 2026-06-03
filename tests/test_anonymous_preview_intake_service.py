@@ -721,8 +721,9 @@ def test_compliance_status_wire_string_needs_manual_review_is_soft_reject():
 
 
 def test_compliance_status_unrecognized_value_fails_closed():
+    raw_unknown = "totally_unknown_state"
     result = ComplianceResult(
-        status="totally_unknown_state",  # type: ignore[arg-type]
+        status=raw_unknown,  # type: ignore[arg-type]
         reason="provider returned a value outside the contract",
         audit_metadata={"layers": ("local_prefilter",)},
         blocked_media_retained=False,
@@ -730,7 +731,16 @@ def test_compliance_status_unrecognized_value_fails_closed():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "compliance status" in excinfo.value.reason
+    reason = excinfo.value.reason
+    # Stable low-sensitivity diagnostic fragments are present...
+    assert "compliance status" in reason
+    assert "recognized" in reason
+    assert "fail closed" in reason.lower()
+    # ...and the raw unknown value is NOT interpolated. APF2c R8o
+    # external review P2: ``status_reason`` is a persisted low-trust
+    # audit field; an attacker-controlled or accidentally leaky raw
+    # provider value must never echo back into it.
+    assert raw_unknown not in reason
 
 
 def test_compliance_status_non_string_value_fails_closed():
@@ -743,6 +753,60 @@ def test_compliance_status_non_string_value_fails_closed():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
+    # The integer ``42`` is one of many possible non-string inputs an
+    # injected provider could pass; the reason still must not echo it.
+    assert "42" not in excinfo.value.reason
+    assert "compliance status" in excinfo.value.reason
+    assert "recognized" in excinfo.value.reason
+
+
+def test_compliance_status_unrecognized_value_scrubs_sensitive_payload():
+    # APF2c R8o regression (PR #22 external review P2,
+    # discussion_r3346860799): a malicious or unhealthy compliance
+    # provider can place secrets / bearer tokens / filesystem paths /
+    # raw media markers in the ``ComplianceResult.status`` field.
+    # ``evaluate_compliance_result`` must fail closed with PreviewStatus
+    # FAILED and never echo any of those fragments into
+    # ``IntakeRejected.reason`` (which the adapter persists onto
+    # ``PreviewRecord.status_reason``).
+    sensitive_status = (
+        "bad token=Bearer secret provider=upstream "
+        "raw=b'BINARY_MEDIA' path=/tmp/raw.mp4"
+    )
+    result = ComplianceResult(
+        status=sensitive_status,  # type: ignore[arg-type]
+        reason="provider returned attacker-controlled status string",
+        audit_metadata={"layers": ("local_prefilter",)},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    # Stable low-sensitivity diagnostic fragments still present.
+    assert "compliance status" in reason
+    assert "recognized" in reason
+    assert "fail closed" in reason.lower()
+
+    # No fragment of the raw provider payload may leak. Asserted
+    # per-fragment so any regression pinpoints the exact leak.
+    forbidden_fragments = (
+        "Bearer",
+        "secret",
+        "provider",
+        "raw=",
+        "BINARY_MEDIA",
+        "/tmp/raw.mp4",
+        "bad token",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"unrecognized compliance status reason leaked sensitive "
+            f"fragment {fragment!r} in reason={reason!r}"
+        )
+    # And the full sensitive input must never appear verbatim either.
+    assert sensitive_status not in reason
 
 
 @pytest.mark.parametrize(
