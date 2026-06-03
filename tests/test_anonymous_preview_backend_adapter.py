@@ -2179,6 +2179,281 @@ def test_missing_config_still_emits_intakeconfig_missing_reason(
 
 
 # ---------------------------------------------------------------------------
+# P2 — probe duration must be finite > 0 before the cap comparison
+# (PR #22 external review P2, discussion_r3348103602, R8z).
+# ---------------------------------------------------------------------------
+
+
+def _fixed_duration_probe_factory(duration_value: object):
+    def fixed_probe(upload: UploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=duration_value,  # type: ignore[arg-type]
+            source_hash=upload.source_hash,
+            media_type=f"video/{Path(upload.file_name).suffix.lstrip('.').lower()}",
+            audio_present=True,
+            audio_quality_score=0.9,
+            teaser_candidate_range=(0.0, 180.0),
+            failure_reason=None,
+        )
+
+    return fixed_probe
+
+
+@pytest.mark.parametrize(
+    "bad_duration",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        0,
+        0.0,
+        -1.0,
+        -3600.0,
+        True,
+        False,
+        None,
+        "120",
+    ],
+)
+def test_probe_non_finite_or_non_positive_duration_fails_closed(
+    adapter, temp_upload_dir, bad_duration
+):
+    # NaN / +inf / -inf and non-positive / non-numeric durations must
+    # never advance to READY_FOR_MODE. ``nan > x`` silently returns
+    # False, so without an explicit finite-check the cap comparison
+    # below would let an invalid-duration probe through.
+    leaky = replace(
+        adapter, probe_fn=_fixed_duration_probe_factory(bad_duration)
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_bad_duration"
+    )
+
+    record = leaky.handle_intake(request, upload)
+
+    assert isinstance(record, PreviewRecord)
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "probe duration invalid" in reason
+    assert "fail closed" in reason.lower()
+    # READY_FOR_MODE must never be reached on a non-finite duration.
+    assert record.status is not PreviewStatus.READY_FOR_MODE
+
+
+def test_probe_non_finite_duration_skips_compliance(
+    config, counter_store, temp_upload_dir
+):
+    # When the duration gate fails closed, the compliance dependency
+    # must never be invoked — that confirms the gate sits between the
+    # probe and compliance.
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_fixed_duration_probe_factory(float("nan")),
+        compliance_fn=spy_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_nan_skip_compliance"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert "probe duration invalid" in record.status_reason
+    assert compliance_calls == []
+
+
+def test_probe_non_finite_duration_status_reason_low_sensitive_payload(
+    adapter, temp_upload_dir
+):
+    # Even if an injected probe stuffs an attacker-controlled scalar
+    # into ``duration_seconds`` (provider payload, bearer token,
+    # filesystem path, raw media marker), the persisted
+    # ``status_reason`` must NOT echo it back.
+    class LeakyScalar:
+        def __repr__(self) -> str:
+            return (
+                "provider=upstream token=Bearer.sk_live_AbCdEf "
+                "raw=b'BINARY_MEDIA' path=/tmp/raw.mp4"
+            )
+
+        def __str__(self) -> str:
+            return self.__repr__()
+
+    leaky_scalar = LeakyScalar()
+    leaky = replace(
+        adapter, probe_fn=_fixed_duration_probe_factory(leaky_scalar)
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_duration_payload_leak"
+    )
+
+    record = leaky.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    reason = record.status_reason
+    assert "probe duration invalid" in reason
+    assert "fail closed" in reason.lower()
+    forbidden_fragments = (
+        "Bearer",
+        "sk_live",
+        "AbCdEf",
+        "BINARY_MEDIA",
+        "/tmp/raw.mp4",
+        "raw=",
+        "provider=",
+        "token=",
+        "path=",
+        "LeakyScalar",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"probe non-finite duration status_reason leaked sensitive "
+            f"fragment {fragment!r} in reason={reason!r}"
+        )
+
+
+def test_probe_duration_just_above_cap_still_uses_cap_reject_branch(
+    adapter, temp_upload_dir, config
+):
+    # Defense-in-depth: the new finite-check must not regress the
+    # existing duration-cap REJECTED branch. A finite > cap duration
+    # must still surface as REJECTED with the legacy markers.
+    def over_cap_probe(upload: UploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=float(config.max_source_duration_seconds + 5),
+            source_hash=upload.source_hash,
+            media_type="video/mp4",
+            audio_present=True,
+            audio_quality_score=0.9,
+            teaser_candidate_range=(0.0, 180.0),
+            failure_reason=None,
+        )
+
+    over = replace(adapter, probe_fn=over_cap_probe)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir,
+        duration_seconds=float(config.max_source_duration_seconds),
+        source_hash="src_hash_finite_over_cap",
+    )
+
+    record = over.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.REJECTED
+    assert "probed duration" in record.status_reason
+    assert "exceeds intake cap" in record.status_reason
+    # The finite-check must not collide with the legacy cap message.
+    assert "probe duration invalid" not in record.status_reason
+
+
+# ---------------------------------------------------------------------------
+# P2 — compliance BLOCK reason must NOT echo raw provider payload into
+# ``status_reason`` (PR #22 external review P2, discussion_r3348103609, R8z).
+# ---------------------------------------------------------------------------
+
+
+def test_compliance_block_status_reason_is_redacted_at_adapter_boundary(
+    adapter, temp_upload_dir
+):
+    # The upstream compliance provider may surface a sensitive
+    # ``reason`` string. The adapter must persist only the stable
+    # structural marker on ``PreviewRecord.status_reason``.
+    sensitive_reason = (
+        "matched_rule=demo provider=upstream "
+        "token=Bearer.sk_live_AbCdEf raw=b'\\x00\\xffBINARY_MEDIA' "
+        "path=/tmp/raw.mp4 transcript_snippet='secret leaked phrase'"
+    )
+
+    def leaky_block(_probe: ProbeResult) -> ComplianceResult:
+        return ComplianceResult(
+            status=ComplianceStatus.BLOCK,
+            reason=sensitive_reason,
+            audit_metadata={"matched_rule": "demo_rule"},
+            blocked_media_retained=False,
+        )
+
+    leaky = replace(adapter, compliance_fn=leaky_block)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_block_reason_redacted"
+    )
+
+    record = leaky.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.REJECTED
+    reason = record.status_reason
+    # Stable downstream-dashboard marker is preserved.
+    assert "compliance block" in reason
+    assert "fail closed" in reason.lower()
+    # None of the sensitive fragments may surface.
+    assert sensitive_reason not in reason
+    forbidden_fragments = (
+        "Bearer",
+        "sk_live",
+        "AbCdEf",
+        "BINARY_MEDIA",
+        "\\x00",
+        "/tmp/raw.mp4",
+        "matched_rule=",
+        "provider=",
+        "token=",
+        "raw=",
+        "path=",
+        "transcript_snippet",
+        "secret leaked phrase",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"compliance BLOCK status_reason leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+
+
+def test_compliance_block_redaction_does_not_regress_other_branches(
+    adapter, temp_upload_dir
+):
+    # NEEDS_MANUAL_REVIEW must continue to soft-reject with its own
+    # stable marker (anonymous soft reject) — the BLOCK redaction must
+    # not collapse the two branches.
+    def needs_review(_probe: ProbeResult) -> ComplianceResult:
+        return ComplianceResult(
+            status=ComplianceStatus.NEEDS_MANUAL_REVIEW,
+            reason="LLM unsure but with sensitive payload "
+            "token=Bearer.sk_live_XYZ",
+            audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+            blocked_media_retained=False,
+        )
+
+    soft = replace(adapter, compliance_fn=needs_review)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_soft_redact_neutral"
+    )
+
+    record = soft.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.SOFT_REJECTED
+    # The soft-reject marker remains; no BLOCK marker leaks through.
+    assert "soft reject" in record.status_reason
+    assert "compliance block" not in record.status_reason
+    # Sensitive payload from the provider reason must not echo.
+    assert "Bearer" not in record.status_reason
+    assert "sk_live_XYZ" not in record.status_reason
+
+
+# ---------------------------------------------------------------------------
 # Test-self guards — no skip / xfail markers, AST scan of this file.
 # ---------------------------------------------------------------------------
 

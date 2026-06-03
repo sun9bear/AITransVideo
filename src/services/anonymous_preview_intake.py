@@ -521,9 +521,21 @@ def evaluate_compliance_result(result: ComplianceResult) -> ComplianceResult:
             ) from exc
         normalized = replace(result, status=status)
     if status is ComplianceStatus.BLOCK:
+        # APF2c R8z fix #2 (PR #22 external review P2,
+        # discussion_r3348103609): the upstream compliance provider may
+        # embed provider payloads, bearer tokens, filesystem paths or
+        # raw user / media snippets inside ``result.reason``. That
+        # string lands on ``IntakeRejected.reason`` and ultimately on
+        # ``PreviewRecord.status_reason`` — a persisted, low-trust
+        # audit field. Surface only the stable structural marker
+        # ``"compliance block (fail closed)"`` so downstream dashboards
+        # keep the ``"compliance block"`` substring while the raw
+        # provider payload is never echoed back. Mirrors the R7b /
+        # R8l / R8o / R8v fail-closed redaction style applied to probe
+        # ``failure_reason`` and the unrecognized-status branch.
         raise IntakeRejected(
             PreviewStatus.REJECTED,
-            f"compliance block: {result.reason}",
+            "compliance block (fail closed)",
         )
     if status is ComplianceStatus.NEEDS_MANUAL_REVIEW:
         raise IntakeRejected(

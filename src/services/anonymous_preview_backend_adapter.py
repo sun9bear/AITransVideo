@@ -36,6 +36,7 @@ changing this adapter.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -244,7 +245,34 @@ class AnonymousPreviewBackendAdapter:
                     PreviewStatus.FAILED,
                     "probe source_hash mismatch (fail closed)",
                 )
-            if probe_result.duration_seconds > config.max_source_duration_seconds:
+            # APF2c R8z fix #1 (PR #22 external review P2,
+            # discussion_r3348103602): the injected probe may hand back a
+            # ``duration_seconds`` that is ``float("nan")`` / ``inf`` /
+            # ``-inf`` / ``0`` / negative / a non-numeric type. ``nan``
+            # in particular silently passes the ``>`` cap comparison
+            # below (``nan > x`` is always ``False``), letting an
+            # invalid-duration probe advance to ``READY_FOR_MODE`` and
+            # leak a meaningless duration into ``PreviewRecord``. Fail
+            # closed **before** the cap comparison, the compliance call
+            # and the record write. ``bool`` is rejected because it is
+            # an ``int`` subclass but carrying ``True`` / ``False`` is a
+            # probe-contract violation, not a legitimate duration. The
+            # raw value is intentionally NOT interpolated into
+            # ``status_reason`` (persisted, low-trust audit field) —
+            # injected probes can embed provider payloads / tokens /
+            # paths / raw media markers in unexpected scalar types.
+            duration_value = probe_result.duration_seconds
+            if (
+                isinstance(duration_value, bool)
+                or not isinstance(duration_value, (int, float))
+                or not math.isfinite(duration_value)
+                or duration_value <= 0
+            ):
+                raise IntakeRejected(
+                    PreviewStatus.FAILED,
+                    "probe duration invalid (fail closed)",
+                )
+            if duration_value > config.max_source_duration_seconds:
                 raise IntakeRejected(
                     PreviewStatus.REJECTED,
                     f"probed duration {probe_result.duration_seconds} "

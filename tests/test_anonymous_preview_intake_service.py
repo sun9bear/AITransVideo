@@ -831,6 +831,110 @@ def test_compliance_status_wire_string_block_is_normalized_and_rejected():
     assert "compliance block" in excinfo.value.reason
 
 
+# ---------------------------------------------------------------------------
+# P2 — pure helper compliance BLOCK reason redaction
+# (PR #22 external review P2, discussion_r3348103609, R8z).
+# ---------------------------------------------------------------------------
+
+
+def test_compliance_block_reason_does_not_leak_provider_payload():
+    # ``evaluate_compliance_result`` must surface only the stable
+    # structural marker on ``IntakeRejected.reason``. Provider
+    # payloads, tokens, paths and raw transcript snippets that an
+    # injected compliance wrapper places on ``result.reason`` must
+    # never echo back into the persisted ``status_reason``.
+    sensitive_reason = (
+        "matched_rule=demo provider=upstream "
+        "token=Bearer.sk_live_AbCdEf raw=b'\\x00\\xffBINARY_MEDIA' "
+        "path=/tmp/raw.mp4 transcript_snippet='secret leaked phrase'"
+    )
+    result = ComplianceResult(
+        status=ComplianceStatus.BLOCK,
+        reason=sensitive_reason,
+        audit_metadata={"matched_rule": "demo_rule"},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.REJECTED
+    reason = excinfo.value.reason
+    # Stable downstream-dashboard marker is preserved.
+    assert "compliance block" in reason
+    assert "fail closed" in reason.lower()
+    assert sensitive_reason not in reason
+    forbidden_fragments = (
+        "Bearer",
+        "sk_live",
+        "AbCdEf",
+        "BINARY_MEDIA",
+        "\\x00",
+        "/tmp/raw.mp4",
+        "matched_rule=",
+        "provider=",
+        "token=",
+        "raw=",
+        "path=",
+        "transcript_snippet",
+        "secret leaked phrase",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"compliance BLOCK reason leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+
+
+def test_compliance_block_wire_string_reason_is_also_redacted():
+    # Wire-level ``"block"`` must reach the same redacted reason as the
+    # enum branch — the normalization step must not re-introduce the
+    # raw provider reason.
+    sensitive_reason = "leaked path=/var/lib/uploads/a.mp4 token=Bearer.ZZZ"
+    result = ComplianceResult(
+        status="block",  # type: ignore[arg-type]
+        reason=sensitive_reason,
+        audit_metadata={"matched_rule": "demo_rule"},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.REJECTED
+    reason = excinfo.value.reason
+    assert "compliance block" in reason
+    assert "fail closed" in reason.lower()
+    assert sensitive_reason not in reason
+    for fragment in ("Bearer", "ZZZ", "/var/lib/uploads", "a.mp4", "path=", "token="):
+        assert fragment not in reason, (
+            f"wire-string BLOCK reason leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+
+
+def test_compliance_block_redaction_preserves_other_branch_semantics():
+    # The BLOCK redaction must not bleed across into the other branches
+    # ``evaluate_compliance_result`` handles. NEEDS_MANUAL_REVIEW must
+    # still soft-reject with the anonymous marker — no "compliance
+    # block" leakage — and PASS must continue to return unchanged.
+    soft = ComplianceResult(
+        status=ComplianceStatus.NEEDS_MANUAL_REVIEW,
+        reason="LLM unsure with token=Bearer.sk_live_XYZ",
+        audit_metadata={"layers": ("local_prefilter", "asr_teaser", "llm")},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(soft)
+    assert excinfo.value.status is PreviewStatus.SOFT_REJECTED
+    assert "soft reject" in excinfo.value.reason
+    assert "compliance block" not in excinfo.value.reason
+
+    pass_result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok",
+        audit_metadata={"layers": ()},
+        blocked_media_retained=False,
+    )
+    assert evaluate_compliance_result(pass_result) is pass_result
+
+
 def test_compliance_status_wire_string_needs_manual_review_is_soft_reject():
     result = ComplianceResult(
         status="needs_manual_review",  # type: ignore[arg-type]

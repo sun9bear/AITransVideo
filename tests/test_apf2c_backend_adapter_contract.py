@@ -30,6 +30,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -230,6 +231,30 @@ class FakeBackendAdapter:
                 raise IntakeRejected(
                     PreviewStatus.FAILED,
                     "probe source_hash mismatch (fail closed)",
+                )
+            # APF2c R8z contract mirror (PR #22 external review P2,
+            # discussion_r3348103602): an injected probe may hand back a
+            # ``duration_seconds`` that is ``float("nan")`` / ``inf`` /
+            # ``-inf`` / ``0`` / negative / a non-numeric type / a ``bool``.
+            # ``nan`` in particular silently passes ``>`` comparisons,
+            # letting an invalid-duration probe advance to
+            # ``READY_FOR_MODE`` and leak a meaningless duration into the
+            # ``PreviewRecord``. Fail closed **before** compliance and the
+            # record write. The raw value is intentionally NOT
+            # interpolated into ``status_reason`` (persisted, low-trust
+            # audit field) — injected probes can embed provider payloads /
+            # tokens / paths / raw media markers in unexpected scalar
+            # types.
+            duration_value = probe_result.duration_seconds
+            if (
+                isinstance(duration_value, bool)
+                or not isinstance(duration_value, (int, float))
+                or not math.isfinite(duration_value)
+                or duration_value <= 0
+            ):
+                raise IntakeRejected(
+                    PreviewStatus.FAILED,
+                    "probe duration invalid (fail closed)",
                 )
             compliance_result = self._safe_compliance(probe_result)
             evaluate_compliance_result(compliance_result)
@@ -1138,6 +1163,214 @@ def test_adapter_invalid_preview_ttl_reason_does_not_leak_raw_value(
             f"{fragment!r} in reason={reason!r}"
         )
     assert sensitive_ttl not in reason
+
+
+# ---------------------------------------------------------------------------
+# Contract mirror — APF2c R8z probe duration fail-closed gate (PR #22
+# external review P2, discussion_r3348103602).
+#
+# The production adapter rejects any probe ``duration_seconds`` that is
+# ``float("nan")`` / ``inf`` / ``-inf`` / ``0`` / negative / non-numeric /
+# ``bool`` with the fixed low-sensitivity reason
+# ``"probe duration invalid (fail closed)"``. The fake adapter in this
+# scaffold must mirror that gate so contract tests do not drift from
+# production behavior. The gate runs **after** ``source_hash`` match and
+# **before** compliance / record write — compliance must not be invoked
+# on an invalid-duration probe.
+# ---------------------------------------------------------------------------
+
+
+PROBE_DURATION_INVALID_REASON = "probe duration invalid (fail closed)"
+
+
+def _invalid_duration_probe_factory(duration_value):
+    """Build a probe that otherwise passes ``evaluate_probe_result`` but
+    carries an attacker-controlled ``duration_seconds`` value. The
+    returned probe matches ``upload.source_hash`` so the source_hash
+    mismatch gate does not fire before the duration gate."""
+
+    def invalid_duration_probe(upload: FakeUploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=duration_value,
+            source_hash=upload.source_hash,
+            media_type=f"video/{Path(upload.file_name).suffix.lstrip('.').lower()}",
+            audio_present=True,
+            audio_quality_score=0.8,
+            teaser_candidate_range=(0.0, 180.0),
+            failure_reason=None,
+        )
+
+    return invalid_duration_probe
+
+
+@pytest.mark.parametrize(
+    "bad_duration",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        0,
+        0.0,
+        -1,
+        -0.5,
+        True,
+        False,
+        "120",
+        None,
+    ],
+)
+def test_adapter_invalid_probe_duration_fails_closed(
+    config, counter_store, temp_upload_dir, bad_duration
+):
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    adapter = FakeBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_invalid_duration_probe_factory(bad_duration),
+        compliance_fn=spy_compliance,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_invalid_duration"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    # Status must not be READY_FOR_MODE — an invalid-duration probe
+    # must never advance through the success path.
+    assert record.status is not PreviewStatus.READY_FOR_MODE
+    # Compliance must NOT be invoked on the invalid-duration path.
+    assert compliance_calls == []
+    # Fixed low-sensitivity reason — raw duration is never echoed.
+    assert record.status_reason == PROBE_DURATION_INVALID_REASON
+    assert "probe duration invalid" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    assert adapter.forbidden_calls == []
+
+
+def test_adapter_invalid_probe_duration_reason_does_not_leak_raw_payload(
+    config, counter_store, temp_upload_dir
+):
+    """A leaky probe may smuggle provider payloads / tokens / paths /
+    raw media markers into ``duration_seconds`` via ``__repr__`` /
+    ``__str__`` (e.g. a custom numeric-looking class). The fixed reason
+    must never embed any of those fragments."""
+
+    class LeakyDuration:
+        """Duration-shaped object whose ``repr``/``str`` carry secrets.
+
+        The adapter's ``isinstance(duration_value, (int, float))`` gate
+        rejects this **before** any string interpolation — that is the
+        guarantee under test.
+        """
+
+        def __repr__(self) -> str:  # pragma: no cover - defensive only
+            return (
+                "duration=Bearer.sk-live_AbCdEfGhIjKlMn "
+                "token=secret-token-xyz "
+                "path=/var/lib/anon_uploads/clip-leak.mp4 "
+                "provider=ffmpeg-runner "
+                "media_id=med_0123abcd "
+                "raw_media=<bytes>"
+            )
+
+        def __str__(self) -> str:  # pragma: no cover - defensive only
+            return self.__repr__()
+
+    leaky_duration = LeakyDuration()
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    adapter = FakeBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_invalid_duration_probe_factory(leaky_duration),
+        compliance_fn=spy_compliance,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_duration_leak"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert compliance_calls == []
+    reason = record.status_reason
+    assert reason == PROBE_DURATION_INVALID_REASON
+    forbidden_fragments = (
+        "Bearer",
+        "sk-live",
+        "AbCdEfGhIjKlMn",
+        "token=",
+        "secret-token",
+        "/var/lib/anon_uploads",
+        "clip-leak.mp4",
+        "provider=",
+        "ffmpeg-runner",
+        "media_id=",
+        "med_0123abcd",
+        "raw_media",
+        "<bytes>",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"adapter invalid-duration path leaked sensitive fragment "
+            f"{fragment!r} in status_reason={reason!r}"
+        )
+    assert adapter.forbidden_calls == []
+
+
+def test_adapter_invalid_probe_duration_skips_compliance_and_record_write(
+    config, counter_store, temp_upload_dir
+):
+    """Spy on both probe + compliance and confirm the duration gate
+    short-circuits the success path: compliance is never called and the
+    returned record's ``compliance_status`` stays ``None`` (status-only
+    failure record, not a ``PreviewRecord`` with a populated compliance
+    decision)."""
+
+    compliance_calls: list[ProbeResult] = []
+
+    def spy_compliance(probe: ProbeResult) -> ComplianceResult:
+        compliance_calls.append(probe)
+        return _passing_compliance(probe)
+
+    adapter = FakeBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_invalid_duration_probe_factory(float("nan")),
+        compliance_fn=spy_compliance,
+        now_fn=_frozen_now,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_nan_skip_compliance"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert record.status_reason == PROBE_DURATION_INVALID_REASON
+    assert compliance_calls == []
+    # Status-only failure record: compliance_status stays None even
+    # though the spy ``compliance_fn`` would have returned PASS.
+    assert record.compliance_status is None
+    # Duration field on the status-only record is the safe sentinel,
+    # never the raw invalid value.
+    assert record.duration_seconds == 0.0
+    assert adapter.forbidden_calls == []
 
 
 # ---------------------------------------------------------------------------
