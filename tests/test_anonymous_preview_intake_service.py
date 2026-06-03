@@ -14,6 +14,7 @@ Design source of truth: ``docs/plans/2026-06-02-apf2-anonymous-intake-contract.m
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping as ABCMapping
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1143,6 +1144,170 @@ def test_compliance_audit_metadata_nested_set_bytes_fails_closed():
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
     assert "rule_hashes" in excinfo.value.reason
+
+
+# APF2c R8zg P2 fix #1 (PR #22 discussion_r3348801401): byte-typed
+# mapping keys must fail closed and must not leak the raw key value
+# into ``status_reason``.
+
+
+@pytest.mark.parametrize(
+    "media_key, type_name",
+    [
+        # ``bytes`` and ``memoryview`` over a ``bytes`` buffer are both
+        # hashable, so a plain ``dict`` literal can carry them as keys
+        # and the production scan in ``_find_media_bytes_path`` is what
+        # rejects them. ``bytearray`` is unhashable so it cannot land in
+        # a plain dict at all — it is covered separately below via a
+        # minimal custom ``Mapping`` stub so the test exercises the
+        # production code rather than tripping a TypeError on the dict
+        # literal before the helper runs.
+        (b"\x00\x01raw-key\xff", "bytes"),
+        (memoryview(b"raw-key"), "memoryview"),
+    ],
+)
+def test_compliance_audit_metadata_top_level_byte_key_fails_closed(
+    media_key, type_name
+):
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok; teaser ASR ok; LLM compliance ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            media_key: "value",
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "audit metadata" in excinfo.value.reason
+    assert type_name in excinfo.value.reason
+    # Generic <key> marker is surfaced — raw key value never appears.
+    assert "<key>" in excinfo.value.reason
+    raw_bytes = bytes(media_key) if not isinstance(media_key, bytes) else media_key
+    assert raw_bytes not in excinfo.value.reason.encode("utf-8", errors="replace")
+    assert repr(media_key) not in excinfo.value.reason
+
+
+class _MappingWithBytearrayKey(ABCMapping):
+    """Minimal Mapping stub whose key iterator returns an unhashable
+    ``bytearray`` alongside legitimate string-keyed entries.
+
+    A plain ``dict`` literal cannot carry a ``bytearray`` key (Python
+    raises ``TypeError: unhashable type: 'bytearray'`` at construction
+    time, before the code under test runs). This stub implements only
+    the contract surface ``_find_media_bytes_path`` actually consumes —
+    ``__iter__`` / ``__len__`` / ``__getitem__`` — and exposes the
+    ``bytearray`` exclusively through ``__iter__`` so the production
+    recursive key scan is what fails closed. ``__getitem__`` resolves
+    the byte key by identity so the inherited ``ItemsView`` lookup does
+    not itself raise ``TypeError``.
+    """
+
+    def __init__(self, baseline, byte_key, value):
+        self._baseline = dict(baseline)
+        self._byte_key = byte_key
+        self._byte_value = value
+
+    def __iter__(self):
+        yield from self._baseline
+        yield self._byte_key
+
+    def __len__(self):
+        return len(self._baseline) + 1
+
+    def __getitem__(self, requested):
+        if requested is self._byte_key:
+            return self._byte_value
+        return self._baseline[requested]
+
+
+def test_compliance_audit_metadata_top_level_bytearray_key_fails_closed():
+    # APF2c R8zh fix (PR #22 external review P2): a compliance provider
+    # could deliver ``audit_metadata`` via a custom ``Mapping`` whose key
+    # iterator yields ``bytearray`` (e.g. a buffered-protocol wrapper).
+    # The production recursive key scan must still fail closed without
+    # leaking the raw key value or repr into ``IntakeRejected.reason``.
+    byte_key = bytearray(b"raw-key")
+    metadata = _MappingWithBytearrayKey(
+        baseline={"layers": ("local_prefilter", "asr_teaser", "llm")},
+        byte_key=byte_key,
+        value="value",
+    )
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok; teaser ASR ok; LLM compliance ok",
+        audit_metadata=metadata,
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "audit metadata" in reason
+    assert "bytearray" in reason
+    # Generic <key> marker is surfaced — raw key value never appears.
+    assert "<key>" in reason
+    assert bytes(byte_key) not in reason.encode("utf-8", errors="replace")
+    assert repr(byte_key) not in reason
+
+
+def test_compliance_audit_metadata_nested_dict_byte_key_fails_closed():
+    # Bytes hidden as a key one level deep must still trip the guard.
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            "nested": {b"raw\xff": "value"},
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "audit metadata" in excinfo.value.reason
+    assert "bytes" in excinfo.value.reason
+    assert "nested" in excinfo.value.reason
+    assert "<key>" in excinfo.value.reason
+    assert b"raw\xff" not in excinfo.value.reason.encode("utf-8", errors="replace")
+
+
+def test_compliance_audit_metadata_nested_container_key_with_bytes_fails_closed():
+    # A tuple key that itself contains bytes must fail closed via the
+    # recursive key scan.
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            ("inner", b"\x01\x02snippet"): "value",
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "bytes" in excinfo.value.reason
+    assert "<key>" in excinfo.value.reason
+    assert b"\x01\x02snippet" not in excinfo.value.reason.encode(
+        "utf-8", errors="replace"
+    )
+
+
+def test_compliance_audit_metadata_legitimate_string_keys_still_pass():
+    # Sanity: the key-side scan must not regress the existing
+    # string-keyed PASS path.
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            ("tuple", "key"): "value",
+        },
+        blocked_media_retained=False,
+    )
+    assert evaluate_compliance_result(result) is result
 
 
 def test_compliance_audit_metadata_nested_textual_passes():

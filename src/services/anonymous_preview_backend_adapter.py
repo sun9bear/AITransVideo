@@ -477,10 +477,27 @@ class AnonymousPreviewBackendAdapter:
             raise fail_closed_from_exception("compliance", exc) from exc
 
     def _safe_now(self) -> datetime:
+        """Return a usable ``datetime`` for the status-only failure path.
+
+        Falls back to the conservative ``_FALLBACK_NOW`` epoch when the
+        injected ``now_fn`` raises **or** when it returns a value that
+        is not a ``datetime`` instance. APF2c R8zg fix #2 (PR #22
+        external review P2, discussion_r3348801408): without the type
+        check, a misbehaving clock that returns e.g. a string / number
+        / ``None`` would silently pass through here and explode in
+        ``_status_only_failure`` at
+        ``now + timedelta(seconds=ttl_seconds)`` with a ``TypeError``
+        that escapes ``handle_intake`` — breaking the
+        "always return a status-only failed record" promise.
+        """
+
         try:
-            return self.now_fn()
+            result = self.now_fn()
         except Exception:  # noqa: BLE001 — fail closed on clock error
             return _FALLBACK_NOW
+        if not isinstance(result, datetime):
+            return _FALLBACK_NOW
+        return result
 
     def _safe_hash(self, prefix: str, value: str) -> str:
         try:

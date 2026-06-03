@@ -415,12 +415,34 @@ def _find_media_bytes_path(
 
     Strings are intentionally treated as scalars even though they are
     iterable — only raw media byte types are forbidden.
+
+    Both Mapping **keys** and values are scanned. APF2c R8zg fix #1
+    (PR #22 external review P2, discussion_r3348801401): a compliance
+    provider that smuggles raw media bytes via a ``Mapping`` key would
+    otherwise pass the value-only scan silently and let
+    ``build_preview_record`` persist the bytes inside
+    ``PreviewRecord.compliance_audit_metadata``. The key is recursed
+    through the same helper so nested container keys (e.g. a tuple key
+    holding bytes) also fail closed. The key's repr is never embedded
+    in the returned ``path`` — only a generic ``<key>`` marker — so the
+    raw key value cannot leak into ``IntakeRejected.reason`` →
+    ``PreviewRecord.status_reason`` (a persisted low-trust audit field).
     """
 
     if isinstance(value, (bytes, bytearray, memoryview)):
         return (path or "<root>", type(value).__name__)
     if isinstance(value, Mapping):
         for key, child in value.items():
+            key_path = f"{path}.<key>" if path else "<key>"
+            hit = _find_media_bytes_path(key, key_path)
+            if hit is not None:
+                return hit
+            if isinstance(key, (bytes, bytearray, memoryview)):
+                # Defensive belt-and-suspenders: the recursive call
+                # above already returns the offender, but keep the
+                # explicit guard so a future refactor cannot
+                # accidentally regress the key-side scan.
+                return (key_path, type(key).__name__)
             sub_path = f"{path}.{key}" if path else str(key)
             hit = _find_media_bytes_path(child, sub_path)
             if hit is not None:

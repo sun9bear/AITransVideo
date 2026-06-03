@@ -1233,6 +1233,105 @@ def test_unexpected_clock_exception_does_not_break_failure_record(
     )
 
 
+# APF2c R8zg P2 fix #2 (PR #22 discussion_r3348801408): a clock that
+# returns a non-``datetime`` value (without raising) must not break
+# the status-only failed record promise. ``_safe_now`` must validate
+# the return type and fall back to ``_FALLBACK_NOW`` so the failure
+# path's ``now + timedelta(...)`` cannot ``TypeError``.
+
+
+@pytest.mark.parametrize(
+    "bad_clock_value",
+    [
+        "2026-06-02T20:36:00+08:00",  # str — naive caller bug
+        1_717_339_200,  # int epoch — wrong type
+        1_717_339_200.5,  # float epoch — wrong type
+        None,  # accidentally omitted
+        object(),  # arbitrary sentinel
+    ],
+)
+def test_clock_returning_non_datetime_does_not_break_failure_record(
+    config, counter_store, temp_upload_dir, bad_clock_value
+):
+    def bad_clock() -> datetime:
+        # Deliberately violate the ``ClockFn`` annotation to exercise
+        # the runtime fail-closed branch (a misconfigured caller may
+        # inject any callable here).
+        return bad_clock_value  # type: ignore[return-value]
+
+    adapter = AnonymousPreviewBackendAdapter(
+        config=config,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=bad_clock,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_clock_bad_type"
+    )
+
+    # The happy path will try to call ``now_fn`` directly; the resulting
+    # ``TypeError`` (or earlier failure) MUST be translated to a
+    # status-only failed record, not propagated to the caller.
+    record = adapter.handle_intake(request, upload)
+
+    assert isinstance(record, PreviewRecord)
+    assert record.status is PreviewStatus.FAILED
+    # ``_safe_now`` returned ``_FALLBACK_NOW``; the TTL still resolves
+    # to the configured default via ``_safe_preview_record_ttl_seconds``,
+    # so ``expires_at - created_at`` is a valid ``timedelta``.
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
+    # Raw clock payload must not leak into the audit field — the
+    # outer ``except Exception`` already collapses to the dependency
+    # type-name marker.
+    assert "TypeError" in record.status_reason or "adapter error" in record.status_reason
+    assert str(bad_clock_value) not in record.status_reason
+
+
+def test_clock_returning_non_datetime_on_explicit_failure_path_succeeds(
+    config, counter_store, temp_upload_dir
+):
+    # Force a deterministic ``IntakeRejected`` (rate-limit overflow)
+    # while the clock returns a string. The failure path still goes
+    # through ``_status_only_failure`` → ``_safe_now``, which must
+    # silently fall back to ``_FALLBACK_NOW`` instead of letting
+    # ``timedelta`` raise. The promise is: ``handle_intake`` returns a
+    # ``PreviewRecord``, not an exception.
+    def stringy_clock() -> datetime:
+        return "definitely-not-a-datetime"  # type: ignore[return-value]
+
+    cfg = replace(
+        config,
+        rate_limit_per_ip_per_day=0,  # everyone fails closed immediately
+    )
+    adapter = AnonymousPreviewBackendAdapter(
+        config=cfg,
+        counter_store=counter_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=stringy_clock,
+    )
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_clock_string_failpath"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert isinstance(record, PreviewRecord)
+    # The status-only record must materialize regardless of clock type.
+    assert isinstance(record.created_at, datetime)
+    assert isinstance(record.expires_at, datetime)
+    assert record.expires_at - record.created_at == timedelta(
+        seconds=DEFAULT_PREVIEW_RECORD_TTL_SECONDS
+    )
+
+
 # ---------------------------------------------------------------------------
 # Behavior contract — status-only PreviewRecord (no forbidden fields).
 # ---------------------------------------------------------------------------
