@@ -1408,6 +1408,127 @@ def test_compliance_pass_with_failure_reason_adapter_fails_closed(
 
 
 # ---------------------------------------------------------------------------
+# P2 — wire-string source_type normalized before record write
+# (PR #22 review discussion_r3345886349).
+# ---------------------------------------------------------------------------
+
+
+def test_happy_path_wire_string_source_type_normalized_into_enum(
+    adapter, temp_upload_dir
+):
+    # A request whose ``source_type`` arrived as the raw HTTP/wire string
+    # ``"local_upload"`` (not the ``SourceType`` enum) must land on the
+    # ``PreviewRecord`` as ``SourceType.LOCAL_UPLOAD`` so downstream
+    # identity checks (``is SourceType.LOCAL_UPLOAD``) cannot silently
+    # misroute. The PreviewRecord.source_type field is typed
+    # ``SourceType`` and must never carry a raw ``str``.
+    request = _make_request(source_type="local_upload")  # type: ignore[arg-type]
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_wire_local_upload"
+    )
+
+    record = adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.READY_FOR_MODE
+    assert record.source_type is SourceType.LOCAL_UPLOAD
+    assert type(record.source_type) is SourceType
+
+
+def test_youtube_wire_string_source_type_normalized_in_failure_record(
+    adapter,
+):
+    # A YouTube source supplied as the raw wire string ``"youtube_url"``
+    # is rejected for anonymous users, and the status-only failure record
+    # must still carry the canonical ``SourceType.YOUTUBE_URL`` enum.
+    request = _make_request(
+        source_type="youtube_url",  # type: ignore[arg-type]
+        is_free_user=False,
+        youtube_url="https://example.invalid/anything",
+    )
+
+    record = adapter.handle_intake(request, upload=None)
+
+    assert record.status is PreviewStatus.REJECTED
+    assert record.source_type is SourceType.YOUTUBE_URL
+    assert type(record.source_type) is SourceType
+
+
+def test_unrecognized_wire_source_type_failure_falls_back_to_local_upload_enum(
+    adapter,
+):
+    # An unrecognized wire-level value must fail closed (FAILED), and the
+    # resulting status-only record must still write a canonical enum
+    # (``LOCAL_UPLOAD`` matches the ``build_preview_record`` default) so
+    # the typed ``PreviewRecord.source_type`` contract is never violated
+    # with a raw ``str``. The unrecognized raw value must NOT be embedded
+    # in ``status_reason`` — wire callers may pass attacker-controlled
+    # strings carrying secrets / tokens / paths / raw media markers, and
+    # ``status_reason`` is a persisted low-trust audit field (PR #22
+    # external review P2 follow-up, R8l).
+    request = _make_request(
+        source_type="not_a_real_source",  # type: ignore[arg-type]
+    )
+
+    record = adapter.handle_intake(request, upload=None)
+
+    assert record.status is PreviewStatus.FAILED
+    # Stable structured failure tokens — no raw wire value embedded.
+    assert "source_type" in record.status_reason
+    assert "recognized" in record.status_reason
+    assert "fail closed" in record.status_reason.lower()
+    assert "not_a_real_source" not in record.status_reason
+    # Defense-in-depth: even on the unrecognized FAILED branch, the
+    # persisted record's source_type is the canonical enum.
+    assert type(record.source_type) is SourceType
+    assert record.source_type is SourceType.LOCAL_UPLOAD
+
+
+def test_unrecognized_source_type_fail_closed_scrubs_sensitive_value(
+    adapter,
+):
+    # Regression for PR #22 external review P2 follow-up (R8l): when the
+    # wire ``source_type`` is an attacker-controlled string carrying
+    # provider tokens / secrets / raw media markers / filesystem paths,
+    # the FAILED status-only record's ``status_reason`` must NOT leak
+    # any fragment of that input. The typed PreviewRecord.source_type
+    # field must still fall back to the canonical ``LOCAL_UPLOAD`` enum.
+    sensitive_source_type = (
+        "provider=upstream token=Bearer secret "
+        "raw=b'BINARY_MEDIA' path=/var/lib/uploads/x.mp4"
+    )
+    request = _make_request(
+        source_type=sensitive_source_type,  # type: ignore[arg-type]
+    )
+
+    record = adapter.handle_intake(request, upload=None)
+
+    # Fail-closed contract: FAILED + canonical enum fallback.
+    assert record.status is PreviewStatus.FAILED
+    assert record.source_type is SourceType.LOCAL_UPLOAD
+    assert type(record.source_type) is SourceType
+
+    # ``status_reason`` is a persisted audit field — no sensitive payload
+    # fragment may appear. Asserted per-fragment so the regression test
+    # pinpoints the exact leak if it ever returns.
+    reason = record.status_reason
+    forbidden_fragments = (
+        "provider",
+        "Bearer",
+        "raw=",
+        "BINARY_MEDIA",
+        "/var/lib/uploads",
+        "x.mp4",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"unrecognized source_type status_reason leaked sensitive "
+            f"fragment {fragment!r} in reason={reason!r}"
+        )
+    # And the full sensitive input must never appear verbatim either.
+    assert sensitive_source_type not in reason
+
+
+# ---------------------------------------------------------------------------
 # Import guard — adapter module only imports stdlib + intake contract.
 # ---------------------------------------------------------------------------
 

@@ -163,6 +163,114 @@ def test_result_is_immutable_dataclass() -> None:
 
 
 # ---------------------------------------------------------------------------
+# P2 — probe_filename_prefix must not escape the temp directory
+# (PR #22 review discussion_r3345886353).
+# ---------------------------------------------------------------------------
+
+
+def test_traversal_probe_prefix_fails_closed_and_no_external_write(
+    tmp_path: Path,
+) -> None:
+    # A prefix containing ``../`` would join into ``path / "../foo<uuid>.tmp"``,
+    # which lexically resolves outside the caller-provided temp directory.
+    # The helper must reject (fail-closed) and never create or delete any
+    # probe file in the parent directory.
+    parent = tmp_path / "scratch_parent"
+    parent.mkdir()
+    inside = parent / "temp_uploads"
+    inside.mkdir()
+
+    pre_parent = {p.name for p in parent.iterdir()}
+    pre_inside = {p.name for p in inside.iterdir()}
+
+    result = check_temp_upload_storage(
+        inside, probe_filename_prefix="../escape_health_"
+    )
+
+    assert result.available is False
+    assert "escapes temp directory" in result.reason
+    assert "fail closed" in result.reason.lower()
+    # Stable, low-sensitivity reason: must not echo the raw prefix or
+    # any filesystem path.
+    assert "../escape_health_" not in result.reason
+    assert str(inside) not in result.reason
+
+    # No new file landed in the parent (escape target) or inside.
+    assert {p.name for p in parent.iterdir()} == pre_parent
+    assert {p.name for p in inside.iterdir()} == pre_inside
+
+
+def test_subdirectory_separator_probe_prefix_fails_closed(
+    tmp_path: Path,
+) -> None:
+    # A prefix containing a forward-slash separator would try to write
+    # into a child directory of ``path`` — escaping the contract that
+    # probes only sit inside the caller-provided directory itself. The
+    # helper must reject without creating the would-be subdirectory.
+    pre_root = {p.name for p in tmp_path.iterdir()}
+
+    result = check_temp_upload_storage(
+        tmp_path, probe_filename_prefix="nested/health_"
+    )
+
+    assert result.available is False
+    assert "escapes temp directory" in result.reason
+    # Subdirectory must not be auto-created — helper never calls mkdir.
+    assert not (tmp_path / "nested").exists()
+    assert {p.name for p in tmp_path.iterdir()} == pre_root
+
+
+def test_absolute_probe_prefix_fails_closed_and_no_external_write(
+    tmp_path: Path,
+) -> None:
+    # An absolute-path prefix would make ``path / probe_name`` resolve
+    # to the absolute target instead of staying under ``path``. The
+    # helper must reject and never touch the elsewhere directory.
+    target = tmp_path / "target"
+    target.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    pre_target = {p.name for p in target.iterdir()}
+    pre_elsewhere = {p.name for p in elsewhere.iterdir()}
+
+    # ``str(elsewhere / "health_")`` produces a platform-correct absolute
+    # path on both POSIX and Windows.
+    absolute_prefix = str(elsewhere / "health_")
+
+    result = check_temp_upload_storage(
+        target, probe_filename_prefix=absolute_prefix
+    )
+
+    assert result.available is False
+    assert "escapes temp directory" in result.reason
+    assert "fail closed" in result.reason.lower()
+    # Stable, low-sensitivity reason: absolute path must not be echoed.
+    assert absolute_prefix not in result.reason
+
+    # Neither the target nor the would-be escape destination grew.
+    assert {p.name for p in target.iterdir()} == pre_target
+    assert {p.name for p in elsewhere.iterdir()} == pre_elsewhere
+
+
+def test_legitimate_prefix_with_dots_still_succeeds(tmp_path: Path) -> None:
+    # Defense regression: a prefix containing literal dots but no path
+    # separator (e.g. ``"aivt..health_"``) is a valid filename component
+    # and must still complete the probe successfully — the guard is
+    # about path components, not about ``.`` characters per se.
+    pre = {p.name for p in tmp_path.iterdir()}
+
+    result = check_temp_upload_storage(
+        tmp_path, probe_filename_prefix="aivt..health_"
+    )
+
+    assert result.available is True
+    assert "succeeded" in result.reason
+    # Probe cleaned itself up; nothing remains.
+    assert {p.name for p in tmp_path.iterdir()} == pre
+
+
+# ---------------------------------------------------------------------------
 # Import guard — module must depend only on the standard library.
 # ---------------------------------------------------------------------------
 

@@ -183,9 +183,21 @@ class AnonymousPreviewBackendAdapter:
 
         try:
             config = require_config(self.config)
+            # Normalize the wire-level ``source_type`` once at the adapter
+            # boundary so every downstream write — ``admit_source``,
+            # ``build_preview_record``, and the fail-closed status-only
+            # record — sees the canonical ``SourceType`` enum rather than
+            # the raw wire string. ``admit_source`` internally normalizes
+            # too, but it discards the result, so without this step the
+            # ``PreviewRecord.source_type`` field still carried the raw
+            # ``str`` for wire callers (PR #22 external review P2,
+            # discussion_r3345886349).
+            normalized_source_type = self._normalize_source_type(
+                request.source_type
+            )
             admit_source(
                 config,
-                source_type=request.source_type,
+                source_type=normalized_source_type,
                 is_free_user=request.is_free_user,
             )
             if upload is None:
@@ -215,7 +227,7 @@ class AnonymousPreviewBackendAdapter:
                 upload=intake,
                 probe_result=probe_result,
                 compliance_result=normalized_compliance,
-                source_type=request.source_type,
+                source_type=normalized_source_type,
                 now=self.now_fn(),
             )
         except IntakeRejected as exc:
@@ -236,6 +248,42 @@ class AnonymousPreviewBackendAdapter:
             return self._status_only_failure(request, upload, failure)
 
     # -- Internal helpers ---------------------------------------------------
+
+    @staticmethod
+    def _normalize_source_type(value: object) -> SourceType:
+        """Coerce a wire-level value into the canonical ``SourceType`` enum.
+
+        Mirrors the recognition behaviour inside ``admit_source`` so the
+        adapter can normalize *once* at its boundary and thread the enum
+        through every downstream write (``admit_source`` call,
+        ``build_preview_record`` argument, fail-closed status-only record).
+        Without this normalization a raw HTTP/wire ``str`` such as
+        ``"local_upload"`` would land on ``PreviewRecord.source_type`` —
+        a typed ``SourceType`` field — and downstream identity checks
+        could silently misroute (PR #22 external review P2).
+
+        Raises ``IntakeRejected`` with ``PreviewStatus.FAILED`` when the
+        value is not a recognized ``SourceType`` (matching ``admit_source``).
+        The raw wire value is intentionally **not** embedded in the
+        rejection reason — wire callers may pass attacker-controlled
+        strings containing tokens, secrets, provider payloads, raw media
+        markers, or filesystem paths, and ``status_reason`` is a
+        persisted low-trust audit field. The status-only ``PreviewRecord``
+        built by ``_status_only_failure`` falls back to
+        ``SourceType.LOCAL_UPLOAD`` so the typed contract is preserved
+        without surfacing the unrecognized payload (PR #22 external
+        review P2 follow-up, R8l).
+        """
+
+        if isinstance(value, SourceType):
+            return value
+        try:
+            return SourceType(value)
+        except (TypeError, ValueError) as exc:
+            raise IntakeRejected(
+                PreviewStatus.FAILED,
+                "source_type is not a recognized SourceType (fail closed)",
+            ) from exc
 
     def _build_session(
         self, config: IntakeConfig, request: RequestFacts
@@ -420,12 +468,25 @@ class AnonymousPreviewBackendAdapter:
             raw_session_id = ""
         session_id_hash = self._safe_hash("sess", raw_session_id)
         ttl_seconds = self._safe_preview_record_ttl_seconds()
+        # Status-only record must also carry the canonical ``SourceType``
+        # enum, not a raw wire string. When the original value is itself
+        # unrecognized (the unrecognized-source FAILED branch), fall back
+        # to ``LOCAL_UPLOAD`` — the same default ``build_preview_record``
+        # uses — so the persisted record keeps the typed contract intact
+        # even on the failure path (PR #22 external review P2,
+        # discussion_r3345886349).
+        try:
+            canonical_source_type = self._normalize_source_type(
+                request.source_type
+            )
+        except IntakeRejected:
+            canonical_source_type = SourceType.LOCAL_UPLOAD
         return PreviewRecord(
             record_id=_default_record_id(source_hash),
             session_id_hash=session_id_hash,
             source_hash=source_hash,
             upload_hash=source_hash,
-            source_type=request.source_type,
+            source_type=canonical_source_type,
             status=exc.status,
             status_reason=exc.reason,
             duration_seconds=0.0,

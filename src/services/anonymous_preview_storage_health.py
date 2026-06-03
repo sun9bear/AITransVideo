@@ -113,6 +113,24 @@ def check_temp_upload_storage(
     probe_name = f"{probe_filename_prefix}{uuid.uuid4().hex}.tmp"
     probe_path = path / probe_name
 
+    # Defense-in-depth: a caller-provided ``probe_filename_prefix`` that
+    # carries path components (``../``, ``subdir/``, an absolute path,
+    # a Windows drive-letter prefix) would make ``path / probe_name``
+    # resolve outside the caller-provided temp directory, so a probe
+    # write/delete could land on an unrelated file. We reject any prefix
+    # whose joined path is not a direct child of ``path`` (no
+    # ``resolve()`` so we never follow symlinks; the comparison is purely
+    # lexical). The result is a stable, low-sensitivity fail-closed
+    # reason that never echoes the raw prefix or any filesystem path
+    # (PR #22 external review P2, discussion_r3345886353).
+    if probe_path.parent != path:
+        return StorageHealthResult(
+            available=False,
+            reason=(
+                "probe filename prefix escapes temp directory (fail closed)"
+            ),
+        )
+
     try:
         _write_probe(probe_path)
     except Exception as exc:  # noqa: BLE001 — fail closed on any error
