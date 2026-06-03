@@ -41,6 +41,7 @@ from src.services.anonymous_preview_intake import (
     DEFAULT_PREVIEW_RECORD_TTL_SECONDS,
     DEFAULT_SESSION_TTL_SECONDS,
     FORBIDDEN_PREVIEW_RECORD_FIELDS,
+    PROBE_FAILURE_STATUS_REASON,
     SHANGHAI,
     AnonymousSession,
     ComplianceResult,
@@ -569,8 +570,84 @@ def test_adapter_probe_failure_translated_to_status_only_record(
     record = failing_adapter.handle_intake(request, upload)
 
     assert record.status is PreviewStatus.FAILED
+    # The redacted constant still contains the human-friendly
+    # "probe failure" prefix so existing dashboards keep working.
     assert "probe failure" in record.status_reason
+    # P2: the raw probe failure_reason MUST NOT reach status_reason.
+    assert record.status_reason == PROBE_FAILURE_STATUS_REASON
+    assert "ffprobe" not in record.status_reason
     assert failing_adapter.forbidden_calls == []
+
+
+def test_adapter_probe_failure_redacted_scrubs_sensitive_fragments(
+    adapter, temp_upload_dir
+):
+    # Pin PR #22 external review P2 ``discussion_r3345656835``: even
+    # when a probe wrapper hands back a ``ProbeResult.failure_reason``
+    # full of ffprobe stderr, temp paths, tokens, provider names,
+    # media ids and tracebacks, the adapter's status-only
+    # ``PreviewRecord.status_reason`` must stay redacted.
+    sensitive_failure = (
+        "ffprobe error: Invalid data while reading "
+        "path=/var/lib/anon_uploads/clip-abc.mp4 "
+        "token=Bearer.sk-live_AbCdEfGhIjKlMn "
+        "provider=ffmpeg-runner "
+        "media_id=med_0123abcd "
+        "Traceback (most recent call last):\n"
+        "  File \"probe.py\", line 11, in run\n"
+        "    subprocess.check_output([...])"
+    )
+
+    def leaky_probe(upload: FakeUploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=0,
+            source_hash=upload.source_hash,
+            media_type="",
+            audio_present=False,
+            audio_quality_score=0,
+            teaser_candidate_range=(0, 0),
+            failure_reason=sensitive_failure,
+        )
+
+    leaky_adapter = replace(adapter, probe_fn=leaky_probe)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir, source_hash="src_hash_probe_redact"
+    )
+
+    record = leaky_adapter.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.FAILED
+    assert record.status_reason == PROBE_FAILURE_STATUS_REASON
+    status_reason = record.status_reason
+    forbidden_fragments = (
+        "ffprobe",
+        "ffmpeg",
+        "Invalid data",
+        "/var/lib/anon_uploads",
+        "clip-abc.mp4",
+        "Bearer",
+        "sk-live",
+        "AbCdEfGhIjKlMn",
+        "token=",
+        "provider=",
+        "ffmpeg-runner",
+        "media_id=",
+        "med_0123abcd",
+        "Traceback",
+        "probe.py",
+        "subprocess",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in status_reason, (
+            f"adapter probe-failure path leaked sensitive fragment "
+            f"{fragment!r} in status_reason={status_reason!r}"
+        )
+    assert sensitive_failure not in status_reason
+    # The forbidden-call ledger must remain empty — the redaction does
+    # not introduce any new ASR / LLM / TTS / clone / preview-media /
+    # pricing / payment / Gateway / Job API touchpoints.
+    assert leaky_adapter.forbidden_calls == []
 
 
 def test_adapter_probe_exception_translated_to_status_only_record(

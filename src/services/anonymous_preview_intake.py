@@ -52,6 +52,16 @@ DEFAULT_RATE_LIMIT_PER_IP_PER_DAY: int = 3
 DEFAULT_RATE_LIMIT_PER_DEVICE_PER_DAY: int = 2
 DEFAULT_RATE_LIMIT_PER_SOURCE_HASH_PER_DAY: int = 1
 
+# Redacted status reason for any probe failure surfaced via
+# ``IntakeRejected`` / ``PreviewRecord.status_reason``. ``ProbeResult.
+# failure_reason`` routinely embeds ``ffprobe`` / ``ffmpeg`` stderr,
+# temp paths, ``token=...`` / ``provider=...`` / ``media_id=...``
+# fragments and tracebacks; the raw text must never be persisted on the
+# low-trust audit field. Mirrors the R7b fail-closed redaction style
+# applied to ``fail_closed_from_exception`` and the compliance
+# ``failure_reason`` branch.
+PROBE_FAILURE_STATUS_REASON: str = "probe failure (details redacted)"
+
 
 # ---------------------------------------------------------------------------
 # Enums.
@@ -349,12 +359,26 @@ def admit_upload(config: IntakeConfig, upload: UploadIntake) -> None:
 
 
 def evaluate_probe_result(probe_result: ProbeResult) -> ProbeResult:
-    """Fail closed when probe reported a ``failure_reason`` (C15)."""
+    """Fail closed when probe reported a ``failure_reason`` (C15).
+
+    The raw ``ProbeResult.failure_reason`` is intentionally NOT
+    interpolated into ``IntakeRejected.reason``. Probe wrappers
+    routinely embed ``ffprobe`` / ``ffmpeg`` stderr text, temp
+    filesystem paths, ``token=...`` / ``provider=...`` / ``media_id=...``
+    fragments and stack tracebacks inside ``failure_reason``, and that
+    string lands on ``PreviewRecord.status_reason`` — a persisted,
+    low-trust audit surface that must stay free of provider payloads,
+    credentials and raw media markers. The redacted constant
+    ``PROBE_FAILURE_STATUS_REASON`` is the only audit fragment surfaced
+    here, matching the R7b fail-closed redaction style applied to
+    ``fail_closed_from_exception`` and the compliance ``failure_reason``
+    branch.
+    """
 
     if probe_result.failure_reason:
         raise IntakeRejected(
             PreviewStatus.FAILED,
-            f"probe failure: {probe_result.failure_reason}",
+            PROBE_FAILURE_STATUS_REASON,
         )
     return probe_result
 
@@ -581,6 +605,7 @@ __all__ = [
     "DEFAULT_RATE_LIMIT_PER_IP_PER_DAY",
     "DEFAULT_RATE_LIMIT_PER_DEVICE_PER_DAY",
     "DEFAULT_RATE_LIMIT_PER_SOURCE_HASH_PER_DAY",
+    "PROBE_FAILURE_STATUS_REASON",
     "FORBIDDEN_PREVIEW_RECORD_FIELDS",
     # enums
     "SourceType",

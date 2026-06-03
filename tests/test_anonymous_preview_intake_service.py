@@ -31,6 +31,7 @@ from src.services.anonymous_preview_intake import (
     DEFAULT_RATE_LIMIT_PER_SOURCE_HASH_PER_DAY,
     DEFAULT_SESSION_TTL_SECONDS,
     FORBIDDEN_PREVIEW_RECORD_FIELDS,
+    PROBE_FAILURE_STATUS_REASON,
     SHANGHAI,
     AnonymousSession,
     ComplianceResult,
@@ -429,13 +430,78 @@ def test_probe_failure_reason_blocks_pipeline():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_probe_result(probe)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "ffprobe" in excinfo.value.reason
+    # Reason is fully redacted — the raw probe failure_reason must not
+    # leak into ``IntakeRejected.reason`` because that string lands on
+    # ``PreviewRecord.status_reason``, a persisted low-trust audit field.
+    assert excinfo.value.reason == PROBE_FAILURE_STATUS_REASON
+    assert "ffprobe" not in excinfo.value.reason
 
 
 def test_probe_pass_returns_result(temp_upload_dir):
     upload = _make_upload(temp_upload_dir)
     probe = _passing_probe(upload)
     assert evaluate_probe_result(probe) is probe
+
+
+def test_probe_failure_reason_redacted_scrubs_sensitive_fragments():
+    # Pin the P2 scrub: ffprobe / ffmpeg stderr, temp filesystem paths,
+    # tokens, provider names, media ids and tracebacks routinely land in
+    # ``ProbeResult.failure_reason``. None of them may reach
+    # ``IntakeRejected.reason`` / ``PreviewRecord.status_reason``.
+    sensitive_failure = (
+        "ffprobe error: Invalid data found when processing input "
+        "path=/tmp/anon_preview/clip-XYZ.mp4 "
+        "token=sk-live_AbCdEfGhIjKlMnOpQrStUvWx "
+        "provider=ffmpeg-runner-v2 "
+        "media_id=med_0123456789abcdef "
+        "Traceback (most recent call last):\n"
+        "  File \"probe.py\", line 42, in run\n"
+        "    subprocess.check_output([...])"
+    )
+    probe = ProbeResult(
+        duration_seconds=0,
+        source_hash="src_hash_redact",
+        media_type="",
+        audio_present=False,
+        audio_quality_score=0,
+        teaser_candidate_range=(0, 0),
+        failure_reason=sensitive_failure,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_probe_result(probe)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert reason == PROBE_FAILURE_STATUS_REASON
+    forbidden_fragments = (
+        "ffprobe",
+        "ffmpeg",
+        "Invalid data",
+        "/tmp/anon_preview",
+        "clip-XYZ.mp4",
+        "sk-live",
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+        "token=",
+        "provider=",
+        "ffmpeg-runner-v2",
+        "media_id=",
+        "med_0123456789abcdef",
+        "Traceback",
+        "probe.py",
+        "subprocess",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"evaluate_probe_result leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+    # Full sensitive blob must not be embedded either.
+    assert sensitive_failure not in reason
+
+
+def test_probe_failure_status_reason_constant_is_pinned():
+    # The constant value is part of the audit contract — changing it
+    # is intentionally a visible API edit.
+    assert PROBE_FAILURE_STATUS_REASON == "probe failure (details redacted)"
 
 
 # ---------------------------------------------------------------------------

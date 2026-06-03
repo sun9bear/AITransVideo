@@ -411,9 +411,16 @@ class FakeIntakeRunner:
                 f"probe error (fail closed): {exc}",
             ) from exc
         if result.failure_reason:
+            # The raw ``ProbeResult.failure_reason`` is intentionally NOT
+            # interpolated — probe wrappers routinely embed ffprobe /
+            # ffmpeg stderr, temp paths, tokens, provider names,
+            # media ids and tracebacks, and that string would land on
+            # ``PreviewRecord.status_reason``. Mirrors the production
+            # ``evaluate_probe_result`` redaction (PR #22 review P2
+            # discussion_r3345656835).
             raise IntakeRejected(
                 PreviewStatus.FAILED,
-                f"probe failure: {result.failure_reason}",
+                "probe failure (details redacted)",
             )
         return result
 
