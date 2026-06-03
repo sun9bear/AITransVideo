@@ -423,10 +423,20 @@ def _find_media_bytes_path(
     ``build_preview_record`` persist the bytes inside
     ``PreviewRecord.compliance_audit_metadata``. The key is recursed
     through the same helper so nested container keys (e.g. a tuple key
-    holding bytes) also fail closed. The key's repr is never embedded
-    in the returned ``path`` — only a generic ``<key>`` marker — so the
-    raw key value cannot leak into ``IntakeRejected.reason`` →
-    ``PreviewRecord.status_reason`` (a persisted low-trust audit field).
+    holding bytes) also fail closed.
+
+    APF2c R8zl (PR #22 external review P2, discussion_r3348801401 /
+    discussion_r3349214069): neither the key nor the value-at-key sub
+    path may embed the raw mapping key. Both legs use stable generic
+    markers — ``<key>`` for "we descended into the key itself" and
+    ``<value>`` for "we descended into the value stored at that key"
+    — so the returned ``path`` never echoes raw mapping key text,
+    ``repr(key)``, filesystem paths, provider keys, bearer tokens or
+    other attacker-/leak-controlled snippets into
+    ``IntakeRejected.reason`` → ``PreviewRecord.status_reason``
+    (a persisted low-trust audit field). Mirrors the R7b / R8l / R8o /
+    R8v / R8z fail-closed redaction style applied to probe / compliance
+    ``failure_reason`` / ``status`` / BLOCK ``reason``.
     """
 
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -441,9 +451,15 @@ def _find_media_bytes_path(
                 # Defensive belt-and-suspenders: the recursive call
                 # above already returns the offender, but keep the
                 # explicit guard so a future refactor cannot
-                # accidentally regress the key-side scan.
+                # accidentally regress the key-side scan. ``key_path``
+                # is a literal ``<key>`` marker; the raw key bytes are
+                # never embedded.
                 return (key_path, type(key).__name__)
-            sub_path = f"{path}.{key}" if path else str(key)
+            # Generic ``<value>`` marker — never ``str(key)`` / ``{key}``
+            # — so a key whose textual content carries a token /
+            # filesystem path / provider key / user-supplied snippet
+            # cannot leak through this branch into the returned path.
+            sub_path = f"{path}.<value>" if path else "<value>"
             hit = _find_media_bytes_path(child, sub_path)
             if hit is not None:
                 return hit

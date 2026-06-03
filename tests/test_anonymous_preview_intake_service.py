@@ -1054,8 +1054,13 @@ def test_compliance_audit_metadata_with_media_bytes_fails_closed(media_value):
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "audit metadata" in excinfo.value.reason
-    assert "teaser_audio" in excinfo.value.reason
+    reason = excinfo.value.reason
+    assert "audit metadata" in reason
+    # APF2c R8zl (PR #22 discussion_r3349214069): the raw mapping key
+    # ``"teaser_audio"`` must NOT leak into ``status_reason``. The
+    # offending_path uses a generic ``<value>`` marker instead.
+    assert "teaser_audio" not in reason
+    assert "<value>" in reason
 
 
 def test_compliance_audit_metadata_pure_strings_pass():
@@ -1089,8 +1094,13 @@ def test_compliance_audit_metadata_nested_dict_bytes_fails_closed():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "audit metadata" in excinfo.value.reason
-    assert "nested.audio" in excinfo.value.reason
+    reason = excinfo.value.reason
+    assert "audit metadata" in reason
+    # APF2c R8zl: raw mapping keys ``nested`` / ``audio`` must not leak;
+    # the recursive scan emits a stable ``<value>`` marker per hop.
+    assert "nested" not in reason
+    assert "audio" not in reason
+    assert "<value>" in reason
 
 
 def test_compliance_audit_metadata_nested_list_memoryview_fails_closed():
@@ -1108,8 +1118,15 @@ def test_compliance_audit_metadata_nested_list_memoryview_fails_closed():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "memoryview" in excinfo.value.reason
-    assert "samples" in excinfo.value.reason
+    reason = excinfo.value.reason
+    assert "memoryview" in reason
+    # APF2c R8zl: raw mapping keys ``samples`` / ``buffer`` must not
+    # leak. List index ``[i]`` markers and the generic ``<value>``
+    # marker are stable structural hints that carry no key text.
+    assert "samples" not in reason
+    assert "buffer" not in reason
+    assert "<value>" in reason
+    assert "[1]" in reason
 
 
 def test_compliance_audit_metadata_nested_tuple_bytearray_fails_closed():
@@ -1127,8 +1144,13 @@ def test_compliance_audit_metadata_nested_tuple_bytearray_fails_closed():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "bytearray" in excinfo.value.reason
-    assert "evidence" in excinfo.value.reason
+    reason = excinfo.value.reason
+    assert "bytearray" in reason
+    # APF2c R8zl: raw mapping key ``evidence`` (and inner tuple text)
+    # must not appear in the path; only ``<value>`` + ``[i]`` markers.
+    assert "evidence" not in reason
+    assert "inner_label" not in reason
+    assert "<value>" in reason
 
 
 def test_compliance_audit_metadata_nested_set_bytes_fails_closed():
@@ -1143,7 +1165,11 @@ def test_compliance_audit_metadata_nested_set_bytes_fails_closed():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "rule_hashes" in excinfo.value.reason
+    reason = excinfo.value.reason
+    # APF2c R8zl: ``rule_hashes`` is a raw mapping key — it must not
+    # leak into the reason. The redacted path uses ``<value>`` markers.
+    assert "rule_hashes" not in reason
+    assert "<value>" in reason
 
 
 # APF2c R8zg P2 fix #1 (PR #22 discussion_r3348801401): byte-typed
@@ -1267,11 +1293,16 @@ def test_compliance_audit_metadata_nested_dict_byte_key_fails_closed():
     with pytest.raises(IntakeRejected) as excinfo:
         evaluate_compliance_result(result)
     assert excinfo.value.status is PreviewStatus.FAILED
-    assert "audit metadata" in excinfo.value.reason
-    assert "bytes" in excinfo.value.reason
-    assert "nested" in excinfo.value.reason
-    assert "<key>" in excinfo.value.reason
-    assert b"raw\xff" not in excinfo.value.reason.encode("utf-8", errors="replace")
+    reason = excinfo.value.reason
+    assert "audit metadata" in reason
+    assert "bytes" in reason
+    # APF2c R8zl: the outer key ``"nested"`` must NOT leak into the
+    # reason — the recursion emits a ``<value>`` hop before reaching
+    # the inner ``<key>`` marker that locates the byte key.
+    assert "nested" not in reason
+    assert "<key>" in reason
+    assert "<value>" in reason
+    assert b"raw\xff" not in reason.encode("utf-8", errors="replace")
 
 
 def test_compliance_audit_metadata_nested_container_key_with_bytes_fails_closed():
@@ -1293,6 +1324,154 @@ def test_compliance_audit_metadata_nested_container_key_with_bytes_fails_closed(
     assert b"\x01\x02snippet" not in excinfo.value.reason.encode(
         "utf-8", errors="replace"
     )
+
+
+def test_compliance_audit_metadata_byte_scan_does_not_leak_sensitive_key_text():
+    # APF2c R8zl P2 fix #2 (PR #22 discussion_r3349214069): when a
+    # mapping key happens to carry sensitive text (bearer token,
+    # filesystem path, provider key, raw user-supplied snippet), the
+    # byte-scan child-path builder must NOT echo the key into
+    # ``offending_path`` → ``IntakeRejected.reason`` →
+    # ``PreviewRecord.status_reason``. The scan emits a generic
+    # ``<value>`` marker instead so no raw key fragment can leak even
+    # if the offending value down the tree is what fails closed.
+    sensitive_key = (
+        "secret=sk_live_AbCdEfGhIjKlMnOpQrStUvWx "
+        "token=Bearer.ey.payload.signature "
+        "path=/var/lib/uploads/anon/clip.mp4 "
+        "media_id=med_0123456789abcdef"
+    )
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok",
+        audit_metadata={
+            "layers": ("local_prefilter", "asr_teaser", "llm"),
+            sensitive_key: b"\x00\xffraw",
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "audit metadata" in reason
+    assert "bytes" in reason
+    # Stable generic marker is what survives — the raw key text never does.
+    assert "<value>" in reason
+    assert sensitive_key not in reason
+    # NOTE: ``path=`` (bare) is intentionally NOT in this list — the
+    # reason string emits a generic structural label
+    # ``(path='<value>', type=bytes)`` where ``path=`` is the label of
+    # the offending-path field, not user-supplied content. We assert
+    # against the *concrete* sensitive value tail ``path=/var/lib/...``
+    # (and the bare filesystem path / filename) instead.
+    forbidden_fragments = (
+        "sk_live",
+        "AbCdEfGhIjKlMnOpQrStUvWx",
+        "Bearer",
+        "ey.payload",
+        "/var/lib/uploads",
+        "clip.mp4",
+        "med_0123456789abcdef",
+        "secret=",
+        "token=",
+        "path=/var/lib/uploads",
+        "path=/var/lib/uploads/anon/clip.mp4",
+        "media_id=",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"byte-scan path leaked sensitive key fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+
+
+def test_compliance_audit_metadata_nested_sensitive_key_then_bytes_redacted():
+    # The leak path also applies one level deep: a benign outer key
+    # whose value is a mapping with a sensitive inner key carrying
+    # bytes must not echo either key text.
+    inner_sensitive_key = "Bearer.sk_live_NESTED path=/tmp/raw.mp4"
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok",
+        audit_metadata={
+            "outer-benign": {inner_sensitive_key: bytearray(b"raw teaser")},
+        },
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "audit metadata" in reason
+    assert "bytearray" in reason
+    assert "<value>" in reason
+    assert "outer-benign" not in reason
+    assert inner_sensitive_key not in reason
+    # NOTE: bare ``path=`` is the generic structural label inside
+    # ``(path='<value>.<value>', type=bytearray)`` (where ``<value>``
+    # is the redacted marker). We assert against the concrete sensitive
+    # tail ``path=/tmp/raw.mp4`` and the raw filesystem path instead.
+    for fragment in (
+        "Bearer",
+        "sk_live_NESTED",
+        "/tmp/raw.mp4",
+        "path=/tmp/raw.mp4",
+    ):
+        assert fragment not in reason, (
+            f"nested byte-scan path leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
+
+
+def test_compliance_audit_metadata_byte_value_under_object_key_redacted():
+    # Even when the mapping key is a non-string Python object (its
+    # ``str``/``repr`` could carry implementation detail or accidental
+    # leaks), the byte-scan path must not call ``str(key)`` — only the
+    # generic ``<value>`` marker is emitted.
+
+    class _LeakyKey:
+        # __hash__ + __eq__ make it a valid dict key. ``__str__`` and
+        # ``__repr__`` are intentionally leaky to prove the helper
+        # never invokes them on the path-building branch.
+        def __init__(self, secret: str) -> None:
+            self.secret = secret
+
+        def __hash__(self) -> int:
+            return hash(self.secret)
+
+        def __eq__(self, other) -> bool:
+            return isinstance(other, _LeakyKey) and other.secret == self.secret
+
+        def __str__(self) -> str:  # pragma: no cover - must not be hit
+            return f"LEAKY_STR:{self.secret}"
+
+        def __repr__(self) -> str:  # pragma: no cover - must not be hit
+            return f"LEAKY_REPR:{self.secret}"
+
+    leaky_key = _LeakyKey("sk_live_TOTALLY_SECRET")
+    result = ComplianceResult(
+        status=ComplianceStatus.PASS,
+        reason="prefilter ok",
+        audit_metadata={leaky_key: b"\x00raw"},
+        blocked_media_retained=False,
+    )
+    with pytest.raises(IntakeRejected) as excinfo:
+        evaluate_compliance_result(result)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "audit metadata" in reason
+    assert "bytes" in reason
+    assert "<value>" in reason
+    for fragment in (
+        "sk_live_TOTALLY_SECRET",
+        "LEAKY_STR",
+        "LEAKY_REPR",
+    ):
+        assert fragment not in reason, (
+            f"object-key byte-scan path leaked sensitive fragment "
+            f"{fragment!r} in reason={reason!r}"
+        )
 
 
 def test_compliance_audit_metadata_legitimate_string_keys_still_pass():
