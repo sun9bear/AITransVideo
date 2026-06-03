@@ -341,7 +341,29 @@ def admit_upload(config: IntakeConfig, upload: UploadIntake) -> None:
             PreviewStatus.REJECTED,
             "chunked upload is not supported in APF2",
         )
-    if upload.extension not in config.allowed_upload_types:
+    # APF2c R8r (PR #22 external review P2 discussion_r3347449325): the
+    # ``in`` membership test below silently degrades to a substring scan
+    # when ``allowed_upload_types`` is mis-injected as a raw string
+    # (e.g. ``"mp4,mov,m4v,webm"``), so ``clip.m`` / ``clip.web`` would
+    # leak through. Verify the runtime container type before the lookup
+    # and fail closed on anything other than a ``tuple`` of ``str``. The
+    # raw config value is intentionally NOT interpolated into
+    # ``IntakeRejected.reason`` because that string lands on
+    # ``PreviewRecord.status_reason`` — a persisted, low-trust audit
+    # field. Mirrors the R7b / R8l / R8o fail-closed redaction style.
+    allowed_types = config.allowed_upload_types
+    if not isinstance(allowed_types, tuple):
+        raise IntakeRejected(
+            PreviewStatus.FAILED,
+            "allowed_upload_types must be a tuple (fail closed)",
+        )
+    for entry in allowed_types:
+        if not isinstance(entry, str):
+            raise IntakeRejected(
+                PreviewStatus.FAILED,
+                "allowed_upload_types entries must be strings (fail closed)",
+            )
+    if upload.extension not in allowed_types:
         raise IntakeRejected(
             PreviewStatus.REJECTED,
             f"upload extension {upload.extension!r} is not allowed",

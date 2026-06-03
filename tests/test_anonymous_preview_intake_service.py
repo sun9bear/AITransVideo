@@ -311,6 +311,129 @@ def test_chunked_upload_rejected(config, temp_upload_dir):
 
 
 # ---------------------------------------------------------------------------
+# APF2c R8r — allowed_upload_types runtime-type guard (PR #22 external
+# review P2 discussion_r3347449325). The ``in`` membership check below
+# silently degrades to a substring scan when the config is mis-injected
+# as a raw comma-separated string, so ``clip.m`` / ``clip.web`` would
+# leak through. The pure helper must fail closed on any non-tuple /
+# non-string allow-list without echoing the raw config value into
+# ``IntakeRejected.reason``.
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_upload_types_raw_string_misconfig_fails_closed(temp_upload_dir):
+    raw_string_allow_list = "mp4,mov,m4v,webm"
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        allowed_upload_types=raw_string_allow_list,  # type: ignore[arg-type]
+    )
+    # Without the guard, ``"m" in "mp4,mov,m4v,webm"`` is True, so a
+    # ``clip.m`` upload would silently slip past the extension gate.
+    upload = _make_upload(temp_upload_dir, file_name="clip.m")
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_upload(bad_config, upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "allowed_upload_types" in reason
+    assert "fail closed" in reason.lower()
+    # Raw config value (and any of its substring fragments that would
+    # advertise the misconfiguration shape) must NOT leak into
+    # ``status_reason`` — that field is a persisted low-trust audit
+    # surface.
+    forbidden_fragments = (
+        raw_string_allow_list,
+        "mp4,mov",
+        "m4v,webm",
+        "mp4,",
+        ",mov",
+    )
+    for fragment in forbidden_fragments:
+        assert fragment not in reason, (
+            f"allowed_upload_types fail-closed reason leaked raw config "
+            f"fragment {fragment!r} in reason={reason!r}"
+        )
+
+
+def test_allowed_upload_types_raw_string_also_blocks_web_substring(temp_upload_dir):
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        allowed_upload_types="mp4,mov,m4v,webm",  # type: ignore[arg-type]
+    )
+    # ``"web" in "mp4,mov,m4v,webm"`` is True without the guard.
+    upload = _make_upload(temp_upload_dir, file_name="clip.web")
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_upload(bad_config, upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "allowed_upload_types" in excinfo.value.reason
+
+
+def test_allowed_upload_types_list_misconfig_fails_closed(temp_upload_dir):
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        allowed_upload_types=["mp4", "mov", "m4v", "webm"],  # type: ignore[arg-type]
+    )
+    upload = _make_upload(temp_upload_dir, file_name="clip.mp4")
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_upload(bad_config, upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "allowed_upload_types" in excinfo.value.reason
+    assert "tuple" in excinfo.value.reason
+
+
+def test_allowed_upload_types_none_misconfig_fails_closed(temp_upload_dir):
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        allowed_upload_types=None,  # type: ignore[arg-type]
+    )
+    upload = _make_upload(temp_upload_dir, file_name="clip.mp4")
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_upload(bad_config, upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "allowed_upload_types" in excinfo.value.reason
+
+
+def test_allowed_upload_types_non_string_members_fail_closed(temp_upload_dir):
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        allowed_upload_types=("mp4", 4, "webm"),  # type: ignore[arg-type]
+    )
+    upload = _make_upload(temp_upload_dir, file_name="clip.mp4")
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_upload(bad_config, upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "allowed_upload_types" in reason
+    assert "strings" in reason
+    # The offending element (``4``) must not be echoed.
+    assert "4" not in reason
+
+
+def test_allowed_upload_types_default_tuple_still_passes_legitimate_extensions(
+    config, temp_upload_dir
+):
+    # Sanity / non-regression: the new guard must not change the happy
+    # path. Each legitimate extension in the default tuple continues to
+    # be admitted exactly as before.
+    for ext in ("mp4", "mov", "m4v", "webm"):
+        admit_upload(config, _make_upload(temp_upload_dir, file_name=f"clip.{ext}"))
+
+
+def test_allowed_upload_types_default_tuple_still_rejects_disallowed_extension(
+    config, temp_upload_dir
+):
+    upload = _make_upload(temp_upload_dir, file_name="clip.mkv")
+    with pytest.raises(IntakeRejected) as excinfo:
+        admit_upload(config, upload)
+    assert excinfo.value.status is PreviewStatus.REJECTED
+    assert "extension" in excinfo.value.reason
+
+
+# ---------------------------------------------------------------------------
 # Temp upload dir / config fail-closed (behavior #6 background).
 # ---------------------------------------------------------------------------
 

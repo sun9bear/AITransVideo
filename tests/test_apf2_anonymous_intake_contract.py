@@ -338,7 +338,25 @@ class FakeIntakeRunner:
                 PreviewStatus.REJECTED,
                 "chunked upload is not supported in APF2",
             )
-        if upload.extension not in config.allowed_upload_types:
+        # Mirror of APF2c R8r (PR #22 external review P2
+        # discussion_r3347449325): ``in`` against a raw string degrades to
+        # a substring scan, so ``"mp4,mov,m4v,webm"`` would admit
+        # ``clip.m`` / ``clip.web``. Fail closed on any non-tuple /
+        # non-string allow-list without echoing the raw config value into
+        # ``IntakeRejected.reason``.
+        allowed_types = config.allowed_upload_types
+        if not isinstance(allowed_types, tuple):
+            raise IntakeRejected(
+                PreviewStatus.FAILED,
+                "allowed_upload_types must be a tuple (fail closed)",
+            )
+        for entry in allowed_types:
+            if not isinstance(entry, str):
+                raise IntakeRejected(
+                    PreviewStatus.FAILED,
+                    "allowed_upload_types entries must be strings (fail closed)",
+                )
+        if upload.extension not in allowed_types:
             raise IntakeRejected(
                 PreviewStatus.REJECTED,
                 f"upload extension {upload.extension!r} is not allowed",
@@ -731,6 +749,61 @@ def test_c7_chunked_upload_rejected(config, counter_store, temp_upload_dir):
     with pytest.raises(IntakeRejected) as excinfo:
         runner.admit_upload(upload)
     assert "chunked" in excinfo.value.reason
+
+
+# C4 mirror — APF2c R8r: non-tuple allow-list must fail closed
+# (PR #22 external review P2 discussion_r3347449325). Keeps the
+# APF2/APF2c contract behavior aligned so the scaffold cannot drift
+# from the production landing in ``src.services.anonymous_preview_intake``.
+
+
+def test_c4_raw_string_allow_list_fails_closed(
+    counter_store, temp_upload_dir
+):
+    raw_string_allow_list = "mp4,mov,m4v,webm"
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        allowed_upload_types=raw_string_allow_list,  # type: ignore[arg-type]
+    )
+    runner = _runner(bad_config, counter_store)
+    upload = _make_upload(temp_upload_dir, file_name="clip.m")
+    with pytest.raises(IntakeRejected) as excinfo:
+        runner.admit_upload(upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    reason = excinfo.value.reason
+    assert "allowed_upload_types" in reason
+    assert "fail closed" in reason.lower()
+    assert raw_string_allow_list not in reason
+    assert "mp4,mov" not in reason
+
+
+def test_c4_list_allow_list_fails_closed(counter_store, temp_upload_dir):
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        allowed_upload_types=["mp4", "mov", "m4v", "webm"],  # type: ignore[arg-type]
+    )
+    runner = _runner(bad_config, counter_store)
+    upload = _make_upload(temp_upload_dir, file_name="clip.mp4")
+    with pytest.raises(IntakeRejected) as excinfo:
+        runner.admit_upload(upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "tuple" in excinfo.value.reason
+
+
+def test_c4_non_string_allow_list_members_fail_closed(
+    counter_store, temp_upload_dir
+):
+    bad_config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        allowed_upload_types=("mp4", 4, "webm"),  # type: ignore[arg-type]
+    )
+    runner = _runner(bad_config, counter_store)
+    upload = _make_upload(temp_upload_dir, file_name="clip.mp4")
+    with pytest.raises(IntakeRejected) as excinfo:
+        runner.admit_upload(upload)
+    assert excinfo.value.status is PreviewStatus.FAILED
+    assert "strings" in excinfo.value.reason
+    assert "4" not in excinfo.value.reason
 
 
 # C8 — temp upload dir missing or unconfigured fails closed.
