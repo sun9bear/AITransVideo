@@ -413,6 +413,75 @@ def test_invalid_max_duration_in_config_fails_closed(bad_max):
     assert "max_preview_duration_seconds" in admission.reason
 
 
+@pytest.mark.parametrize("bad_max", [True, False])
+def test_boolean_max_preview_duration_in_config_fails_closed(bad_max):
+    """P2 regression — ``bool`` is a subclass of ``int``, so without an
+    explicit guard ``max_preview_duration_seconds=True`` / ``False`` would
+    silently coerce to ``1.0`` / ``0.0``. ``True`` would cap every preview
+    to 1 second and ``False`` would trip the ``<= 0`` branch with a
+    confusing reason instead of a deterministic boolean rejection. APF3a
+    admission must reject boolean configuration values before any numeric
+    conversion, fail closed, leave ``preview_duration_seconds`` at
+    ``0.0``, and must not silently admit at the bogus 1.0 / 0.0 cap nor
+    leak the raw boolean / cap value in the rejection reason or hint."""
+
+    cfg = AnonymousPreviewAdmissionConfig(max_preview_duration_seconds=bad_max)
+
+    admission = evaluate_anonymous_preview_admission(
+        config=cfg,
+        mode=AnonymousPreviewMode.FREE,
+        source_duration_seconds=42.0,
+    )
+
+    assert admission.decision is AdmissionDecision.FAILED
+    assert admission.preview_duration_seconds == 0.0
+    # Must NOT silently cap to True->1.0 or False->0.0 as if the request
+    # was admitted at a degenerate boundary.
+    assert admission.preview_duration_seconds != 1.0 or (
+        admission.decision is AdmissionDecision.FAILED
+    )
+    assert admission.voice_strategy is VoiceStrategy.PRESET_ONLY
+    assert "max_preview_duration_seconds" in admission.reason
+    # Locked-down policy still enforced on the failure record.
+    assert admission.artifact_policy.watermark_required is True
+    assert admission.artifact_policy.allow_download_url is False
+    assert admission.artifact_policy.allow_provider_voice_id is False
+    assert admission.artifact_policy.allow_clone_artifact is False
+    assert admission.artifact_policy.allow_payment_fields is False
+    # No echo of the raw boolean / silent-cap value, no provider / token
+    # / path / payment / clone identifier surfaced via reason or hint.
+    rendered = f"{admission.reason}|{admission.next_step_hint or ''}"
+    for fragment in (
+        "True",
+        "False",
+        "1.0",
+        "0.0",
+        "bool",
+        "Bearer",
+        "Token",
+        "sk_live",
+        "/tmp/",
+        "path=",
+        "minimax",
+        "cosyvoice",
+        "volcengine",
+        "voice_clone",
+        "clone_voice",
+        "clone_provider_voice_id",
+        "clone_reservation_id",
+        "voice_clone_voice_id",
+        "payment_token",
+        "pricing_quote",
+        "credit_reservation_id",
+        "preview_url",
+        "download_url",
+    ):
+        assert fragment not in rendered, (
+            "boolean max_preview_duration rejection reason/hint leaks "
+            f"{fragment!r}: {rendered!r}"
+        )
+
+
 @pytest.mark.parametrize("bad_mode", ["bogus", "Free ", "", "premium", 0, None])
 def test_unknown_mode_is_rejected(bad_mode):
     admission = evaluate_anonymous_preview_admission(

@@ -282,6 +282,17 @@ def _validate_config(
             AdmissionDecision.FAILED,
             "AnonymousPreviewAdmissionConfig is missing (fail closed)",
         )
+    # Python's ``bool`` is a subclass of ``int``, so without an explicit
+    # guard ``max_preview_duration_seconds=True/False`` would silently
+    # coerce to ``1.0`` / ``0.0`` and either cap every preview to 1
+    # second or trip the ``<= 0`` branch with a confusing reason. Reject
+    # boolean configuration values up front, fail closed, and do not echo
+    # the raw value back to the caller.
+    if isinstance(config.max_preview_duration_seconds, bool):
+        raise AdmissionRejected(
+            AdmissionDecision.FAILED,
+            "config.max_preview_duration_seconds must be positive (fail closed)",
+        )
     if (
         not isinstance(config.max_preview_duration_seconds, (int, float))
         or not isfinite(float(config.max_preview_duration_seconds))
