@@ -245,6 +245,16 @@ def _coerce_mode(mode: object) -> AnonymousPreviewMode:
 
 
 def _validate_duration(source_duration_seconds: object) -> float:
+    # Python's ``bool`` is a subclass of ``int``, so ``isinstance(True,
+    # (int, float))`` is True. APF3a low-trust request facts must reject
+    # boolean inputs before any numeric conversion, otherwise ``True`` /
+    # ``False`` would silently coerce to ``1.0`` / ``0.0`` and pass as a
+    # valid duration. Fail closed without echoing the raw value.
+    if isinstance(source_duration_seconds, bool):
+        raise AdmissionRejected(
+            AdmissionDecision.FAILED,
+            "source_duration_seconds must be a number (fail closed)",
+        )
     if not isinstance(source_duration_seconds, (int, float)):
         raise AdmissionRejected(
             AdmissionDecision.FAILED,

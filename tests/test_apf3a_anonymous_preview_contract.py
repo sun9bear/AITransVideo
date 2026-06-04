@@ -455,6 +455,64 @@ def test_non_numeric_duration_fails_closed(bad_duration):
     assert "source_duration_seconds" in admission.reason
 
 
+@pytest.mark.parametrize("bad_duration", [True, False])
+def test_boolean_duration_fails_closed(bad_duration):
+    """P2 regression — ``bool`` is a subclass of ``int``, so without an
+    explicit guard ``True`` / ``False`` would silently coerce to ``1.0``
+    / ``0.0`` and pass numeric validation. APF3a admission must reject
+    boolean inputs before float conversion and must not leak the raw
+    value or any provider / token / path / payment / clone identifier in
+    the rejection reason or hint."""
+
+    admission = evaluate_anonymous_preview_admission(
+        config=_default_config(),
+        mode=AnonymousPreviewMode.FREE,
+        source_duration_seconds=bad_duration,
+    )
+
+    assert admission.decision is AdmissionDecision.FAILED
+    assert admission.preview_duration_seconds == 0.0
+    assert admission.voice_strategy is VoiceStrategy.PRESET_ONLY
+    assert "source_duration_seconds" in admission.reason
+    # Locked-down policy is still enforced on the failure record.
+    assert admission.artifact_policy.watermark_required is True
+    assert admission.artifact_policy.allow_download_url is False
+    assert admission.artifact_policy.allow_provider_voice_id is False
+    assert admission.artifact_policy.allow_clone_artifact is False
+    assert admission.artifact_policy.allow_payment_fields is False
+    # No echo of the raw boolean, no provider / token / path / payment /
+    # clone identifier surfaced via reason or hint.
+    rendered = f"{admission.reason}|{admission.next_step_hint or ''}"
+    for fragment in (
+        "True",
+        "False",
+        "1.0",
+        "0.0",
+        "bool",
+        "Bearer",
+        "Token",
+        "sk_live",
+        "/tmp/",
+        "path=",
+        "minimax",
+        "cosyvoice",
+        "volcengine",
+        "voice_clone",
+        "clone_voice",
+        "clone_provider_voice_id",
+        "clone_reservation_id",
+        "voice_clone_voice_id",
+        "payment_token",
+        "pricing_quote",
+        "credit_reservation_id",
+        "preview_url",
+        "download_url",
+    ):
+        assert fragment not in rendered, (
+            f"boolean rejection reason/hint leaks {fragment!r}: {rendered!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # (7) Module-level import / surface guards.
 # ---------------------------------------------------------------------------
