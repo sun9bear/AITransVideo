@@ -1060,6 +1060,252 @@ def test_admission_except_block_does_not_recoerce_mode():
     )
 
 
+# ---------------------------------------------------------------------------
+# (11) PR #23 P2 r6 regression — hostile ``str`` subclass mode must fail
+#      closed *before* the Enum value lookup runs.
+# ---------------------------------------------------------------------------
+
+
+class _HostileStr(str):
+    """``str`` subclass whose ``__hash__`` / ``__eq__`` / ``__repr__``
+    are all hostile.
+
+    Simulates the PR #23 r6 external P2 attack: a low-trust ``str``
+    subclass that passes the old ``isinstance(mode, str)`` guard and
+    then reaches ``AnonymousPreviewMode(value)``. The Enum value lookup
+    consults ``_value2member_map_[value]``, which is a dict lookup that
+    calls ``__hash__`` / ``__eq__`` on the key. A hostile subclass can
+    therefore raise out of the fail-closed branch or run arbitrary code.
+
+    Constructing ``_HostileStr("free")`` does NOT trigger our dunders —
+    ``str.__new__`` builds the underlying buffer first. Only an enum
+    lookup (or any other ``hash(self)`` / ``self == other``) would.
+    """
+
+    def __hash__(self):  # pragma: no cover - asserted via admission
+        raise RuntimeError(
+            "hostile str subclass __hash__ — must never be invoked by APF3a"
+        )
+
+    def __eq__(self, other):  # pragma: no cover - asserted via admission
+        raise RuntimeError(
+            "hostile str subclass __eq__ — must never be invoked by APF3a"
+        )
+
+    def __ne__(self, other):  # pragma: no cover - asserted via admission
+        raise RuntimeError(
+            "hostile str subclass __ne__ — must never be invoked by APF3a"
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover - asserted via admission
+        return "<HostileStr token=sk_live_LEAK path=/var/secret>"
+
+
+_HOSTILE_STR_FORBIDDEN_FRAGMENTS = (
+    "HostileStr",
+    "sk_live",
+    "LEAK",
+    "/var/secret",
+    "token=",
+    "path=",
+    "Bearer",
+    "Token",
+    "Authorization",
+    "minimax",
+    "cosyvoice",
+    "volcengine",
+    "voice_clone",
+    "clone_voice",
+    "clone_provider_voice_id",
+    "clone_reservation_id",
+    "voice_clone_voice_id",
+    "payment_token",
+    "pricing_quote",
+    "credit_reservation_id",
+    "preview_url",
+    "download_url",
+    "http://",
+    "https://",
+)
+
+
+def _assert_hostile_str_fail_closed(admission):
+    assert admission.decision is AdmissionDecision.REJECTED
+    # The hostile str subclass must not show up as the fallback mode —
+    # conservative ``FREE`` is required by the task.
+    assert admission.mode is AnonymousPreviewMode.FREE
+    assert admission.preview_duration_seconds == 0.0
+    assert admission.voice_strategy is VoiceStrategy.PRESET_ONLY
+    assert admission.reason == UNKNOWN_MODE_REASON
+    assert admission.next_step_hint == "fix_input_and_retry"
+    policy = admission.artifact_policy
+    assert policy.watermark_required is True
+    assert policy.allow_download_url is False
+    assert policy.allow_subtitle_export is False
+    assert policy.allow_jianying_draft_export is False
+    assert policy.allow_payment_fields is False
+    assert policy.allow_provider_voice_id is False
+    assert policy.allow_clone_artifact is False
+    assert policy.stream_only_required is True
+    assert policy.allow_editable_assets is False
+    assert policy.artifact_ttl_required is True
+    assert policy.low_priority_required is True
+    rendered = f"{admission.reason}|{admission.next_step_hint or ''}"
+    for fragment in _HOSTILE_STR_FORBIDDEN_FRAGMENTS:
+        assert fragment not in rendered, (
+            f"hostile str subclass admission leaks {fragment!r}: {rendered!r}"
+        )
+
+
+@pytest.mark.parametrize("inner", ["free", "express", "smart", "studio"])
+def test_hostile_str_subclass_with_known_value_fails_closed(inner):
+    """PR #23 r6 external P2 — even if the underlying string value
+    matches a real enum member (``"free"`` / ``"express"`` / ...), a
+    ``str`` subclass must be rejected before the Enum value lookup runs.
+
+    Doing the lookup would call ``dict.__getitem__`` on the
+    hostile-typed key, which invokes ``__hash__`` / ``__eq__`` on the
+    subclass and either runs arbitrary code or raises out of the
+    fail-closed branch."""
+
+    hostile = _HostileStr(inner)
+
+    admission = evaluate_anonymous_preview_admission(
+        config=_default_config(),
+        mode=hostile,
+        source_duration_seconds=42.0,
+    )
+
+    _assert_hostile_str_fail_closed(admission)
+
+
+def test_hostile_str_subclass_with_unknown_value_fails_closed():
+    """Even when the underlying value is not a real enum member, the
+    rejection reason / fallback mode must stay conservative and must
+    not echo the hostile ``repr`` or attempt to coerce the value."""
+
+    hostile = _HostileStr("totally-bogus-mode")
+
+    admission = evaluate_anonymous_preview_admission(
+        config=_default_config(),
+        mode=hostile,
+        source_duration_seconds=42.0,
+    )
+
+    _assert_hostile_str_fail_closed(admission)
+
+
+def test_hostile_str_subclass_does_not_silently_admit_with_clone_flag():
+    """Defense in depth — flipping the express clone flag must not
+    surface an Express admission for a hostile ``str`` subclass with
+    value ``"express"``. The fallback strategy stays ``PRESET_ONLY`` and
+    the decision stays ``REJECTED``."""
+
+    cfg = _default_config(anonymous_express_cosyvoice_clone_enabled=True)
+
+    admission = evaluate_anonymous_preview_admission(
+        config=cfg,
+        mode=_HostileStr("express"),
+        source_duration_seconds=42.0,
+    )
+
+    _assert_hostile_str_fail_closed(admission)
+
+
+def test_exact_str_inputs_still_admit():
+    """Companion regression — the new ``type(mode) is str`` check must
+    not block exact built-in ``str`` inputs. ``"free"`` / ``"express"``
+    happy-path coverage already lives in
+    :func:`test_free_and_express_admitted_for_short_source`; this test
+    locks the same behaviour explicitly so a future tightening that
+    accidentally rejects exact ``str`` would red here too."""
+
+    for value, expected in (("free", AnonymousPreviewMode.FREE), ("express", AnonymousPreviewMode.EXPRESS)):
+        admission = evaluate_anonymous_preview_admission(
+            config=_default_config(),
+            mode=value,
+            source_duration_seconds=30.0,
+        )
+        assert admission.decision is AdmissionDecision.ADMITTED
+        assert admission.mode is expected
+        assert admission.voice_strategy is VoiceStrategy.PRESET_ONLY
+
+
+def test_coerce_mode_uses_exact_type_check_for_str():
+    """AST guard — ``_coerce_mode`` must use ``type(mode) is str`` (exact
+    type check) rather than ``isinstance(mode, str)`` before reaching
+    ``AnonymousPreviewMode(mode)``. ``isinstance`` lets hostile ``str``
+    subclasses through, which then hit the Enum value-lookup dict and
+    invoke the subclass's ``__hash__`` / ``__eq__`` (PR #23 r6 P2)."""
+
+    source = _ADMISSION_MODULE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    coerce_node = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_coerce_mode":
+            coerce_node = node
+            break
+    assert coerce_node is not None, "_coerce_mode function not found"
+
+    saw_exact_type_check = False
+    for sub in ast.walk(coerce_node):
+        # Detect ``type(mode) is str`` — an ast.Compare with ``is`` op,
+        # left side ``type(mode)`` (Call to ``type`` with single arg
+        # ``mode``), and comparator the ``str`` Name.
+        if not isinstance(sub, ast.Compare):
+            continue
+        if not sub.ops or not isinstance(sub.ops[0], ast.Is):
+            continue
+        left = sub.left
+        if not (
+            isinstance(left, ast.Call)
+            and isinstance(left.func, ast.Name)
+            and left.func.id == "type"
+            and len(left.args) == 1
+            and isinstance(left.args[0], ast.Name)
+            and left.args[0].id == "mode"
+        ):
+            continue
+        comparator = sub.comparators[0] if sub.comparators else None
+        if isinstance(comparator, ast.Name) and comparator.id == "str":
+            saw_exact_type_check = True
+            break
+
+    assert saw_exact_type_check, (
+        "_coerce_mode must use `type(mode) is str` to block str subclasses "
+        "before AnonymousPreviewMode(mode); isinstance(mode, str) is unsafe "
+        "because str subclasses can override __hash__ / __eq__ and trigger "
+        "hostile code inside the Enum value lookup (PR #23 r6 P2)."
+    )
+
+    # Defense in depth: ``_coerce_mode`` must NOT call
+    # ``AnonymousPreviewMode(mode)`` from a branch gated only by an
+    # ``isinstance(mode, str)`` check. We assert no ``isinstance(mode,
+    # str)`` appears as a guard inside ``_coerce_mode`` at all (the only
+    # str check should be the exact-type one above).
+    for sub in ast.walk(coerce_node):
+        if not isinstance(sub, ast.Call):
+            continue
+        if not isinstance(sub.func, ast.Name) or sub.func.id != "isinstance":
+            continue
+        if len(sub.args) != 2:
+            continue
+        target = sub.args[0]
+        check = sub.args[1]
+        if (
+            isinstance(target, ast.Name)
+            and target.id == "mode"
+            and isinstance(check, ast.Name)
+            and check.id == "str"
+        ):
+            raise AssertionError(
+                "_coerce_mode must not gate AnonymousPreviewMode(mode) on "
+                "isinstance(mode, str); use `type(mode) is str` instead to "
+                "block hostile str subclasses (PR #23 r6 P2)."
+            )
+
+
 def test_admission_source_has_no_mode_repr_format_strings():
     """P1 regression — AST-scan the admission module to ensure no
     `f"...{mode!r}..."` / `repr(mode)` / `str(mode)` reaches the

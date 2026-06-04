@@ -230,7 +230,15 @@ class AdmissionRejected(Exception):
 def _coerce_mode(mode: object) -> AnonymousPreviewMode:
     if isinstance(mode, AnonymousPreviewMode):
         return mode
-    if isinstance(mode, str):
+    # Only exact built-in ``str`` may be coerced through the Enum value
+    # lookup. ``str`` subclasses can override ``__hash__`` / ``__eq__``
+    # and trigger hostile behaviour inside ``AnonymousPreviewMode(...)``,
+    # because that lookup hits ``_value2member_map_[value]`` which calls
+    # the value's ``__hash__`` / ``__eq__`` (PR #23 external P2 r6).
+    # ``isinstance(mode, str)`` would let those subclasses slip through,
+    # so we require the exact type and fail closed otherwise — without
+    # echoing the raw value into ``reason``.
+    if type(mode) is str:
         try:
             return AnonymousPreviewMode(mode)
         except ValueError as exc:
