@@ -334,7 +334,58 @@ def _default_artifact_policy() -> AnonymousPreviewArtifactPolicy:
     return AnonymousPreviewArtifactPolicy()
 
 
-def raise_clone_provider_boundary(mode: AnonymousPreviewMode) -> None:
+# Static label set used by :func:`raise_clone_provider_boundary` to
+# render a safe, non-sensitive, finite-alphabet label in the boundary
+# error message. The set contains exactly the canonical enum values; the
+# helper renders these strings only when the input is either an
+# :class:`AnonymousPreviewMode` member with a matching ``.value`` or an
+# exact built-in ``str`` whose value matches one of these labels.
+# Anything else (``str`` subclass, malformed object, hostile dunders,
+# missing/raising ``.value``) falls back to the static ``"unknown"``
+# label. PR #23 r7 external review pinned this contract: the boundary
+# helper must always raise ``NotImplementedError`` regardless of input
+# shape.
+_CLONE_BOUNDARY_KNOWN_LABELS: frozenset[str] = frozenset(
+    {"free", "express", "smart", "studio"}
+)
+_CLONE_BOUNDARY_UNKNOWN_LABEL: str = "unknown"
+
+
+def _safe_clone_boundary_label(mode: object) -> str:
+    """Resolve a hook-free, non-sensitive label for the boundary message.
+
+    The label is only ever read from a trusted source: an
+    :class:`AnonymousPreviewMode` member's ``.value`` (a plain str pinned
+    at enum definition time) or an exact built-in ``str`` whose value
+    matches a canonical enum label. ``str`` subclasses are explicitly
+    *not* trusted — they can override ``__hash__`` / ``__eq__`` /
+    ``__repr__`` / ``__str__`` and either run arbitrary code or raise
+    out of the boundary contract (PR #23 r7 external P2). Any
+    exception raised while inspecting ``mode`` is swallowed and the
+    static ``"unknown"`` label is returned, so the helper's promised
+    exception type stays :class:`NotImplementedError`.
+    """
+    try:
+        if isinstance(mode, AnonymousPreviewMode):
+            candidate = mode.value
+            if (
+                type(candidate) is str
+                and candidate in _CLONE_BOUNDARY_KNOWN_LABELS
+            ):
+                return candidate
+            return _CLONE_BOUNDARY_UNKNOWN_LABEL
+        if type(mode) is str and mode in _CLONE_BOUNDARY_KNOWN_LABELS:
+            return mode
+    except Exception:
+        # Defense in depth — any hostile dunder, descriptor or
+        # ``__getattribute__`` hook that slips past the type guards
+        # collapses to the static label instead of propagating out of
+        # the boundary contract.
+        return _CLONE_BOUNDARY_UNKNOWN_LABEL
+    return _CLONE_BOUNDARY_UNKNOWN_LABEL
+
+
+def raise_clone_provider_boundary(mode: object) -> None:
     """Boundary marker — always raises ``NotImplementedError``.
 
     APF3a ships without any real voice-clone provider wiring. Any code
@@ -347,11 +398,25 @@ def raise_clone_provider_boundary(mode: AnonymousPreviewMode) -> None:
     * no paid provider is contacted from this module's call graph;
     * any silent-fallback mistake at the integration boundary fails
       loudly during local tests instead of in production.
+
+    ``mode`` is typed as ``object`` because the boundary must hold even
+    when called with a raw wire-mode string, a ``str`` subclass, a
+    malformed object whose ``.value`` access raises, or an object whose
+    ``__repr__`` / ``__str__`` / ``__eq__`` / ``__hash__`` are hostile
+    (PR #23 r7 external P2 — *Keep the clone boundary's promised
+    exception type*). The helper never invokes ``repr(mode)`` /
+    ``str(mode)`` / ``mode.value`` / Enum lookup / equality / hash on a
+    low-trust input — see :func:`_safe_clone_boundary_label`. For an
+    :class:`AnonymousPreviewMode` member the safe ``.value`` is
+    rendered; for an exact built-in ``str`` matching a canonical label
+    that label is rendered; for everything else the static
+    ``"unknown"`` label is used.
     """
 
+    label = _safe_clone_boundary_label(mode)
     raise NotImplementedError(
         "anonymous Express CosyVoice temporary clone is gated at boundary; "
-        f"no provider wiring exists in APF3a for mode={mode.value!r}"
+        f"no provider wiring exists in APF3a for mode={label!r}"
     )
 
 

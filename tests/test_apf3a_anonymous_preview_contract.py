@@ -1335,3 +1335,311 @@ def test_admission_source_has_no_mode_repr_format_strings():
     assert offenders == [], (
         f"admission module leaks raw `mode` into reason: {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (12) PR #23 P2 r7 regression — clone-boundary helper exception type.
+# ---------------------------------------------------------------------------
+
+
+class _MalformedMode:
+    """Mode-shaped object whose ``.value`` access raises.
+
+    Simulates the PR #23 r7 external P2 attack: an attacker-controlled
+    object that looks enough like an :class:`AnonymousPreviewMode` to
+    end up at the clone boundary, but whose ``.value`` descriptor
+    raises. The boundary helper's previous implementation rendered
+    ``mode.value`` directly into the error message, so any access that
+    raised escaped as :class:`AttributeError` / :class:`RuntimeError`
+    instead of the promised :class:`NotImplementedError`.
+    """
+
+    @property
+    def value(self) -> str:  # pragma: no cover - asserted via boundary
+        raise RuntimeError(
+            "malformed mode .value — must never be touched by APF3a boundary"
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover - asserted via boundary
+        return "<MalformedMode token=sk_live_LEAK path=/var/secret>"
+
+    def __str__(self) -> str:  # pragma: no cover - asserted via boundary
+        return "<MalformedMode token=sk_live_LEAK path=/var/secret>"
+
+
+_CLONE_BOUNDARY_FORBIDDEN_FRAGMENTS = (
+    "sk_live",
+    "LEAK",
+    "/var/secret",
+    "token=",
+    "path=",
+    "Bearer",
+    "Token",
+    "Authorization",
+    "minimax",
+    "cosyvoice",
+    "volcengine",
+    "voice_clone",
+    "clone_voice",
+    "clone_provider_voice_id",
+    "clone_reservation_id",
+    "voice_clone_voice_id",
+    "payment_token",
+    "pricing_quote",
+    "credit_reservation_id",
+    "preview_url",
+    "download_url",
+    "http://",
+    "https://",
+    "HostileStr",
+    "MalformedMode",
+)
+
+
+def _assert_clone_boundary_message_safe(msg: str, *, case_label: str) -> None:
+    """Shared guard — the boundary message stays stable and leak-free."""
+    assert "no provider wiring" in msg, (
+        f"boundary message missing canonical phrase ({case_label}): {msg!r}"
+    )
+    for fragment in _CLONE_BOUNDARY_FORBIDDEN_FRAGMENTS:
+        assert fragment not in msg, (
+            f"boundary leaks {fragment!r} for case {case_label!r}: {msg!r}"
+        )
+
+
+def test_clone_boundary_enum_mode_still_raises_not_implemented_with_value_label():
+    """Pinned by the task — calling with a real enum member keeps the
+    canonical phrase and renders the safe ``.value`` label."""
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary(AnonymousPreviewMode.EXPRESS)
+    msg = str(excinfo.value)
+    assert "no provider wiring" in msg
+    assert "express" in msg
+    _assert_clone_boundary_message_safe(msg, case_label="enum-express")
+
+
+def test_clone_boundary_enum_free_mode_renders_free_label():
+    """Defense in depth — other enum members also resolve via ``.value``
+    without triggering hostile hooks."""
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary(AnonymousPreviewMode.FREE)
+    msg = str(excinfo.value)
+    assert "free" in msg
+    _assert_clone_boundary_message_safe(msg, case_label="enum-free")
+
+
+def test_clone_boundary_raw_string_mode_raises_not_implemented_not_attribute_error():
+    """PR #23 r7 external P2 — raw ``str`` input no longer escapes as
+    :class:`AttributeError` from ``mode.value``. The boundary helper
+    must collapse it to :class:`NotImplementedError` and keep the
+    promised phrase."""
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary("express")
+    msg = str(excinfo.value)
+    assert "no provider wiring" in msg
+    _assert_clone_boundary_message_safe(msg, case_label="raw-str-express")
+
+
+def test_clone_boundary_unknown_string_mode_raises_not_implemented_with_static_label():
+    """Unknown exact ``str`` inputs must not be echoed back — they
+    resolve to the static ``"unknown"`` label and never propagate
+    :class:`ValueError` from an Enum lookup."""
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary("totally-bogus")
+    msg = str(excinfo.value)
+    assert "no provider wiring" in msg
+    assert "totally-bogus" not in msg
+    assert "unknown" in msg
+    _assert_clone_boundary_message_safe(msg, case_label="raw-str-bogus")
+
+
+def test_clone_boundary_hostile_str_subclass_raises_not_implemented_only():
+    """PR #23 r7 external P2 — hostile ``str`` subclasses whose
+    ``__hash__`` / ``__eq__`` / ``__repr__`` / ``__str__`` all raise
+    must still surface :class:`NotImplementedError`, with no leak of
+    their hostile ``repr`` payload."""
+
+    hostile = _HostileStr("express")
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary(hostile)
+    msg = str(excinfo.value)
+    _assert_clone_boundary_message_safe(msg, case_label="hostile-str-subclass")
+    # Hostile str subclass falls to the static label — never matches a
+    # canonical enum value, so the message does NOT include "express".
+    # (We still want to verify the subclass's underlying buffer is not
+    # surfaced via str/repr; the leak guard above covers the secret
+    # fragments.)
+    assert "unknown" in msg
+
+
+def test_clone_boundary_hostile_str_subclass_with_unknown_value_raises_not_implemented():
+    """Same hostile-subclass attack but with a non-canonical underlying
+    value — the boundary still raises :class:`NotImplementedError` and
+    never echoes the value, since the ``type(mode) is str`` check fails
+    before any equality / hash lookup."""
+
+    hostile = _HostileStr("totally-bogus-mode")
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary(hostile)
+    msg = str(excinfo.value)
+    _assert_clone_boundary_message_safe(
+        msg, case_label="hostile-str-subclass-unknown"
+    )
+    assert "totally-bogus-mode" not in msg
+    assert "unknown" in msg
+
+
+def test_clone_boundary_malformed_mode_with_raising_value_raises_not_implemented():
+    """PR #23 r7 external P2 — malformed objects whose ``.value`` access
+    raises must not propagate :class:`AttributeError` /
+    :class:`RuntimeError` out of the boundary. The helper resolves the
+    label without touching ``.value`` on non-enum input."""
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary(_MalformedMode())
+    msg = str(excinfo.value)
+    _assert_clone_boundary_message_safe(msg, case_label="malformed-mode")
+    assert "unknown" in msg
+
+
+@pytest.mark.parametrize(
+    "raw_input,case_label",
+    [
+        (None, "none"),
+        (0, "int-zero"),
+        (123, "int"),
+        (1.5, "float"),
+        ((), "empty-tuple"),
+        ([], "empty-list"),
+        ({}, "empty-dict"),
+        (object(), "bare-object"),
+    ],
+)
+def test_clone_boundary_non_string_non_enum_mode_raises_not_implemented(
+    raw_input, case_label
+):
+    """Defense in depth — every non-enum non-str shape must collapse to
+    :class:`NotImplementedError` with the static ``"unknown"`` label."""
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        raise_clone_provider_boundary(raw_input)
+    msg = str(excinfo.value)
+    _assert_clone_boundary_message_safe(msg, case_label=case_label)
+    assert "unknown" in msg
+
+
+def test_clone_boundary_message_label_is_quoted_static_set_only():
+    """The label rendered inside ``mode=...`` is drawn from a finite
+    static alphabet (``"free"`` / ``"express"`` / ``"smart"`` /
+    ``"studio"`` / ``"unknown"``). Nothing else may show up there —
+    callers may surface the boundary message to logs / status APIs, so
+    a low-trust label would still be a contract violation even when no
+    blocked fragment matches."""
+
+    allowed_labels = {"free", "express", "smart", "studio", "unknown"}
+    inputs = [
+        AnonymousPreviewMode.FREE,
+        AnonymousPreviewMode.EXPRESS,
+        AnonymousPreviewMode.SMART,
+        AnonymousPreviewMode.STUDIO,
+        "free",
+        "express",
+        "smart",
+        "studio",
+        "totally-bogus",
+        _HostileStr("express"),
+        _HostileStr("totally-bogus"),
+        _MalformedMode(),
+        None,
+        123,
+        object(),
+    ]
+    import re as _re  # local import keeps the module-level surface minimal.
+
+    label_pattern = _re.compile(r"mode='([^']*)'")
+    for raw_input in inputs:
+        try:
+            raise_clone_provider_boundary(raw_input)
+        except NotImplementedError as exc:
+            msg = str(exc)
+        else:  # pragma: no cover - boundary must always raise
+            raise AssertionError(
+                "raise_clone_provider_boundary did not raise NotImplementedError"
+            )
+        match = label_pattern.search(msg)
+        assert match is not None, (
+            f"boundary message missing `mode='...'` clause: {msg!r}"
+        )
+        label = match.group(1)
+        assert label in allowed_labels, (
+            f"boundary message renders out-of-set label {label!r}: {msg!r}"
+        )
+
+
+def test_clone_boundary_signature_accepts_object_input():
+    """AST guard — ``raise_clone_provider_boundary`` must accept
+    ``mode: object``, not ``mode: AnonymousPreviewMode``. The wider
+    type signature is the load-bearing surface promise that callers
+    can pass raw / hostile inputs without the helper escaping the
+    contract."""
+
+    source = _ADMISSION_MODULE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    target = None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "raise_clone_provider_boundary"
+        ):
+            target = node
+            break
+    assert target is not None, "raise_clone_provider_boundary not found"
+
+    args = target.args.args
+    assert len(args) == 1, "raise_clone_provider_boundary must take a single arg"
+    annotation = args[0].annotation
+    assert isinstance(annotation, ast.Name) and annotation.id == "object", (
+        "raise_clone_provider_boundary(mode) must be typed as `object` so "
+        "raw / hostile inputs are part of the contract surface (PR #23 r7 P2)."
+    )
+
+
+def test_clone_boundary_source_has_no_unguarded_mode_attribute_access():
+    """AST guard — ``raise_clone_provider_boundary`` body itself must
+    not access ``mode.value`` / ``mode.<anything>``. The previous
+    implementation rendered ``mode.value!r`` directly into the error
+    message, which raised :class:`AttributeError` for raw strings and
+    triggered hostile descriptors for malformed objects. Only the
+    helper :func:`_safe_clone_boundary_label` may touch ``mode``'s
+    attributes, and only behind a try/except + enum/exact-str guard."""
+
+    source = _ADMISSION_MODULE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    target = None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "raise_clone_provider_boundary"
+        ):
+            target = node
+            break
+    assert target is not None, "raise_clone_provider_boundary not found"
+
+    offenders: list[str] = []
+    for sub in ast.walk(target):
+        if not isinstance(sub, ast.Attribute):
+            continue
+        value = sub.value
+        if isinstance(value, ast.Name) and value.id == "mode":
+            offenders.append(
+                f"mode.{sub.attr} at line {sub.lineno}"
+            )
+    assert offenders == [], (
+        "raise_clone_provider_boundary must not touch `mode.<attr>` "
+        "directly — the safe label resolver is the only place where "
+        f"a guarded attribute access is allowed: {offenders}"
+    )
