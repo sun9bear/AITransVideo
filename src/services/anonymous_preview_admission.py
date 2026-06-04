@@ -369,6 +369,13 @@ def evaluate_anonymous_preview_admission(
     """
 
     artifact_policy = _default_artifact_policy()
+    # Track the successfully-coerced mode so the ``except`` fallback can
+    # reuse it instead of re-running ``AnonymousPreviewMode(mode)`` on a
+    # low-trust object (PR #23 external P2). Re-coercing an attacker-
+    # controlled non-string value triggers the Enum value-comparison
+    # path, which invokes ``__eq__`` / ``__hash__`` on the value and can
+    # raise arbitrary exceptions out of the fail-closed branch.
+    resolved_mode: Optional[AnonymousPreviewMode] = None
     try:
         cfg = _validate_config(config)
         resolved_mode = _coerce_mode(mode)
@@ -397,14 +404,22 @@ def evaluate_anonymous_preview_admission(
             next_step_hint=None,
         )
     except AdmissionRejected as exc:
-        fallback_mode: AnonymousPreviewMode
-        if isinstance(mode, AnonymousPreviewMode):
+        # NEVER call ``AnonymousPreviewMode(mode)`` on the raw input
+        # here. Trust order, all safe (no ``__eq__`` / ``__hash__``
+        # invocation on a low-trust value):
+        #
+        # 1. ``resolved_mode`` from inside the try (only set if
+        #    ``_coerce_mode`` already accepted the input).
+        # 2. ``mode`` if it is already an ``AnonymousPreviewMode``
+        #    instance — ``isinstance`` walks the class hierarchy and
+        #    does not dispatch through dunders on the value.
+        # 3. Conservative ``AnonymousPreviewMode.FREE`` fallback.
+        if resolved_mode is not None:
+            fallback_mode = resolved_mode
+        elif isinstance(mode, AnonymousPreviewMode):
             fallback_mode = mode
         else:
-            try:
-                fallback_mode = AnonymousPreviewMode(mode)  # type: ignore[arg-type]
-            except (ValueError, TypeError):
-                fallback_mode = AnonymousPreviewMode.FREE
+            fallback_mode = AnonymousPreviewMode.FREE
         return AnonymousPreviewAdmission(
             mode=fallback_mode,
             decision=exc.decision,

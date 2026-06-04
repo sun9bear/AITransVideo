@@ -806,6 +806,260 @@ def test_unknown_mode_reason_constant_is_stable_and_input_free():
     assert UNKNOWN_MODE_REASON != NOT_ANONYMOUS_FUNNEL_REASON
 
 
+# ---------------------------------------------------------------------------
+# (10) PR #23 P2 regression — unsafe ``mode`` object must not be
+#      re-coerced inside the fail-closed fallback path.
+# ---------------------------------------------------------------------------
+
+
+class _HostileMode:
+    """Non-string mode object whose ``__eq__`` / ``__hash__`` / ``__repr__``
+    are all hostile.
+
+    Simulates the PR #23 external P2 attack: an attacker-controlled
+    value where the Enum value-comparison done inside
+    ``AnonymousPreviewMode(value)`` would invoke ``__eq__`` /
+    ``__hash__`` on the value and raise out of the fail-closed branch.
+    """
+
+    def __eq__(self, other):  # pragma: no cover - asserted via admission
+        raise RuntimeError(
+            "hostile mode __eq__ — must never be invoked by APF3a fallback"
+        )
+
+    def __ne__(self, other):  # pragma: no cover - same as __eq__
+        raise RuntimeError(
+            "hostile mode __ne__ — must never be invoked by APF3a fallback"
+        )
+
+    def __hash__(self):  # pragma: no cover - asserted via admission
+        raise RuntimeError(
+            "hostile mode __hash__ — must never be invoked by APF3a fallback"
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover - asserted via admission
+        return "<HostileMode token=sk_live_LEAK path=/var/secret>"
+
+
+_FAIL_CLOSED_FORBIDDEN_FRAGMENTS = (
+    "HostileMode",
+    "sk_live",
+    "LEAK",
+    "/var/secret",
+    "token=",
+    "path=",
+    "Bearer",
+    "Token",
+    "Authorization",
+    "minimax",
+    "cosyvoice",
+    "volcengine",
+    "voice_clone",
+    "clone_voice",
+    "clone_provider_voice_id",
+    "clone_reservation_id",
+    "voice_clone_voice_id",
+    "payment_token",
+    "pricing_quote",
+    "credit_reservation_id",
+    "preview_url",
+    "download_url",
+    "http://",
+    "https://",
+)
+
+
+def _assert_unsafe_mode_fail_closed(admission, *, expected_decision):
+    assert admission.decision is expected_decision
+    # Conservative fallback mode required by the task — must not echo
+    # any attribute of the hostile object.
+    assert admission.mode is AnonymousPreviewMode.FREE
+    assert admission.preview_duration_seconds == 0.0
+    assert admission.voice_strategy is VoiceStrategy.PRESET_ONLY
+    policy = admission.artifact_policy
+    assert policy.watermark_required is True
+    assert policy.allow_download_url is False
+    assert policy.allow_subtitle_export is False
+    assert policy.allow_jianying_draft_export is False
+    assert policy.allow_payment_fields is False
+    assert policy.allow_provider_voice_id is False
+    assert policy.allow_clone_artifact is False
+    assert policy.stream_only_required is True
+    assert policy.allow_editable_assets is False
+    assert policy.artifact_ttl_required is True
+    assert policy.low_priority_required is True
+    rendered = f"{admission.reason}|{admission.next_step_hint or ''}"
+    for fragment in _FAIL_CLOSED_FORBIDDEN_FRAGMENTS:
+        assert fragment not in rendered, (
+            f"fail-closed admission leaks {fragment!r}: {rendered!r}"
+        )
+
+
+def test_unsafe_mode_with_missing_config_fails_closed_without_recoercion():
+    """PR #23 external P2 regression — when ``_validate_config`` raises
+    before ``_coerce_mode`` runs, the ``except AdmissionRejected``
+    fallback must not re-invoke ``AnonymousPreviewMode(mode)`` on a
+    low-trust non-string object. Doing so would trigger Enum value
+    comparison via the hostile ``__eq__`` / ``__hash__`` and re-raise
+    out of the fail-closed branch."""
+
+    admission = evaluate_anonymous_preview_admission(
+        config=None,
+        mode=_HostileMode(),
+        source_duration_seconds=10.0,
+    )
+
+    _assert_unsafe_mode_fail_closed(
+        admission, expected_decision=AdmissionDecision.FAILED
+    )
+    # Preserve the upstream failure semantics — the reason is the
+    # ``_validate_config`` reason, not the generic unknown-mode reason.
+    assert "AnonymousPreviewAdmissionConfig is missing" in admission.reason
+    assert admission.next_step_hint == "retry_or_contact_support"
+
+
+@pytest.mark.parametrize(
+    "bad_max",
+    [0, -1.0, float("nan"), float("inf"), True, False],
+)
+def test_unsafe_mode_with_invalid_max_duration_fails_closed_without_recoercion(
+    bad_max,
+):
+    """Same PR #23 P2 regression but the upstream failure originates in
+    the ``max_preview_duration_seconds`` validation branch (including
+    the r3/r4 boolean fail-closed guard). The fallback must still not
+    re-coerce the hostile object."""
+
+    cfg = AnonymousPreviewAdmissionConfig(max_preview_duration_seconds=bad_max)
+
+    admission = evaluate_anonymous_preview_admission(
+        config=cfg,
+        mode=_HostileMode(),
+        source_duration_seconds=10.0,
+    )
+
+    _assert_unsafe_mode_fail_closed(
+        admission, expected_decision=AdmissionDecision.FAILED
+    )
+    assert "max_preview_duration_seconds" in admission.reason
+    assert admission.next_step_hint == "retry_or_contact_support"
+
+
+def test_unsafe_mode_with_valid_config_is_rejected_without_recoercion():
+    """When ``_validate_config`` succeeds and the hostile object reaches
+    ``_coerce_mode``, the coercion helper rejects on the explicit
+    non-string branch (which never invokes ``AnonymousPreviewMode(value)``).
+    The fallback path must still avoid re-coercion and fall back to
+    the conservative ``FREE`` mode."""
+
+    admission = evaluate_anonymous_preview_admission(
+        config=_default_config(),
+        mode=_HostileMode(),
+        source_duration_seconds=10.0,
+    )
+
+    _assert_unsafe_mode_fail_closed(
+        admission, expected_decision=AdmissionDecision.REJECTED
+    )
+    assert admission.reason == UNKNOWN_MODE_REASON
+    assert admission.next_step_hint == "fix_input_and_retry"
+
+
+@pytest.mark.parametrize(
+    "bad_duration",
+    [-1, float("nan"), float("inf"), "120", True, False],
+)
+def test_unsafe_mode_with_invalid_duration_fails_closed_without_recoercion(
+    bad_duration,
+):
+    """The duration validator only runs after ``_coerce_mode``, so this
+    code path actually exercises a successful coercion attempt for a
+    hostile object — which still rejects at the non-string branch
+    *before* duration is even inspected. Asserts the contract holds
+    end-to-end across the fail-closed branches r3/r4 already pin."""
+
+    admission = evaluate_anonymous_preview_admission(
+        config=_default_config(),
+        mode=_HostileMode(),
+        source_duration_seconds=bad_duration,
+    )
+
+    # The hostile mode rejects at ``_coerce_mode`` first, so the
+    # decision is REJECTED (unknown mode), not FAILED (bad duration).
+    _assert_unsafe_mode_fail_closed(
+        admission, expected_decision=AdmissionDecision.REJECTED
+    )
+    assert admission.reason == UNKNOWN_MODE_REASON
+
+
+def test_unsafe_mode_with_invalid_config_preserves_legitimate_mode_fallback():
+    """A legitimate ``AnonymousPreviewMode`` caller must keep its mode
+    in the fallback record even when ``_validate_config`` fails first
+    — i.e. the new ``resolved_mode`` hoist must not regress the
+    behaviour pinned by r3/r4."""
+
+    admission = evaluate_anonymous_preview_admission(
+        config=None,
+        mode=AnonymousPreviewMode.EXPRESS,
+        source_duration_seconds=10.0,
+    )
+
+    assert admission.decision is AdmissionDecision.FAILED
+    assert admission.mode is AnonymousPreviewMode.EXPRESS
+    assert admission.preview_duration_seconds == 0.0
+    assert admission.voice_strategy is VoiceStrategy.PRESET_ONLY
+    assert "AnonymousPreviewAdmissionConfig is missing" in admission.reason
+
+
+def test_admission_except_block_does_not_recoerce_mode():
+    """AST guard — the ``except AdmissionRejected`` block inside
+    ``evaluate_anonymous_preview_admission`` must not contain a
+    ``AnonymousPreviewMode(mode)`` call. That call triggers Enum
+    value-comparison via ``__eq__`` / ``__hash__`` on a low-trust
+    value and re-raises out of the fail-closed branch (PR #23 P2)."""
+
+    source = _ADMISSION_MODULE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name != "evaluate_anonymous_preview_admission":
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Try):
+                continue
+            for handler in child.handlers:
+                handler_type = handler.type
+                if not (
+                    isinstance(handler_type, ast.Name)
+                    and handler_type.id == "AdmissionRejected"
+                ):
+                    continue
+                for sub in ast.walk(handler):
+                    if not isinstance(sub, ast.Call):
+                        continue
+                    func = sub.func
+                    name = None
+                    if isinstance(func, ast.Name):
+                        name = func.id
+                    elif isinstance(func, ast.Attribute):
+                        name = func.attr
+                    if name == "AnonymousPreviewMode" and sub.args:
+                        arg = sub.args[0]
+                        if isinstance(arg, ast.Name) and arg.id == "mode":
+                            offenders.append(
+                                f"AnonymousPreviewMode({arg.id}) at "
+                                f"line {sub.lineno}"
+                            )
+
+    assert offenders == [], (
+        "evaluate_anonymous_preview_admission re-coerces a low-trust "
+        f"value in its fail-closed branch: {offenders}"
+    )
+
+
 def test_admission_source_has_no_mode_repr_format_strings():
     """P1 regression — AST-scan the admission module to ensure no
     `f"...{mode!r}..."` / `repr(mode)` / `str(mode)` reaches the
