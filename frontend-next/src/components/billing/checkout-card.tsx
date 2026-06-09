@@ -128,6 +128,21 @@ export function CheckoutCard({
       if (!result.checkout_url) {
         throw new Error("未收到支付链接,请稍后重试")
       }
+      // Stash the pending order so the billing page can keep confirming and
+      // auto-update even if the user closes the (async) WeChat QR page without
+      // returning through the success redirect. Banner reads "avt_pending_order".
+      try {
+        window.localStorage.setItem(
+          "avt_pending_order",
+          JSON.stringify({
+            order_id: result.order_id,
+            provider: defaultProvider,
+            ts: Date.now(),
+          }),
+        )
+      } catch {
+        // localStorage unavailable — non-fatal; webhook still settles server-side
+      }
       // Hand off to the provider checkout URL. For fake provider this is
       // `/api/billing/fake-pay/{order_id}`; for Alipay this is the signed
       // payment URL from the gateway.
