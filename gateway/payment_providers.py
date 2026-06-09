@@ -270,6 +270,96 @@ class WechatPayProvider(_StubProvider):
         return mapping.get(provider_status, provider_status)
 
 
+class PaddleProvider:
+    """Paddle Billing (MoR). Mechanics live in payment_provider_paddle.py."""
+
+    name = "paddle"
+
+    @property
+    def operational(self) -> bool:
+        from payment_provider_paddle import is_paddle_live_ready
+
+        return is_paddle_live_ready()
+
+    def create_checkout(
+        self,
+        *,
+        order_id: str,
+        amount_cny: int,
+        target_plan_code: str,
+        billing_period: str,
+        checkout_surface: str = "pc_web",
+    ) -> CheckoutResult:
+        # Paddle charges by price_id; which methods show (Alipay / WeChat / card)
+        # is decided by Paddle from buyer geo + currency, so amount_cny and
+        # checkout_surface are not needed to build the transaction.
+        del amount_cny, checkout_surface
+        from payment_provider_paddle import PaddleConfig, create_transaction
+
+        config = PaddleConfig.from_env()
+        if config is None:
+            raise NotImplementedError(
+                "payment provider paddle is not configured; set AVT_PADDLE_* env vars first"
+            )
+        checkout_url, txn_id = create_transaction(
+            config,
+            order_id=order_id,
+            target_plan_code=target_plan_code,
+            billing_period=billing_period,
+        )
+        return CheckoutResult(checkout_url=checkout_url, provider_order_id=txn_id)
+
+    def verify_signature(self, raw_body: bytes, headers: dict[str, str]) -> bool:
+        from payment_provider_paddle import PaddleConfig, verify_paddle_signature
+
+        return verify_paddle_signature(PaddleConfig.from_env(), raw_body, headers)
+
+    def parse_webhook(self, raw_body: bytes) -> NormalizedWebhookEvent:
+        from payment_provider_paddle import parse_paddle_webhook
+
+        parsed = parse_paddle_webhook(raw_body)
+        return NormalizedWebhookEvent(
+            provider_event_id=parsed.provider_event_id,
+            event_type=parsed.event_type,
+            order_id=parsed.order_id,
+            new_status=parsed.new_status,
+            raw_payload=dict(parsed.raw),
+        )
+
+    def map_status(self, provider_status: str) -> str:
+        # Used by the order-query refresh path, which passes a transaction.status
+        # token (not an event_type). Webhook path uses parse_webhook's new_status.
+        from payment_provider_paddle import map_paddle_transaction_status
+
+        return map_paddle_transaction_status(provider_status)
+
+    async def query_order(
+        self,
+        *,
+        order_id: str,
+        provider_order_id: str | None = None,
+    ) -> ProviderOrderQueryResult | None:
+        del order_id  # Paddle is queried by transaction id (provider_order_id)
+        if not provider_order_id:
+            return None
+        from payment_provider_paddle import PaddleConfig, query_transaction
+
+        result = await query_transaction(
+            PaddleConfig.from_env(), transaction_id=provider_order_id
+        )
+        if result is None:
+            return None
+        provider_event_id = (
+            f"paddle_query_{result.transaction_id}_{result.provider_status}"
+        )
+        return ProviderOrderQueryResult(
+            provider_event_id=provider_event_id,
+            provider_order_id=result.transaction_id,
+            provider_status=result.provider_status,
+            raw_payload=dict(result.raw_payload),
+        )
+
+
 _PROVIDERS: dict[str, PaymentProvider] = {}
 
 
@@ -307,6 +397,7 @@ def _init_registry() -> None:
         "stripe": StripeProvider(),
         "alipay": AlipayProvider(),
         "wechatpay": WechatPayProvider(),
+        "paddle": PaddleProvider(),
     }
 
 

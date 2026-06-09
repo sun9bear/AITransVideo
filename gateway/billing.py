@@ -204,7 +204,10 @@ async def get_order(
         if role != "admin":
             raise HTTPException(status_code=403, detail="无权查看此订单")
 
-    if refresh and order.provider == "alipay" and order.status in ("created", "pending"):
+    # §7.5/R2: any provider with a query_order impl can refresh on demand (was
+    # alipay-only). Stub providers raise NotImplementedError, which
+    # _refresh_order_from_provider swallows.
+    if refresh and order.status in ("created", "pending"):
         await _refresh_order_from_provider(db=db, order=order)
 
     return {
@@ -256,6 +259,22 @@ async def _refresh_order_from_provider(
             logger.warning("Ignoring alipay query result for %s: %s", order.id, exc)
             return
 
+    if order.provider == "paddle":
+        from payment_provider_paddle import PaddleConfig, validate_paddle_webhook_payload
+
+        try:
+            validate_paddle_webhook_payload(
+                PaddleConfig.from_env(),
+                query_result.raw_payload,
+                order_id=str(order.id),
+                target_plan_code=order.target_plan_code,
+                billing_period=order.billing_period,
+                provider_order_id=order.provider_order_id,
+            )
+        except ValueError as exc:
+            logger.warning("Ignoring paddle query result for %s: %s", order.id, exc)
+            return
+
     if query_result.provider_order_id and order.provider_order_id != query_result.provider_order_id:
         order.provider_order_id = query_result.provider_order_id
 
@@ -291,6 +310,7 @@ _PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "alipay": "支付宝",
     "wechatpay": "微信支付",
     "stripe": "Stripe",
+    "paddle": "信用卡 / 微信 (Paddle)",
 }
 
 
@@ -324,7 +344,7 @@ async def get_checkout_config(
     if user is None:
         raise HTTPException(status_code=401, detail="未登录")
 
-    preference = ["alipay", "wechatpay", "stripe", "fake"]
+    preference = ["alipay", "wechatpay", "paddle", "stripe", "fake"]
     all_providers = list_providers()
 
     providers_payload: list[dict] = []
@@ -625,6 +645,13 @@ async def receive_webhook(
             is_query_result=False,
         )
 
+    if provider_name == "paddle":
+        signature_valid = signature_valid and await _validate_paddle_event_against_order(
+            db=db,
+            order_id=event.order_id,
+            payload=event.raw_payload,
+        )
+
     settled = await _process_payment_event(
         db=db,
         provider=provider_name,
@@ -678,6 +705,39 @@ async def _validate_alipay_event_against_order(
         return True
     except ValueError as exc:
         logger.warning("Alipay payload validation failed for %s: %s", order_id, exc)
+        return False
+
+
+async def _validate_paddle_event_against_order(
+    *,
+    db: AsyncSession,
+    order_id: str,
+    payload: dict | None,
+) -> bool:
+    result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if order is None:
+        # Order-less event (e.g. adjustment.created carries no
+        # custom_data.order_id). _process_payment_event records it and no-ops —
+        # a safe 200-ACK. Refund credit clawback via transaction_id is a P2 task
+        # (R7); P1 must not error here and trigger Paddle retry storms.
+        return True
+
+    from payment_provider_paddle import PaddleConfig, validate_paddle_webhook_payload
+
+    data = (payload or {}).get("data") or {}
+    try:
+        validate_paddle_webhook_payload(
+            PaddleConfig.from_env(),
+            data,
+            order_id=str(order.id),
+            target_plan_code=order.target_plan_code,
+            billing_period=order.billing_period,
+            provider_order_id=order.provider_order_id,
+        )
+        return True
+    except ValueError as exc:
+        logger.warning("Paddle payload validation failed for %s: %s", order_id, exc)
         return False
 
 
