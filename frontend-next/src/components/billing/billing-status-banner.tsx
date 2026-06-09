@@ -22,6 +22,16 @@ const ERROR_REASON_COPY: Record<string, string> = {
   order_not_found: "未找到对应的订单，可能已经过期或被取消。",
 }
 
+// Providers whose final status is confirmed by polling getOrder(refresh) after
+// the user returns from an off-site / overlay checkout. Alipay (async notify can
+// lag) and Paddle (webhook + ~10min WeChat capture) both rely on it. The refresh
+// path is provider-generic on the gateway side (plan §7.5).
+const POLLABLE_RETURN_PROVIDERS = new Set(["alipay", "paddle"])
+
+function isPollableReturnProvider(provider: string | null): boolean {
+  return provider !== null && POLLABLE_RETURN_PROVIDERS.has(provider)
+}
+
 function readBannerFromStatus(
   status: string | null,
   reason: string | null,
@@ -128,7 +138,7 @@ export function BillingStatusBanner({
   const [initialProvider] = useState(() => searchParams.get("provider"))
   const [dismissed, setDismissed] = useState(false)
   const [content, setContent] = useState<BannerContent | null>(() => {
-    if (initialOrderId && initialProvider === "alipay") {
+    if (initialOrderId && isPollableReturnProvider(initialProvider)) {
       return readBannerFromOrderStatus("pending")
     }
     return readBannerFromStatus(initialStatus, initialReason)
@@ -151,7 +161,7 @@ export function BillingStatusBanner({
   }, [initialOrderId, initialProvider, initialReason, initialStatus, pathname, router])
 
   useEffect(() => {
-    if (!initialOrderId || initialProvider !== "alipay") return
+    if (!initialOrderId || !isPollableReturnProvider(initialProvider)) return
     let cancelled = false
     const orderId = initialOrderId
 
