@@ -74,7 +74,11 @@ _EVENT_STATUS_MAP: dict[str, str] = {
 _TXN_STATUS_MAP: dict[str, str] = {
     "completed": "paid",
     "paid": "paid",
-    "billed": "paid",
+    # "billed" = invoice finalised, NOT necessarily paid (manual/invoice
+    # collection). Our checkout is auto-collection, which settles on
+    # completed/paid — so a query that returns "billed" must NOT settle
+    # (review F-A). Revisit only if invoice/manual collection is added.
+    "billed": "pending",
     "canceled": "cancelled",
     "past_due": "pending",
     "ready": "pending",
@@ -112,10 +116,20 @@ class PaddleConfig:
         notify_url = (
             os.environ.get("AVT_PADDLE_NOTIFY_URL", "").strip() or DEFAULT_NOTIFY_URL
         )
-        try:
-            max_age = int(os.environ.get("AVT_PADDLE_SIGNATURE_MAX_AGE_S", "").strip())
-        except ValueError:
-            max_age = _DEFAULT_SIGNATURE_MAX_AGE_S
+        raw_max_age = os.environ.get("AVT_PADDLE_SIGNATURE_MAX_AGE_S", "").strip()
+        max_age = _DEFAULT_SIGNATURE_MAX_AGE_S
+        if raw_max_age:
+            try:
+                max_age = int(raw_max_age)
+            except ValueError:
+                # Surface operator misconfig instead of silently using the
+                # default (review F-B). Empty/unset stays silent (normal case).
+                logger.error(
+                    "AVT_PADDLE_SIGNATURE_MAX_AGE_S=%r is not an integer; "
+                    "using default %ss",
+                    raw_max_age,
+                    _DEFAULT_SIGNATURE_MAX_AGE_S,
+                )
         return cls(
             api_key=api_key,
             api_base=api_base,
@@ -230,8 +244,8 @@ def verify_paddle_signature(
     if config is None:
         return False
     raw_sig = headers.get("paddle-signature") or headers.get("Paddle-Signature") or ""
-    ts, h1 = _parse_signature_header(raw_sig)
-    if not ts or not h1:
+    ts, h1s = _parse_signature_header(raw_sig)
+    if not ts or not h1s:
         logger.warning("paddle webhook missing/malformed Paddle-Signature header")
         return False
 
@@ -249,23 +263,27 @@ def verify_paddle_signature(
     expected = hmac.new(
         config.webhook_secret.encode("utf-8"), signed_payload, hashlib.sha256
     ).hexdigest()
-    if not hmac.compare_digest(expected, h1):
+    # Accept if ANY h1 matches — Paddle emits multiple h1 during webhook-secret
+    # rotation (old + new), so checking only one would reject valid webhooks
+    # mid-rotation (review F-D).
+    if not any(hmac.compare_digest(expected, h) for h in h1s):
         logger.warning("paddle webhook signature mismatch")
         return False
     return True
 
 
-def _parse_signature_header(raw: str) -> tuple[str, str]:
+def _parse_signature_header(raw: str) -> tuple[str, list[str]]:
+    # Collect ALL h1 values: Paddle includes multiple during secret rotation.
     ts = ""
-    h1 = ""
+    h1s: list[str] = []
     for part in raw.split(";"):
         key, _, value = part.partition("=")
         key = key.strip()
         if key == "ts":
             ts = value.strip()
         elif key == "h1":
-            h1 = value.strip()
-    return ts, h1
+            h1s.append(value.strip())
+    return ts, h1s
 
 
 # --- webhook parsing + status mapping ---

@@ -149,7 +149,7 @@ class TestStatusMapping:
     def test_transaction_status_tokens(self):
         assert map_paddle_transaction_status("completed") == "paid"
         assert map_paddle_transaction_status("paid") == "paid"
-        assert map_paddle_transaction_status("billed") == "paid"
+        assert map_paddle_transaction_status("billed") == "pending"  # F-A: billed != paid
         assert map_paddle_transaction_status("canceled") == "cancelled"
         assert map_paddle_transaction_status("ready") == "pending"
         assert map_paddle_transaction_status("draft") == "pending"
@@ -225,6 +225,17 @@ class TestSignatureVerification:
         body = b"{}"
         h = _sig_headers(_SECRET, 1700, body)["paddle-signature"]
         assert verify_paddle_signature(cfg, body, {"Paddle-Signature": h}, now=1700) is True
+
+    def test_multiple_h1_accepts_any_match_for_rotation(self, paddle_configured_env):
+        # Paddle emits multiple h1 during webhook-secret rotation; any match
+        # must pass, all-wrong must still fail (review F-D).
+        cfg = paddle_configured_env
+        body = b"{}"
+        good = hmac.new(_SECRET.encode(), b"1700:" + body, hashlib.sha256).hexdigest()
+        ok = {"paddle-signature": f"ts=1700;h1=deadbeef;h1={good}"}
+        assert verify_paddle_signature(cfg, body, ok, now=1700) is True
+        bad = {"paddle-signature": "ts=1700;h1=deadbeef;h1=cafebabe"}
+        assert verify_paddle_signature(cfg, body, bad, now=1700) is False
 
 
 # --- webhook parsing ---

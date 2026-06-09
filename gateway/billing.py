@@ -721,6 +721,12 @@ async def _validate_paddle_event_against_order(
         # custom_data.order_id). _process_payment_event records it and no-ops —
         # a safe 200-ACK. Refund credit clawback via transaction_id is a P2 task
         # (R7); P1 must not error here and trigger Paddle retry storms.
+        #
+        # INVARIANT (review F-E): this `return True` is safe ONLY because a
+        # missing order cannot settle downstream. When R7 wires refund clawback
+        # resolved by transaction_id under this path, a signed "paid"-type event
+        # with an unknown order_id must NOT bypass binding — return False for
+        # settlement events before adding clawback resolution here.
         return True
 
     from payment_provider_paddle import PaddleConfig, validate_paddle_webhook_payload
