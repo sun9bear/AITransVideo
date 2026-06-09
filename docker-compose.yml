@@ -138,6 +138,11 @@ services:
         # match gateway SITE_URL or canonical / OG / sitemap will diverge
         # from email-link host. See plans/2026-05-03-geo-optimization-plan.md.
         NEXT_PUBLIC_SITE_URL: "${NEXT_PUBLIC_SITE_URL:-https://aitrans.video}"
+        # Paddle.js client-side token + env — baked into the client bundle so
+        # /paddle-checkout can Paddle.Initialize. Token is browser-safe (public);
+        # server API key / webhook secret are NOT build args.
+        NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: "${NEXT_PUBLIC_PADDLE_CLIENT_TOKEN:-}"
+        NEXT_PUBLIC_PADDLE_ENV: "${NEXT_PUBLIC_PADDLE_ENV:-sandbox}"
     image: aivideotrans-next:latest
     container_name: aivideotrans-next
     network_mode: host
