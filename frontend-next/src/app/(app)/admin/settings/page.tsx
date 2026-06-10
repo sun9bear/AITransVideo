@@ -186,9 +186,10 @@ const DEFAULT_SETTINGS: AdminSettings = {
   // --- APF 匿名免注册预览默认值（2026-06-10）---
   // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致：
   //   anonymous_free_preview_enabled      = False
-  //   anonymous_preview_max_in_flight     = 10
+  //   anonymous_preview_max_in_flight     = 2
+  // CodeX P1 修复：曾误写 10，把匿名并发门从计划值放大 5×。
   anonymous_free_preview_enabled: false,
-  anonymous_preview_max_in_flight: 10,
+  anonymous_preview_max_in_flight: 2,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [

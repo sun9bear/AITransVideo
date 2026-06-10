@@ -228,7 +228,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       return
     }
 
-    if (uploadResp.admission_decision !== 'admit' || uploadResp.status !== 'ready_for_mode') {
+    if (uploadResp.admission_decision !== 'admitted' || uploadResp.status !== 'ready_for_mode') {
       const reason = mapStatusReason(uploadResp.status_reason)
       setState((s) => ({
         ...s,

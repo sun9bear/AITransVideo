@@ -8,7 +8,15 @@
  * 直接交给 <video> 的 src；前端对存储后端零感知）。
  */
 
-export type UploadAdmissionDecision = 'admit' | 'deny' | 'hold'
+// 后端 AdmissionDecision 契约枚举值（src/services/anonymous_preview_admission.py）。
+// 历史 bug：曾误写成 'admit'|'deny'|'hold'，与后端 'admitted' 错位，导致任何
+// 成功上传都被判 upload_denied，漏斗完全不可用（CodeX P0）。
+export type UploadAdmissionDecision =
+  | 'admitted'
+  | 'login_required'
+  | 'not_anonymous_funnel'
+  | 'rejected'
+  | 'failed'
 export type PreviewMode = 'dubbed' | 'subtitled'
 export type PreviewStatus = 'pending' | 'processing' | 'ready' | 'failed' | 'unknown'
 

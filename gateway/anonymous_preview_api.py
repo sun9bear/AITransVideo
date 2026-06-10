@@ -286,6 +286,12 @@ async def anonymous_upload(
             _merged_audit = dict(_orm_row.audit or {})
             _merged_audit["stored_upload_path"] = str(upload_path)
             _merged_audit["teaser_path"] = str(teaser_dest_for(upload_path))
+            # CodeX P1 修复：契约 PreviewRecord 字段名是 duration_seconds
+            # (不是 teaser_duration_seconds)；ORM record 行不带 duration 列，
+            # 故把契约真实 teaser 时长落进 audit，供 stream/后续 gate 读取。
+            _merged_audit["teaser_duration_seconds"] = float(
+                getattr(record, "duration_seconds", 0.0) or 0.0
+            )
             _orm_row.audit = _merged_audit
             await db.commit()
     except Exception as exc:
@@ -301,10 +307,10 @@ async def anonymous_upload(
                 _t.unlink(missing_ok=True)
         return JSONResponse(status_code=503, content={"error": "storage_error"})
 
-    # Admission (T6 thin adapter) — use the record's teaser duration if available
+    # Admission (T6 thin adapter) — 用契约字段 duration_seconds（CodeX P1）。
     admission: Optional[FreePreviewAdmissionResult] = None
     try:
-        teaser_dur = getattr(record, "teaser_duration_seconds", None) or 0.0
+        teaser_dur = float(getattr(record, "duration_seconds", 0.0) or 0.0)
         admission = admit_for_free_preview(teaser_dur, settings)
     except Exception as exc:
         logger.warning("anon_upload: admit_for_free_preview error: %s", exc)
@@ -497,9 +503,11 @@ async def anonymous_preview_stream(
     if not _get_admin_enabled():
         return JSONResponse(status_code=403, content={"error": "anonymous_preview_disabled"})
 
-    # T6 stream gate
+    # T6 stream gate —— ORM record 行不带 duration 列，从 audit 读
+    # upload 阶段落盘的契约 teaser 时长（CodeX P1）。
     try:
-        teaser_dur = getattr(record, "teaser_duration_seconds", 0.0) or 0.0
+        _audit = dict(getattr(record, "audit", None) or {})
+        teaser_dur = float(_audit.get("teaser_duration_seconds", 0.0) or 0.0)
         admission = admit_for_free_preview(teaser_dur, settings)
         gate: StreamGate = stream_gate_from_artifact_policy(admission.artifact_policy)
         if not gate.stream_only_required:
@@ -733,7 +741,9 @@ async def anonymous_preview_create(
         logger.error("anon_create: sentinel user missing (migration 035 not applied?)")
         return JSONResponse(status_code=503, content={"error": "misconfigured"})
 
-    # 原子抢占：job_id IS NULL → __creating__（并发双 create 只有一个赢）
+    # 原子抢占：job_id IS NULL → __creating__（并发双 create 只有一个赢）。
+    # 对抗审核 P1：用 RETURNING 判定胜出，不依赖 asyncpg 的 rowcount
+    # （某些驱动/配置下 UPDATE 的 rowcount 不可靠 → 合法抢占被误判 409）。
     claim = await db.execute(
         _sa_update(AnonymousPreviewRecord)
         .where(
@@ -741,9 +751,11 @@ async def anonymous_preview_create(
             AnonymousPreviewRecord.job_id.is_(None),
         )
         .values(job_id=_CREATING_SENTINEL)
+        .returning(AnonymousPreviewRecord.preview_id)
     )
+    won_claim = claim.first() is not None
     await db.commit()
-    if getattr(claim, "rowcount", 0) != 1:
+    if not won_claim:
         return JSONResponse(status_code=409, content={"error": "already_created"})
 
     # payload（白名单深度防御：违规字段=代码 bug，拒绝并回滚抢占）

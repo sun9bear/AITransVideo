@@ -406,9 +406,11 @@ class TestUploadEndpoint:
         monkeypatch.setattr(_asyncio, "to_thread", _patched_to_thread)
 
         def _fake_admit(teaser_dur, sett):
+            # CodeX P0 守卫：后端契约 decision 是 "admitted"（不是 "admit"）。
+            # 前端只接受 "admitted" 才进 consent，错位会让漏斗不可用。
             result = MagicMock()
             result.decision = MagicMock()
-            result.decision.value = "admit"
+            result.decision.value = "admitted"
             return result
 
         monkeypatch.setattr(api, "admit_for_free_preview", _fake_admit)
@@ -439,6 +441,8 @@ class TestUploadEndpoint:
         assert "preview_id" in body
         assert body["preview_id"] == "prv_test_001"
         assert body["mode"] == "free"
+        # 契约值守卫：upload 必须回后端真实枚举 "admitted"，前端据此进 consent
+        assert body["admission_decision"] == "admitted"
 
         app.dependency_overrides.clear()
         monkeypatch.setattr(_asyncio, "to_thread", original_to_thread)

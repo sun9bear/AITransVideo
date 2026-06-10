@@ -124,7 +124,11 @@ def _db(*, in_flight: int = 0, sentinel_id: str | None = "u-sentinel", claim_row
     sentinel_result.scalar_one_or_none.return_value = (
         SimpleNamespace(id=sentinel_id) if sentinel_id else None
     )
-    claim_result = MagicMock(rowcount=claim_rows)
+    # claim 改用 RETURNING（对抗审核 P1）：胜出=first() 返回一行，竞争失败=None
+    claim_result = MagicMock()
+    claim_result.first = MagicMock(
+        return_value=("prv-won",) if claim_rows == 1 else None
+    )
     db.execute = AsyncMock(side_effect=[count_result, sentinel_result, claim_result])
     db.commit = AsyncMock()
     db.add = MagicMock()
