@@ -45,6 +45,42 @@ scan two classes of stuck pan operations and reconcile them:
   (``Job.status == 'archiving'``) would fail and the cleanup task
   would silently no-op (the 2026-05-26 production bug).
 
+## Pass 3 — orphaned archiving (Job.archiving + no live backup_record)
+
+  SELECT Job WHERE
+    status = 'archiving'
+    AND updated_at < now() - 4h
+    AND NOT EXISTS BackupRecord(user, job,
+          job_edit_generation == Job.edit_generation,
+          status IN ('uploading', 'restoring', 'uploaded'))
+
+  2026-06-10 production incident (job_c31bd38126fd47ed8c2d3c1749c15ccf,
+  stuck 7 days): during the 2026-06-02 A-fix deploy, ops manually
+  aborted an in-flight backup, marked background_tasks/backup_records
+  'failed' by hand, but never flipped Job.status back to 'succeeded'.
+  Result: Job='archiving' + ALL backup_records 'failed' — a state
+  neither Pass 1 (wants BR uploading/restoring) nor Pass 2 (wants BR
+  uploaded) matches, while admin_api.create_backup requires
+  status='succeeded' to start a new backup. Deadlock with no automatic
+  rescue. (The sanctioned manual abort path is now
+  pan.status_mutator.rollback_archive_attempt — postmortem P2b.)
+
+  Action: pg_try_advisory_lock probe (got lock == no live executor for
+  this (user, job), same proof as Pass 1) → set_archive_status back to
+  'succeeded'. No BackupRecord mutation — they are already terminal
+  ('failed') or absent. Generation-scoped NOT EXISTS: a stale-generation
+  'uploaded' BR is history, not a live attempt; a live executor at any
+  generation holds the (generation-agnostic) advisory lock and makes the
+  probe fail. Job.updated_at is refreshed by onupdate on every Job write
+  (including the flip TO 'archiving'), so the 4h threshold also protects
+  the executor-start window before the BackupRecord row exists.
+
+  Safety: every state reachable here is pre-COMMIT-POINT — the only
+  path that removes local data (residue_cleanup rmtree) requires an
+  'uploaded' BR at the current generation, which the predicate
+  excludes. So project_dir is still intact and 'succeeded' is the
+  truthful status.
+
 ## Concurrency safety
 
 pg_try_advisory_lock is session-level. Reaper opens one connection per
@@ -113,6 +149,8 @@ async def run_stale_reaper_tick(
       {'in_flight_reaped': int, 'in_flight_skipped_locked': int,
        'post_commit_forwarded': int, 'post_commit_skipped_locked': int,
        'residue_cleanup_enqueued': int,
+       'orphaned_archiving_reaped': int,
+       'orphaned_archiving_skipped_locked': int,
        'dry_run': bool}
     """
     now = datetime.now(timezone.utc)
@@ -123,6 +161,8 @@ async def run_stale_reaper_tick(
         'post_commit_forwarded': 0,
         'post_commit_skipped_locked': 0,
         'residue_cleanup_enqueued': 0,
+        'orphaned_archiving_reaped': 0,
+        'orphaned_archiving_skipped_locked': 0,
         'dry_run': dry_run,
     }
 
@@ -318,6 +358,102 @@ async def run_stale_reaper_tick(
                     "pan_stale_reaper: forward-resolve failed job=%s err=%s",
                     row.job_id, exc,
                 )
+
+        # --- Pass 3: orphaned archiving (jobs.archiving + no live BR) ---
+        # 2026-06-10 incident: manual deploy-abort left Job='archiving'
+        # with ALL backup_records 'failed' (current generation) — no pass
+        # matched, admin_api refused a re-backup (needs 'succeeded'),
+        # deadlock. See module docstring for the full story.
+        #
+        # Generation-aware NOT EXISTS: only a BR at the job's CURRENT
+        # edit_generation in a live/recoverable status (uploading /
+        # restoring / uploaded) disqualifies the job. All-'failed', or no
+        # record at all, qualifies.
+        active_br_exists = (
+            select(BackupRecord.id)
+            .where(
+                BackupRecord.user_id == Job.user_id,
+                BackupRecord.job_id == Job.job_id,
+                BackupRecord.job_edit_generation == Job.edit_generation,
+                BackupRecord.status.in_(
+                    ['uploading', 'restoring', 'uploaded']
+                ),
+            )
+            .exists()
+        )
+        orphan_rows = (await conn.execute(
+            select(Job.user_id, Job.job_id, Job.project_dir).where(
+                Job.status == 'archiving',
+                Job.updated_at < cutoff,
+                ~active_br_exists,
+            )
+        )).all()
+        await conn.commit()  # same rationale as Pass 1 SELECT close
+
+        for row in orphan_rows:
+            if dry_run:
+                stats['orphaned_archiving_reaped'] += 1
+                continue
+
+            lock_key = pan_lock_key(row.user_id, row.job_id)
+            got = await _try_advisory_lock(conn, lock_key)
+            if not got:
+                stats['orphaned_archiving_skipped_locked'] += 1
+                logger.info(
+                    "pan_stale_reaper: skip orphaned-archiving job=%s "
+                    "(lock held)",
+                    row.job_id,
+                )
+                continue
+            # CodeX P1-3: flush the lock-acquire auto-begin txn before the
+            # explicit begin() below (lock is session-scoped, survives).
+            await conn.commit()
+            try:
+                # Defense-in-depth signal only: every state reachable here
+                # is pre-COMMIT-POINT (residue_cleanup's rmtree requires an
+                # 'uploaded' BR at the current generation, excluded by the
+                # predicate), so project_dir should still exist. If it
+                # doesn't, flag loudly but still flip — 'succeeded'
+                # surfaces the problem; 'archiving' forever hides it
+                # behind admin_api's status=='succeeded' gate.
+                if row.project_dir:
+                    from pathlib import Path
+                    try:
+                        if not Path(row.project_dir).resolve().is_dir():
+                            logger.warning(
+                                "pan_stale_reaper: orphaned-archiving "
+                                "job=%s project_dir missing on disk (%s) — "
+                                "flipping to 'succeeded' anyway; operator "
+                                "should check for an older recoverable "
+                                "backup.",
+                                row.job_id, row.project_dir,
+                            )
+                    except (OSError, RuntimeError):
+                        pass
+
+                async with conn.begin():
+                    await set_archive_status(
+                        row.user_id, row.job_id, 'succeeded', conn=conn,
+                    )
+                stats['orphaned_archiving_reaped'] += 1
+                logger.info(
+                    "pan_stale_reaper: reaped orphaned-archiving user=%s "
+                    "job=%s (no live backup_record at current generation; "
+                    "status -> 'succeeded')",
+                    row.user_id, row.job_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    await conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.warning(
+                    "pan_stale_reaper: orphaned-archiving reap failed "
+                    "job=%s err=%s",
+                    row.job_id, exc,
+                )
+            finally:
+                await _release_advisory_lock(conn, lock_key)
 
     return stats
 
