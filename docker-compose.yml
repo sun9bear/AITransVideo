@@ -143,6 +143,8 @@ services:
         # server API key / webhook secret are NOT build args.
         NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: "${NEXT_PUBLIC_PADDLE_CLIENT_TOKEN:-}"
         NEXT_PUBLIC_PADDLE_ENV: "${NEXT_PUBLIC_PADDLE_ENV:-sandbox}"
+        # APF 匿名 Free 预览 (plan 2026-06-10 T1) — 构建期烘焙到 client bundle
+        NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW: "${NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW:-0}"
     image: aivideotrans-next:latest
     container_name: aivideotrans-next
     network_mode: host
@@ -395,6 +397,11 @@ services:
       AVT_BAIDU_PAN_APPSECRET: "${AVT_BAIDU_PAN_APPSECRET:-}"
       AVT_BAIDU_PAN_REDIRECT_URI: "${AVT_BAIDU_PAN_REDIRECT_URI:-}"
       AVT_PAN_TOKEN_ENCRYPTION_KEY: "${AVT_PAN_TOKEN_ENCRYPTION_KEY:-}"
+      # --- APF 匿名 Free 预览 (plan 2026-06-10 T1) ---
+      # 默认关。开启需同时配齐 HMAC secret（≥32字节）否则 startup_checks 降级。
+      # 公网开启前置条件：T1–T9 全部合并 + secret 已配 + §5 成本确认。
+      AVT_ENABLE_ANONYMOUS_PREVIEW: "${AVT_ENABLE_ANONYMOUS_PREVIEW:-false}"
+      AVT_ANONYMOUS_PREVIEW_HASH_SECRET: "${AVT_ANONYMOUS_PREVIEW_HASH_SECRET:-}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s

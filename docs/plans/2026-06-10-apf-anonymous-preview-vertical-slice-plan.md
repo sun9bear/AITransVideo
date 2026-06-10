@@ -132,7 +132,28 @@ job_intercept download 链语义是"可下载 artifact"（attachment disposition
 ## 5. 单预览付费调用清单与日成本上界（评审 F1）
 
 admitted 预览走 pipeline 一次，付费调用 = **ASR(≤180s) + LLM 合规 ×1 + 翻译 LLM + S2 Pass1/2（多模态）+ MiMo TTS(≤180s)**。乘 global cap 500/天即最坏日成本上界——这是**已知可被恶意打满的预算承诺**，须在 T1 时按当前各 provider 单价算出数字写进 admin 告警阈值说明。
-**待核验项（T5 验收）：** free `preset_mapping` 路径下 S2 Pass 3（音色画像，多模态付费）是否会跑；预设音色不需要画像，若跑则匿名 lane 跳过。
+
+**T1 成本测算（2026-06-10，基于已知费率，保守上界）：**
+
+| 调用 | provider | 单价 | 180s/次 估算 | 说明 |
+|---|---|---|---|---|
+| ASR 转录 | AssemblyAI | $0.37/小时 ≈ ¥2.7/小时 | ≈ ¥0.135/次 | 180s = 0.05 小时 |
+| LLM 合规审核 | Gemini 3.1 Flash Lite | ≈ ¥0.01/1K tokens | ≈ ¥0.05/次 | 转录约 3K tokens in+out 保守估 |
+| 翻译 LLM | DeepSeek V3 | ≈ ¥1.0/百万 tokens | ≈ ¥0.01/次 | 180s 中文约 1K tokens |
+| S2 Pass1/2 | Gemini Pro（多模态） | ≈ ¥0.06/1K tokens | ≈ ¥0.30/次 | audio+text 多模态，2 pass 各约 2.5K tokens |
+| MiMo TTS | MiMo（免费预设） | ¥0（预设音色免费） | ¥0/次 | preset_mapping 不调付费 API |
+| **单次合计** | | | **≈ ¥0.50/次**（保守上界 ¥0.80） | |
+| **×500/天上界** | | | **≈ ¥250/天**（保守 ¥400/天） | |
+
+注记与假设：
+- AssemblyAI 按实际合同价（$0.37/hr），汇率 7.3 CNY/USD；无协议价按 $0.65/hr 则 ≈ ¥0.24/次。
+- Gemini 3.1 Flash Lite 合规单次不超过 5K tokens（保守估）；实际视转录长度，180s 通常 ≈ 2-3K 字。
+- DeepSeek V3 翻译成本极低（¥1/百万 tokens），180s 翻译 < 1K tokens，可近似忽略。
+- S2 Pass1/2 多模态 Gemini Pro 是最大单项；Pass3（音色画像）T5 验收后若确认跳过，则节省约 ¥0.15/次。
+- MiMo TTS preset_mapping 当前为**免费预设**（不调 MiniMax/CosyVoice），TTS 成本 = ¥0。
+- **admin 告警阈值建议**：daily_cost_warning_cny = 200（每日 ¥200 触发 WARNING），daily_cost_critical_cny = 350（每日 ¥350 触发 CRITICAL + 熔断建议）。500/天 global cap 与 ¥250/天 上界共同构成预算承诺。
+
+**待核验项（T5 验收）：** free `preset_mapping` 路径下 S2 Pass 3（音色画像，多模态付费）是否会跑；预设音色不需要画像，若跑则匿名 lane 跳过。若 Pass3 确认跳过，单次成本降至 ≈ ¥0.35/次，日上界 ≈ ¥175/天。
 
 ## 6. 任务拆解
 
