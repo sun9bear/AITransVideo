@@ -223,11 +223,14 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/jobs
         target: /opt/aivideotrans/app/jobs
-      # Caddy public access logs for admin traffic analytics (read-only).
+      # Caddy public access logs for admin traffic analytics, plus
+      # gateway-side audit JSONL writers (express_voice_cleanup.jsonl,
+      # support_handoff_email.log). Was read_only until 2026-06-10 — that
+      # silently dropped every gateway audit append (OSError EROFS, swallowed
+      # as non-fatal by design). Gateway now has legitimate write needs here.
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
         target: /opt/aivideotrans/data/runtime_logs
-        read_only: true
       # 2026-05-26 postmortem P0c. Pan backup tar staging directory.
       # MUST be a bind mount on the data partition rather than the
       # container overlay so multi-GB tar.gz builds during pan backups
