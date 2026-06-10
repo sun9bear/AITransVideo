@@ -12,23 +12,25 @@ import {
 } from "@/components/ui/dialog"
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { AnonymousTrialPanel } from "./anonymous-trial-panel"
 
 /**
  * AnonymousTrialLauncher — the hero "立即试用" CTA.
  *
- * Phase 1 scope (IMPORTANT): the anonymous upload → preview pipeline does NOT
- * exist yet (session, chunked upload, probe, compliance, teaser are Phase 2/3).
- * So this panel is honest about that — it does NOT promise "立即预览" while
- * silently doing nothing. It shows what's coming (an illustrative, non-clickable
- * upload zone marked 即将开放) and offers a REAL next step (register, so the
- * visitor can be first in when it opens). Per the funnel, anonymous intake is
- * LOCAL UPLOAD ONLY — no YouTube field is ever shown to anonymous/Free users.
- *
- * When Phase 2 lands, this becomes the live `anonymous-trial-panel.tsx` (drag &
- * drop, progress, probe, compliance status) and the copy can promise the real
- * "免注册立即预览". See docs/plans/2026-06-01-anonymous-preview-funnel-ux-plan.md.
+ * When NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW === "1", renders the real
+ * upload → preview panel (AnonymousTrialPanel). Otherwise shows the
+ * existing "即将开放" placeholder so the marketing page stays honest
+ * while the feature flag is off.
  */
+const ANONYMOUS_PREVIEW_ENABLED =
+  process.env.NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW === "1"
+
 export function AnonymousTrialLauncher({ className }: { className?: string }) {
+  if (ANONYMOUS_PREVIEW_ENABLED) {
+    return <AnonymousTrialPanel className={className} />
+  }
+
+  // ── Feature flag OFF: original placeholder ──────────────────────────────
   return (
     <Dialog>
       <DialogTrigger
