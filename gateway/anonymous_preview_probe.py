@@ -195,6 +195,16 @@ def probe_source(path: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def teaser_dest_for(source_path: Path) -> Path:
+    """teaser 落盘路径的唯一真源。
+
+    build_probe_fn 切割时与 T8b ``/create`` 回找文件时必须走同一条规则——
+    teaser 路径不持久化在契约 record 上（status-only），create 端点靠
+    本函数 + audit 里的 stored_upload_path 复原。
+    """
+    return source_path.parent / f"teaser_{source_path.stem}.mp4"
+
+
 def cut_teaser(
     source_path: Path,
     dest_path: Path,
@@ -339,7 +349,7 @@ def build_probe_fn(
             )
 
         # Step 2 — cut teaser
-        dest_path = source_path.parent / f"teaser_{source_path.stem}.mp4"
+        dest_path = teaser_dest_for(source_path)
         teaser = cut_teaser(source_path, dest_path, max_seconds=max_teaser_seconds)
         if teaser.failure_reason is not None:
             return ProbeResult(

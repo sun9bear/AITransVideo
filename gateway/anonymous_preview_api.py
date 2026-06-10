@@ -273,6 +273,26 @@ async def anonymous_upload(
             upload_path.unlink(missing_ok=True)
         return JSONResponse(status_code=500, content={"error": "intake_failed"})
 
+    # APF P0 T8b：把媒体路径持久化进 ORM audit（契约 record 保持 status-only，
+    # 禁媒体字段；/create 需要 teaser 路径作为 Job API source_ref）。
+    try:
+        from anonymous_preview_probe import teaser_dest_for
+
+        _row_result = await db.execute(
+            select(AnonymousPreviewRecord).where(
+                AnonymousPreviewRecord.preview_id == record.record_id
+            )
+        )
+        _orm_row = _row_result.scalar_one_or_none()
+        if _orm_row is not None and upload_path is not None:
+            _merged_audit = dict(_orm_row.audit or {})
+            _merged_audit["stored_upload_path"] = str(upload_path)
+            _merged_audit["teaser_path"] = str(teaser_dest_for(upload_path))
+            _orm_row.audit = _merged_audit
+            await db.commit()
+    except Exception as exc:
+        logger.warning("anon_upload: audit path persist failed: %s", exc)
+
     # Admission (T6 thin adapter) — use the record's teaser duration if available
     admission: Optional[FreePreviewAdmissionResult] = None
     try:
@@ -531,3 +551,260 @@ async def anonymous_preview_stream(
     except Exception as exc:
         logger.warning("anon_stream: proxy error job_id=%s: %s", job_id, exc)
         return JSONResponse(status_code=502, content={"error": "stream_proxy_error"})
+
+
+# ---------------------------------------------------------------------------
+# POST /{preview_id}/create  (T8b)
+# ---------------------------------------------------------------------------
+
+_CREATING_SENTINEL = "__creating__"
+_SENTINEL_USER_EMAIL = "anonymous-preview@system"
+_READY_STATUS = "ready_for_mode"  # PreviewStatus.READY_FOR_MODE.value（契约钉死）
+
+
+async def _reset_create_claim(db: "AsyncSession", preview_id: str) -> None:
+    """create 下游失败时回滚原子抢占（job_id 复位 NULL，允许重试）。"""
+    from sqlalchemy import update as _sa_update
+
+    try:
+        await db.execute(
+            _sa_update(AnonymousPreviewRecord)
+            .where(
+                AnonymousPreviewRecord.preview_id == preview_id,
+                AnonymousPreviewRecord.job_id == _CREATING_SENTINEL,
+            )
+            .values(job_id=None)
+        )
+        await db.commit()
+    except Exception as exc:
+        logger.error("anon_create: claim reset failed preview_id=%s: %s", preview_id, exc)
+
+
+@router.post("/{preview_id}/create")
+async def anonymous_preview_create(
+    preview_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """匿名预览任务创建编排（plan AD-7/AD-8，T8b）。
+
+    门序：CSRF → session → preview_id/record/TTL → F6 硬门(仅 READY 且未建过 job)
+    → consent(strict) → 双门(free tier env + admin 热开关) → teaser 文件在场
+    → 本地 ffprobe(免费) + T6 admission → in-flight gate → sentinel 用户
+    → 原子抢占(job_id IS NULL) → payload 白名单 → POST Job API
+    → PG Job 行(sentinel owner + is_anonymous_preview) → record 回写。
+    全程任何 gate 失败 fail-closed；抢占后失败回滚抢占。
+    """
+    import secrets as _secrets
+    from datetime import datetime, timezone as _tz
+
+    from sqlalchemy import func, update as _sa_update
+
+    from anonymous_consent import validate_anonymous_consent
+    from anonymous_preview_payload_spec import validate_create_payload
+    from anonymous_preview_probe import probe_source
+    from models import Job, User
+    from quota import TERMINAL_STATUSES
+
+    # CSRF
+    try:
+        require_same_origin_state_change(request)
+    except Exception:
+        return JSONResponse(status_code=403, content={"error": "csrf_origin_rejected"})
+
+    session_ctx = await require_anonymous_session(request, db)
+    if isinstance(session_ctx, Response):
+        return session_ctx
+    assert isinstance(session_ctx, AnonymousSessionContext)
+
+    safe_id = _safe_preview_id(preview_id)
+    if safe_id is None:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+
+    record = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
+    if record is None or _is_record_expired(record):
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+
+    # F6 硬门：仅 READY_FOR_MODE 且未建过 job（job_id 兼作防重放闸）
+    if record.job_id:
+        return JSONResponse(status_code=409, content={"error": "already_created"})
+    if str(record.status) != _READY_STATUS:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "preview_not_ready", "status": _redact_reason(str(record.status))},
+        )
+
+    # consent（strict-bool 三件套；服务端盖权威时间戳）
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    consent_payload, consent_reason = validate_anonymous_consent(
+        (body or {}).get("anonymous_consent") if isinstance(body, dict) else None
+    )
+    if consent_payload is None:
+        return JSONResponse(
+            status_code=403,
+            content={"error": "consent_required", "reason": consent_reason},
+        )
+    consent_payload["server_confirmed_at"] = datetime.now(_tz.utc).isoformat()
+
+    # 双门（AD-7）：匿名 surface 不绕过 free tier 总开关语义
+    if not getattr(settings, "enable_free_tier", False):
+        return JSONResponse(status_code=403, content={"error": "free_disabled"})
+    if not _get_admin_enabled():
+        return JSONResponse(status_code=403, content={"error": "anonymous_preview_disabled"})
+
+    # teaser 文件在场（路径由 upload 阶段写入 audit）
+    audit = dict(record.audit or {})
+    teaser_path_raw = audit.get("teaser_path")
+    teaser_path = Path(str(teaser_path_raw)) if teaser_path_raw else None
+    if teaser_path is None or not teaser_path.is_file():
+        return JSONResponse(status_code=409, content={"error": "teaser_missing"})
+
+    # 本地 ffprobe（免费）→ T6 admission（决策值全部来自契约）
+    probe = await asyncio.to_thread(probe_source, teaser_path)
+    if not probe.get("ok") or not probe.get("duration_seconds"):
+        return JSONResponse(status_code=409, content={"error": "teaser_unprobeable"})
+    try:
+        admission = admit_for_free_preview(float(probe["duration_seconds"]), settings)
+        decision = admission.decision
+        decision_str = decision.value if hasattr(decision, "value") else str(decision)
+        if decision_str != "admitted":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "preview_not_admitted", "decision": decision_str},
+            )
+    except Exception as exc:
+        logger.warning("anon_create: admission error: %s", exc)
+        return JSONResponse(status_code=409, content={"error": "admission_error"})
+
+    # in-flight gate（AD-8；fail-closed：admin 读失败按 0 容量拒绝）
+    try:
+        from admin_settings import load_settings as _load_admin
+
+        max_in_flight = int(_load_admin().anonymous_preview_max_in_flight)
+    except Exception:
+        max_in_flight = 0
+    try:
+        cnt_result = await db.execute(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.is_anonymous_preview.is_(True),
+                Job.status.notin_(list(TERMINAL_STATUSES)),
+            )
+        )
+        in_flight = int(cnt_result.scalar() or 0)
+    except Exception as exc:
+        logger.warning("anon_create: in-flight count failed: %s", exc)
+        return JSONResponse(status_code=503, content={"error": "gate_unavailable"})
+    if in_flight >= max_in_flight:
+        return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
+
+    # sentinel 系统用户（035 迁移插入；缺失=部署配置错误，fail-closed）
+    sentinel_result = await db.execute(
+        select(User).where(User.email == _SENTINEL_USER_EMAIL)
+    )
+    sentinel = sentinel_result.scalar_one_or_none()
+    if sentinel is None:
+        logger.error("anon_create: sentinel user missing (migration 035 not applied?)")
+        return JSONResponse(status_code=503, content={"error": "misconfigured"})
+
+    # 原子抢占：job_id IS NULL → __creating__（并发双 create 只有一个赢）
+    claim = await db.execute(
+        _sa_update(AnonymousPreviewRecord)
+        .where(
+            AnonymousPreviewRecord.preview_id == safe_id,
+            AnonymousPreviewRecord.job_id.is_(None),
+        )
+        .values(job_id=_CREATING_SENTINEL)
+    )
+    await db.commit()
+    if getattr(claim, "rowcount", 0) != 1:
+        return JSONResponse(status_code=409, content={"error": "already_created"})
+
+    # payload（白名单深度防御：违规字段=代码 bug，拒绝并回滚抢占）
+    payload = {
+        "job_type": "localize_video",
+        "source_type": "local_video",
+        "source_ref": str(teaser_path),
+        "output_target": "editor",
+        "service_mode": "free",
+        "requires_review": False,
+        "voice_strategy": "preset_mapping",
+        "tts_provider": "mimo",
+        "source_content_hash": record.source_hash,
+        "anonymous_preview": True,
+    }
+    violations = validate_create_payload(payload)
+    if violations:
+        logger.error("anon_create: payload spec violations: %s", violations)
+        await _reset_create_claim(db, safe_id)
+        return JSONResponse(status_code=500, content={"error": "payload_spec_violation"})
+
+    # POST Job API
+    try:
+        client = get_client()
+        create_resp = await client.post(
+            f"{settings.job_api_upstream}/jobs",
+            json=payload,
+            headers=internal_headers(),
+        )
+        if create_resp.status_code not in (200, 201, 202):
+            logger.error(
+                "anon_create: job api returned %d", create_resp.status_code
+            )
+            await _reset_create_claim(db, safe_id)
+            return JSONResponse(status_code=502, content={"error": "job_create_failed"})
+        job_id = str(create_resp.json().get("job_id") or "").strip()
+        if not job_id:
+            await _reset_create_claim(db, safe_id)
+            return JSONResponse(status_code=502, content={"error": "job_create_failed"})
+    except Exception as exc:
+        logger.error("anon_create: job api error: %s", exc)
+        await _reset_create_claim(db, safe_id)
+        return JSONResponse(status_code=502, content={"error": "job_create_failed"})
+
+    # PG Job 行（sentinel owner + 标记列；mirror 的结算 bypass 靠它识别）
+    try:
+        db.add(
+            Job(
+                job_id=job_id,
+                user_id=sentinel.id,
+                source_type="local_video",
+                source_ref=str(teaser_path),
+                source_content_hash=record.source_hash,
+                title="匿名预览",
+                speakers="auto",
+                status="queued",
+                service_mode="free",
+                tts_provider="mimo",
+                requires_review=False,
+                voice_clone_enabled=False,
+                voice_strategy="preset_mapping",
+                plan_code_snapshot="free",
+                role_snapshot="user",
+                is_anonymous_preview=True,
+            )
+        )
+        # record 回写：真实 job_id + claim token 占位 + consent 审计
+        fresh = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
+        if fresh is not None:
+            fresh.job_id = job_id
+            fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
+            merged = dict(fresh.audit or {})
+            merged["anonymous_consent"] = consent_payload
+            fresh.audit = merged
+        await db.commit()
+    except Exception as exc:
+        # Job API 已建任务但 PG 行/record 写失败：不回滚抢占（job 已存在，
+        # 重放会双建）；记录错误，orphan reconciliation 与 status 端点
+        # 仍可经 record.job_id==__creating__ 暴露异常态供排障。
+        logger.error("anon_create: post-create persist failed job=%s: %s", job_id, exc)
+        return JSONResponse(status_code=500, content={"error": "persist_failed"})
+
+    return JSONResponse(
+        status_code=202,
+        content={"preview_id": safe_id, "status": "processing"},
+    )
