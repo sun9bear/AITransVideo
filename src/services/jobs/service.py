@@ -825,6 +825,87 @@ class JobService:
             "segment_status": load_segment_status(record.project_dir),
         }
 
+    def preview_bulk_replace_terms(
+        self,
+        job_id: str,
+        *,
+        find: str,
+        replace: str,
+        field: str = "cn_text",
+    ) -> dict:
+        """Preview a literal terminology replacement in editing/segments.json.
+
+        Read-only, but still requires editing state so the preview represents
+        the same buffer that apply/regenerate will mutate.
+        """
+        from services.jobs.editing_bulk_replace import preview_bulk_replace_terms
+
+        record = self._require_editing(job_id)
+        return preview_bulk_replace_terms(
+            record.project_dir,
+            find=find,
+            replace=replace,
+            field=field,
+        )
+
+    def apply_bulk_replace_terms(
+        self,
+        job_id: str,
+        *,
+        find: str,
+        replace: str,
+        field: str = "cn_text",
+        expected_segment_ids: object = None,
+        expected_total_matches: int | None = None,
+        expected_matches: object = None,
+    ) -> dict:
+        """Apply a confirmed terminology replacement and mark affected TTS stale."""
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_bulk_replace import apply_bulk_replace_terms
+
+        record = self._require_editing(job_id)
+        result = apply_bulk_replace_terms(
+            record.project_dir,
+            find=find,
+            replace=replace,
+            field=field,
+            expected_segment_ids=expected_segment_ids,
+            expected_total_matches=expected_total_matches,
+            expected_matches=expected_matches,
+        )
+        _touch_editing(record, self.store)
+
+        try:
+            before_by_id = {
+                str(item.get("segment_id")): item
+                for item in result.get("matches", [])
+                if isinstance(item, dict)
+            }
+            after_by_id = {
+                str(item.get("segment_id")): item
+                for item in result.get("segments", [])
+                if isinstance(item, dict)
+            }
+            for sid in result.get("replaced_segment_ids", []):
+                sid = str(sid)
+                before = before_by_id.get(sid) or {}
+                after = after_by_id.get(sid) or {}
+                self._emit_post_edit_segment_patch_audit(
+                    record,
+                    sid,
+                    {"cn_text": before.get("before_text")},
+                    after,
+                    {"cn_text": after.get("cn_text", "")},
+                )
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "post_edit bulk-replace audit emit failed for %s", job_id
+            )
+
+        return result
+
     def _emit_post_edit_segment_patch_audit(
         self,
         record: JobRecord,
@@ -1364,6 +1445,51 @@ class JobService:
         )
         _touch_editing(record, self.store)
         return result
+
+    def regenerate_selected_dirty_segments_async(
+        self,
+        job_id: str,
+        *,
+        segment_ids: list[str],
+        tts_caller=None,
+    ) -> dict:
+        """Async re-TTS for an explicit subset of dirty editing segments."""
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.input_validators import validate_segment_id
+        from services.jobs.editing import EditingConflictError
+        from services.jobs.regenerate_all_async import (
+            RegenBatchAlreadyActiveError,
+            start_regen_all_async,
+        )
+
+        normalised: list[str] = []
+        seen: set[str] = set()
+        for raw_sid in segment_ids:
+            sid = str(raw_sid).strip()
+            if not sid or sid in seen:
+                continue
+            validate_segment_id(sid)
+            normalised.append(sid)
+            seen.add(sid)
+        if not normalised:
+            raise ValueError("segment_ids must contain at least one segment id")
+
+        record = self._require_editing(job_id)
+        caller = tts_caller or getattr(self, "_segment_tts_caller", None)
+        try:
+            task_id = start_regen_all_async(
+                project_dir=record.project_dir,
+                tts_caller=caller,
+                default_tts_model=record.tts_model,
+                segment_ids=normalised,
+                reject_if_active=True,
+            )
+        except RegenBatchAlreadyActiveError as exc:
+            raise EditingConflictError(
+                "another batch regeneration task is already active; wait for it to finish"
+            ) from exc
+        _touch_editing(record, self.store)
+        return {"task_id": task_id, "status": "running"}
 
     def regenerate_all_dirty_segments_async(
         self,

@@ -64,6 +64,7 @@ def regenerate_all_dirty_segments(
     *,
     tts_caller: SegmentTTSCaller | None = None,
     default_tts_model: str | None = None,
+    segment_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run regenerate_segment_tts on every segment whose status is in
     BATCH_REGENERATE_TRIGGER_STATUSES. Continue on per-segment failure.
@@ -71,10 +72,21 @@ def regenerate_all_dirty_segments(
     Returns a summary dict per plan D38.
     """
     status_map = load_segment_status(project_dir)
-    eligible = sorted(
-        sid for sid, status in status_map.items()
-        if status in BATCH_REGENERATE_TRIGGER_STATUSES
-    )
+    if segment_ids is None:
+        eligible = sorted(
+            sid for sid, status in status_map.items()
+            if status in BATCH_REGENERATE_TRIGGER_STATUSES
+        )
+    else:
+        seen: set[str] = set()
+        eligible = []
+        for raw_sid in segment_ids:
+            sid = str(raw_sid).strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            if status_map.get(sid) in BATCH_REGENERATE_TRIGGER_STATUSES:
+                eligible.append(sid)
 
     succeeded: list[str] = []
     failures: list[dict[str, str]] = []
