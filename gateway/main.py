@@ -362,6 +362,26 @@ async def lifespan(app: FastAPI):
             "pan auto-archive / refresh / reap / orphan-cleanup will be OFF",
         )
 
+    # APF P0 T9: Anonymous preview TTL & media cleanup sweeper. Deletes
+    # gateway-side upload/teaser files for block/reject records and expired
+    # records, appends audit JSONL (no transcription text / raw IP), and
+    # prunes stale anonymous_sessions / daily_usage rows. Only started when
+    # enable_anonymous_preview is True (feature-flag gate). Same fail-safe
+    # pattern as all other sweepers above — startup failure must not block
+    # gateway. Must be merged before flag is enabled on any environment.
+    try:
+        if settings.enable_anonymous_preview:
+            from anonymous_preview_sweeper import sweeper_loop as _anon_preview_sweeper_loop
+            _anon_preview_sweeper_task = _asyncio.create_task(
+                _anon_preview_sweeper_loop(), name="anonymous-preview-sweeper",
+            )
+            app.state.anonymous_preview_sweeper_task = _anon_preview_sweeper_task
+    except Exception:
+        logger.exception(
+            "Failed to start anonymous_preview_sweeper; anonymous preview media "
+            "TTL cleanup will not run (manual cleanup required)",
+        )
+
     # Seed pricing runtime
     try:
         from pricing_runtime import get_runtime_pricing
@@ -387,6 +407,8 @@ async def lifespan(app: FastAPI):
         "pan_token_refresh_task",
         "pan_orphan_cleanup_task",
         "pan_stale_reaper_task",
+        # APF P0 T9: anonymous preview TTL sweeper.
+        "anonymous_preview_sweeper_task",
     ):
         handle = getattr(app.state, attr, None)
         if handle is not None:
