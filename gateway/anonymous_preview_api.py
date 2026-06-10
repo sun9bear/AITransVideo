@@ -45,6 +45,8 @@ from anonymous_preview_policy import (
 )
 from anonymous_preview_probe import build_probe_fn, teaser_dest_for
 from anonymous_preview_prescreen import prescreen_filename
+from anonymous_preview_quota import hash_scope_key, shanghai_today
+from src.services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
 from anonymous_preview_record_store import RecordStoreError
 from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anonymous_upload, extract_client_ip
 from anonymous_preview_intake_wiring import run_intake_and_save
@@ -187,6 +189,63 @@ async def anonymous_upload(
 
     admin_enabled = _get_admin_enabled()
 
+    # AD-8 body-before peek: non-authoritative global + per-IP rate-limit pre-check.
+    # Performed BEFORE reading the request body so we can reject obviously-over-cap
+    # callers without writing to disk (瞬时磁盘 = 并发数×200MB 防护).
+    # This is a cheap SELECT-only peek; the authoritative try_acquire still runs later
+    # inside run_intake_and_save → adapter._enforce_rate_limits.
+    # Fail-closed on DB error: 503 gate_unavailable (same semantics as in-flight gate).
+    client_ip_peek = extract_client_ip(request) or ""
+    day_key_peek = shanghai_today()
+    try:
+        # Use async db session directly for the peek SELECTs (avoids sync engine spin-up)
+        from sqlalchemy import text as _sa_text
+
+        _global_key = "global"
+        _global_row = await db.execute(
+            _sa_text(
+                "SELECT count FROM anonymous_preview_daily_usage "
+                "WHERE scope = 'global' AND scope_key = :key "
+                "  AND mode = 'free' AND usage_date = :day"
+            ),
+            {"key": _global_key, "day": day_key_peek},
+        )
+        _global_count = int((_global_row.fetchone() or [0])[0])
+        if _global_count >= settings.anonymous_preview_cap_global_per_day:
+            logger.info(
+                "anon_upload: AD-8 peek global cap reached count=%d cap=%d",
+                _global_count,
+                settings.anonymous_preview_cap_global_per_day,
+            )
+            return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
+
+        _ip_hashed = hash_scope_key(
+            client_ip_peek, secret=settings.anonymous_preview_hash_secret
+        )
+        _ip_row = await db.execute(
+            _sa_text(
+                "SELECT count FROM anonymous_preview_daily_usage "
+                "WHERE scope = 'ip' AND scope_key = :key "
+                "  AND mode = 'free' AND usage_date = :day"
+            ),
+            {"key": _ip_hashed, "day": day_key_peek},
+        )
+        _ip_count = int((_ip_row.fetchone() or [0])[0])
+        if _ip_count >= settings.anonymous_preview_cap_per_ip:
+            logger.info(
+                "anon_upload: AD-8 peek ip cap reached count=%d cap=%d ip_hash=%.8s",
+                _ip_count,
+                settings.anonymous_preview_cap_per_ip,
+                _ip_hashed,
+            )
+            return JSONResponse(status_code=429, content={"error": "rate_limited"})
+    except RateLimitCounterUnavailable:
+        logger.warning("anon_upload: AD-8 peek rate-limit store unavailable — fail-closed")
+        return JSONResponse(status_code=503, content={"error": "gate_unavailable"})
+    except Exception as exc:
+        logger.warning("anon_upload: AD-8 peek unexpected error — fail-closed: %s", exc)
+        return JSONResponse(status_code=503, content={"error": "gate_unavailable"})
+
     # Stream upload to disk
     upload_path: Optional[Path] = None
     try:
@@ -225,7 +284,6 @@ async def anonymous_upload(
     # src.services.anonymous_preview_backend_adapter.RequestFacts / UploadFacts
     from src.services.anonymous_preview_backend_adapter import RequestFacts, UploadFacts
     from src.services.anonymous_preview_intake import SourceType
-    from anonymous_preview_quota import shanghai_today
 
     client_ip = extract_client_ip(request) or ""
 

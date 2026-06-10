@@ -37,6 +37,7 @@ changing this adapter.
 from __future__ import annotations
 
 import math
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -151,7 +152,27 @@ ClockFn = Callable[[], datetime]
 
 
 def _default_record_id(source_hash: str) -> str:
-    return f"prv_{source_hash[:12]}" if source_hash else "prv_rejected_no_upload"
+    """Generate a collision-resistant record_id for the PK of
+    ``anonymous_preview_records``.
+
+    Format: ``prv_{source_hash[:8]}_{secrets.token_urlsafe(6)}``
+
+    The 8-char hash prefix is kept for operator readability / log
+    correlation.  The 6-byte (8-char URL-safe base64) random suffix
+    makes the id unique per upload attempt, so two different anonymous
+    sessions uploading the same video — same ``source_hash`` — produce
+    distinct PKs and the second ``save_record`` never triggers a
+    UNIQUE-constraint violation.
+
+    When ``source_hash`` is empty (no upload reached the adapter, e.g.
+    a YouTube-URL early rejection) the well-known sentinel
+    ``prv_rejected_no_upload_{token}`` is used so the no-upload path
+    also gets a unique ID (multiple rapid YouTube rejects from the same
+    session were also colliding on the old fixed sentinel value).
+    """
+    if source_hash:
+        return f"prv_{source_hash[:8]}_{secrets.token_urlsafe(6)}"
+    return f"prv_rejected_no_upload_{secrets.token_urlsafe(6)}"
 
 
 _FALLBACK_NOW = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -280,6 +301,11 @@ class AnonymousPreviewBackendAdapter:
                 )
             compliance_result = self._safe_compliance(probe_result)
             normalized_compliance = evaluate_compliance_result(compliance_result)
+            # Generate a unique record_id here (adapter boundary) so that
+            # the pure ``build_preview_record`` function stays side-effect
+            # free while the PK is guaranteed collision-resistant across
+            # concurrent uploads of the same file by different sessions.
+            unique_record_id = _default_record_id(intake.source_hash)
             return build_preview_record(
                 config,
                 session=session,
@@ -288,6 +314,7 @@ class AnonymousPreviewBackendAdapter:
                 compliance_result=normalized_compliance,
                 source_type=normalized_source_type,
                 now=self.now_fn(),
+                record_id=unique_record_id,
             )
         except IntakeRejected as exc:
             return self._status_only_failure(request, upload, exc)

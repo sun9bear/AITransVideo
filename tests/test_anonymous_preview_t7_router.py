@@ -476,7 +476,25 @@ class TestUploadEndpoint:
 
         app = FastAPI()
         app.include_router(api.router)
-        app.dependency_overrides[get_db] = _fake_get_db
+
+        # AD-8 peek runs before handle_anonymous_upload; db must return valid count rows
+        # (count=0, below any cap) so peek passes and UploadTooLarge is reached.
+        _peek_call = {"n": 0}
+
+        async def _db_for_too_large():
+            db = MagicMock()
+            db.commit = AsyncMock()
+
+            async def _execute(stmt, params=None):
+                _peek_call["n"] += 1
+                row = MagicMock()
+                row.fetchone = MagicMock(return_value=[0])
+                return row
+
+            db.execute = _execute
+            yield db
+
+        app.dependency_overrides[get_db] = _db_for_too_large
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(

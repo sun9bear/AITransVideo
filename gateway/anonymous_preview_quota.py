@@ -232,6 +232,19 @@ class PgRateLimitCounterStore:
                 f"try_acquire failed for scope={self._scope!r} key={key!r}"
             ) from exc
 
+    def peek(self, key: str) -> int:
+        """Return the current count for ``key`` without incrementing (read-only).
+
+        AD-8 body-before peek: used as a cheap pre-check in the upload endpoint
+        *before* reading the request body.  This is non-authoritative — the real
+        try_acquire inside the adapter is still the canonical gate.  This method
+        only exists to reject obviously-over-cap callers before any disk I/O.
+
+        Returns 0 if no row exists for the key.  Raises
+        ``RateLimitCounterUnavailable`` on any DB error so callers can fail-closed.
+        """
+        return self.get(key)
+
     def decrement(self, key: str) -> int:
         """Best-effort rollback of a prior try_acquire admission.
 
