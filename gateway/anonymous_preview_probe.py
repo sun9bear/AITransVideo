@@ -397,11 +397,40 @@ def build_probe_fn(
     return _probe
 
 
+def build_intake_probe_fn(
+    settings: Any,
+    *,
+    max_teaser_seconds: float = 180.0,
+) -> Callable[[Any], Any]:
+    """Return the adapter-contract probe callable used by the router.
+
+    ``AnonymousPreviewBackendAdapter._safe_probe`` invokes the injected
+    ``probe_fn`` as ``probe_fn(upload)`` — a SINGLE ``UploadFacts`` arg.
+    ``build_probe_fn`` returns a TWO-arg ``_probe(source_path, source_hash)``
+    callable, so passing it to the adapter raw makes every upload raise
+    ``TypeError`` → ``_safe_probe`` fail-closes → a FAILED record (after the
+    rate-limit slot is already burned). This wrapper bridges the arity:
+    it unpacks ``stored_path`` / ``source_hash`` off the ``UploadFacts`` so
+    the router can wire ONE named callable and the seam is unit-testable.
+
+    Regression guard: ``tests/test_anonymous_preview_t4_probe_wiring.py``.
+    """
+    raw = build_probe_fn(settings, max_teaser_seconds=max_teaser_seconds)
+
+    def _intake_probe_fn(upload: Any) -> Any:
+        # Duck-typed against UploadFacts; kept loose so this module avoids
+        # importing the src dataclasses at module load (stdlib-only header).
+        return raw(upload.stored_path, upload.source_hash)
+
+    return _intake_probe_fn
+
+
 __all__ = [
     "TeaserResult",
     "probe_source",
     "cut_teaser",
     "build_probe_fn",
+    "build_intake_probe_fn",
     "FFPROBE_TIMEOUT_SECONDS",
     "FFMPEG_TIMEOUT_SECONDS",
 ]

@@ -120,13 +120,24 @@ export async function createPreview(
   return body as unknown as CreateResponse
 }
 
+/** Error from a status poll that carries the HTTP status so the caller can
+ *  distinguish a 401 (session expired → stop) from a transient 429/5xx. */
+export class PreviewStatusError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'PreviewStatusError'
+    this.status = status
+  }
+}
+
 /** Poll preview processing status. */
 export async function getPreviewStatus(previewId: string): Promise<StatusResponse> {
   const resp = await fetch(`/gateway/anonymous-preview/${previewId}/status`, {
     credentials: 'include',
   })
   if (!resp.ok) {
-    throw new Error(`状态查询失败（HTTP ${resp.status}）`)
+    throw new PreviewStatusError(resp.status, `状态查询失败（HTTP ${resp.status}）`)
   }
   return resp.json() as Promise<StatusResponse>
 }

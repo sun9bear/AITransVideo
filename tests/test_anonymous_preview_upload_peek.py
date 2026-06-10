@@ -371,7 +371,7 @@ class TestPeekPassThrough:
             return result
 
         monkeypatch.setattr(api, "admit_for_free_preview", _fake_admit)
-        monkeypatch.setattr(api, "build_probe_fn", lambda s: lambda x: None)
+        monkeypatch.setattr(api, "build_intake_probe_fn", lambda s: lambda x: None)
 
         app = FastAPI()
         app.include_router(api.router)

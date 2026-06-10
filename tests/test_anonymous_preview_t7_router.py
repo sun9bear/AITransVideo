@@ -416,7 +416,9 @@ class TestUploadEndpoint:
             return result
 
         monkeypatch.setattr(api, "admit_for_free_preview", _fake_admit)
-        monkeypatch.setattr(api, "build_probe_fn", lambda s: lambda x: None)
+        # Router now wires build_intake_probe_fn (the single-arg adapter-contract
+        # seam). The mock returns a 1-arg callable matching probe_fn(upload).
+        monkeypatch.setattr(api, "build_intake_probe_fn", lambda s: lambda x: None)
 
         app.include_router(api.router)
 

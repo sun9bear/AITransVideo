@@ -196,12 +196,20 @@ def upgrade() -> None:
         ),
     )
 
-    op.create_index(
-        "ix_jobs_anon_preview_status",
-        "jobs",
-        ["status"],
-        postgresql_where=sa.text("is_anonymous_preview"),
-    )
+    # ix_jobs_anon_preview_status is a partial index on the EXISTING, hot
+    # `jobs` table. A plain CREATE INDEX takes an ACCESS EXCLUSIVE lock and
+    # blocks ALL reads/writes to `jobs` for the build duration — unacceptable
+    # on a payment-active prod DB. CONCURRENTLY avoids the lock but cannot run
+    # inside a transaction, so we step outside the migration transaction via
+    # autocommit_block(). The add_column above is committed first (entering the
+    # block commits the current tx), so the partial predicate resolves.
+    # IF NOT EXISTS keeps re-runs idempotent. (The three new tables' indexes
+    # stay plain/transactional — they're built on empty tables, no lock risk.)
+    with op.get_context().autocommit_block():
+        op.execute(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_jobs_anon_preview_status "
+            "ON jobs (status) WHERE is_anonymous_preview"
+        )
 
     # ------------------------------------------------------------------
     # 5. Sentinel system user — idempotent (ON CONFLICT DO NOTHING)
@@ -241,8 +249,10 @@ def downgrade() -> None:
         )
     )
 
-    # 4. jobs column + partial index
-    op.drop_index("ix_jobs_anon_preview_status", table_name="jobs")
+    # 4. jobs column + partial index. DROP INDEX CONCURRENTLY (also outside a
+    # transaction) so downgrade never takes the ACCESS EXCLUSIVE lock either.
+    with op.get_context().autocommit_block():
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_jobs_anon_preview_status")
     op.drop_column("jobs", "is_anonymous_preview")
 
     # 3. anonymous_preview_records

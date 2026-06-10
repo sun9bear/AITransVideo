@@ -43,7 +43,7 @@ from anonymous_preview_policy import (
     admit_for_free_preview,
     stream_gate_from_artifact_policy,
 )
-from anonymous_preview_probe import build_probe_fn, teaser_dest_for
+from anonymous_preview_probe import build_intake_probe_fn, teaser_dest_for
 from anonymous_preview_prescreen import prescreen_filename
 from anonymous_preview_quota import hash_scope_key, shanghai_today
 from src.services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
@@ -272,8 +272,11 @@ async def anonymous_upload(
         logger.error("anon_upload: filesystem error: %s", exc)
         return JSONResponse(status_code=503, content={"error": "storage_error"})
 
-    # Probe fn (T4) and prescreen fn (T5)
-    _probe_fn = build_probe_fn(settings)
+    # Probe fn (T4) and prescreen fn (T5).
+    # build_intake_probe_fn returns the SINGLE-arg adapter-contract callable
+    # (the adapter calls probe_fn(upload)); never pass build_probe_fn raw —
+    # its 2-arg signature TypeErrors into a fail-closed FAILED record.
+    _probe_fn = build_intake_probe_fn(settings)
 
     def _prescreen_fn(probe_result) -> object:  # noqa: ANN001
         # T5: local-rules prescreen by filename (synchronous stdlib, no paid calls)
@@ -627,9 +630,15 @@ async def anonymous_preview_stream(
         resp_headers["Content-Disposition"] = "inline"
 
         async def _iter_body():
-            async for chunk in upstream_response.aiter_bytes(chunk_size=65536):
-                yield chunk
-            await upstream_response.aclose()
+            # aclose() MUST be in finally: on client disconnect Starlette
+            # abandons the generator without draining it, so an aclose() placed
+            # after the loop never runs and the upstream TCP conn leaks until
+            # timeout.
+            try:
+                async for chunk in upstream_response.aiter_bytes(chunk_size=65536):
+                    yield chunk
+            finally:
+                await upstream_response.aclose()
 
         return StreamingResponse(
             _iter_body(),

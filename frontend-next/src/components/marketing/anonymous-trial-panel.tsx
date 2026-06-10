@@ -18,6 +18,7 @@ import {
   getPreviewStreamUrl,
   mapStatusReason,
   mapStageLabel,
+  PreviewStatusError,
   type UploadResponse,
   type PreviewStatus,
 } from "@/lib/api/anonymousPreview"
@@ -28,6 +29,11 @@ const MAX_FILE_BYTES = 200 * 1024 * 1024 // 200 MB
 const ACCEPTED_TYPES = ['video/mp4', 'video/quicktime', 'video/x-m4v', 'video/webm']
 const ACCEPTED_EXTENSIONS = ['.mp4', '.mov', '.m4v', '.webm']
 const POLL_INTERVAL_MS = 5_000
+// Stop polling after this many consecutive transient (429/5xx/network) errors
+// so a degraded gateway leaves the user with a clear message, not an endless
+// "等待处理…" spinner. A 401 (session expired) stops immediately.
+const MAX_POLL_ERRORS = 4
+const MAX_POLL_BACKOFF_MS = 30_000
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -180,6 +186,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   const [state, setState] = useState<PanelState>(INITIAL_STATE)
   const abortRef = useRef<AbortController | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pollErrorsRef = useRef(0)
 
   // cleanup on unmount / close
   useEffect(() => {
@@ -192,6 +199,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   function resetPanel() {
     abortRef.current?.abort()
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    pollErrorsRef.current = 0
     setState(INITIAL_STATE)
   }
 
@@ -267,18 +275,34 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
 
   // ── Polling ──
 
-  function schedulePoll(previewId: string) {
+  function schedulePoll(previewId: string, delayMs: number = POLL_INTERVAL_MS) {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
-    pollTimerRef.current = setTimeout(() => void doPoll(previewId), POLL_INTERVAL_MS)
+    pollTimerRef.current = setTimeout(() => void doPoll(previewId), delayMs)
   }
 
   async function doPoll(previewId: string) {
-    let statusResp
+    let statusResp: Awaited<ReturnType<typeof getPreviewStatus>>
     try {
       statusResp = await getPreviewStatus(previewId)
-    } catch {
-      // transient error — retry
-      schedulePoll(previewId)
+      pollErrorsRef.current = 0
+    } catch (err) {
+      // 401 = session expired → stop and tell the user; never silently spin.
+      const httpStatus = err instanceof PreviewStatusError ? err.status : 0
+      if (httpStatus === 401) {
+        setState((s) => ({ ...s, step: 'error', errorMsg: '会话已过期，请刷新页面后重试' }))
+        return
+      }
+      // 429 / 5xx / network — bounded retries with backoff, then surface.
+      pollErrorsRef.current += 1
+      if (pollErrorsRef.current >= MAX_POLL_ERRORS) {
+        setState((s) => ({ ...s, step: 'error', errorMsg: '网络不稳定，预览状态查询多次失败，请稍后重试' }))
+        return
+      }
+      const backoff = Math.min(
+        POLL_INTERVAL_MS * 2 ** (pollErrorsRef.current - 1),
+        MAX_POLL_BACKOFF_MS,
+      )
+      schedulePoll(previewId, backoff)
       return
     }
 
