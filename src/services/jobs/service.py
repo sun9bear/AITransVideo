@@ -184,6 +184,7 @@ class JobService:
         smart_consent: dict | None = None,
         express_consent: dict | None = None,
         express_consent_parse_error: str | None = None,
+        anonymous_preview: bool = False,
     ) -> JobRecord:
         normalized_source_type = str(source_type).strip()
         normalized_source_ref = str(source_ref).strip()
@@ -294,6 +295,9 @@ class JobService:
             # only forwards when service_mode==express).
             express_consent=express_consent,
             express_consent_parse_error=express_consent_parse_error,
+            # APF P0 T5：匿名预览标记 passthrough——JobRecord 持久化，
+            # pipeline 经 _snap("anonymous_preview") 进入匿名严格合规 lane。
+            anonymous_preview=anonymous_preview is True,
         )
         self.store.save_job(record)
         self.store.append_event(
