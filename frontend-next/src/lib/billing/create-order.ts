@@ -22,6 +22,10 @@ export type CreateOrderResponse = {
   provider: string
   checkout_surface?: string
   checkout_url: string
+  // "qrcode" => render qr_code_url in-page (WeChat Native weixin:// string);
+  // "redirect" / absent => navigate to checkout_url (Alipay/Paddle/fake).
+  display_mode?: "redirect" | "qrcode"
+  qr_code_url?: string | null
   expires_at: string | null
 }
 

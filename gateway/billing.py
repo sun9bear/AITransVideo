@@ -192,6 +192,10 @@ async def create_order(
         "provider": order.provider,
         "checkout_surface": checkout_surface,
         "checkout_url": checkout.checkout_url,
+        # "qrcode" => frontend renders qr_code_url in-page (WeChat Native);
+        # "redirect" (default) => frontend navigates to checkout_url.
+        "display_mode": getattr(checkout, "display_mode", "redirect"),
+        "qr_code_url": getattr(checkout, "qr_code_url", None),
         "expires_at": order.expires_at.isoformat() if order.expires_at else None,
     }
 
@@ -288,6 +292,30 @@ async def _refresh_order_from_provider(
             logger.warning("Ignoring paddle query result for %s: %s", order.id, exc)
             return
 
+    if order.provider == "wechatpay":
+        from payment_provider_wechat import (
+            WechatPayConfig,
+            map_wechat_trade_state,
+            validate_wechat_webhook_payload,
+        )
+
+        # NOTPAY/USERPAYING query responses may omit attach/amount — only gate
+        # the transitions that can settle. Pending never settles downstream.
+        if map_wechat_trade_state(query_result.provider_status) != "pending":
+            try:
+                # The query response IS the transaction object (same shape as
+                # the decrypted webhook resource): same fact gates apply.
+                validate_wechat_webhook_payload(
+                    WechatPayConfig.from_env(),
+                    query_result.raw_payload,
+                    order_id=str(order.id),
+                    amount_cny=order.amount_cny,
+                    provider_order_id=order.provider_order_id,
+                )
+            except ValueError as exc:
+                logger.warning("Ignoring wechat query result for %s: %s", order.id, exc)
+                return
+
     if query_result.provider_order_id and order.provider_order_id != query_result.provider_order_id:
         order.provider_order_id = query_result.provider_order_id
 
@@ -334,6 +362,7 @@ def _display_name(provider_code: str) -> str:
 @router.get("/checkout-config")
 async def get_checkout_config(
     user: User | None = Depends(get_current_user),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict:
     """Return the list of checkout providers currently usable by this gateway.
 
@@ -389,8 +418,32 @@ async def get_checkout_config(
         "fake",
     )
 
+    # Surface-aware recommendation (plan 2026-06-08 §4 three-rail routing):
+    # - desktop + domestic: own WeChat Native QR (~0.6% fee) when operational
+    # - mobile web: Paddle — WeChat Native QR needs a SECOND device on mobile
+    #   (the weixin:// QR cannot be long-press-recognized inside WeChat), and
+    #   WeChat-via-Paddle is desktop-only, so Paddle (card / future Alipay)
+    #   is the usable mobile rail.
+    # default_provider keeps its historical "first operational" semantics for
+    # backward compatibility; the frontend should prefer recommended_provider.
+    operational_codes = {p["code"] for p in providers_payload if p["operational"]}
+    surface = detect_checkout_surface(
+        None,
+        request.headers.get("user-agent") if request is not None else None,
+    )
+    if surface == "mobile_web":
+        surface_preference = ["paddle", "wechatpay"]
+    else:
+        surface_preference = ["wechatpay", "paddle"]
+    recommended_provider = next(
+        (code for code in surface_preference if code in operational_codes),
+        default_provider,
+    )
+
     return {
         "default_provider": default_provider,
+        "recommended_provider": recommended_provider,
+        "checkout_surface": surface,
         "providers": providers_payload,
     }
 
@@ -665,6 +718,13 @@ async def receive_webhook(
             payload=event.raw_payload,
         )
 
+    if provider_name == "wechatpay":
+        signature_valid = signature_valid and await _validate_wechat_event_against_order(
+            db=db,
+            order_id=event.order_id,
+            payload=event.raw_payload,
+        )
+
     settled = await _process_payment_event(
         db=db,
         provider=provider_name,
@@ -685,6 +745,10 @@ def _provider_webhook_response(
 ) -> dict | PlainTextResponse:
     if provider_name == "alipay":
         return PlainTextResponse("success")
+    if provider_name == "wechatpay":
+        # WeChat Pay v3 treats HTTP 200 as the ACK; the spec response body is
+        # {"code": "SUCCESS"}. Anything else triggers redelivery storms.
+        return {"code": "SUCCESS"}
     return {"ok": True, "settled": settled}
 
 
@@ -757,6 +821,40 @@ async def _validate_paddle_event_against_order(
         return True
     except ValueError as exc:
         logger.warning("Paddle payload validation failed for %s: %s", order_id, exc)
+        return False
+
+
+async def _validate_wechat_event_against_order(
+    *,
+    db: AsyncSession,
+    order_id: str,
+    payload: dict | None,
+) -> bool:
+    result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if order is None:
+        # Order-less event: recorded by _process_payment_event and no-op'd —
+        # safe 200-ACK so WeChat doesn't retry-storm (same invariant as the
+        # Paddle branch above: a missing order cannot settle downstream).
+        return True
+
+    from payment_provider_wechat import (
+        WechatPayConfig,
+        validate_wechat_webhook_payload,
+    )
+
+    transaction = (payload or {}).get("transaction") or {}
+    try:
+        validate_wechat_webhook_payload(
+            WechatPayConfig.from_env(),
+            transaction,
+            order_id=str(order.id),
+            amount_cny=order.amount_cny,
+            provider_order_id=order.provider_order_id,
+        )
+        return True
+    except ValueError as exc:
+        logger.warning("WeChat payload validation failed for %s: %s", order_id, exc)
         return False
 
 

@@ -21,6 +21,10 @@ export type CheckoutProvider = {
 
 export type CheckoutConfigResponse = {
   default_provider: string
+  // Surface-aware pick (desktop → wechatpay QR, mobile → paddle). Prefer this
+  // over default_provider as the initially-selected option when present.
+  recommended_provider?: string
+  checkout_surface?: string
   providers: CheckoutProvider[]
 }
 

@@ -147,6 +147,7 @@ export default function BillingPage() {
             plans={state.plans}
             subscription={state.subscription}
             checkoutConfig={state.checkoutConfig}
+            onOrderSettled={handleOrderSettled}
           />
           {/*
             OrderHistory fetches its own data so it loads independently of the

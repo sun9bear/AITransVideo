@@ -26,7 +26,7 @@ const ERROR_REASON_COPY: Record<string, string> = {
 // the user returns from an off-site / overlay checkout. Alipay (async notify can
 // lag) and Paddle (webhook + ~10min WeChat capture) both rely on it. The refresh
 // path is provider-generic on the gateway side (plan §7.5).
-const POLLABLE_RETURN_PROVIDERS = new Set(["alipay", "paddle"])
+const POLLABLE_RETURN_PROVIDERS = new Set(["alipay", "paddle", "wechatpay"])
 
 function isPollableReturnProvider(provider: string | null): boolean {
   return provider !== null && POLLABLE_RETURN_PROVIDERS.has(provider)

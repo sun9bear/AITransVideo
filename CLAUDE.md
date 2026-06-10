@@ -33,6 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - ❌ 在 "找不到数据时自动 X" 的兜底逻辑里调用付费 API
 - ❌ 在 "用户没选择时默认帮他做 X" 的便利逻辑里调用付费 API
 - ❌ 在 batch / loop / retry 里无上限调用付费 API
+- ❌ 支付渠道之间自动 fallback（如 Paddle/Alipay 失败时自动改走 wechatpay 重新下单）——各 provider 独立，渠道由用户在前端显式选择（plan 2026-05-22 §8.1）
 
 允许的模式：
 - ✅ 用户在前端显式点击按钮触发（例如 "克隆音色" 按钮）
