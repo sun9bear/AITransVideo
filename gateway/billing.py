@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -71,6 +72,33 @@ VALID_BILLING_PERIODS: set[str] = set(_CATALOG_BILLING_PERIODS)
 PLAN_PRICES_CNY: dict[tuple[str, str], int] = get_legacy_price_table()
 
 ORDER_EXPIRY_MINUTES = 30
+
+# Provider webhooks are unauthenticated endpoints: cap the body BEFORE any
+# parse/base64/AES work (security review 2026-06-10, HIGH). Real provider
+# notifications are a few KB; 64 KiB leaves 10x headroom.
+WEBHOOK_MAX_BODY_BYTES = 64 * 1024
+
+# Frontend polls GET /orders/{id}?refresh=true every few seconds (QR dialog 3s,
+# banner 15s). Throttle the upstream provider query per order so polling can't
+# amplify into the provider's rate limits (security review 2026-06-10, HIGH).
+# Skipped refreshes still return the current DB state — webhooks remain the
+# settlement truth, so confirmation is delayed by at most the interval.
+_REFRESH_MIN_INTERVAL_S = 5.0
+_refresh_last_at: dict[str, float] = {}
+
+
+def _refresh_allowed(order_id: str) -> bool:
+    now = time.monotonic()
+    last = _refresh_last_at.get(order_id)
+    if last is not None and (now - last) < _REFRESH_MIN_INTERVAL_S:
+        return False
+    if len(_refresh_last_at) > 2048:
+        cutoff = now - 3600.0
+        for key, stamp in list(_refresh_last_at.items()):
+            if stamp < cutoff:
+                _refresh_last_at.pop(key, None)
+    _refresh_last_at[order_id] = now
+    return True
 
 
 # --- Request/Response models ---
@@ -224,7 +252,11 @@ async def get_order(
     # §7.5/R2: any provider with a query_order impl can refresh on demand (was
     # alipay-only). Stub providers raise NotImplementedError, which
     # _refresh_order_from_provider swallows.
-    if refresh and order.status in ("created", "pending"):
+    if (
+        refresh
+        and order.status in ("created", "pending")
+        and _refresh_allowed(str(order.id))
+    ):
         await _refresh_order_from_provider(db=db, order=order)
 
     return {
@@ -659,7 +691,17 @@ async def receive_webhook(
     3. Parse payload via adapter.parse_webhook()
     4. Pass to _process_payment_event with verified signature_valid
     """
+    # Reject oversized bodies before reading where possible (Content-Length),
+    # and unconditionally after reading (chunked encoding has no length header).
+    # This is an unauthenticated endpoint; the wechatpay path additionally
+    # base64-decodes and AES-decrypts the body, so each extra MB allocates
+    # several times over.
+    declared_length = request.headers.get("content-length")
+    if declared_length and declared_length.isdigit() and int(declared_length) > WEBHOOK_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="webhook body too large")
     raw_body = await request.body()
+    if len(raw_body) > WEBHOOK_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="webhook body too large")
     headers = dict(request.headers)
 
     # Resolve provider
@@ -834,8 +876,14 @@ async def _validate_wechat_event_against_order(
     order = result.scalar_one_or_none()
     if order is None:
         # Order-less event: recorded by _process_payment_event and no-op'd —
-        # safe 200-ACK so WeChat doesn't retry-storm (same invariant as the
-        # Paddle branch above: a missing order cannot settle downstream).
+        # safe 200-ACK so WeChat doesn't retry-storm.
+        #
+        # INVARIANT (mirrors the Paddle F-E note): this `return True` is safe
+        # ONLY because a missing order cannot settle downstream. WeChat's
+        # provider_event_id IS the transaction_id, so if refund clawback /
+        # reconciliation resolved by transaction_id is ever wired under this
+        # path, a signed event with an unknown order_id must NOT bypass
+        # binding — return False for settle/refund-semantic events first.
         return True
 
     from payment_provider_wechat import (

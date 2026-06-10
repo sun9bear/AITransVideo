@@ -31,6 +31,9 @@ import {
 import { getOrder, type PaymentOrderStatus } from "@/lib/billing/get-order"
 
 const POLL_INTERVAL_MS = 3000
+// Stop dialog-local polling after ~10 min (orders expire server-side at 30
+// min; the banner stash keeps confirming at its own cadence after close).
+const MAX_POLL_ATTEMPTS = 200
 
 type WechatQrDialogProps = {
   orderId: string
@@ -53,6 +56,7 @@ export function WechatQrDialog({
   onPaid,
 }: WechatQrDialogProps) {
   const [status, setStatus] = useState<PaymentOrderStatus | "pending">("pending")
+  const [pollExhausted, setPollExhausted] = useState(false)
   const onPaidRef = useRef(onPaid)
 
   useEffect(() => {
@@ -63,7 +67,7 @@ export function WechatQrDialog({
     let cancelled = false
 
     async function poll() {
-      while (!cancelled) {
+      for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS && !cancelled; attempt += 1) {
         try {
           const order = await getOrder(orderId, { refresh: true })
           if (cancelled) return
@@ -87,6 +91,7 @@ export function WechatQrDialog({
         }
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
       }
+      if (!cancelled) setPollExhausted(true)
     }
 
     void poll()
@@ -129,8 +134,14 @@ export function WechatQrDialog({
               <QRCode value={qrCodeUrl} size={192} aria-label="微信支付二维码" />
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-              等待支付确认…支付完成后本窗口会自动更新
+              {pollExhausted ? (
+                <span>确认超时。若你已完成支付,可关闭本窗口,到账后账单页会自动更新。</span>
+              ) : (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  等待支付确认…支付完成后本窗口会自动更新
+                </>
+              )}
             </div>
             <p className="px-2 text-center text-xs leading-relaxed text-muted-foreground">
               请打开手机微信,用「扫一扫」扫描上方二维码完成支付。

@@ -407,6 +407,9 @@ class TestPayloadValidation:
         [
             (lambda t: t.update(attach="other"), {}),
             (lambda t: t.update(mchid="999"), {}),
+            # HARD gate: mchid absent must reject too (shared-mchid defense —
+            # a forwarded AiPlay callback passes signature + decrypt).
+            (lambda t: t.pop("mchid"), {}),
             (lambda t: t["amount"].update(total=1), {}),
             (lambda t: t.update(out_trade_no="AVT_other"), {"provider_order_id": "AVT_a"}),
         ],
@@ -419,6 +422,27 @@ class TestPayloadValidation:
             validate_wechat_webhook_payload(
                 config, txn, order_id="ord-1", amount_cny=9900, **kwargs
             )
+
+    def test_appid_bound_when_configured(self, wechat_setup):
+        import dataclasses
+
+        config, _ = wechat_setup
+        bound = dataclasses.replace(config, appid="wx_ours")
+        txn = _txn(order_id="ord-1", otn="AVT_a", total=9900)
+        txn["appid"] = "wx_theirs"
+        with pytest.raises(ValueError):
+            validate_wechat_webhook_payload(
+                bound, txn, order_id="ord-1", amount_cny=9900
+            )
+        txn["appid"] = "wx_ours"
+        validate_wechat_webhook_payload(bound, txn, order_id="ord-1", amount_cny=9900)
+
+    def test_config_repr_never_leaks_secrets(self, wechat_setup):
+        config, _ = wechat_setup
+        rendered = repr(config)
+        assert _APIV3_KEY not in rendered
+        assert "PRIVATE KEY" not in rendered
+        assert "private_key_pem" not in rendered
 
 
 # --- query ---
@@ -475,6 +499,26 @@ class TestQueryTransaction:
 
 
 # --- provider adapter ---
+
+
+class TestRefreshThrottle:
+    """Per-order provider-query throttle (security review HIGH-2)."""
+
+    def test_throttle_blocks_rapid_repeat_then_allows(self, monkeypatch):
+        import billing
+
+        billing._refresh_last_at.clear()
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(billing.time, "monotonic", lambda: clock["now"])
+        assert billing._refresh_allowed("ord-t") is True
+        assert billing._refresh_allowed("ord-t") is False  # 0s later
+        clock["now"] += 2.0
+        assert billing._refresh_allowed("ord-t") is False  # still inside window
+        clock["now"] += 4.0
+        assert billing._refresh_allowed("ord-t") is True  # 6s > 5s window
+        # Independent orders are not coupled.
+        assert billing._refresh_allowed("ord-other") is True
+        billing._refresh_last_at.clear()
 
 
 class TestWechatPayProvider:

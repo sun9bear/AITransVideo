@@ -32,7 +32,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -78,14 +78,16 @@ def _env_flag(name: str, *, default: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class WechatPayConfig:
+    # Secret-bearing fields carry repr=False so an accidental log/format of the
+    # config object can never leak key material (defense in depth).
     mchid: str
-    apiv3_key: bytes  # 32 bytes, AES-256-GCM
-    private_key_pem: bytes  # merchant private key (request signing)
-    cert_serial: str  # merchant certificate serial (Authorization header)
-    pub_key_id: str  # WeChat platform public key id (callback Wechatpay-Serial)
-    platform_pub_key_pem: bytes  # WeChat platform public key (callback verify)
-    notify_url: str
-    order_prefix: str
+    apiv3_key: bytes = field(repr=False)  # 32 bytes, AES-256-GCM
+    private_key_pem: bytes = field(repr=False)  # merchant private key (request signing)
+    cert_serial: str = ""  # merchant certificate serial (Authorization header)
+    pub_key_id: str = ""  # WeChat platform public key id (callback Wechatpay-Serial)
+    platform_pub_key_pem: bytes = field(default=b"", repr=False)  # platform pub key (callback verify)
+    notify_url: str = DEFAULT_NOTIFY_URL
+    order_prefix: str = DEFAULT_ORDER_PREFIX
     appid: str | None = None
     api_base: str = API_BASE
 
@@ -404,9 +406,16 @@ def validate_wechat_webhook_payload(
         raise ValueError("wechatpay config missing")
     txn = transaction or {}
 
+    # HARD gate (security review 2026-06-10 MEDIUM): the mchid is shared with
+    # AiPlay.video, so a forwarded AiPlay callback passes signature + decrypt.
+    # mchid must be present AND equal; with an appid configured, bind it too —
+    # don't rely solely on the attach namespace staying disjoint.
     mchid = str(txn.get("mchid") or "").strip()
-    if mchid and mchid != config.mchid:
+    if mchid != config.mchid:
         raise ValueError("mchid mismatch")
+    if config.appid:
+        if str(txn.get("appid") or "").strip() != config.appid:
+            raise ValueError("appid mismatch")
 
     if str(txn.get("attach") or "").strip() != str(order_id):
         raise ValueError("attach order_id mismatch")
