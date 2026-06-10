@@ -45,7 +45,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# sys.path setup
+# sys.path setup — must precede real module imports
 # ---------------------------------------------------------------------------
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -55,143 +55,75 @@ for _p in (_GATEWAY, _SRC):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-
 # ---------------------------------------------------------------------------
-# Minimal stubs for gateway modules that need DB / network at import time
-# ---------------------------------------------------------------------------
-
-def _stub_module(name: str, **attrs) -> types.ModuleType:
-    mod = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(mod, k, v)
-    return mod
-
-
-# Stub database so get_db / init_db don't need a real PG connection
-_db_stub = _stub_module(
-    "database",
-    get_db=lambda: None,
-    async_session=MagicMock(),
-    engine=MagicMock(),
-    init_db=MagicMock(),
-    resolve_database_url=lambda s: "postgresql://fake/fake",
-)
-sys.modules.setdefault("database", _db_stub)
-
-# Stub config with necessary fields
-class _FakeSettings:
-    enable_anonymous_preview: bool = True
-    anonymous_preview_max_upload_bytes: int = 200 * 1024 * 1024
-    anonymous_preview_max_seconds: float = 180.0
-    anonymous_preview_hash_secret: str = "x" * 32
-    job_api_upstream: str = "http://127.0.0.1:8877"
-    cors_origins: str = "http://localhost:3000"
-    env: str = "dev"
-    anonymous_preview_cap_global_per_day: int = 500
-    anonymous_preview_cap_per_ip: int = 3
-    anonymous_preview_cap_per_device: int = 1
-    anonymous_preview_cap_per_source: int = 1
-
-_fake_settings = _FakeSettings()
-
-_config_stub = _stub_module(
-    "config",
-    settings=_fake_settings,
-    resolve_database_url=lambda s: "postgresql://fake/fake",
-)
-sys.modules.setdefault("config", _config_stub)
-
-# Stub models
-_models_stub = _stub_module("models")
-
-class _FakeAnonymousSession:
-    __tablename__ = "anonymous_sessions"
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-class _FakeAnonymousPreviewRecord:
-    __tablename__ = "anonymous_preview_records"
-    def __init__(self, **kw):
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-_models_stub.AnonymousSession = _FakeAnonymousSession
-_models_stub.AnonymousPreviewRecord = _FakeAnonymousPreviewRecord
-sys.modules.setdefault("models", _models_stub)
-
-# Stub internal_auth
-_internal_auth_stub = _stub_module(
-    "internal_auth",
-    internal_headers=lambda: {"X-Internal-Key": "test-key"},
-)
-sys.modules.setdefault("internal_auth", _internal_auth_stub)
-
-# Stub proxy (get_client)
-_proxy_stub = _stub_module("proxy", get_client=MagicMock())
-sys.modules.setdefault("proxy", _proxy_stub)
-
-# Stub csrf
-def _csrf_ok(request):
-    pass
-_csrf_stub = _stub_module("csrf", require_same_origin_state_change=_csrf_ok)
-sys.modules.setdefault("csrf", _csrf_stub)
-
-# Stub admin_settings
-class _FakeAdminSettings:
-    anonymous_free_preview_enabled: bool = True
-    anonymous_preview_max_in_flight: int = 2
-
-_admin_settings_stub = _stub_module(
-    "admin_settings",
-    load_settings=lambda: _FakeAdminSettings(),
-    AdminSettings=_FakeAdminSettings,
-)
-sys.modules.setdefault("admin_settings", _admin_settings_stub)
-
-# Stub anonymous_preview_quota (needs hash_scope_key)
-import hmac, hashlib
-
-def _hash_scope_key_impl(value: str, *, secret: str) -> str:
-    return hmac.new(secret.encode(), value.encode(), hashlib.sha256).hexdigest()
-
-_quota_stub = _stub_module(
-    "anonymous_preview_quota",
-    hash_scope_key=_hash_scope_key_impl,
-    PgRateLimitCounterStore=MagicMock(),
-    shanghai_today=lambda: "2026-06-10",
-)
-sys.modules.setdefault("anonymous_preview_quota", _quota_stub)
-
-# ---------------------------------------------------------------------------
-# Now import the modules under test
+# Import real modules (order-independent, no sys.modules.setdefault).
+# All patches are applied in fixtures via monkeypatch, never at module level.
 # ---------------------------------------------------------------------------
 
-from anonymous_session import (
+import anonymous_preview_api as api  # noqa: E402
+import anonymous_session as anon_session_mod  # noqa: E402
+from anonymous_session import (  # noqa: E402
     AnonymousSessionContext,
-    get_or_create_anonymous_session,
-    require_anonymous_session,
-    _hash_token,
     _COOKIE_NAME,
     _COOKIE_MAX_AGE,
+    _hash_token,
+    get_or_create_anonymous_session,
+    require_anonymous_session,
+    _create_session,
+    _lookup_session,
 )
+from database import get_db  # noqa: E402
+
+
+async def _fake_get_db():
+    """No-op DB override for TestClient tests — all DB calls are monkeypatched."""
+    yield AsyncMock()
+
+# ---------------------------------------------------------------------------
+# Declarative fake models for SQLAlchemy expression construction
+# (same pattern as test_anonymous_preview_t8_create.py)
+# ---------------------------------------------------------------------------
+
+from sqlalchemy import Boolean, Column, String  # noqa: E402
+from sqlalchemy.orm import declarative_base  # noqa: E402
+
+_Base = declarative_base()
+
+
+class _FakeAnonymousSessionModel(_Base):
+    __tablename__ = "anon_sessions_fake_t7"
+    session_id_hash = Column(String, primary_key=True)
+    expires_at = Column(String)
+    claim_user_id = Column(String)
+
+
+class _FakeAnonymousPreviewRecordModel(_Base):
+    __tablename__ = "anon_preview_records_fake_t7"
+    preview_id = Column(String, primary_key=True)
+    session_id = Column(String)
+    job_id = Column(String)
+    status = Column(String)
+    status_reason = Column(String)
+    mode = Column(String)
+    expires_at = Column(String)
+    created_at = Column(String)
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _make_session_row(hash_val: str, expired: bool = False) -> _FakeAnonymousSession:
+def _make_session_row(hash_val: str, expired: bool = False) -> MagicMock:
     offset = -1 if expired else 1
-    return _FakeAnonymousSession(
-        session_id_hash=hash_val,
-        expires_at=_now_utc() + timedelta(hours=offset),
-        claim_user_id=None,
-    )
+    row = MagicMock()
+    row.session_id_hash = hash_val
+    row.expires_at = _now_utc() + timedelta(hours=offset)
+    row.claim_user_id = None
+    return row
 
 
 def _make_record(
@@ -200,18 +132,47 @@ def _make_record(
     job_id: Optional[str] = None,
     status: str = "ready_for_mode",
     expired: bool = False,
-) -> _FakeAnonymousPreviewRecord:
+) -> MagicMock:
     offset = -1 if expired else 24
-    return _FakeAnonymousPreviewRecord(
-        preview_id=preview_id,
-        session_id=session_id_hash,
-        job_id=job_id,
-        status=status,
-        status_reason=None,
-        mode="free",
-        expires_at=_now_utc() + timedelta(hours=offset),
-        created_at=_now_utc(),
-    )
+    row = MagicMock()
+    row.preview_id = preview_id
+    row.session_id = session_id_hash
+    row.job_id = job_id
+    row.status = status
+    row.status_reason = None
+    row.mode = "free"
+    row.expires_at = _now_utc() + timedelta(hours=offset)
+    row.created_at = _now_utc()
+    return row
+
+
+# ---------------------------------------------------------------------------
+# autouse fixture: patch settings to valid defaults for every T7 test.
+# Both api.settings and anon_session_mod.settings are the SAME object
+# (both do `from config import settings`), so patching one patches both.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _patch_settings(monkeypatch):
+    """Ensure settings fields are correct for all T7 tests."""
+    s = api.settings
+    monkeypatch.setattr(s, "enable_anonymous_preview", True, raising=False)
+    monkeypatch.setattr(s, "anonymous_preview_hash_secret", "x" * 32, raising=False)
+    monkeypatch.setattr(s, "anonymous_preview_max_upload_bytes", 200 * 1024 * 1024, raising=False)
+    monkeypatch.setattr(s, "anonymous_preview_max_seconds", 180.0, raising=False)
+    monkeypatch.setattr(s, "job_api_upstream", "http://127.0.0.1:8877", raising=False)
+    monkeypatch.setattr(s, "anonymous_preview_cap_global_per_day", 500, raising=False)
+    monkeypatch.setattr(s, "anonymous_preview_cap_per_ip", 3, raising=False)
+    monkeypatch.setattr(s, "anonymous_preview_cap_per_device", 1, raising=False)
+    monkeypatch.setattr(s, "anonymous_preview_cap_per_source", 1, raising=False)
+    # Patch AnonymousPreviewRecord in api to the declarative fake
+    monkeypatch.setattr(api, "AnonymousPreviewRecord", _FakeAnonymousPreviewRecordModel)
+    # Patch AnonymousSession in anonymous_session module to the declarative fake
+    monkeypatch.setattr(anon_session_mod, "AnonymousSession", _FakeAnonymousSessionModel, raising=False)
+    # Patch _get_admin_enabled in api (used by router handlers)
+    monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
+    # Patch admin flag in anonymous_session module
+    monkeypatch.setattr(anon_session_mod, "_get_admin_flag", lambda: True)
 
 
 # ---------------------------------------------------------------------------
@@ -223,60 +184,47 @@ class TestFlagGate:
 
     @pytest.mark.asyncio
     async def test_flag_off_returns_404_from_get_or_create(self, monkeypatch):
-        monkeypatch.setattr(_fake_settings, "enable_anonymous_preview", False)
-        try:
-            fake_req = MagicMock()
-            fake_resp = MagicMock()
-            fake_db = AsyncMock()
-            result = await get_or_create_anonymous_session(fake_req, fake_resp, fake_db)
-            from fastapi.responses import JSONResponse
-            assert isinstance(result, JSONResponse)
-            assert result.status_code == 404
-        finally:
-            monkeypatch.setattr(_fake_settings, "enable_anonymous_preview", True)
+        monkeypatch.setattr(api.settings, "enable_anonymous_preview", False)
+        fake_req = MagicMock()
+        fake_resp = MagicMock()
+        fake_db = AsyncMock()
+        result = await get_or_create_anonymous_session(fake_req, fake_resp, fake_db)
+        from fastapi.responses import JSONResponse
+        assert isinstance(result, JSONResponse)
+        assert result.status_code == 404
 
     @pytest.mark.asyncio
     async def test_flag_off_returns_404_from_require(self, monkeypatch):
-        monkeypatch.setattr(_fake_settings, "enable_anonymous_preview", False)
-        try:
-            fake_req = MagicMock()
-            fake_db = AsyncMock()
-            result = await require_anonymous_session(fake_req, fake_db)
-            from fastapi.responses import JSONResponse
-            assert isinstance(result, JSONResponse)
-            assert result.status_code == 404
-        finally:
-            monkeypatch.setattr(_fake_settings, "enable_anonymous_preview", True)
+        monkeypatch.setattr(api.settings, "enable_anonymous_preview", False)
+        fake_req = MagicMock()
+        fake_db = AsyncMock()
+        result = await require_anonymous_session(fake_req, fake_db)
+        from fastapi.responses import JSONResponse
+        assert isinstance(result, JSONResponse)
+        assert result.status_code == 404
 
     @pytest.mark.asyncio
     async def test_admin_off_returns_403_from_get_or_create(self, monkeypatch):
-        monkeypatch.setattr(
-            _admin_settings_stub, "load_settings",
-            lambda: _FakeAdminSettings()
-        )
-        with patch("anonymous_session._get_admin_flag", return_value=False):
-            fake_req = MagicMock()
-            fake_resp = MagicMock()
-            fake_db = AsyncMock()
-            result = await get_or_create_anonymous_session(fake_req, fake_resp, fake_db)
-            from fastapi.responses import JSONResponse
-            assert isinstance(result, JSONResponse)
-            assert result.status_code == 403
+        monkeypatch.setattr(anon_session_mod, "_get_admin_flag", lambda: False)
+        fake_req = MagicMock()
+        fake_resp = MagicMock()
+        fake_db = AsyncMock()
+        result = await get_or_create_anonymous_session(fake_req, fake_resp, fake_db)
+        from fastapi.responses import JSONResponse
+        assert isinstance(result, JSONResponse)
+        assert result.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_admin_read_failure_returns_closed(self):
+    async def test_admin_read_failure_returns_closed(self, monkeypatch):
         """Admin settings read failure → fail-closed → 403."""
-        def _raise():
-            raise RuntimeError("config file missing")
-
-        with patch("anonymous_session._get_admin_flag", return_value=False):
-            fake_req = MagicMock()
-            fake_resp = MagicMock()
-            fake_db = AsyncMock()
-            result = await get_or_create_anonymous_session(fake_req, fake_resp, fake_db)
-            from fastapi.responses import JSONResponse
-            assert isinstance(result, JSONResponse)
-            assert result.status_code == 403
+        monkeypatch.setattr(anon_session_mod, "_get_admin_flag", lambda: False)
+        fake_req = MagicMock()
+        fake_resp = MagicMock()
+        fake_db = AsyncMock()
+        result = await get_or_create_anonymous_session(fake_req, fake_resp, fake_db)
+        from fastapi.responses import JSONResponse
+        assert isinstance(result, JSONResponse)
+        assert result.status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -287,11 +235,8 @@ class TestSessionCookie:
     """Cookie set on new session; no-cookie → 401 on require."""
 
     @pytest.mark.asyncio
-    async def test_new_session_sets_cookie_attributes(self):
+    async def test_new_session_sets_cookie_attributes(self, monkeypatch):
         """First upload call creates a session and sets cookie with correct attrs."""
-        # We test _create_session directly to avoid DB plumbing
-        from anonymous_session import _create_session
-
         # Fake DB that records the add() call
         added_rows = []
         fake_db = AsyncMock()
@@ -301,6 +246,9 @@ class TestSessionCookie:
         cookie_calls = []
         fake_resp = MagicMock()
         fake_resp.set_cookie.side_effect = lambda **kw: cookie_calls.append(kw)
+
+        # Patch AnonymousSession constructor used inside _create_session
+        monkeypatch.setattr(anon_session_mod, "AnonymousSession", _FakeAnonymousSessionModel, raising=False)
 
         ctx = await _create_session(fake_db, fake_resp, set_cookie=True)
 
@@ -332,13 +280,17 @@ class TestSessionCookie:
         assert result.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_invalid_session_cookie_require_returns_401(self):
+    async def test_invalid_session_cookie_require_returns_401(self, monkeypatch):
         """require_anonymous_session with a cookie that doesn't match any row → 401."""
         fake_req = MagicMock()
         fake_req.headers = {}
         fake_db = AsyncMock()
-        # DB execute returns no row
-        fake_db.execute.return_value.scalar_one_or_none.return_value = None
+
+        # Patch _lookup_session to return None (no matching row)
+        async def _fake_lookup(db, sid):
+            return None
+
+        monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
 
         result = await require_anonymous_session(
             fake_req, fake_db, avt_anon="bad_token_xyz"
@@ -348,16 +300,18 @@ class TestSessionCookie:
         assert result.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_expired_session_cookie_require_returns_401(self):
+    async def test_expired_session_cookie_require_returns_401(self, monkeypatch):
         """require_anonymous_session with an expired session → 401."""
         raw_token = "valid_token_abc"
-        hashed = _hash_token(raw_token)
-        # Return an expired row
-        expired_row = _make_session_row(hashed, expired=True)
         fake_req = MagicMock()
         fake_req.headers = {}
         fake_db = AsyncMock()
-        fake_db.execute.return_value.scalar_one_or_none.return_value = None  # expired filtered by query
+
+        # Patch _lookup_session to return None (expired row already filtered by query)
+        async def _fake_lookup(db, sid):
+            return None
+
+        monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
 
         result = await require_anonymous_session(
             fake_req, fake_db, avt_anon=raw_token
@@ -367,7 +321,7 @@ class TestSessionCookie:
         assert result.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_valid_session_cookie_require_returns_context(self):
+    async def test_valid_session_cookie_require_returns_context(self, monkeypatch):
         """require_anonymous_session with a valid session → AnonymousSessionContext."""
         raw_token = "valid_token_xyz_abc_def"
         hashed = _hash_token(raw_token)
@@ -380,10 +334,10 @@ class TestSessionCookie:
         async def _fake_lookup(db, sid):
             return row
 
-        with patch("anonymous_session._lookup_session", side_effect=_fake_lookup):
-            result = await require_anonymous_session(
-                fake_req, fake_db, avt_anon=raw_token
-            )
+        monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
+        result = await require_anonymous_session(
+            fake_req, fake_db, avt_anon=raw_token
+        )
         assert isinstance(result, AnonymousSessionContext)
         assert result.session_id_hash == hashed
         assert result.is_new is False
@@ -413,16 +367,6 @@ class TestUploadEndpoint:
 
         app = FastAPI()
 
-        # Import the router (re-import to get fresh module bindings)
-        import importlib
-        # Remove cached stale modules that would break fresh import
-        for mod_name in list(sys.modules.keys()):
-            if "anonymous_preview_api" in mod_name:
-                del sys.modules[mod_name]
-
-        import anonymous_preview_api as _api_mod
-
-        # Patch all dependencies
         fake_session_ctx = AnonymousSessionContext(
             session_id_hash="sess_hash_abc",
             raw_token="raw_token_abc",
@@ -430,7 +374,6 @@ class TestUploadEndpoint:
         )
 
         async def _fake_get_or_create(req, resp, db):
-            # Set cookie directly on the response mock to satisfy the test
             resp.set_cookie(
                 key=_COOKIE_NAME,
                 value="raw_token_abc",
@@ -450,21 +393,17 @@ class TestUploadEndpoint:
 
         fake_record = self._make_record_result()
 
-        monkeypatch.setattr(_api_mod, "get_or_create_anonymous_session", _fake_get_or_create)
-        monkeypatch.setattr(_api_mod, "handle_anonymous_upload", _fake_handle_upload)
-        monkeypatch.setattr(_api_mod, "_get_admin_enabled", lambda: True)
+        monkeypatch.setattr(api, "get_or_create_anonymous_session", _fake_get_or_create)
+        monkeypatch.setattr(api, "handle_anonymous_upload", _fake_handle_upload)
+        monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
+        monkeypatch.setattr(api, "require_same_origin_state_change", lambda r: None)
 
         import asyncio as _asyncio
 
-        def _fake_to_thread(fn):
-            # run_intake_and_save in thread — return fake record
-            return fake_record
-
-        # Patch asyncio.to_thread so we don't actually run the sync DB code
         original_to_thread = _asyncio.to_thread
 
         async def _patched_to_thread(fn, *args, **kwargs):
-            return _fake_to_thread(fn)
+            return fake_record
 
         monkeypatch.setattr(_asyncio, "to_thread", _patched_to_thread)
 
@@ -474,12 +413,11 @@ class TestUploadEndpoint:
             result.decision.value = "admit"
             return result
 
-        monkeypatch.setattr(_api_mod, "admit_for_free_preview", _fake_admit)
+        monkeypatch.setattr(api, "admit_for_free_preview", _fake_admit)
+        monkeypatch.setattr(api, "build_probe_fn", lambda s: lambda x: None)
 
-        # Also stub build_probe_fn so it doesn't call ffprobe
-        monkeypatch.setattr(_api_mod, "build_probe_fn", lambda s: lambda x: None)
-
-        app.include_router(_api_mod.router)
+        app.include_router(api.router)
+        app.dependency_overrides[get_db] = _fake_get_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -493,7 +431,7 @@ class TestUploadEndpoint:
         assert body["preview_id"] == "prv_test_001"
         assert body["mode"] == "free"
 
-        # Restore
+        app.dependency_overrides.clear()
         monkeypatch.setattr(_asyncio, "to_thread", original_to_thread)
 
     @pytest.mark.asyncio
@@ -501,12 +439,6 @@ class TestUploadEndpoint:
         """UploadTooLarge → 413."""
         from fastapi.testclient import TestClient
         from fastapi import FastAPI
-
-        for mod_name in list(sys.modules.keys()):
-            if "anonymous_preview_api" in mod_name:
-                del sys.modules[mod_name]
-
-        import anonymous_preview_api as _api_mod
 
         fake_session_ctx = AnonymousSessionContext(
             session_id_hash="sess_hash_abc",
@@ -522,12 +454,14 @@ class TestUploadEndpoint:
         async def _fake_handle_upload(**kwargs):
             raise UploadTooLarge(200 * 1024 * 1024)
 
-        monkeypatch.setattr(_api_mod, "get_or_create_anonymous_session", _fake_get_or_create)
-        monkeypatch.setattr(_api_mod, "handle_anonymous_upload", _fake_handle_upload)
-        monkeypatch.setattr(_api_mod, "_get_admin_enabled", lambda: True)
+        monkeypatch.setattr(api, "get_or_create_anonymous_session", _fake_get_or_create)
+        monkeypatch.setattr(api, "handle_anonymous_upload", _fake_handle_upload)
+        monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
+        monkeypatch.setattr(api, "require_same_origin_state_change", lambda r: None)
 
         app = FastAPI()
-        app.include_router(_api_mod.router)
+        app.include_router(api.router)
+        app.dependency_overrides[get_db] = _fake_get_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -536,6 +470,7 @@ class TestUploadEndpoint:
             headers={"origin": "http://localhost:3000"},
         )
         assert resp.status_code == 413
+        app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -545,18 +480,9 @@ class TestUploadEndpoint:
 class TestStreamGate:
     """Stream endpoint gate conditions."""
 
-    def _make_api_mod(self):
-        for mod_name in list(sys.modules.keys()):
-            if "anonymous_preview_api" in mod_name:
-                del sys.modules[mod_name]
-        import anonymous_preview_api as m
-        return m
-
     @pytest.mark.asyncio
     async def test_record_no_job_returns_409(self, monkeypatch):
         """record with no job_id → 409 preview_not_ready."""
-        _api_mod = self._make_api_mod()
-
         sess_hash = "sess_hash_stream_1"
         fake_session_ctx = AnonymousSessionContext(
             session_id_hash=sess_hash,
@@ -571,26 +497,25 @@ class TestStreamGate:
         async def _fake_get_record(db, pid, sid):
             return record
 
-        monkeypatch.setattr(_api_mod, "require_anonymous_session", _fake_require)
-        monkeypatch.setattr(_api_mod, "_get_record_for_session", _fake_get_record)
-        monkeypatch.setattr(_api_mod, "_get_admin_enabled", lambda: True)
+        monkeypatch.setattr(api, "require_anonymous_session", _fake_require)
+        monkeypatch.setattr(api, "_get_record_for_session", _fake_get_record)
+        monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
 
         from fastapi.testclient import TestClient
         from fastapi import FastAPI
         app = FastAPI()
-        app.include_router(_api_mod.router)
+        app.include_router(api.router)
+        app.dependency_overrides[get_db] = _fake_get_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/gateway/anonymous-preview/prv_abc123/stream")
+        app.dependency_overrides.clear()
         assert resp.status_code == 409
         assert "no_job" in resp.json().get("detail", resp.text)
 
     @pytest.mark.asyncio
     async def test_session_mismatch_returns_404(self, monkeypatch):
         """Session mismatch (record belongs to different session) → 404."""
-        _api_mod = self._make_api_mod()
-
-        sess_hash = "sess_hash_owner"
         fake_session_ctx = AnonymousSessionContext(
             session_id_hash="sess_hash_attacker",
             raw_token=None,
@@ -601,26 +526,25 @@ class TestStreamGate:
             return fake_session_ctx
 
         async def _fake_get_record(db, pid, sid):
-            # Returns None because session_id doesn't match
             return None
 
-        monkeypatch.setattr(_api_mod, "require_anonymous_session", _fake_require)
-        monkeypatch.setattr(_api_mod, "_get_record_for_session", _fake_get_record)
+        monkeypatch.setattr(api, "require_anonymous_session", _fake_require)
+        monkeypatch.setattr(api, "_get_record_for_session", _fake_get_record)
 
         from fastapi.testclient import TestClient
         from fastapi import FastAPI
         app = FastAPI()
-        app.include_router(_api_mod.router)
+        app.include_router(api.router)
+        app.dependency_overrides[get_db] = _fake_get_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/gateway/anonymous-preview/prv_abc123/stream")
+        app.dependency_overrides.clear()
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
     async def test_stream_happy_path_inline_disposition(self, monkeypatch):
         """Happy path: proxied stream has Content-Disposition: inline."""
-        _api_mod = self._make_api_mod()
-
         sess_hash = "sess_hash_stream_ok"
         fake_session_ctx = AnonymousSessionContext(
             session_id_hash=sess_hash,
@@ -639,11 +563,10 @@ class TestStreamGate:
         async def _fake_get_record(db, pid, sid):
             return record
 
-        monkeypatch.setattr(_api_mod, "require_anonymous_session", _fake_require)
-        monkeypatch.setattr(_api_mod, "_get_record_for_session", _fake_get_record)
-        monkeypatch.setattr(_api_mod, "_get_admin_enabled", lambda: True)
+        monkeypatch.setattr(api, "require_anonymous_session", _fake_require)
+        monkeypatch.setattr(api, "_get_record_for_session", _fake_get_record)
+        monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
 
-        # Fake admit / stream_gate
         from anonymous_preview_policy import StreamGate
         fake_gate = StreamGate(
             stream_only_required=True,
@@ -655,18 +578,15 @@ class TestStreamGate:
 
         fake_admission = MagicMock()
         fake_admission.artifact_policy = MagicMock()
-        monkeypatch.setattr(_api_mod, "admit_for_free_preview", lambda dur, s: fake_admission)
-        monkeypatch.setattr(_api_mod, "stream_gate_from_artifact_policy", lambda p: fake_gate)
+        monkeypatch.setattr(api, "admit_for_free_preview", lambda dur, s: fake_admission)
+        monkeypatch.setattr(api, "stream_gate_from_artifact_policy", lambda p: fake_gate)
 
-        # Fake httpx client
         fake_client = MagicMock()
 
-        # Job status response
         job_status_resp = MagicMock()
         job_status_resp.status_code = 200
         job_status_resp.json.return_value = {"status": "succeeded"}
 
-        # Stream response
         fake_stream_resp = MagicMock()
         fake_stream_resp.status_code = 200
         fake_stream_resp.headers = {
@@ -680,32 +600,28 @@ class TestStreamGate:
         fake_stream_resp.aiter_bytes = _aiter_bytes
         fake_stream_resp.aclose = AsyncMock()
 
-        # client.get returns job_status_resp (for the /jobs/{id} check)
         fake_client.get = AsyncMock(return_value=job_status_resp)
-        # client.build_request returns a request object
         fake_client.build_request.return_value = MagicMock()
-        # client.send returns the stream response
         fake_client.send = AsyncMock(return_value=fake_stream_resp)
 
-        monkeypatch.setattr(_api_mod, "get_client", lambda: fake_client)
+        monkeypatch.setattr(api, "get_client", lambda: fake_client)
 
         from fastapi.testclient import TestClient
         from fastapi import FastAPI
         app = FastAPI()
-        app.include_router(_api_mod.router)
+        app.include_router(api.router)
+        app.dependency_overrides[get_db] = _fake_get_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
             "/gateway/anonymous-preview/prv_abc123/stream",
             headers={"range": "bytes=0-"},
         )
+        app.dependency_overrides.clear()
 
-        # Should be 200 (proxied)
         assert resp.status_code == 200
-        # Content-Disposition must be inline
         assert resp.headers.get("content-disposition") == "inline"
 
-        # Verify Range was forwarded to upstream build_request call
         build_req_call = fake_client.build_request.call_args
         assert build_req_call is not None
         fwd_headers_arg = build_req_call[1].get("headers") or build_req_call[0][2]
@@ -796,7 +712,6 @@ class TestImportGuards:
     def test_no_r2_references(self):
         """anonymous_preview_api.py must contain no R2 / r2 strings (stream-only)."""
         src = self._get_api_source()
-        # Check for R2-related identifiers (not in comments starting with #)
         r2_forbidden = ["r2_client", "R2_ENDPOINT", "avt-artifacts", "X-Amz-", "presigned", "r2_artifacts"]
         for pattern in r2_forbidden:
             assert pattern not in src, (
