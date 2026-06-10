@@ -2670,6 +2670,17 @@ class ProcessPipeline:
         # APF P0 T5（AD-7/G3）：匿名预览标记，严格 is True gate；
         # 驱动匿名严格合规 lane + Pass 3 跳过。登录任务恒 False。
         job_anonymous_preview = _snap('anonymous_preview', False) is True
+        if job_anonymous_preview and job_voice_strategy != 'preset_mapping':
+            # 防 clone 第三道防线（对抗审核加固）：匿名任务的 voice_strategy
+            # 只允许 preset_mapping——gateway payload 硬编码是第一道、
+            # 白名单校验是第二道，这里是 pipeline 侧独立兜底，任何上游
+            # 改动都不可能让匿名任务踏入 voiceclone 分支。
+            print(
+                f"[PIPELINE] 匿名预览任务 voice_strategy={job_voice_strategy} 非法，"
+                "强制回 preset_mapping",
+                flush=True,
+            )
+            job_voice_strategy = 'preset_mapping'
         self._current_service_mode = job_service_mode  # for recovery paths
 
         # Smart MVP P2 (plan §6.0.6 / Codex 第八轮 F3) — derive the

@@ -163,7 +163,6 @@ async def get_or_create_anonymous_session(
     request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
-    avt_anon: Optional[str] = Cookie(None, alias=_COOKIE_NAME),
 ) -> AnonymousSessionContext | Response:
     """FastAPI dependency for ``POST /upload``.
 
@@ -192,6 +191,10 @@ async def get_or_create_anonymous_session(
         )
 
     # --- try to resolve existing session ---
+    # 对抗审核 P0 修复：本函数被端点手动 await 调用（非 Depends 注入），
+    # Cookie() 参数在手动调用下不会被 FastAPI 填充（拿到的是 Param 对象）。
+    # 必须直接从 request.cookies 读，两种调用方式行为才一致。
+    avt_anon = request.cookies.get(_COOKIE_NAME)
     if avt_anon:
         try:
             session_id_hash = _hash_token(avt_anon)
@@ -214,7 +217,6 @@ async def get_or_create_anonymous_session(
 async def require_anonymous_session(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    avt_anon: Optional[str] = Cookie(None, alias=_COOKIE_NAME),
 ) -> AnonymousSessionContext | Response:
     """FastAPI dependency for ``GET /{id}/status`` and ``GET /{id}/stream``.
 
@@ -239,6 +241,9 @@ async def require_anonymous_session(
         )
 
     # --- require existing valid session ---
+    # 对抗审核 P0 修复：同 get_or_create —— 手动调用下 Cookie() 参数不被
+    # 注入，必须直接读 request.cookies。
+    avt_anon = request.cookies.get(_COOKIE_NAME)
     if not avt_anon:
         return JSONResponse(
             status_code=401,

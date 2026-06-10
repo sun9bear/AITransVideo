@@ -187,3 +187,40 @@ def test_consent_blank_client_timestamp_normalized_to_none():
     )
     assert reason is None
     assert payload["client_confirmed_at"] is None
+
+
+# --- 对抗审核 P0 回归：session 函数手动调用必须读 request.cookies ------------
+
+
+def _session_env(monkeypatch):
+    import anonymous_session as anon
+
+    monkeypatch.setattr(anon, "_get_admin_flag", lambda: True)
+    monkeypatch.setattr(anon.settings, "enable_anonymous_preview", True, raising=False)
+    monkeypatch.setattr(anon, "_hash_token", lambda t: "h:" + t)
+
+    async def _fake_lookup(db, h):
+        return object()
+
+    monkeypatch.setattr(anon, "_lookup_session", _fake_lookup)
+    return anon
+
+
+def test_require_session_reads_request_cookies_on_manual_call(monkeypatch):
+    from unittest.mock import MagicMock
+
+    anon = _session_env(monkeypatch)
+    req = MagicMock()
+    req.cookies = {"avt_anon": "tok123"}
+    ctx = _run(anon.require_anonymous_session(req, MagicMock()))
+    assert getattr(ctx, "session_id_hash", None) == "h:tok123"
+
+
+def test_require_session_manual_call_without_cookie_401(monkeypatch):
+    from unittest.mock import MagicMock
+
+    anon = _session_env(monkeypatch)
+    req = MagicMock()
+    req.cookies = {}
+    resp = _run(anon.require_anonymous_session(req, MagicMock()))
+    assert getattr(resp, "status_code", None) == 401

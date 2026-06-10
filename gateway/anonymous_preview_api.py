@@ -43,7 +43,7 @@ from anonymous_preview_policy import (
     admit_for_free_preview,
     stream_gate_from_artifact_policy,
 )
-from anonymous_preview_probe import build_probe_fn
+from anonymous_preview_probe import build_probe_fn, teaser_dest_for
 from anonymous_preview_prescreen import prescreen_filename
 from anonymous_preview_record_store import RecordStoreError
 from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anonymous_upload, extract_client_ip
@@ -276,8 +276,6 @@ async def anonymous_upload(
     # APF P0 T8b：把媒体路径持久化进 ORM audit（契约 record 保持 status-only，
     # 禁媒体字段；/create 需要 teaser 路径作为 Job API source_ref）。
     try:
-        from anonymous_preview_probe import teaser_dest_for
-
         _row_result = await db.execute(
             select(AnonymousPreviewRecord).where(
                 AnonymousPreviewRecord.preview_id == record.record_id
@@ -291,7 +289,17 @@ async def anonymous_upload(
             _orm_row.audit = _merged_audit
             await db.commit()
     except Exception as exc:
-        logger.warning("anon_upload: audit path persist failed: %s", exc)
+        # 对抗审核 P1 修复：原先 warning 后返回 200 会造成"上传成功但
+        # /create 永远 409 teaser_missing"的哑死局。改为显式 503 + 清理
+        # 媒体文件，让用户重新上传（fail-loud 而非 fail-silent）。
+        logger.error("anon_upload: audit path persist failed: %s", exc)
+        if upload_path is not None:
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+            _t = teaser_dest_for(upload_path)
+            if _t.exists():
+                _t.unlink(missing_ok=True)
+        return JSONResponse(status_code=503, content={"error": "storage_error"})
 
     # Admission (T6 thin adapter) — use the record's teaser duration if available
     admission: Optional[FreePreviewAdmissionResult] = None
@@ -359,6 +367,20 @@ async def anonymous_preview_status(
                 "preview_id": record.preview_id,
                 "preview_status": record.status,
                 "stage": None,
+                "progress": None,
+                "mode": record.mode,
+            },
+        )
+
+    # 对抗审核 P1 修复：__creating__ 哨兵值不要拿去查 Job API（必 404 →
+    # 伪装成 pending）。显式返回 creating 阶段，前端与监控可识别。
+    if record.job_id == "__creating__":
+        return JSONResponse(
+            status_code=200,
+            content={
+                "preview_id": record.preview_id,
+                "preview_status": "processing",
+                "stage": "creating",
                 "progress": None,
                 "mode": record.mode,
             },
@@ -766,7 +788,32 @@ async def anonymous_preview_create(
         await _reset_create_claim(db, safe_id)
         return JSONResponse(status_code=502, content={"error": "job_create_failed"})
 
-    # PG Job 行（sentinel owner + 标记列；mirror 的结算 bypass 靠它识别）
+    # 对抗审核 P1 修复——写入顺序对调：先把 record 指向真实 job_id（单独
+    # 提交），__creating__ 哨兵的存活窗从"整个 create 后半段"缩到单条
+    # UPDATE；record 写成功后即使 PG Job 行失败，status/stream 仍可用
+    # （job 真实存在），不会出现永久锁死。
+    try:
+        fresh = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
+        if fresh is not None:
+            fresh.job_id = job_id
+            fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
+            merged = dict(fresh.audit or {})
+            merged["anonymous_consent"] = consent_payload
+            fresh.audit = merged
+        await db.commit()
+    except Exception as exc:
+        # job 已在 Job API 跑、record 仍是 __creating__：不回滚抢占（重试
+        # 会双建任务）；status 端点的 creating 分支可见此态，留 TTL 清理。
+        logger.critical(
+            "anon_create: record 回写失败 job=%s — record 滞留 __creating__, "
+            "需人工核对: %s", job_id, exc,
+        )
+        return JSONResponse(status_code=500, content={"error": "persist_failed"})
+
+    # PG Job 行（sentinel owner + 标记列）。失败不再 5xx：job 已在跑、
+    # record 已指向真实 job_id；损失的只有 in-flight 计数与 mirror 标记
+    # （r2 sweeper 对无 PG 行的 job 直接跳过、不结算——已核验
+    # r2_artifact_sweeper.py:219-222），CRITICAL 日志供运维补行。
     try:
         db.add(
             Job(
@@ -788,21 +835,12 @@ async def anonymous_preview_create(
                 is_anonymous_preview=True,
             )
         )
-        # record 回写：真实 job_id + claim token 占位 + consent 审计
-        fresh = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
-        if fresh is not None:
-            fresh.job_id = job_id
-            fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
-            merged = dict(fresh.audit or {})
-            merged["anonymous_consent"] = consent_payload
-            fresh.audit = merged
         await db.commit()
     except Exception as exc:
-        # Job API 已建任务但 PG 行/record 写失败：不回滚抢占（job 已存在，
-        # 重放会双建）；记录错误，orphan reconciliation 与 status 端点
-        # 仍可经 record.job_id==__creating__ 暴露异常态供排障。
-        logger.error("anon_create: post-create persist failed job=%s: %s", job_id, exc)
-        return JSONResponse(status_code=500, content={"error": "persist_failed"})
+        logger.critical(
+            "anon_create: PG Job 行写入失败 job=%s — in-flight 计数与 mirror "
+            "标记缺失, 需人工补行: %s", job_id, exc,
+        )
 
     return JSONResponse(
         status_code=202,

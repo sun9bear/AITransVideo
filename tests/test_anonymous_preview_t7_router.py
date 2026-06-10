@@ -272,9 +272,10 @@ class TestSessionCookie:
         """require_anonymous_session with no cookie → 401."""
         fake_req = MagicMock()
         fake_req.headers = {}
+        fake_req.cookies = {}
         fake_db = AsyncMock()
 
-        result = await require_anonymous_session(fake_req, fake_db, avt_anon=None)
+        result = await require_anonymous_session(fake_req, fake_db)
         from fastapi.responses import JSONResponse
         assert isinstance(result, JSONResponse)
         assert result.status_code == 401
@@ -292,9 +293,8 @@ class TestSessionCookie:
 
         monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
 
-        result = await require_anonymous_session(
-            fake_req, fake_db, avt_anon="bad_token_xyz"
-        )
+        fake_req.cookies = {"avt_anon": "bad_token_xyz"}
+        result = await require_anonymous_session(fake_req, fake_db)
         from fastapi.responses import JSONResponse
         assert isinstance(result, JSONResponse)
         assert result.status_code == 401
@@ -313,9 +313,8 @@ class TestSessionCookie:
 
         monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
 
-        result = await require_anonymous_session(
-            fake_req, fake_db, avt_anon=raw_token
-        )
+        fake_req.cookies = {"avt_anon": raw_token}
+        result = await require_anonymous_session(fake_req, fake_db)
         from fastapi.responses import JSONResponse
         assert isinstance(result, JSONResponse)
         assert result.status_code == 401
@@ -335,9 +334,8 @@ class TestSessionCookie:
             return row
 
         monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
-        result = await require_anonymous_session(
-            fake_req, fake_db, avt_anon=raw_token
-        )
+        fake_req.cookies = {"avt_anon": raw_token}
+        result = await require_anonymous_session(fake_req, fake_db)
         assert isinstance(result, AnonymousSessionContext)
         assert result.session_id_hash == hashed
         assert result.is_new is False
@@ -417,7 +415,18 @@ class TestUploadEndpoint:
         monkeypatch.setattr(api, "build_probe_fn", lambda s: lambda x: None)
 
         app.include_router(api.router)
-        app.dependency_overrides[get_db] = _fake_get_db
+
+        # audit 路径持久化（T8b）会查 record 行——给 None 让其跳过持久化，
+        # 不触发新的 fail-loud 503 语义（对抗审核修复后 persist 失败=503）。
+        async def _db_for_upload():
+            db = MagicMock()
+            _result = MagicMock()
+            _result.scalar_one_or_none = MagicMock(return_value=None)
+            db.execute = AsyncMock(return_value=_result)
+            db.commit = AsyncMock()
+            yield db
+
+        app.dependency_overrides[get_db] = _db_for_upload
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(

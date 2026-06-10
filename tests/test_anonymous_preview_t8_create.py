@@ -317,3 +317,27 @@ def test_create_job_api_failure_resets_claim(wired):
     resp = _call(_db())
     assert resp.status_code == 502
     wired["reset"].assert_awaited_once()
+
+
+# --- 对抗审核 P1 回归：status 端点不得拿 __creating__ 哨兵去查 Job API -------
+
+
+def test_status_endpoint_handles_creating_sentinel(wired, monkeypatch):
+    rec = wired["record"]
+    rec.job_id = "__creating__"
+    monkeypatch.setattr(
+        api, "_get_record_for_session", AsyncMock(return_value=rec)
+    )
+    monkeypatch.setattr(api, "_is_record_expired", lambda r: False)
+    resp = _run(api.anonymous_preview_status("p1", _request(), MagicMock()))
+    assert resp.status_code == 200
+    assert b'"stage":"creating"' in resp.body.replace(b" ", b"")
+    wired["client"].get.assert_not_called()  # 没有拿哨兵值去打 Job API
+
+
+def test_pipeline_third_defense_source_guard():
+    import pipeline.process as process_module
+
+    src = Path(process_module.__file__).read_text(encoding="utf-8")
+    assert "防 clone 第三道防线" in src
+    assert "job_voice_strategy = 'preset_mapping'" in src
