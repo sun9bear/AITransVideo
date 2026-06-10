@@ -354,7 +354,9 @@ class TestUploadEndpoint:
         r.status = MagicMock()
         r.status.value = "ready_for_mode"
         r.status_reason = None
-        r.teaser_duration_seconds = 30.0
+        # 契约真实字段是 duration_seconds（不是 teaser_duration_seconds）；
+        # 用错字段名会让未来读测试者误判生产读哪个字段（CodeX 测试卫生点）。
+        r.duration_seconds = 30.0
         return r
 
     @pytest.mark.asyncio
