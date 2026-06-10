@@ -108,10 +108,36 @@ function readBannerFromStatus(
         "支付流程未能完成，请稍后重试或重新创建订单。",
     }
   }
+  // successUrl / checkout.closed returns may arrive without an order_id AND
+  // without a localStorage stash (private mode) — show static copy instead of
+  // nothing so a paid user isn't left staring at an unchanged page.
+  if (status === "processing") return pendingBanner(false)
+  if (status === "closed") return pendingBanner(true)
   return null
 }
 
-function readBannerFromOrderStatus(status: PaymentOrderStatus): BannerContent {
+function pendingBanner(closedReturn: boolean): BannerContent {
+  if (closedReturn) {
+    // The buyer deliberately closed the checkout window. Don't pretend a
+    // payment is confirming — but keep polling: a WeChat buyer often closes
+    // the QR page while the async capture is still in flight.
+    return {
+      tone: "info",
+      title: "支付窗口已关闭",
+      body: "若你已完成付款,系统会自动确认到账并更新本页;若尚未支付,可重新发起支付。",
+    }
+  }
+  return {
+    tone: "info",
+    title: "支付确认中",
+    body: "银行卡支付通常几秒内确认;微信支付最长约 10 分钟。确认后本页会自动刷新,无需重复支付。",
+  }
+}
+
+function readBannerFromOrderStatus(
+  status: PaymentOrderStatus,
+  closedReturn = false,
+): BannerContent {
   if (status === "paid") {
     return {
       tone: "success",
@@ -140,11 +166,7 @@ function readBannerFromOrderStatus(status: PaymentOrderStatus): BannerContent {
       body: "退款状态已同步到账单记录中。",
     }
   }
-  return {
-    tone: "info",
-    title: "支付确认中",
-    body: "若用微信支付,到账可能需要几分钟。确认后本页会自动刷新,无需重复支付。",
-  }
+  return pendingBanner(closedReturn)
 }
 
 function toneStyles(tone: BannerTone) {
@@ -190,10 +212,13 @@ export function BillingStatusBanner({
   const [stashedOrder] = useState(() => readStashedPendingOrder())
   const effectiveOrderId = initialOrderId ?? stashedOrder?.order_id ?? null
   const effectiveProvider = initialProvider ?? stashedOrder?.provider ?? null
+  // The /paddle-checkout page returns status=closed when the buyer dismissed
+  // the overlay without completing — same polling, distinct copy.
+  const closedReturn = initialStatus === "closed"
   const [dismissed, setDismissed] = useState(false)
   const [content, setContent] = useState<BannerContent | null>(() => {
     if (effectiveOrderId && isPollableReturnProvider(effectiveProvider)) {
-      return readBannerFromOrderStatus("pending")
+      return pendingBanner(closedReturn)
     }
     return readBannerFromStatus(initialStatus, initialReason)
   })
@@ -224,7 +249,7 @@ export function BillingStatusBanner({
         try {
           const order = await getOrder(orderId, { refresh: true })
           if (cancelled) return
-          setContent(readBannerFromOrderStatus(order.status))
+          setContent(readBannerFromOrderStatus(order.status, closedReturn))
           if (order.status !== "created" && order.status !== "pending") {
             clearStashedPendingOrder()
             if (!notifiedRef.current) {
@@ -245,7 +270,7 @@ export function BillingStatusBanner({
         setContent({
           tone: "info",
           title: "支付仍在确认中",
-          body: "微信支付到账可能需要几分钟。确认后本页会自动更新,你也可以稍后刷新查看。",
+          body: "到账确认晚于预期(银行卡通常几秒,微信最长约 10 分钟)。确认后本页会自动更新,你也可以稍后刷新查看;若你未完成支付,订单会在 30 分钟后自动过期。",
         })
       }
     }
@@ -254,7 +279,7 @@ export function BillingStatusBanner({
     return () => {
       cancelled = true
     }
-  }, [effectiveOrderId, effectiveProvider])
+  }, [closedReturn, effectiveOrderId, effectiveProvider])
 
   if (!content || dismissed) return null
 

@@ -169,14 +169,97 @@ def expected_price_id(config: PaddleConfig, plan_code: str, billing_period: str)
 # --- checkout (sync — billing.create_order calls create_checkout synchronously) ---
 
 
+def _is_paddle_safe_email(email: str) -> bool:
+    """Paddle rejects emails with spaces or non-ASCII chars (customer_email_invalid)."""
+    if not email or "@" not in email or " " in email:
+        return False
+    try:
+        email.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def resolve_customer_id(config: PaddleConfig, email: str) -> str | None:
+    """Find or create the Paddle customer for ``email``; return its ``ctm_`` id.
+
+    POST /transactions only accepts ``customer_id`` (no inline email), so this
+    is the prerequisite for prefilling the buyer email on checkout. Lookup
+    first (GET /customers?email=), create on miss; a create-race conflict
+    (409 customer_already_exists) falls back to a second lookup.
+    """
+    # Paddle dedupes customer emails case-insensitively but the list filter is
+    # exact-match — normalize so mixed-case account emails still hit the GET.
+    email = email.strip().lower()
+    if not _is_paddle_safe_email(email):
+        return None
+    # Tight budget: this is a prefill nicety on the checkout hot path, not a
+    # required step — fail fast and fall back to a customer-less transaction.
+    with httpx.Client(timeout=httpx.Timeout(5.0)) as client:
+        found = _lookup_customer_id(client, config, email)
+        if found:
+            return found
+        response = client.post(
+            f"{config.api_base}/customers",
+            headers=_auth_headers(config),
+            json={"email": email},
+        )
+        if response.status_code == 409:
+            return _lookup_customer_id(client, config, email)
+        response.raise_for_status()
+        data = (response.json() or {}).get("data") or {}
+        return str(data.get("id") or "").strip() or None
+
+
+def _lookup_customer_id(
+    client: httpx.Client, config: PaddleConfig, email: str
+) -> str | None:
+    response = client.get(
+        f"{config.api_base}/customers",
+        headers=_auth_headers(config),
+        params={"email": email},
+    )
+    response.raise_for_status()
+    entries = (response.json() or {}).get("data") or []
+    # Prefer an active customer; an archived ctm_ id may be rejected on the
+    # transaction. Fall back to the first entry if Paddle omits status.
+    for entry in entries:
+        if entry.get("status") in (None, "active") and entry.get("id"):
+            return str(entry["id"])
+    return None
+
+
+def _resolve_customer_id_safe(config: PaddleConfig, email: str | None) -> str | None:
+    """Best-effort wrapper: email prefill is a UX nicety, NEVER a checkout gate."""
+    if not email:
+        return None
+    try:
+        return resolve_customer_id(config, email)
+    except Exception as exc:
+        # Do NOT log str(exc): httpx errors embed the request URL, which
+        # carries the account email as a query param (PII in gateway logs).
+        status = getattr(getattr(exc, "response", None), "status_code", "")
+        logger.warning(
+            "paddle customer resolve failed (checkout continues): %s %s",
+            type(exc).__name__,
+            status,
+        )
+        return None
+
+
 def create_transaction(
     config: PaddleConfig,
     *,
     order_id: str,
     target_plan_code: str,
     billing_period: str,
+    customer_email: str | None = None,
 ) -> tuple[str, str]:
     """Create a Paddle transaction and return ``(checkout_url, transaction_id)``.
+
+    ``customer_email`` (the gateway account email, may be None for phone-only
+    accounts) attaches a Paddle customer so the checkout opens with the email
+    prefilled instead of asking the buyer to type one.
 
     Raises ``ValueError`` if the price is unmapped or Paddle returns no
     ``checkout.url`` (R11 — default payment link not configured).
@@ -213,6 +296,9 @@ def create_transaction(
         "items": [{"price_id": price_id, "quantity": 1}],
         "custom_data": {"order_id": order_id},
     }
+    customer_id = _resolve_customer_id_safe(config, customer_email)
+    if customer_id:
+        body["customer_id"] = customer_id
     with httpx.Client(timeout=httpx.Timeout(20.0)) as client:
         response = client.post(
             f"{config.api_base}/transactions",

@@ -24,7 +24,7 @@
  * - All numeric facts come from the gateway. Nothing is hardcoded.
  */
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -88,6 +88,21 @@ export function CheckoutCard({
   )
   const [selectedPeriod, setSelectedPeriod] = useState<BillingPeriod>("monthly")
   const [submitting, setSubmitting] = useState(false)
+  const [redirecting, setRedirecting] = useState(false)
+
+  useEffect(() => {
+    // Browser Back from the provider checkout restores this page from the
+    // bfcache with JS state intact — without this reset the pay button would
+    // stay disabled on "正在跳转支付页…" forever.
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        setSubmitting(false)
+        setRedirecting(false)
+      }
+    }
+    window.addEventListener("pageshow", handlePageShow)
+    return () => window.removeEventListener("pageshow", handlePageShow)
+  }, [])
 
   const selectedPlan = paidPlans.find((p) => p.code === selectedPlanCode) ?? null
   const periods = periodsForPlan(selectedPlan?.price_cny_fen ?? null)
@@ -143,16 +158,16 @@ export function CheckoutCard({
       } catch {
         // localStorage unavailable — non-fatal; webhook still settles server-side
       }
-      // Hand off to the provider checkout URL. For fake provider this is
-      // `/api/billing/fake-pay/{order_id}`; for Alipay this is the signed
-      // payment URL from the gateway.
-      toast.success("正在跳转到支付页…")
-      await new Promise((r) => setTimeout(r, 300))
+      // Hand off to the provider checkout URL immediately — every ms of delay
+      // on the pay CTA is conversion loss, and a toast would be destroyed by
+      // the navigation anyway. Keep the button disabled (redirecting) until
+      // the page actually unloads so a double-click can't create a 2nd order.
+      setRedirecting(true)
       window.location.assign(result.checkout_url)
     } catch (err) {
       const message = err instanceof Error ? err.message : "创建订单失败"
       toast.error(message)
-    } finally {
+      setRedirecting(false)
       setSubmitting(false)
     }
   }
@@ -267,7 +282,7 @@ export function CheckoutCard({
         onClick={handleCheckout}
       >
         {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-        {submitting ? "正在创建订单…" : "立即支付"}
+        {redirecting ? "正在跳转支付页…" : submitting ? "正在创建订单…" : "立即支付"}
       </Button>
 
       <p className="text-xs leading-relaxed text-muted-foreground">

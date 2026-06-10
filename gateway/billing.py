@@ -12,10 +12,13 @@ Phase 6 architecture:
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+
+import anyio
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -142,14 +145,24 @@ async def create_order(
     # Flush to get order.id without committing — if adapter fails, we rollback
     await db.flush()
 
-    # Create checkout through provider adapter
+    # Create checkout through provider adapter. customer_email prefills the
+    # buyer email on hosted checkouts (Paddle); phone-only accounts have no
+    # email (User.email is nullable) and pass None — providers must treat it
+    # as a UX nicety, never a checkout gate.
+    # Providers are sync (blocking httpx) — run off the event loop so a slow
+    # provider API can't stall the whole gateway (auth, webhooks, other users).
+    account_email = (getattr(user, "email", None) or "").strip() or None
     try:
-        checkout = provider.create_checkout(
-            order_id=str(order.id),
-            amount_cny=amount,
-            target_plan_code=body.target_plan_code,
-            billing_period=body.billing_period,
-            checkout_surface=checkout_surface,
+        checkout = await anyio.to_thread.run_sync(
+            functools.partial(
+                provider.create_checkout,
+                order_id=str(order.id),
+                amount_cny=amount,
+                target_plan_code=body.target_plan_code,
+                billing_period=body.billing_period,
+                checkout_surface=checkout_surface,
+                customer_email=account_email,
+            )
         )
     except Exception as exc:
         await db.rollback()

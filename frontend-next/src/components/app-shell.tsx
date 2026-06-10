@@ -6,6 +6,7 @@ import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
 import { clearPostAuthSessionHint } from "@/lib/auth/post-auth-redirect"
+import { WORKSPACE_THEME_STORAGE_KEY } from "@/lib/theme"
 import { Button } from "@/components/ui/button"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
 import { SupportWidget } from "@/components/support/SupportWidget"
@@ -61,8 +62,6 @@ type NavGroup = {
   items: NavItem[]
   adminOnly?: boolean
 }
-
-const WORKSPACE_THEME_STORAGE_KEY = "aivt-workspace-theme"
 
 const navGroups: NavGroup[] = [
   {

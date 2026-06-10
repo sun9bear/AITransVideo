@@ -431,6 +431,229 @@ class TestCreateTransaction:
             )
 
 
+# --- customer resolution (email prefill on checkout) ---
+
+
+def _patch_customers_client(monkeypatch, *, get_payloads, post_payload=None, post_status=200):
+    """Client mock for the /customers find-or-create flow. ``get_payloads`` is
+    consumed per GET call (last one repeats); POST always returns the same."""
+    state = {"gets": 0}
+    calls: list[tuple[str, dict | None]] = []
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, headers=None, params=None):
+            idx = min(state["gets"], len(get_payloads) - 1)
+            state["gets"] += 1
+            calls.append(("get", params))
+            return _SyncResp(get_payloads[idx])
+
+        def post(self, url, headers=None, json=None):
+            calls.append(("post", json))
+            return _SyncResp(post_payload or {}, post_status)
+
+    monkeypatch.setattr(paddle.httpx, "Client", _Client)
+    return calls
+
+
+class TestResolveCustomer:
+    def test_lookup_hit_returns_existing_id_without_create(
+        self, monkeypatch, paddle_configured_env
+    ):
+        calls = _patch_customers_client(
+            monkeypatch,
+            get_payloads=[{"data": [{"id": "ctm_1", "status": "active"}]}],
+        )
+        assert (
+            paddle.resolve_customer_id(paddle_configured_env, "user@example.com")
+            == "ctm_1"
+        )
+        assert all(method != "post" for method, _ in calls)
+
+    def test_lookup_miss_creates_customer(self, monkeypatch, paddle_configured_env):
+        calls = _patch_customers_client(
+            monkeypatch,
+            get_payloads=[{"data": []}],
+            post_payload={"data": {"id": "ctm_new"}},
+        )
+        assert (
+            paddle.resolve_customer_id(paddle_configured_env, "user@example.com")
+            == "ctm_new"
+        )
+        post_bodies = [body for method, body in calls if method == "post"]
+        assert post_bodies == [{"email": "user@example.com"}]
+
+    def test_create_conflict_falls_back_to_second_lookup(
+        self, monkeypatch, paddle_configured_env
+    ):
+        # Create race: another request created the customer between our GET
+        # and POST. 409 must NOT raise — re-lookup instead.
+        _patch_customers_client(
+            monkeypatch,
+            get_payloads=[{"data": []}, {"data": [{"id": "ctm_2", "status": "active"}]}],
+            post_status=409,
+        )
+        assert (
+            paddle.resolve_customer_id(paddle_configured_env, "user@example.com")
+            == "ctm_2"
+        )
+
+    def test_archived_customer_not_used(self, monkeypatch, paddle_configured_env):
+        # Archived ctm_ ids can be rejected on the transaction; degrade to no
+        # prefill (None) rather than attach one.
+        _patch_customers_client(
+            monkeypatch,
+            get_payloads=[{"data": [{"id": "ctm_a", "status": "archived"}]}],
+            post_status=409,
+        )
+        assert (
+            paddle.resolve_customer_id(paddle_configured_env, "user@example.com")
+            is None
+        )
+
+    def test_email_normalized_to_lowercase(self, monkeypatch, paddle_configured_env):
+        # Paddle dedupes emails case-insensitively but ?email= is exact-match:
+        # without normalization a mixed-case account email misses the GET,
+        # 409s on POST, and misses the retry GET — no prefill, every checkout.
+        calls = _patch_customers_client(
+            monkeypatch,
+            get_payloads=[{"data": []}],
+            post_payload={"data": {"id": "ctm_lc"}},
+        )
+        assert (
+            paddle.resolve_customer_id(paddle_configured_env, " User@Example.COM ")
+            == "ctm_lc"
+        )
+        assert [p for m, p in calls if m == "get"] == [{"email": "user@example.com"}]
+        assert [b for m, b in calls if m == "post"] == [{"email": "user@example.com"}]
+
+    @pytest.mark.parametrize(
+        "email",
+        ["", "no-at-sign", "has space@example.com", "中文@example.com"],
+    )
+    def test_paddle_unsafe_email_skips_network(
+        self, monkeypatch, paddle_configured_env, email
+    ):
+        class _Boom:
+            def __init__(self, *a, **k):
+                raise AssertionError("network must not be touched for unsafe email")
+
+        monkeypatch.setattr(paddle.httpx, "Client", _Boom)
+        assert paddle.resolve_customer_id(paddle_configured_env, email) is None
+
+    def test_safe_wrapper_swallows_errors(self, monkeypatch, paddle_configured_env):
+        def boom(config, email):
+            raise RuntimeError("paddle down")
+
+        monkeypatch.setattr(paddle, "resolve_customer_id", boom)
+        assert (
+            paddle._resolve_customer_id_safe(paddle_configured_env, "u@x.com") is None
+        )
+        assert paddle._resolve_customer_id_safe(paddle_configured_env, None) is None
+
+
+class TestCreateTransactionCustomerEmail:
+    def test_customer_email_attached_as_customer_id(
+        self, monkeypatch, paddle_configured_env
+    ):
+        _patch_price_ok(monkeypatch, paddle_configured_env)
+        monkeypatch.setattr(
+            paddle,
+            "_resolve_customer_id_safe",
+            lambda cfg, email: "ctm_9" if email == "u@x.com" else None,
+        )
+        capture = {}
+        _patch_sync_client(
+            monkeypatch,
+            {"data": {"id": "txn_1", "checkout": {"url": "https://x/p?_ptxn=txn_1"}}},
+            capture=capture,
+        )
+        create_transaction(
+            paddle_configured_env,
+            order_id="o",
+            target_plan_code="plus",
+            billing_period="monthly",
+            customer_email="u@x.com",
+        )
+        assert capture["json"]["customer_id"] == "ctm_9"
+
+    def test_resolve_failure_never_blocks_checkout(
+        self, monkeypatch, paddle_configured_env
+    ):
+        # Email prefill is a UX nicety: resolution failure must degrade to a
+        # customer-less transaction, never a failed checkout.
+        _patch_price_ok(monkeypatch, paddle_configured_env)
+
+        def boom(config, email):
+            raise RuntimeError("customers api down")
+
+        monkeypatch.setattr(paddle, "resolve_customer_id", boom)
+        capture = {}
+        _patch_sync_client(
+            monkeypatch,
+            {"data": {"id": "txn_2", "checkout": {"url": "https://x/p?_ptxn=txn_2"}}},
+            capture=capture,
+        )
+        url, txn = create_transaction(
+            paddle_configured_env,
+            order_id="o",
+            target_plan_code="plus",
+            billing_period="monthly",
+            customer_email="u@x.com",
+        )
+        assert txn == "txn_2"
+        assert "customer_id" not in capture["json"]
+
+    def test_no_email_means_no_customer_field(
+        self, monkeypatch, paddle_configured_env
+    ):
+        _patch_price_ok(monkeypatch, paddle_configured_env)
+        capture = {}
+        _patch_sync_client(
+            monkeypatch,
+            {"data": {"id": "txn_3", "checkout": {"url": "https://x/p?_ptxn=txn_3"}}},
+            capture=capture,
+        )
+        create_transaction(
+            paddle_configured_env,
+            order_id="o",
+            target_plan_code="plus",
+            billing_period="monthly",
+        )
+        assert "customer_id" not in capture["json"]
+
+
+def test_provider_create_checkout_passes_customer_email(
+    monkeypatch, paddle_configured_env
+):
+    captured = {}
+
+    def fake_create_transaction(
+        config, *, order_id, target_plan_code, billing_period, customer_email=None
+    ):
+        captured["customer_email"] = customer_email
+        return ("https://x/p?_ptxn=t", "t")
+
+    monkeypatch.setattr(paddle, "create_transaction", fake_create_transaction)
+    result = PaddleProvider().create_checkout(
+        order_id="o",
+        amount_cny=9900,
+        target_plan_code="plus",
+        billing_period="monthly",
+        customer_email="u@x.com",
+    )
+    assert captured["customer_email"] == "u@x.com"
+    assert result.provider_order_id == "t"
+
+
 # --- transaction query (async httpx.AsyncClient) ---
 
 

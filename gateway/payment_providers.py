@@ -43,6 +43,7 @@ class PaymentProvider(Protocol):
         target_plan_code: str,
         billing_period: str,
         checkout_surface: str = "pc_web",
+        customer_email: str | None = None,
     ) -> CheckoutResult:
         ...
 
@@ -79,8 +80,10 @@ class FakeProvider:
         target_plan_code: str,
         billing_period: str,
         checkout_surface: str = "pc_web",
+        customer_email: str | None = None,
     ) -> CheckoutResult:
         del amount_cny, target_plan_code, billing_period, checkout_surface
+        del customer_email
         if not is_fake_payment_enabled():
             raise RuntimeError("fake payment provider is disabled")
         return CheckoutResult(
@@ -182,7 +185,9 @@ class AlipayProvider:
         target_plan_code: str,
         billing_period: str,
         checkout_surface: str = "pc_web",
+        customer_email: str | None = None,
     ) -> CheckoutResult:
+        del customer_email  # Alipay checkout collects no buyer email
         if self._config is None:
             raise NotImplementedError(
                 "payment provider alipay is not configured; set AVT_ALIPAY_* env vars first"
@@ -289,6 +294,7 @@ class PaddleProvider:
         target_plan_code: str,
         billing_period: str,
         checkout_surface: str = "pc_web",
+        customer_email: str | None = None,
     ) -> CheckoutResult:
         # Paddle charges by price_id; which methods show (Alipay / WeChat / card)
         # is decided by Paddle from buyer geo + currency, so amount_cny and
@@ -306,6 +312,7 @@ class PaddleProvider:
             order_id=order_id,
             target_plan_code=target_plan_code,
             billing_period=billing_period,
+            customer_email=customer_email,
         )
         return CheckoutResult(checkout_url=checkout_url, provider_order_id=txn_id)
 
