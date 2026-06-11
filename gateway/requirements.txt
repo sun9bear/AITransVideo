@@ -4,6 +4,9 @@ httpx==0.28.1
 python-multipart==0.0.20
 sqlalchemy[asyncio]==2.0.40
 asyncpg==0.31.0
+# sync driver for anonymous_preview_api._make_sync_intake_session (run_intake_and_save
+# needs a sync Session inside asyncio.to_thread); without it upload → intake_failed 500
+psycopg2-binary==2.9.10
 alembic==1.15.2
 bcrypt==4.3.0
 pydantic==2.11.3
