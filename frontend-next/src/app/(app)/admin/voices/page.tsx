@@ -726,8 +726,10 @@ export default function VoiceCatalogPage() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err))
     } finally {
-      setLabeling(false)
-      setLabelProgress('')
+      if (isMountedRef.current) {
+        setLabeling(false)
+        setLabelProgress('')
+      }
     }
   }
 

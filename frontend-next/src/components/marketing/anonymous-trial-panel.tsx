@@ -264,18 +264,25 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
 
   async function handleCreate() {
     if (!state.consentChecked || !state.previewId) return
+    // Same generation discipline as doPoll: if the panel is reset while
+    // createPreview is in flight, schedulePoll would otherwise re-arm with
+    // the NEW generation and revive polling for the abandoned preview.
+    const gen = pollGenRef.current
+    const previewId = state.previewId
 
     setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null }))
 
     try {
-      await createPreview(state.previewId, new Date().toISOString())
+      await createPreview(previewId, new Date().toISOString())
     } catch (err) {
+      if (gen !== pollGenRef.current) return
       const msg = err instanceof Error ? err.message : '创建预览失败，请重试'
       setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
       return
     }
 
-    schedulePoll(state.previewId)
+    if (gen !== pollGenRef.current) return
+    schedulePoll(previewId)
   }
 
   // ── Polling ──

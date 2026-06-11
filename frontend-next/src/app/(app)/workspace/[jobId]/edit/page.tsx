@@ -832,9 +832,11 @@ export default function VideoEditPage() {
       toast.error(`批量合成失败: ${getErrorMessage(error)}`, { id: toastId })
       return false
     } finally {
-      setIsBatchRegenerating(false)
-      setBatchTaskId(null)
-      setIsCancellingBatch(false)
+      if (isMountedRef.current) {
+        setIsBatchRegenerating(false)
+        setBatchTaskId(null)
+        setIsCancellingBatch(false)
+      }
     }
   }, [isBatchRegenerating, isMountedRef, jobId, loadData])
 
@@ -998,10 +1000,12 @@ export default function VideoEditPage() {
     } catch (error) {
       toast.error(`批量替换失败: ${getErrorMessage(error)}`, { id: toastId })
     } finally {
-      setIsBulkReplaceApplying(false)
-      setIsBatchRegenerating(false)
-      setBatchTaskId(null)
-      setIsCancellingBatch(false)
+      if (isMountedRef.current) {
+        setIsBulkReplaceApplying(false)
+        setIsBatchRegenerating(false)
+        setBatchTaskId(null)
+        setIsCancellingBatch(false)
+      }
     }
   }, [
     bulkReplacePreview,
