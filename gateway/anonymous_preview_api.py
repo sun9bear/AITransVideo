@@ -384,7 +384,7 @@ async def anonymous_upload(
     record_status = record.status
     status_str = record_status.value if hasattr(record_status, "value") else str(record_status)
 
-    return JSONResponse(
+    out = JSONResponse(
         status_code=200,
         content={
             "preview_id": record.record_id,
@@ -394,6 +394,13 @@ async def anonymous_upload(
             "admission_decision": admission_decision,
         },
     )
+    # FastAPI 不会把依赖注入 `response` 上的 header 合并进 handler 显式返回的
+    # Response —— get_or_create_anonymous_session 设置的 avt_anon Set-Cookie
+    # 必须手动搬运，否则匿名会话永远到不了客户端，/create 恒 401
+    # anonymous_session_required（2026-06-11 e2e 冒烟发现，漏斗级 P0）。
+    for _sc in response.headers.getlist("set-cookie"):
+        out.headers.append("set-cookie", _sc)
+    return out
 
 
 # ---------------------------------------------------------------------------

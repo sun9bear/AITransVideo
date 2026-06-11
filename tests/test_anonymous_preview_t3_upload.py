@@ -818,3 +818,37 @@ class TestHelpers:
         }
         ip = extract_client_ip(req)
         assert ip == "1.2.3.4"
+
+
+# ---------------------------------------------------------------------------
+# 9. P0 回归守卫：upload 成功响应必须搬运 Set-Cookie（2026-06-11 e2e 冒烟发现）
+# ---------------------------------------------------------------------------
+
+class TestUploadSetCookieGuard:
+    """FastAPI 不会把依赖注入 ``response`` 上的 header 合并进 handler 显式
+    返回的 JSONResponse。get_or_create_anonymous_session 把 avt_anon
+    Set-Cookie 设在注入 response 上，upload 成功路径若直接 return 自建
+    JSONResponse，cookie 永远到不了客户端 → /create 恒 401
+    anonymous_session_required，漏斗对所有新访客完全不可用（生产冒烟实测）。
+
+    源码级契约：anonymous_upload 内必须存在 set-cookie 搬运逻辑。
+    """
+
+    def test_upload_success_return_merges_session_set_cookie(self):
+        src = (Path(_GATEWAY_DIR) / "anonymous_preview_api.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+        upload_fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "anonymous_upload"
+        )
+        fn_src = ast.get_source_segment(src, upload_fn) or ""
+        assert 'getlist("set-cookie")' in fn_src, (
+            "anonymous_upload 丢失了 Set-Cookie 搬运逻辑：注入 response 上的 "
+            "avt_anon cookie 必须复制到显式返回的 JSONResponse，否则匿名会话"
+            "到不了客户端，/create 恒 401（2026-06-11 P0 回归）"
+        )
+        assert ".append(" in fn_src and "set-cookie" in fn_src.lower()
