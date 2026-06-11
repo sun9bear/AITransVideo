@@ -49,7 +49,11 @@ from anonymous_preview_quota import hash_scope_key, shanghai_today
 from services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
 from anonymous_preview_record_store import RecordStoreError
 from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anonymous_upload, extract_client_ip
-from anonymous_preview_intake_wiring import run_intake_and_save
+from anonymous_preview_intake_wiring import (
+    ANON_PREVIEW_COUNTER_SCOPE,
+    peek_counter_keys,
+    run_intake_and_save,
+)
 from anonymous_session import (
     AnonymousSessionContext,
     get_or_create_anonymous_session,
@@ -212,14 +216,23 @@ async def anonymous_upload(
         # Use async db session directly for the peek SELECTs (avoids sync engine spin-up)
         from sqlalchemy import text as _sa_text
 
-        _global_key = "global"
+        # (scope, scope_key) 必须与权威计数器写入形状逐字节一致：scope 列恒为
+        # ANON_PREVIEW_COUNTER_SCOPE（wiring 单实例 store），scope_key 是
+        # adapter 复合键 "global:{day}" / "ip:{hmac('ip:'+ip)}:{day}"。
+        # 推导只许走 peek_counter_keys——此前 peek 自行用 scope='global'/'ip'
+        # + 裸值哈希，两个维度恒查 0 行、cap 预检恒放行（2026-06-11 bug ⑤）。
+        _global_key, _ip_key = peek_counter_keys(
+            client_ip_peek,
+            day_key_peek,
+            secret=settings.anonymous_preview_hash_secret,
+        )
         _global_row = await db.execute(
             _sa_text(
                 "SELECT count FROM anonymous_preview_daily_usage "
-                "WHERE scope = 'global' AND scope_key = :key "
+                "WHERE scope = :scope AND scope_key = :key "
                 "  AND mode = 'free' AND usage_date = :day"
             ),
-            {"key": _global_key, "day": day_key_peek},
+            {"scope": ANON_PREVIEW_COUNTER_SCOPE, "key": _global_key, "day": day_key_peek},
         )
         _global_count = int((_global_row.fetchone() or [0])[0])
         if _global_count >= settings.anonymous_preview_cap_global_per_day:
@@ -230,24 +243,21 @@ async def anonymous_upload(
             )
             return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
 
-        _ip_hashed = hash_scope_key(
-            client_ip_peek, secret=settings.anonymous_preview_hash_secret
-        )
         _ip_row = await db.execute(
             _sa_text(
                 "SELECT count FROM anonymous_preview_daily_usage "
-                "WHERE scope = 'ip' AND scope_key = :key "
+                "WHERE scope = :scope AND scope_key = :key "
                 "  AND mode = 'free' AND usage_date = :day"
             ),
-            {"key": _ip_hashed, "day": day_key_peek},
+            {"scope": ANON_PREVIEW_COUNTER_SCOPE, "key": _ip_key, "day": day_key_peek},
         )
         _ip_count = int((_ip_row.fetchone() or [0])[0])
         if _ip_count >= settings.anonymous_preview_cap_per_ip:
             logger.info(
-                "anon_upload: AD-8 peek ip cap reached count=%d cap=%d ip_hash=%.8s",
+                "anon_upload: AD-8 peek ip cap reached count=%d cap=%d ip_key=%.16s",
                 _ip_count,
                 settings.anonymous_preview_cap_per_ip,
-                _ip_hashed,
+                _ip_key,
             )
             return JSONResponse(status_code=429, content={"error": "rate_limited"})
     except RateLimitCounterUnavailable:

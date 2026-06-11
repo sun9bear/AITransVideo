@@ -60,9 +60,51 @@ from services.anonymous_preview_intake import (
 __all__ = [
     "run_intake_and_save",
     "build_intake_config",
+    "build_scope_hasher",
+    "peek_counter_keys",
+    "ANON_PREVIEW_COUNTER_SCOPE",
 ]
 
 logger = logging.getLogger(__name__)
+
+# anonymous_preview_daily_usage.scope 列的唯一合法值——权威计数器
+# （run_intake_and_save → PgRateLimitCounterStore）和 AD-8 peek SELECT
+# 必须用同一个常量；adapter 的维度区分（global/ip/device/source）在
+# scope_key 前缀里，不在 scope 列。
+ANON_PREVIEW_COUNTER_SCOPE = "anon_preview"
+
+
+def build_scope_hasher(secret: str) -> Callable[[str, str], str]:
+    """Return the (prefix, value) → HMAC hasher the adapter consumes.
+
+    adapter 契约是 hasher(prefix, value) 两个位置参数；hash_scope_key 只收
+    一个位置参数，所以把 prefix 并进被哈希材料：``f"{prefix}:{value}"``。
+    这是权威计数器 scope_key 中哈希段的唯一推导落点——AD-8 peek 必须经
+    ``peek_counter_keys`` 复用它，不得自行调 hash_scope_key（裸 IP 不带
+    "ip:" 前缀哈希出来的 key 永远查不到行，cap 预检恒放行——2026-06-11
+    e2e 冒烟同族 bug ⑤）。
+    """
+
+    def hasher(prefix: str, value: str) -> str:
+        return hash_scope_key(f"{prefix}:{value}", secret=secret)
+
+    return hasher
+
+
+def peek_counter_keys(raw_ip: str, day_key: str, *, secret: str) -> tuple[str, str]:
+    """Return ``(global_scope_key, ip_scope_key)`` exactly as the adapter writes.
+
+    形状与 ``AnonymousPreviewBackendAdapter._enforce_rate_limits`` 的复合键
+    严格对齐：``f"global:{day_key}"`` / ``f"ip:{hasher('ip', raw_ip)}:{day_key}"``。
+    回归守卫：tests/test_anonymous_preview_upload_peek.py::
+    TestPeekKeyDerivationConsistency 用 recording counter store 跑真实
+    intake 路径，断言两侧推导逐字节一致——改任一侧形状会 red。
+    """
+    hasher = build_scope_hasher(secret)
+    return (
+        f"global:{day_key}",
+        f"ip:{hasher('ip', raw_ip)}:{day_key}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -217,12 +259,9 @@ def run_intake_and_save(
     # Build HMAC hasher from settings secret.
     # The adapter calls hasher(prefix, value) — two positional args —
     # where prefix disambiguates the scope ("sess", "ip", "dev").
-    # hash_scope_key(value, *, secret=...) takes one positional arg, so
-    # we wrap it to incorporate the prefix into the hashed material.
-    secret = settings.anonymous_preview_hash_secret
-
-    def hasher(prefix: str, value: str) -> str:
-        return hash_scope_key(f"{prefix}:{value}", secret=secret)
+    # 推导逻辑在 build_scope_hasher（模块级共享落点）——AD-8 peek 经
+    # peek_counter_keys 复用同一函数，保证两侧 key 逐字节一致。
+    hasher = build_scope_hasher(settings.anonymous_preview_hash_secret)
 
     # Build single counter store (adapter uses all four scopes via key prefix).
     if counter_store_factory is None:
@@ -247,9 +286,9 @@ def run_intake_and_save(
     # However, the _enforce_rate_limits constructs keys like
     # f"global:{day_key}" and calls try_acquire on those keys.  The PG store
     # stores them in scope_key column while scope column = our constructor arg.
-    # Using scope="anon_preview" and letting the adapter key carry the
-    # discriminator is exactly right.
-    counter_store = _factory("anon_preview")
+    # Using scope=ANON_PREVIEW_COUNTER_SCOPE and letting the adapter key carry
+    # the discriminator is exactly right.
+    counter_store = _factory(ANON_PREVIEW_COUNTER_SCOPE)
 
     # Build config.
     intake_config = build_intake_config(upload_root=upload_root)
