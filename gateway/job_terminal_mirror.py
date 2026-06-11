@@ -143,6 +143,17 @@ async def mirror_job_terminal_state(
     # orders; settlement must be safe to retry and able to repair a PG row that
     # already says "succeeded" but still has reserved quota/credits.
     if upstream_status in TERMINAL_STATUSES:
+        if getattr(db_job, "is_anonymous_preview", False) is True:
+            # APF P0 T8（AD-7/G2）：匿名预览 job 零结算不变量——跳过
+            # settle_job_quota / settle_job_credit_ledger / cost backfill，
+            # 但上方的状态字段镜像已照常完成（orphan reconciliation 与
+            # cleanup 依赖终态可见）。G2 红线：禁止在函数入口整体
+            # return，否则状态镜像一起丢失。
+            logger.info(
+                "mirror: anonymous preview job=%s terminal=%s — settlement bypassed",
+                db_job.job_id, upstream_status,
+            )
+            return changed
         quota_state_before = getattr(db_job, "quota_state", None)
         try:
             await settle_job_quota(db, db_job, upstream_status)

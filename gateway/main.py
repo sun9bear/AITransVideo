@@ -75,6 +75,7 @@ from database import engine, init_db
 from models import Base
 from startup_checks import (
     is_startup_recovery_schema_missing_error,
+    validate_anonymous_preview_config,
     validate_environment_name,
     validate_internal_api_key,
     validate_mainland_voice_worker_config,
@@ -146,6 +147,10 @@ async def lifespan(app: FastAPI):
         settings.mainland_voice_worker_hmac_key_id,
         settings.mainland_voice_worker_hmac_secret,
     )
+    # APF T1 — anonymous preview HMAC secret validation. Downgrades
+    # enable_anonymous_preview to False if secret is missing or too short.
+    # Fail-graceful: logs CRITICAL + downgrade, does not crash gateway.
+    validate_anonymous_preview_config(settings)
     # T3 — DB credentials are resolved and engine is built here. Raises if
     # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
     # avt:avt fallback).
@@ -357,6 +362,26 @@ async def lifespan(app: FastAPI):
             "pan auto-archive / refresh / reap / orphan-cleanup will be OFF",
         )
 
+    # APF P0 T9: Anonymous preview TTL & media cleanup sweeper. Deletes
+    # gateway-side upload/teaser files for block/reject records and expired
+    # records, appends audit JSONL (no transcription text / raw IP), and
+    # prunes stale anonymous_sessions / daily_usage rows. Only started when
+    # enable_anonymous_preview is True (feature-flag gate). Same fail-safe
+    # pattern as all other sweepers above — startup failure must not block
+    # gateway. Must be merged before flag is enabled on any environment.
+    try:
+        if settings.enable_anonymous_preview:
+            from anonymous_preview_sweeper import sweeper_loop as _anon_preview_sweeper_loop
+            _anon_preview_sweeper_task = _asyncio.create_task(
+                _anon_preview_sweeper_loop(), name="anonymous-preview-sweeper",
+            )
+            app.state.anonymous_preview_sweeper_task = _anon_preview_sweeper_task
+    except Exception:
+        logger.exception(
+            "Failed to start anonymous_preview_sweeper; anonymous preview media "
+            "TTL cleanup will not run (manual cleanup required)",
+        )
+
     # Seed pricing runtime
     try:
         from pricing_runtime import get_runtime_pricing
@@ -382,6 +407,8 @@ async def lifespan(app: FastAPI):
         "pan_token_refresh_task",
         "pan_orphan_cleanup_task",
         "pan_stale_reaper_task",
+        # APF P0 T9: anonymous preview TTL sweeper.
+        "anonymous_preview_sweeper_task",
     ):
         handle = getattr(app.state, attr, None)
         if handle is not None:
@@ -500,6 +527,10 @@ app.include_router(voice_catalog_internal_router)
 from user_voice_api import router as user_voice_router, internal_router as user_voice_internal_router
 app.include_router(user_voice_router)
 app.include_router(user_voice_internal_router)
+
+# APF P0 anonymous preview (plan 2026-06-10 T7) — must be before catch-all.
+from anonymous_preview_api import router as anonymous_preview_router  # noqa: E402
+app.include_router(anonymous_preview_router)
 
 # Customer support API + notification center (plan 2026-05-08)
 from notifications_api import internal_router as notifications_internal_router

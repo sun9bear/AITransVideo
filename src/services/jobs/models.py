@@ -224,6 +224,13 @@ class JobRecord:
     # spec §3.1.a + §9.1 audit schema.
     express_consent_parse_error: str | None = None
 
+    # --- APF P0 匿名预览标记（plan 2026-06-10 AD-7/G3，T5） ---
+    # Gateway 在匿名预览 create payload 写入 True；pipeline 经
+    # ``_snap("anonymous_preview")`` 读取，进入匿名严格合规 lane
+    # （三条 skip 路径 fail-closed + S2 Pass 3 跳过）。严格 ``is True``
+    # gate（匹配 smart_consent / express_consent 风格），登录任务恒 False。
+    anonymous_preview: bool = False
+
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
         self.job_type = str(self.job_type).strip()
@@ -371,6 +378,8 @@ class JobRecord:
             # --- Phase 4.3a Express auto-clone entry-input ---
             "express_consent": _serialize_optional_dict(self.express_consent),
             "express_consent_parse_error": self.express_consent_parse_error,
+            # --- APF P0 匿名预览标记 ---
+            "anonymous_preview": self.anonymous_preview is True,
         }
 
     @classmethod
@@ -442,6 +451,8 @@ class JobRecord:
             # --- Phase 4.3a Express auto-clone entry-input ---
             express_consent=payload.get("express_consent"),
             express_consent_parse_error=payload.get("express_consent_parse_error"),
+            # --- APF P0 匿名预览标记（严格 is True，拒 "true"/1 coercion） ---
+            anonymous_preview=payload.get("anonymous_preview") is True,
         )
 
 

@@ -300,6 +300,37 @@ class GatewaySettings(BaseSettings):
     cosyvoice_oss_connect_timeout_s: int = 10
     cosyvoice_oss_read_timeout_s: int = 30
 
+    # --- APF 匿名 Free 预览 (plan 2026-06-10 T1) ---
+    # 双端 feature flag 默认关；生产零影响。
+    # 开启条件：enable_anonymous_preview=True AND anonymous_preview_hash_secret≥32字节。
+    # 启动校验：validate_anonymous_preview_config() — secret 缺失/过短 → CRITICAL+降级
+    # （不崩容器）。
+    # 同时也需要 AVT_ENABLE_FREE_TIER=true（匿名 surface 不绕过 free tier 总开关，AD-7）。
+    enable_anonymous_preview: bool = False
+
+    # 单次预览 teaser 最大时长（秒）。pipeline 按此 cap 截取子文件。
+    anonymous_preview_max_seconds: int = 180
+
+    # 上传文件大小上限（字节）。远小于登录用户 2GB，防带宽白嫖。
+    anonymous_preview_max_upload_bytes: int = 200 * 1024 * 1024  # 200 MB
+
+    # 风控四 key 每日上限（AD-5）：
+    #   global  — 全局每日总预览数
+    #   per_ip  — 同 IP 每日（受信代理提取）
+    #   per_device — 同匿名 session token 每日（即"每设备 1 次/天"）
+    #   per_source — 同源文件 sha256 每日（防重复提交相同文件）
+    anonymous_preview_cap_global_per_day: int = 500
+    anonymous_preview_cap_per_ip: int = 3
+    anonymous_preview_cap_per_device: int = 1
+    anonymous_preview_cap_per_source: int = 1
+
+    # HMAC-SHA256 密钥，用于对 scope_key (IP/device/source) 做不可逆 hash
+    # 再存入 anonymous_preview_daily_usage 表（表内无 raw IP 列，AD-5 F14）。
+    # 必须 ≥32 字节才有效；缺失或过短时 validate_anonymous_preview_config()
+    # 强制降级 enable_anonymous_preview=False。
+    # 生成：python -c "import secrets; print(secrets.token_urlsafe(32))"
+    anonymous_preview_hash_secret: str = ""
+
     model_config = {"env_prefix": "AVT_", "populate_by_name": True}
 
 

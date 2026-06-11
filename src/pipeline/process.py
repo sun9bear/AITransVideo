@@ -50,6 +50,7 @@ from services.audio.source_audio_preparation import (
 from services.content_compliance import (
     ContentPolicyViolationError,
     DEFAULT_REPORT_RELATIVE_PATH,
+    ContentComplianceResult,
     LLMContentComplianceReviewer,
     MainlandChinaContentComplianceReviewer,
     combine_content_compliance_results,
@@ -2259,6 +2260,47 @@ def _resolve_projects_root() -> Path:
     return (PROJECT_ROOT / "projects").resolve(strict=False)
 
 
+ANONYMOUS_PREVIEW_MIN_TRANSCRIPT_CHARS = 20
+
+
+def _should_run_pass3(review_speaker_styles: object, anonymous_preview: bool) -> bool:
+    """S2.5 Pass 3 gate（APF P0 T5）。
+
+    匿名预览 lane 跳过 Pass 3：音色画像是付费多模态调用，对 3 分钟
+    预设音色预览不必要（MiMo style 回落 Pass 1/2 已有字段或默认音色）。
+    登录任务行为不变。
+    """
+    return bool(review_speaker_styles) and not anonymous_preview
+
+
+def _anonymous_compliance_fail_closed_result(
+    *,
+    reason_code: str,
+    source_type: str,
+    source_ref: str,
+    video_title: str,
+) -> ContentComplianceResult:
+    """构造匿名严格 lane 的 fail-closed blocked 结果（APF P0 T5 / AD-2 v2）。
+
+    reason_code 只允许固定枚举串（compliance_disabled / llm_unavailable /
+    transcript_near_empty），不嵌入任何运行时细节，防泄漏。
+    """
+    from datetime import datetime, timezone
+
+    return ContentComplianceResult(
+        status="blocked",
+        policy_code="anonymous_preview_fail_closed",
+        policy_version="apf-p0-t5",
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        source_type=source_type,
+        source_ref=source_ref,
+        video_title=video_title,
+        message=f"匿名预览合规 fail-closed：{reason_code}",
+        findings=(),
+        layers={"anonymous_fail_closed": reason_code},
+    )
+
+
 def _check_duration_limit(
     duration_ms: int,
     *,
@@ -2625,6 +2667,20 @@ class ProcessPipeline:
         job_voice_strategy = _snap('voice_strategy', 'preset_mapping')
         job_plan_code = _snap('plan_code_snapshot', 'free')
         job_role = _snap('role_snapshot', 'user')
+        # APF P0 T5（AD-7/G3）：匿名预览标记，严格 is True gate；
+        # 驱动匿名严格合规 lane + Pass 3 跳过。登录任务恒 False。
+        job_anonymous_preview = _snap('anonymous_preview', False) is True
+        if job_anonymous_preview and job_voice_strategy != 'preset_mapping':
+            # 防 clone 第三道防线（对抗审核加固）：匿名任务的 voice_strategy
+            # 只允许 preset_mapping——gateway payload 硬编码是第一道、
+            # 白名单校验是第二道，这里是 pipeline 侧独立兜底，任何上游
+            # 改动都不可能让匿名任务踏入 voiceclone 分支。
+            print(
+                f"[PIPELINE] 匿名预览任务 voice_strategy={job_voice_strategy} 非法，"
+                "强制回 preset_mapping",
+                flush=True,
+            )
+            job_voice_strategy = 'preset_mapping'
         self._current_service_mode = job_service_mode  # for recovery paths
 
         # Smart MVP P2 (plan §6.0.6 / Codex 第八轮 F3) — derive the
@@ -2952,6 +3008,7 @@ class ProcessPipeline:
                 job_id=config.job_id,
                 user_id=str(_snap("user_id") or ""),
                 display_name=str(_snap("display_name") or download_result.video_title or ""),
+                anonymous_strict=job_anonymous_preview,
             )
 
             speaker_name_a = config.speaker_a_name
@@ -3266,7 +3323,9 @@ class ProcessPipeline:
 
             # --- Pass 3: voice profiling (before voice selection, before translation) ---
             _pass3_cache_path = (final_project_dir / "transcript" / "s2_pass3_result.json").resolve(strict=False)
-            if _review_speaker_styles:
+            if _review_speaker_styles and job_anonymous_preview:
+                print("[S2.5] 匿名预览任务：跳过 Pass 3 音色画像（付费多模态调用，APF P0 T5）", flush=True)
+            if _should_run_pass3(_review_speaker_styles, job_anonymous_preview):
                 _pass3_profiles: dict | None = None
                 if _pass3_cache_path.exists():
                     try:
@@ -10470,13 +10529,58 @@ class ProcessPipeline:
         job_id: str | None = None,
         user_id: str | None = None,
         display_name: str | None = None,
+        anonymous_strict: bool = False,
     ) -> dict[str, object]:
+        if anonymous_strict:
+            # APF P0 T5（AD-2 v2）：sentinel 匿名 job 不享受 admin override。
+            admin_override = False
         if not is_content_compliance_enabled():
+            if anonymous_strict:
+                # C2 skip 路径 1：总开关关闭对匿名 lane 必须 fail-closed。
+                print("[S2] 匿名预览：内容合规总开关关闭 → fail-closed 拒绝。")
+                raise ContentPolicyViolationError(
+                    _anonymous_compliance_fail_closed_result(
+                        reason_code="compliance_disabled",
+                        source_type=source_type,
+                        source_ref=source_ref,
+                        video_title=str(download_result.video_title or ""),
+                    )
+                )
             print("[S2] 内容合规审核已关闭，跳过。")
             return {
                 "status": "skipped",
                 "message": "内容合规审核已关闭。",
             }
+
+        if anonymous_strict:
+            # 近空转录（F7）：有音轨但转录内容过少 → 软拦截；匿名无人工
+            # 复审通道，软拦截即 blocked。
+            _transcript_chars = sum(
+                len(str(getattr(line, "source_text", "") or "").strip())
+                for line in transcript_result.lines
+            )
+            if _transcript_chars < ANONYMOUS_PREVIEW_MIN_TRANSCRIPT_CHARS:
+                print("[S2] 匿名预览：转录内容近空 → fail-closed 软拦截。")
+                raise ContentPolicyViolationError(
+                    _anonymous_compliance_fail_closed_result(
+                        reason_code="transcript_near_empty",
+                        source_type=source_type,
+                        source_ref=source_ref,
+                        video_title=str(download_result.video_title or ""),
+                    )
+                )
+            if llm_generate_json is None or not is_content_compliance_llm_enabled():
+                # C2 skip 路径 2：LLM 第二层未启用/未配置对匿名 lane 必须
+                # fail-closed（非匿名路径保持原"静默跳过第二层"行为）。
+                print("[S2] 匿名预览：LLM 合规层未启用或未配置 → fail-closed 拒绝。")
+                raise ContentPolicyViolationError(
+                    _anonymous_compliance_fail_closed_result(
+                        reason_code="llm_unavailable",
+                        source_type=source_type,
+                        source_ref=source_ref,
+                        video_title=str(download_result.video_title or ""),
+                    )
+                )
 
         print("[S2] 审核视频内容合规性...")
         reviewer = MainlandChinaContentComplianceReviewer()
@@ -10518,7 +10622,9 @@ class ProcessPipeline:
         final_result = combine_content_compliance_results(
             local_result=result,
             llm_result=llm_result,
-            llm_fail_closed=is_content_compliance_llm_fail_closed(),
+            # APF P0 T5（C2 skip 路径 3）：匿名 lane 代码级强制 fail-closed，
+            # 不读 env；登录任务沿用 env 配置。
+            llm_fail_closed=True if anonymous_strict else is_content_compliance_llm_fail_closed(),
         )
         admin_override_applied = bool(admin_override and final_result.blocked)
         if admin_override_applied:

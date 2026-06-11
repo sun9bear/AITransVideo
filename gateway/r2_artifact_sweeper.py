@@ -141,6 +141,16 @@ def _classify_candidate(
         push_keys=None  → publisher pushes full eligible set
         push_keys=froz. → delta push (currently only used for jianying)
     """
+    # APF P0 (AD-6): anonymous preview jobs run with service_mode="free" but
+    # are stream-only — their teaser must NEVER be eager-pushed to R2 (it would
+    # outlive the TTL-delete promise). The free-tier branch in
+    # eager_push_keys_for would otherwise push them, since the sweeper keys off
+    # service_mode alone. Short-circuit on the cross-cutting is_anonymous_preview
+    # column (the minimal, contract-safe isolation point — service_mode stays
+    # "free" so settlement / gating / watermark contracts are untouched).
+    if getattr(db_job, "is_anonymous_preview", False) is True:
+        return False, None
+
     expected_gen = db_job.edit_generation or 0
 
     # Primary trigger: never been published (or was reset by overwrite).

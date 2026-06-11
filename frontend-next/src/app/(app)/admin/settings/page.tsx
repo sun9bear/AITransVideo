@@ -110,6 +110,13 @@ interface AdminSettings {
   express_cosyvoice_auto_clone_per_user_active_temp_cap: number
   // Phase 4.3a PR2 §3: reservation TTL（分钟），validator 5-120
   express_cosyvoice_auto_clone_reservation_ttl_minutes: number
+  // --- APF 匿名免注册预览（P0 切片，2026-06-10）---
+  // 两个字段，full-body POST 语义同上——必须进 state 才不会被静默覆盖。
+  // 字段语义（详见 gateway/admin_settings.py APF 段）：
+  // - ``anonymous_free_preview_enabled``：runtime 总开关（双层 AND: env + admin）。
+  // - ``anonymous_preview_max_in_flight``：全局同时处理的匿名预览上限。
+  anonymous_free_preview_enabled: boolean
+  anonymous_preview_max_in_flight: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -176,6 +183,13 @@ const DEFAULT_SETTINGS: AdminSettings = {
   express_cosyvoice_auto_clone_per_user_active_temp_cap: 3,
   // Phase 4.3a PR2 §3：与 gateway Pydantic 默认值一致（30 分钟）
   express_cosyvoice_auto_clone_reservation_ttl_minutes: 30,
+  // --- APF 匿名免注册预览默认值（2026-06-10）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致：
+  //   anonymous_free_preview_enabled      = False
+  //   anonymous_preview_max_in_flight     = 2
+  // CodeX P1 修复：曾误写 10，把匿名并发门从计划值放大 5×。
+  anonymous_free_preview_enabled: false,
+  anonymous_preview_max_in_flight: 2,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [
@@ -941,6 +955,60 @@ export default function AdminSettingsPage() {
         </label>
       </SettingSection>
 
+      {/* APF 匿名免注册预览（P0 切片，2026-06-10）
+          ⚠️ 总开关默认关闭，需同时设置环境变量 NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW=1
+          才会让前端渲染上传面板；此 admin toggle 控制 gateway 端的处理路径。
+          max_in_flight 是全局并发上限，防止突发请求拖垮 pipeline。 */}
+      <SettingSection
+        title="匿名免注册预览"
+        description="允许未登录用户上传视频并免费获得带水印的前 3 分钟配音预览（APF P0 漏斗）。需同时在前端设置 NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW=1 才会显示上传入口。"
+      >
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.anonymous_free_preview_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, anonymous_free_preview_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              开启匿名预览
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                APF P0 · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后（需同时配置前端 env），未登录用户可在首页上传本地视频，获取带水印的前 3 分钟配音预览。
+              关闭时 gateway 拒绝所有匿名上传请求，前端占位框继续显示"即将开放"。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">全局同时处理上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              同一时刻允许同时进行处理的匿名预览任务数。超出后新上传返回 429（"预览通道繁忙"）。
+              默认 2，建议根据实际服务器负载调整（范围 1–100）。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            step={1}
+            value={settings.anonymous_preview_max_in_flight}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 100) {
+                setSettings((s) => ({ ...s, anonymous_preview_max_in_flight: v }))
+              }
+            }}
+            className="w-24 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+      </SettingSection>
+
       {/* Save button */}
       <div className="flex gap-3 pt-4 border-t border-border">
         <button
@@ -1012,6 +1080,13 @@ export default function AdminSettingsPage() {
               s.express_cosyvoice_auto_clone_per_user_active_temp_cap,
             express_cosyvoice_auto_clone_reservation_ttl_minutes:
               s.express_cosyvoice_auto_clone_reservation_ttl_minutes,
+            // --- APF reset 规则（2026-06-10）---
+            // visible toggle (anonymous_free_preview_enabled) 显式回 DEFAULT (false)；
+            // max_in_flight 是纯数字配置，回 DEFAULT 语义明确，也显式回默认值。
+            anonymous_free_preview_enabled:
+              DEFAULT_SETTINGS.anonymous_free_preview_enabled,
+            anonymous_preview_max_in_flight:
+              DEFAULT_SETTINGS.anonymous_preview_max_in_flight,
           }))}
           type="button"
         >
