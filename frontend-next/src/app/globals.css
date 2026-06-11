@@ -564,8 +564,12 @@
    .ink-display (weight 900) deliberately NOT included — EB Garamond caps at
    800 and would faux-bold. Scoped to .marketing-root (NOT bare
    [data-theme="ink"], which is shared by auth / AppShell light mode);
-   (0,3,0) specificity beats the shared rules regardless of source order. */
-.marketing-root[data-theme="ink"] .ink-heading {
+   Tailwind v4 strips the compound `.marketing-root[data-theme="ink"]` form
+   at build time (same compiler quirk as html[data-theme="ink-dark"], see the
+   ink-dark block) — so the scope is the .marketing-root class alone, bumped
+   to (0,3,0) via :not(.__never__) to beat the shared (0,2,0) rules without
+   relying on source order. */
+.marketing-root .ink-heading:not(.__never__) {
   font-family: var(--font-eb-garamond), "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
 }
 
