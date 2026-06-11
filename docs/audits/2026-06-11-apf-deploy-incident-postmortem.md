@@ -77,8 +77,20 @@ PYTHONIOENCODING=utf-8 python D:/daili/scripts/ssh_over_socks_command.py 127.0.0
 ## 4. 最终生产状态（US `5.78.122.220`）
 
 - 三容器全 **healthy**：gateway / next / app（+ postgres / caddy / cloudflared / disk-resize-helper）
-- 远端 `docker-compose.yml` = **main 版**（内联 PYTHONPATH + APF env 默认关），override **已删**，
-  备份 `docker-compose.yml.bak-20260611-apf`
+- 远端 compose：**root + app 两份均 = main 版**（sha256 与 repo `HEAD:docker-compose.yml` 一致，
+  内联 PYTHONPATH + APF env 默认关），无 override
+  - ⚠️ **纠正（2026-06-11 CodeX 复核发现）**：本文初版此处写"远端 compose = main 版、override 已删"
+    ——**不准确**。当时 main 版 compose 只落在 `/opt/aivideotrans/app/`，**规范入口
+    `/opt/aivideotrans/docker-compose.yml` 仍是 Jun 4 旧版**（无 PYTHONPATH / APF env /
+    Paddle build args）；gateway/next/app 从 app compose 创建、postgres/caddy 从旧 root
+    compose 创建——同一 project 被两份文件分治，即
+    [US_HOST_PRODUCTION_DEPLOYMENT.md](../deployment/US_HOST_PRODUCTION_DEPLOYMENT.md)
+    "Known Bad Pattern" 的复发。若有人按文档从 `/opt/aivideotrans` 跑 `up -d --build`，
+    gateway 会丢 PYTHONPATH 回到 crash-loop。**已修复**：root/app 两份均对齐 repo main
+    （旧 root 备份 `docker-compose.yml.bak-rootdrift-20260611`），规范入口 `config -q` 校验通过。
+  - 容器 label（`com.docker.compose.project.config_files`）仍指 app 路径，要等下次从 root
+    入口 force-recreate 才收敛——内容已一致，`up -d` 对 gateway/next/app 是 no-op，**不必**
+    为洗 label 专门 recreate（会杀 in-flight pipeline）。
 - DB：alembic **= 035 (head)**；`is_anonymous_preview` 列 + 3 表 + `ix_jobs_anon_preview_status`
   索引 + sentinel 用户（`anonymous-preview@system`）全在
 - **APF 开关：关**（`AVT_ENABLE_ANONYMOUS_PREVIEW=false` / `NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW=0`，
@@ -115,7 +127,7 @@ abbf2247 fix(gateway): APF 网关模块改用 from services.X 约定
 
 ---
 
-## 7. 部署教训（三条，已入记忆 [[feedback_apf_deploy_incident]]）
+## 7. 部署教训（四条，已入记忆 [[feedback_apf_deploy_incident]]）
 
 1. **gateway 需要 `PYTHONPATH=/opt/aivideotrans/app`**（共享 `src.services.X` 导入）。改 import 前缀治标，
    给 app/ 上 path 才治本。
@@ -123,6 +135,10 @@ abbf2247 fix(gateway): APF 网关模块改用 from services.X 约定
    diff 模型列 vs 远端 schema。
 3. **migration 数据 INSERT 要核 prod 的 NOT NULL 列**（跨 host default 差异让"测试绿"在 prod 炸）；半应用态
    靠 `stamp` + 手工补完，别 re-run。
+4. **compose 改动必须落到 root 入口 `/opt/aivideotrans/docker-compose.yml`**（唯一生产入口，见
+   [US_HOST_PRODUCTION_DEPLOYMENT.md](../deployment/US_HOST_PRODUCTION_DEPLOYMENT.md)）。只更新
+   `app/` 下那份 = Known Bad Pattern 复发：project 被两份文件分治，下次有人从 root 跑 `up -d`
+   就把修复全部回滚。部署后必须用 `docker compose ls --all` + 容器 label 验证入口唯一。
 
 通用：`git archive HEAD`（永不 tar 工作树）、`//tmp` 双斜线、nohup 后台 build + log poll、部署前查 in-flight、
 `up -d` 会重插值整 project 可能牵连 app。详见 [[deploy_experience]] / [[feedback_compose_env_file_recreate]]。
@@ -131,7 +147,8 @@ abbf2247 fix(gateway): APF 网关模块改用 from services.X 约定
 
 ## 8. 回滚参考（如需）
 
-- compose：远端 `docker-compose.yml.bak-20260611-apf` 是部署前快照。
+- compose：`/opt/aivideotrans/app/docker-compose.yml.bak-20260611-apf` 是部署前快照（app 侧）；
+  `/opt/aivideotrans/docker-compose.yml.bak-rootdrift-20260611` 是 root 入口对齐前的 Jun 4 旧版。
 - gateway/next 旧镜像：本次 rebuild 已覆盖 `:latest`，旧镜像为 dangling（`docker images -a`）。
 - DB：035 的 downgrade 在 `gateway/alembic/versions/035_anonymous_preview.py`（drop 3 表 + 列 + 索引 +
   sentinel，CONCURRENTLY 安全）；但**回滚 DB 会再次触发 §3.2**（gateway 模型仍要这列），除非同时回滚 gateway 代码。
