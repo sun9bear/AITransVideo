@@ -863,8 +863,9 @@ async def anonymous_preview_create(
     # payload（白名单深度防御：违规字段=代码 bug，拒绝并回滚抢占）
     payload = {
         "job_type": "localize_video",
-        "source_type": "local_video",
-        "source_ref": str(teaser_path),
+        # Job API 契约：source 是嵌套对象（api.py do_POST 读 payload["source"]
+        # 的 type/value），扁平 source_type/source_ref 会 400（2026-06-11 冒烟）。
+        "source": {"type": "local_video", "value": str(teaser_path)},
         "output_target": "editor",
         "service_mode": "free",
         "requires_review": False,

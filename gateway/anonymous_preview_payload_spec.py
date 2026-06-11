@@ -14,8 +14,12 @@ from __future__ import annotations
 ANONYMOUS_PREVIEW_PAYLOAD_SPEC: frozenset[str] = frozenset(
     {
         "job_type",
-        "source_type",
-        "source_ref",
+        # Job API POST /jobs 的真实契约是嵌套 source 对象
+        # （payload["source"] = {"type":..., "value":...}，见
+        # src/services/jobs/api.py do_POST）。扁平 source_type/source_ref
+        # 会被 Job API 当作 source 缺失 → ValueError 400
+        # （2026-06-11 冒烟发现）。
+        "source",
         "output_target",
         "service_mode",
         "requires_review",
