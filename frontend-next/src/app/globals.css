@@ -559,6 +559,16 @@
   font-weight: 600;
 }
 
+/* Marketing-scoped East-West heading pair (plan 2026-06-11 Task 6):
+   Garamond for Latin headings, existing Noto Serif SC stack as CJK fallback.
+   .ink-display (weight 900) deliberately NOT included — EB Garamond caps at
+   800 and would faux-bold. Scoped to .marketing-root (NOT bare
+   [data-theme="ink"], which is shared by auth / AppShell light mode);
+   (0,3,0) specificity beats the shared rules regardless of source order. */
+.marketing-root[data-theme="ink"] .ink-heading {
+  font-family: var(--font-eb-garamond), "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
+}
+
 /* Linen canvas weave for "oil painting" surfaces (plan 2026-06-11 Task 5).
    ::after (not ::before) so it composes with the ink-dark root noise overlay,
    which owns ::before. Sub-5% opacity + overlay blend adds tooth without

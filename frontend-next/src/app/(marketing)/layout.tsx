@@ -1,3 +1,4 @@
+import { EB_Garamond } from "next/font/google"
 import { SiteHeader } from "@/components/marketing/site-header"
 import { SiteFooter } from "@/components/marketing/site-footer"
 import { SupportWidget } from "@/components/support/SupportWidget"
@@ -16,6 +17,16 @@ import { SupportWidget } from "@/components/support/SupportWidget"
  * pre-sales questions without leaving the page. It self-disables via
  * /api/support/config when the admin kill switch is off.
  */
+/* East-West heading pair (plan 2026-06-11 Task 6): only weight 600 —
+   EB Garamond caps at 800, pairing it with .ink-display (900) would
+   faux-bold; Garamond is scoped to .ink-heading via .marketing-root rule. */
+const ebGaramond = EB_Garamond({
+  subsets: ["latin"],
+  weight: "600",
+  variable: "--font-eb-garamond",
+  display: "swap",
+})
+
 export default function MarketingLayout({
   children,
 }: {
@@ -24,7 +35,7 @@ export default function MarketingLayout({
   return (
     <div
       data-theme="ink"
-      className="flex min-h-screen flex-col bg-background"
+      className={`${ebGaramond.variable} marketing-root flex min-h-screen flex-col bg-background`}
     >
       <SiteHeader />
       <main id="main-content" className="flex-1">
