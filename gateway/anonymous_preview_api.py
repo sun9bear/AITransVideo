@@ -312,13 +312,22 @@ async def anonymous_upload(
         def _run_sync() -> object:
             sync_db = _make_sync_intake_session()
             try:
-                return run_intake_and_save(
+                rec = run_intake_and_save(
                     db_session=sync_db,
                     request_facts=request_facts,
                     upload_facts=upload_facts,
                     probe_fn=_probe_fn,
                     prescreen_fn=_prescreen_fn,
                 )
+                # run_intake_and_save 契约（wiring docstring）："the caller
+                # commits/rolls back"。store 内部只 flush；漏 commit → close()
+                # 时整个事务（record + 配额计数）静默回滚，upload 返回 200 但
+                # 记录不存在，/create 恒 404 not_found（2026-06-11 冒烟发现）。
+                sync_db.commit()
+                return rec
+            except BaseException:
+                sync_db.rollback()
+                raise
             finally:
                 sync_db.close()
 
@@ -343,6 +352,14 @@ async def anonymous_upload(
             )
         )
         _orm_row = _row_result.scalar_one_or_none()
+        if _orm_row is None:
+            # intake 刚返回了 record 却查不到行 = 持久化层断裂（如漏 commit）。
+            # 静默跳过会让 200 带着死 preview_id 出门 → /create 恒 404；
+            # 必须 fail-loud（与下方 except 分支同语义：503 + 清理媒体）。
+            raise RuntimeError(
+                f"anon_upload: record {record.record_id} not found in ORM "
+                "after intake save — persistence broken"
+            )
         if _orm_row is not None and upload_path is not None:
             _merged_audit = dict(_orm_row.audit or {})
             _merged_audit["stored_upload_path"] = str(upload_path)

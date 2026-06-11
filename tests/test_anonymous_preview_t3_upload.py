@@ -852,3 +852,25 @@ class TestUploadSetCookieGuard:
             "到不了客户端，/create 恒 401（2026-06-11 P0 回归）"
         )
         assert ".append(" in fn_src and "set-cookie" in fn_src.lower()
+
+    def test_upload_sync_intake_commits(self):
+        """P0 回归守卫 #2（2026-06-11 冒烟）：run_intake_and_save 契约是
+        "the caller commits/rolls back"（store 内部只 flush）。调用方漏
+        commit → close() 静默回滚整个事务（record + 配额计数），upload 返
+        200 但 /create 恒 404 not_found。"""
+        src = (Path(_GATEWAY_DIR) / "anonymous_preview_api.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+        upload_fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "anonymous_upload"
+        )
+        fn_src = ast.get_source_segment(src, upload_fn) or ""
+        assert "sync_db.commit()" in fn_src, (
+            "anonymous_upload._run_sync 丢失 sync_db.commit()：intake 事务会被 "
+            "close() 静默回滚，记录永不落库（2026-06-11 P0 回归）"
+        )
+        assert "sync_db.rollback()" in fn_src
