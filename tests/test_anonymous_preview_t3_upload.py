@@ -743,9 +743,18 @@ class TestF18ImportSmoke:
             )
             # Apply the fix: make services.* point to src.services.* object.
             sys.modules["services.anonymous_preview_intake"] = src_mod
-            # Also unify the parent packages if needed.
-            if "services" in sys.modules and "src.services" in sys.modules:
-                sys.modules["services"] = sys.modules["src.services"]
+            # F18 isolation fix (do NOT re-add the parent-package alias):
+            # the old code also did
+            #   sys.modules["services"] = sys.modules["src.services"]
+            # which globally replaced the top-level ``services`` package and was
+            # never restored. Any later test importing an UN-aliased
+            # ``services.*`` submodule then broke — e.g. test_r2_sweeper_race's
+            # lazy ``import services.r2_publisher_lib.r2_publisher`` failed with
+            # ``ImportError: cannot import name 'r2_publisher_lib' from
+            # 'src.services'`` in full-suite runs (passed when run alone). The
+            # specific-submodule alias above is all the F18 unification needs;
+            # the 4 dual-namespace test files import at collection time (before
+            # this test runs) so the parent alias never helped them anyway.
             # Re-import to confirm.
             import importlib
             importlib.invalidate_caches()
