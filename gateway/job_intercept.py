@@ -1383,6 +1383,41 @@ async def intercept_create_job(
         if isinstance(source, dict):
             source["type"] = "local_video"
 
+    # --- 3b. Opaque chunked upload ref（plan 2026-06-11 §3.10）---
+    # 分片上传 complete 返回的 ref 是 ``chunked:{upload_id}``（不透明 token，
+    # 不是文件路径）。这里按 upload_id + 当前登录 user 查 state==ready 的
+    # upload，校验通过才把 source.value 替换为**服务端记录的 final_path**
+    # 转发 Job API——前端传回的任何绝对路径不再被信任（分片通道关死
+    # "路径作能力凭证" 面；存量单请求路径加固见 plan §7 H1，单独任务）。
+    # 不存在 / 非本人 / 非 ready / id 非法 → 同一响应体（无存在性侧信道）。
+    chunked_upload_ref_id: str | None = None
+    if source_type == "local_video" and source_value.startswith("chunked:"):
+        from chunked_upload_store import (
+            parse_chunked_source_value,
+            resolve_ready_upload,
+        )
+
+        _chunked_err = _error_response(
+            404, "upload_not_found",
+            "上传文件不存在或已过期，请重新上传。",
+        )
+        if user is None:
+            return _chunked_err
+        _upload_id = parse_chunked_source_value(source_value)
+        _resolved_path = (
+            resolve_ready_upload(user_id=str(user.id), upload_id=_upload_id)
+            if _upload_id
+            else None
+        )
+        if not _resolved_path:
+            return _chunked_err
+        chunked_upload_ref_id = _upload_id
+        source_value = _resolved_path
+        if isinstance(source, dict):
+            # source 与 request_data["source"] 是同一对象——这里替换后
+            # 下游 upstream forward 拿到的就是服务端 final_path。
+            source["value"] = _resolved_path
+
     source_content_hash = await _compute_source_content_hash(source_type, source_value)
 
     # --- 4. Duration: probe (YouTube) or accept frontend estimate ---
@@ -1717,6 +1752,37 @@ async def intercept_create_job(
             await consume_free_daily(db, user_id=user.id, idempotency_key=idempotency_key, job_id=job_id)
         else:
             await release_free_daily(db, user_id=user.id, idempotency_key=idempotency_key, reason="upstream_rejected")
+
+    # Chunked upload claim 回写（plan 2026-06-11 §3.8 r3）：job create 成功
+    # 后把 job_id 写回 upload state.json。claim 后终文件归现有 uploads 生命
+    # 周期管理；未 claim 的 ready 文件由 sweeper 按 ready_ttl 回收。
+    # best-effort：claim 失败不影响已创建的任务（终文件已在 final_path，
+    # 最坏情况是 sweeper 误回收前用户已无引用——log warning 供排查）。
+    if (
+        chunked_upload_ref_id
+        and user is not None
+        and job_id
+        and upstream_response.status_code in (200, 201, 202)
+    ):
+        try:
+            from chunked_upload_store import claim_upload
+
+            claimed = await asyncio.to_thread(
+                claim_upload,
+                user_id=str(user.id),
+                upload_id=chunked_upload_ref_id,
+                job_id=str(job_id),
+            )
+            if not claimed:
+                logger.warning(
+                    "chunked upload claim failed: upload=%.8s job=%s",
+                    chunked_upload_ref_id, job_id,
+                )
+        except Exception:
+            logger.warning(
+                "chunked upload claim errored: upload=%.8s job=%s",
+                chunked_upload_ref_id, job_id, exc_info=True,
+            )
 
     # Wrap upstream conflict/error into structured error
     if upstream_response.status_code == 409:
