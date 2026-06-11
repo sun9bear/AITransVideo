@@ -866,6 +866,11 @@ async def anonymous_preview_create(
         # Job API 契约：source 是嵌套对象（api.py do_POST 读 payload["source"]
         # 的 type/value），扁平 source_type/source_ref 会 400（2026-06-11 冒烟）。
         "source": {"type": "local_video", "value": str(teaser_path)},
+        # sentinel user_id（服务端注入，客户端不可达）：submit_job 只为带
+        # user_id 的任务预填 workspace_dir/project_dir；缺省会走 legacy
+        # stdout 捕获路径 → project_dir 被源路径污染（写一次门闩封死）→
+        # stream/video 撞 "outside projects root" 400（2026-06-11 冒烟）。
+        "user_id": str(sentinel.id),
         "output_target": "editor",
         "service_mode": "free",
         "requires_review": False,
