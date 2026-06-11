@@ -390,9 +390,12 @@ class TestPeekPassThrough:
                     row_mock.fetchone = MagicMock(return_value=[0])
                     return row_mock
                 else:
-                    # Later calls: ORM audit persist → return None (skip audit persist)
+                    # Later calls: ORM audit persist → return fake row with audit
+                    # (2026-06-11 P0 修复后行缺失 = fail-loud 503，None 不再合法)
+                    _orm_row = MagicMock()
+                    _orm_row.audit = {}
                     result_mock = MagicMock()
-                    result_mock.scalar_one_or_none = MagicMock(return_value=None)
+                    result_mock.scalar_one_or_none = MagicMock(return_value=_orm_row)
                     return result_mock
 
             db.execute = _execute

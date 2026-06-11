@@ -107,11 +107,22 @@ async def _get_record_for_session(
     preview_id: str,
     session_id_hash: str,
 ) -> Optional[AnonymousPreviewRecord]:
-    """Fetch a record matching both preview_id and session_id (ownership check)."""
+    """Fetch a record matching both preview_id and session_id (ownership check).
+
+    存储侧的 ``session_id`` 不是 cookie 会话哈希本身：intake adapter 入库前
+    用 wiring 的 HMAC hasher 又做了一层 ``hash_scope_key("sess:" + 会话哈希)``
+    （privacy scope key，见 build_intake_config 的 hasher 包装）。查询侧必须
+    用同一函数推导，否则 create/status/stream 恒 404 not_found
+    （2026-06-11 冒烟发现）。
+    """
+    stored_session_key = hash_scope_key(
+        f"sess:{session_id_hash}",
+        secret=settings.anonymous_preview_hash_secret,
+    )
     result = await db.execute(
         select(AnonymousPreviewRecord).where(
             AnonymousPreviewRecord.preview_id == preview_id,
-            AnonymousPreviewRecord.session_id == session_id_hash,
+            AnonymousPreviewRecord.session_id == stored_session_key,
         )
     )
     return result.scalar_one_or_none()
