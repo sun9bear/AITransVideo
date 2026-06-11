@@ -183,7 +183,20 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
           {/* Player area */}
           <div className="min-w-0">
             {hasVideo ? (
-              <LazyVideoPlayer jobId={jobId} />
+              /* 画廊装裱：成品态（hasVideo）才装框——"过程是水墨，成品是油画"。
+                 双线框 + mat 内衬 + vignette；outline 在 wrapper 上不受
+                 LazyVideoPlayer 内层 overflow-hidden 裁剪（plan Task 4）。 */
+              <div
+                className="canvas-texture relative rounded-lg p-1.5"
+                style={{
+                  border: "1px solid var(--border)",
+                  outline: "1px solid color-mix(in oklab, var(--cinnabar) 25%, transparent)",
+                  outlineOffset: "3px",
+                  boxShadow: "inset 0 0 48px var(--gallery-vignette, rgba(0, 0, 0, 0.18))",
+                }}
+              >
+                <LazyVideoPlayer jobId={jobId} />
+              </div>
             ) : hasAudio ? (
               <div className="flex flex-col items-center justify-center rounded-lg bg-muted/30 border border-dashed border-border aspect-video gap-3">
                 <Film className="h-10 w-10 text-muted-foreground/50" />

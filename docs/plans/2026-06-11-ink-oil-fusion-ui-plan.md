@@ -144,7 +144,7 @@ git commit -m "feat(ui): ink/ink-dark 注入 --ultramarine/--gallery-vignette to
 3. CSS 变量只需在使用点祖先链上，不强求"同一个 div"；约束是：营销 layout 不能改 `<html>`，所以变量挂营销外层 div（header/footer/main 都在其内）。
 
 - [ ] **Step 1:** `next/font/google` 引入 `EB_Garamond`（**仅 weight 600**，`latin` subset），`.variable` class 挂到 `(marketing)/layout.tsx` 外层 div，并给该 div 加 `marketing-root` class（与 `data-theme="ink"` 同一节点，满足祖先链要求）。
-- [ ] **Step 2:** globals.css 新增**营销专用**规则。**v3 双修正（复审 P1+P2）：** ① Garamond **只套 `.ink-heading`（600）**——`.ink-display` 是 weight 900，EB Garamond 最高 800，套上必 faux-bold，故 display 保持 Noto Serif SC 900 不动（中文主导的 hero 标题本来就该宋体压阵，东西对仗在 heading 层完成）；② 选择器用 `.marketing-root[data-theme="ink"]`（specificity (0,3,0)）稳压既有 `[data-theme="ink"] .ink-heading` 类规则（(0,2,0)），不依赖源码顺序：
+- [ ] **Step 2:** globals.css 新增**营销专用**规则。**v3 双修正（复审 P1+P2）：** ① Garamond **只套 `.ink-heading`（600）**——`.ink-display` 是 weight 900，EB Garamond 最高 800，套上必 faux-bold，故 display 保持 Noto Serif SC 900 不动（中文主导的 hero 标题本来就该宋体压阵，东西对仗在 heading 层完成）；② 选择器原定 `.marketing-root[data-theme="ink"]`，**实测被 Tailwind v4 编译吃掉**（与 ink-dark 的 `html[data-theme]` 同款坑）；落地改为 `.marketing-root .ink-heading:not(.__never__)`（(0,3,0)，沿用项目既有 hack 模式），效果等价：
 
 ```css
   /* Marketing-scoped East-West heading pair: Garamond for Latin headings,
