@@ -27,7 +27,7 @@ from typing import Tuple
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from src.services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
+from services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
 
 
 __all__ = [

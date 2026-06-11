@@ -331,7 +331,7 @@ def build_probe_fn(
     # lightweight pure modules with no pydub/FastAPI deps.
     # We do a lazy import so unit tests can mock subprocess without importing
     # the full src tree.
-    from src.services.anonymous_preview_intake import ProbeResult  # noqa: PLC0415
+    from services.anonymous_preview_intake import ProbeResult  # noqa: PLC0415
     from src.utils.free_duration_gate import evaluate_free_duration_cap  # noqa: PLC0415
 
     def _probe(source_path: Path, source_hash: str) -> ProbeResult:  # type: ignore[return]

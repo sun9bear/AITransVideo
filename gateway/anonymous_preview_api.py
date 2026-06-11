@@ -46,7 +46,7 @@ from anonymous_preview_policy import (
 from anonymous_preview_probe import build_intake_probe_fn, teaser_dest_for
 from anonymous_preview_prescreen import prescreen_filename
 from anonymous_preview_quota import hash_scope_key, shanghai_today
-from src.services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
+from services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
 from anonymous_preview_record_store import RecordStoreError
 from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anonymous_upload, extract_client_ip
 from anonymous_preview_intake_wiring import run_intake_and_save
@@ -285,8 +285,8 @@ async def anonymous_upload(
 
     # Build adapter facts — field names from
     # src.services.anonymous_preview_backend_adapter.RequestFacts / UploadFacts
-    from src.services.anonymous_preview_backend_adapter import RequestFacts, UploadFacts
-    from src.services.anonymous_preview_intake import SourceType
+    from services.anonymous_preview_backend_adapter import RequestFacts, UploadFacts
+    from services.anonymous_preview_intake import SourceType
 
     client_ip = extract_client_ip(request) or ""
 

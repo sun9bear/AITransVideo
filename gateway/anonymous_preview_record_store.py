@@ -32,7 +32,7 @@ from models import AnonymousPreviewRecord
 
 # src/ is on sys.path inside both the test harness and the gateway
 # container (see docker-compose.yml bind mount).
-from src.services.anonymous_preview_intake import (
+from services.anonymous_preview_intake import (
     ComplianceStatus,
     PreviewRecord,
     PreviewStatus,

@@ -43,12 +43,12 @@ from anonymous_preview_record_store import PgPreviewRecordStore, RecordStoreErro
 from config import settings
 
 # src/ must be on sys.path (gateway container bind-mount, tests path setup).
-from src.services.anonymous_preview_backend_adapter import (
+from services.anonymous_preview_backend_adapter import (
     AnonymousPreviewBackendAdapter,
     RequestFacts,
     UploadFacts,
 )
-from src.services.anonymous_preview_intake import (
+from services.anonymous_preview_intake import (
     IntakeConfig,
     PreviewRecord,
     PreviewStatus,

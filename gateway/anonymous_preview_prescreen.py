@@ -14,8 +14,8 @@
 
 from __future__ import annotations
 
-from src.services.anonymous_preview_intake import ComplianceResult, ComplianceStatus
-from src.services.content_compliance import MainlandChinaContentComplianceReviewer
+from services.anonymous_preview_intake import ComplianceResult, ComplianceStatus
+from services.content_compliance import MainlandChinaContentComplianceReviewer
 
 
 def prescreen_filename(filename: str) -> ComplianceResult:
