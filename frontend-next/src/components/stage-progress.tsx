@@ -10,6 +10,11 @@ import type { StageProgressItem } from "@/types/jobs"
  *
  * Connectors and labels track the same family. Was hardcoded to
  * cyan-500 / red-500 / primary mix that didn't sit on the ink palette.
+ *
+ * Completed connectors saturate from ink-gray toward cinnabar by position
+ * (墨→彩, plan 2026-06-11): ratio is computed over the CONNECTOR count
+ * (items.length - 1), not the stage count — the last connector must reach
+ * full pigment, and a 2-stage flow (single connector) is fully saturated.
  */
 
 type StageState = "complete" | "current" | "error" | "upcoming"
@@ -46,10 +51,13 @@ function dotStyle(state: StageState): CSSProperties {
   }
 }
 
-function connectorStyle(state: StageState): CSSProperties {
+function connectorStyle(state: StageState, connectorIndex: number, connectorCount: number): CSSProperties {
   switch (state) {
-    case "complete":
-      return { backgroundColor: "color-mix(in oklab, var(--bamboo) 60%, transparent)" }
+    case "complete": {
+      const ratio = connectorCount > 1 ? connectorIndex / (connectorCount - 1) : 1
+      const pct = Math.round(20 + 70 * ratio)
+      return { backgroundColor: `color-mix(in oklab, var(--cinnabar) ${pct}%, var(--ink-gray-2))` }
+    }
     case "current":
       return { backgroundColor: "color-mix(in oklab, var(--cinnabar) 40%, transparent)" }
     case "error":
@@ -86,7 +94,7 @@ export function StageProgress({ items }: { items: readonly StageProgressItem[] }
             </span>
           </div>
           {index < items.length - 1 ? (
-            <div className={connectorBase} style={connectorStyle(item.state)} />
+            <div className={connectorBase} style={connectorStyle(item.state, index, items.length - 1)} />
           ) : null}
         </div>
       ))}
