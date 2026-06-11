@@ -172,26 +172,33 @@ def _resolve_project_root() -> Optional[Path]:
 
 
 def build_intake_config(*, upload_root: Optional[Path] = None) -> IntakeConfig:
-    """Build an ``IntakeConfig`` from current ``settings``.
+    """Build an ``IntakeConfig`` from the resolved APF limits.
+
+    限制数值（2026-06-11 起）经 ``resolve_apf_limits()`` 取 admin 热配置、
+    任何异常回落 env settings。本函数在 ``run_intake_and_save`` 内 per-request
+    调用，所以 admin 改值后下一个请求即生效（热生效，无需重启）。
 
     ``temp_storage_available`` is determined by a live probe of the upload
     directory so the config accurately reflects filesystem state at call
     time.
     """
+    from anonymous_preview_limits import resolve_apf_limits
+
     if upload_root is None:
         upload_root = _resolve_project_root()
 
     storage_ok = _check_storage_health(upload_root)
+    limits = resolve_apf_limits()
 
     return IntakeConfig(
-        max_upload_bytes=settings.anonymous_preview_max_upload_bytes,
-        max_source_duration_seconds=settings.anonymous_preview_max_seconds,
+        max_upload_bytes=limits.anonymous_preview_max_upload_bytes,
+        max_source_duration_seconds=limits.anonymous_preview_max_seconds,
         temp_upload_dir=upload_root / "uploads" / "anonymous" if upload_root else None,
         temp_storage_available=storage_ok,
-        rate_limit_global_per_day=settings.anonymous_preview_cap_global_per_day,
-        rate_limit_per_ip_per_day=settings.anonymous_preview_cap_per_ip,
-        rate_limit_per_device_per_day=settings.anonymous_preview_cap_per_device,
-        rate_limit_per_source_hash_per_day=settings.anonymous_preview_cap_per_source,
+        rate_limit_global_per_day=limits.anonymous_preview_cap_global_per_day,
+        rate_limit_per_ip_per_day=limits.anonymous_preview_cap_per_ip,
+        rate_limit_per_device_per_day=limits.anonymous_preview_cap_per_device,
+        rate_limit_per_source_hash_per_day=limits.anonymous_preview_cap_per_source,
     )
 
 

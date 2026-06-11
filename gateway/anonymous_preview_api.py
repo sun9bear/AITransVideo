@@ -54,6 +54,7 @@ from anonymous_preview_intake_wiring import (
     peek_counter_keys,
     run_intake_and_save,
 )
+from anonymous_preview_limits import resolve_apf_limits
 from anonymous_session import (
     AnonymousSessionContext,
     get_or_create_anonymous_session,
@@ -204,6 +205,10 @@ async def anonymous_upload(
 
     admin_enabled = _get_admin_enabled()
 
+    # APF 限制旋钮（2026-06-11）：admin 热配置优先、env fallback。本次请求内
+    # 只 resolve 一次，peek / upload / admission 用同一份快照保证一致。
+    limits = resolve_apf_limits()
+
     # AD-8 body-before peek: non-authoritative global + per-IP rate-limit pre-check.
     # Performed BEFORE reading the request body so we can reject obviously-over-cap
     # callers without writing to disk (瞬时磁盘 = 并发数×200MB 防护).
@@ -235,11 +240,11 @@ async def anonymous_upload(
             {"scope": ANON_PREVIEW_COUNTER_SCOPE, "key": _global_key, "day": day_key_peek},
         )
         _global_count = int((_global_row.fetchone() or [0])[0])
-        if _global_count >= settings.anonymous_preview_cap_global_per_day:
+        if _global_count >= limits.anonymous_preview_cap_global_per_day:
             logger.info(
                 "anon_upload: AD-8 peek global cap reached count=%d cap=%d",
                 _global_count,
-                settings.anonymous_preview_cap_global_per_day,
+                limits.anonymous_preview_cap_global_per_day,
             )
             return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
 
@@ -252,11 +257,11 @@ async def anonymous_upload(
             {"scope": ANON_PREVIEW_COUNTER_SCOPE, "key": _ip_key, "day": day_key_peek},
         )
         _ip_count = int((_ip_row.fetchone() or [0])[0])
-        if _ip_count >= settings.anonymous_preview_cap_per_ip:
+        if _ip_count >= limits.anonymous_preview_cap_per_ip:
             logger.info(
                 "anon_upload: AD-8 peek ip cap reached count=%d cap=%d ip_key=%.16s",
                 _ip_count,
-                settings.anonymous_preview_cap_per_ip,
+                limits.anonymous_preview_cap_per_ip,
                 _ip_key,
             )
             return JSONResponse(status_code=429, content={"error": "rate_limited"})
@@ -275,7 +280,7 @@ async def anonymous_upload(
             session_hash=session_ctx.session_id_hash,
             flag_enabled=settings.enable_anonymous_preview,
             admin_enabled=admin_enabled,
-            max_upload_bytes=settings.anonymous_preview_max_upload_bytes,
+            max_upload_bytes=limits.anonymous_preview_max_upload_bytes,
         )
     except UploadRejected as exc:
         logger.warning(
@@ -410,7 +415,8 @@ async def anonymous_upload(
     admission: Optional[FreePreviewAdmissionResult] = None
     try:
         teaser_dur = float(getattr(record, "duration_seconds", 0.0) or 0.0)
-        admission = admit_for_free_preview(teaser_dur, settings)
+        # ApfLimits 字段与 settings 同名，policy 薄 adapter 直接消费
+        admission = admit_for_free_preview(teaser_dur, limits)
     except Exception as exc:
         logger.warning("anon_upload: admit_for_free_preview error: %s", exc)
 
@@ -439,6 +445,32 @@ async def anonymous_upload(
     for _sc in response.headers.getlist("set-cookie"):
         out.headers.append("set-cookie", _sc)
     return out
+
+
+# ---------------------------------------------------------------------------
+# GET /limits  (APF 限制旋钮，2026-06-11)
+# ---------------------------------------------------------------------------
+
+@router.get("/limits")
+async def anonymous_preview_limits() -> Response:
+    """公开只读端点：当前生效的匿名预览限制（前端试用面板动态文案用）。
+
+    无需 session / CSRF（GET 只读、只返回数字、无敏感信息）。仅 env flag
+    gate：flag 关 → 404（与其他匿名预览端点一致）；admin 热开关**不** gate
+    它——面板在 admin 临时熔断期间仍能渲染正确的提示文案。
+
+    注意必须注册在 ``/{preview_id}/*`` 动态路由之前（字面路径优先）。
+    """
+    if not settings.enable_anonymous_preview:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    limits = resolve_apf_limits()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "max_upload_mb": limits.anonymous_preview_max_upload_bytes // (1024 * 1024),
+            "preview_seconds": limits.anonymous_preview_max_seconds,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +646,8 @@ async def anonymous_preview_stream(
     try:
         _audit = dict(getattr(record, "audit", None) or {})
         teaser_dur = float(_audit.get("teaser_duration_seconds", 0.0) or 0.0)
-        admission = admit_for_free_preview(teaser_dur, settings)
+        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）
+        admission = admit_for_free_preview(teaser_dur, resolve_apf_limits())
         gate: StreamGate = stream_gate_from_artifact_policy(admission.artifact_policy)
         if not gate.stream_only_required:
             logger.warning(
@@ -809,7 +842,8 @@ async def anonymous_preview_create(
     if not probe.get("ok") or not probe.get("duration_seconds"):
         return JSONResponse(status_code=409, content={"error": "teaser_unprobeable"})
     try:
-        admission = admit_for_free_preview(float(probe["duration_seconds"]), settings)
+        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）
+        admission = admit_for_free_preview(float(probe["duration_seconds"]), resolve_apf_limits())
         decision = admission.decision
         decision_str = decision.value if hasattr(decision, "value") else str(decision)
         if decision_str != "admitted":

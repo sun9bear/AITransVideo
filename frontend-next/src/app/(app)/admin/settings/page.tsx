@@ -117,6 +117,16 @@ interface AdminSettings {
   // - ``anonymous_preview_max_in_flight``：全局同时处理的匿名预览上限。
   anonymous_free_preview_enabled: boolean
   anonymous_preview_max_in_flight: number
+  // --- APF 限制旋钮（2026-06-11，原 env-only 限制搬进 admin 热配置）---
+  // 6 项数字限制，改完即时生效（gateway 每请求重读）。边界与后端
+  // _APF_LIMIT_BOUNDS validator 一致。注意 max_upload_mb 存 MB（后端
+  // resolver 转字节）。
+  anonymous_preview_max_upload_mb: number
+  anonymous_preview_max_seconds: number
+  anonymous_preview_cap_global_per_day: number
+  anonymous_preview_cap_per_ip: number
+  anonymous_preview_cap_per_device: number
+  anonymous_preview_cap_per_source: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -190,7 +200,76 @@ const DEFAULT_SETTINGS: AdminSettings = {
   // CodeX P1 修复：曾误写 10，把匿名并发门从计划值放大 5×。
   anonymous_free_preview_enabled: false,
   anonymous_preview_max_in_flight: 2,
+  // --- APF 限制旋钮默认值（2026-06-11）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致。
+  anonymous_preview_max_upload_mb: 200,
+  anonymous_preview_max_seconds: 180,
+  anonymous_preview_cap_global_per_day: 500,
+  anonymous_preview_cap_per_ip: 3,
+  anonymous_preview_cap_per_device: 1,
+  anonymous_preview_cap_per_source: 1,
 }
+
+// APF 限制旋钮的输入框元数据：边界与 gateway _APF_LIMIT_BOUNDS 一致。
+const APF_LIMIT_FIELDS: Array<{
+  key: 'anonymous_preview_max_upload_mb' | 'anonymous_preview_max_seconds'
+    | 'anonymous_preview_cap_global_per_day' | 'anonymous_preview_cap_per_ip'
+    | 'anonymous_preview_cap_per_device' | 'anonymous_preview_cap_per_source'
+  label: string
+  unit: string
+  min: number
+  max: number
+  description: string
+}> = [
+  {
+    key: 'anonymous_preview_max_upload_mb',
+    label: '上传文件大小上限',
+    unit: 'MB',
+    min: 10,
+    max: 2048,
+    description: '超过此大小的匿名上传直接拒绝（413）。登录用户上限 2GB，此处上界与之对齐。',
+  },
+  {
+    key: 'anonymous_preview_max_seconds',
+    label: '预览时长上限',
+    unit: '秒',
+    min: 30,
+    max: 7200,
+    description: '生成的预览只取视频前 N 秒（180 = 前 3 分钟）。同时影响前端面板提示文案。',
+  },
+  {
+    key: 'anonymous_preview_cap_global_per_day',
+    label: '全局每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 100000,
+    description: '全站匿名预览每日总次数，超出后新上传返回 429。',
+  },
+  {
+    key: 'anonymous_preview_cap_per_ip',
+    label: '单 IP 每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 1000,
+    description: '同一 IP（受信代理提取）每日可发起的预览次数。',
+  },
+  {
+    key: 'anonymous_preview_cap_per_device',
+    label: '单设备每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 100,
+    description: '同一匿名会话 token（≈ 设备）每日可发起的预览次数。',
+  },
+  {
+    key: 'anonymous_preview_cap_per_source',
+    label: '同源文件每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 100,
+    description: '相同内容哈希的文件每日可重复提交的次数（防重复刷量）。',
+  },
+]
 
 const WHISPER_TRIGGER_OPTIONS = [
   {
@@ -1007,6 +1086,42 @@ export default function AdminSettingsPage() {
             className="w-24 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
           />
         </label>
+
+        {/* APF 限制旋钮（2026-06-11）：6 项原 env-only 限制，保存后即时生效
+            （gateway 每请求重读 admin_settings，无 mtime poll 延迟）。
+            边界与后端 _APF_LIMIT_BOUNDS validator 一致，越界输入不进 state。 */}
+        <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">预览限制</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              保存后对新请求立即生效，无需重启服务。前端试用面板的大小校验与提示文案会自动跟随
+              （上传大小 / 预览时长两项）。紧急关停请用上方「开启匿名预览」总开关，不要把数值调到下界。
+            </p>
+          </div>
+          {APF_LIMIT_FIELDS.map((f) => (
+            <label key={f.key} className="flex flex-col gap-1.5 border-t border-border pt-3 first:border-t-0">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-medium text-foreground whitespace-nowrap">{f.label}</span>
+                <input
+                  type="number"
+                  min={f.min}
+                  max={f.max}
+                  step={1}
+                  value={settings[f.key]}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10)
+                    if (Number.isFinite(v) && v >= f.min && v <= f.max) {
+                      setSettings((s) => ({ ...s, [f.key]: v }))
+                    }
+                  }}
+                  className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+                />
+                <span className="text-xs text-muted-foreground">{f.unit}（{f.min}–{f.max}）</span>
+              </div>
+              <p className="text-xs text-muted-foreground">{f.description}</p>
+            </label>
+          ))}
+        </div>
       </SettingSection>
 
       {/* Save button */}
@@ -1083,6 +1198,9 @@ export default function AdminSettingsPage() {
             // --- APF reset 规则（2026-06-10）---
             // visible toggle (anonymous_free_preview_enabled) 显式回 DEFAULT (false)；
             // max_in_flight 是纯数字配置，回 DEFAULT 语义明确，也显式回默认值。
+            // 2026-06-11 新增的 6 个限制旋钮（max_upload_mb / max_seconds /
+            // 四个 cap）同为可见数字输入，经 ...DEFAULT_SETTINGS spread 回
+            // 出厂默认（200MB / 180s / 500 / 3 / 1 / 1），不透传 current state。
             anonymous_free_preview_enabled:
               DEFAULT_SETTINGS.anonymous_free_preview_enabled,
             anonymous_preview_max_in_flight:

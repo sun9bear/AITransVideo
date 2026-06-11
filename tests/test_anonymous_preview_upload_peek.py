@@ -99,6 +99,23 @@ def _patch_settings(monkeypatch):
     monkeypatch.setattr(anon_session_mod, "AnonymousSession", _FakeSessionModel, raising=False)
     monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
     monkeypatch.setattr(anon_session_mod, "_get_admin_flag", lambda: True)
+    # 2026-06-11 APF 限制旋钮：peek/upload/admission 改读 resolve_apf_limits()
+    # （admin 热配置优先）。测试里把 resolver 钉死为上面 settings 同款数值，
+    # 隔离 admin_settings.json 文件状态对测试的影响。
+    from anonymous_preview_limits import ApfLimits
+
+    monkeypatch.setattr(
+        api,
+        "resolve_apf_limits",
+        lambda: ApfLimits(
+            anonymous_preview_max_upload_bytes=200 * 1024 * 1024,
+            anonymous_preview_max_seconds=180,
+            anonymous_preview_cap_global_per_day=500,
+            anonymous_preview_cap_per_ip=3,
+            anonymous_preview_cap_per_device=1,
+            anonymous_preview_cap_per_source=1,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

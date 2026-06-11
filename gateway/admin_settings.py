@@ -64,6 +64,18 @@ _VALID_WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3"}
 # Phase 4.1 + Codex 2026-05-25 决策：flash 默认，plus 同时支持
 _VALID_CLONE_TARGET_MODELS = frozenset({"cosyvoice-v3.5-flash", "cosyvoice-v3.5-plus"})
 
+# APF 限制旋钮边界（2026-06-11）：{field: (min, max)}。
+# 下界 ≥1 防误设 0（等效误关停且难排查——紧急关停用 anonymous_free_preview_enabled
+# 主开关）；上界防天文数字。max_upload_mb 上界 2048 对齐登录用户 2GB 上限。
+_APF_LIMIT_BOUNDS = {
+    "anonymous_preview_max_upload_mb": (10, 2048),
+    "anonymous_preview_max_seconds": (30, 7200),
+    "anonymous_preview_cap_global_per_day": (1, 100000),
+    "anonymous_preview_cap_per_ip": (1, 1000),
+    "anonymous_preview_cap_per_device": (1, 100),
+    "anonymous_preview_cap_per_source": (1, 100),
+}
+
 
 class AdminSettings(BaseModel):
     tts_provider: str = "minimax"          # "minimax" or "mimo"
@@ -322,6 +334,45 @@ class AdminSettings(BaseModel):
     # ≥ 此值 → 429（匿名不饿死付费任务）。admin 可在灰度期调大。
     # 默认 2：500/天 ÷ 2 并发槽位，灰度初期保守。
     anonymous_preview_max_in_flight: int = 2
+
+    # --- APF 限制旋钮（2026-06-11，原 env-only 限制搬进 admin 热配置）---
+    # 6 项与 GatewaySettings 同名 env 字段一一对应（默认值严格一致）；
+    # admin 改完即时生效（gateway 每请求经 anonymous_preview_limits.
+    # resolve_apf_limits() 重读），无需重启容器。env 字段保留作 fail-safe
+    # fallback：admin_settings.json 读取/解析任何异常 → resolver 回落 env 值。
+    #
+    # ⚠️ 单位差异：``anonymous_preview_max_upload_mb`` 存 **MB**（admin UI
+    # 友好），消费侧由 resolver 统一 ×1024×1024 转字节；env 对应字段是
+    # ``anonymous_preview_max_upload_bytes``（字节）。其余 5 项单位同 env。
+    anonymous_preview_max_upload_mb: int = 200
+    anonymous_preview_max_seconds: int = 180
+    anonymous_preview_cap_global_per_day: int = 500
+    anonymous_preview_cap_per_ip: int = 3
+    anonymous_preview_cap_per_device: int = 1
+    anonymous_preview_cap_per_source: int = 1
+
+    @field_validator(
+        "anonymous_preview_max_upload_mb",
+        "anonymous_preview_max_seconds",
+        "anonymous_preview_cap_global_per_day",
+        "anonymous_preview_cap_per_ip",
+        "anonymous_preview_cap_per_device",
+        "anonymous_preview_cap_per_source",
+    )
+    @classmethod
+    def validate_apf_limit_bounds(cls, v: int, info) -> int:
+        """APF 限制旋钮统一边界校验（同 reservation_ttl 5-120 validator 模式）。
+
+        下界防误设 0/负数（max_upload=0 → 所有上传 413；cap=0 → 全量 429，
+        等效误关停但比主开关难排查）；上界防天文数字（带宽/磁盘/成本失控）。
+        各字段边界见模块级 ``_APF_LIMIT_BOUNDS``。
+        """
+        low, high = _APF_LIMIT_BOUNDS[info.field_name]
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"{info.field_name} 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
 
     @field_validator("whisper_alignment_trigger")
     @classmethod

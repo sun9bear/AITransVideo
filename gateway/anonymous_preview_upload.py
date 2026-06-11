@@ -178,7 +178,8 @@ async def handle_anonymous_upload(
     admin_enabled:
         ``admin_settings.anonymous_free_preview_enabled`` value.  ``False`` → 404.
     max_upload_bytes:
-        ``settings.anonymous_preview_max_upload_bytes``.
+        ``resolve_apf_limits().anonymous_preview_max_upload_bytes``
+        （admin 热配置优先，异常回落 env settings；2026-06-11 起）。
 
     Returns
     -------

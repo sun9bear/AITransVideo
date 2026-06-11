@@ -16,16 +16,21 @@ import {
   createPreview,
   getPreviewStatus,
   getPreviewStreamUrl,
+  getPreviewLimits,
+  formatPreviewDuration,
   mapStatusReason,
   mapStageLabel,
+  DEFAULT_PREVIEW_LIMITS,
   PreviewStatusError,
+  type PreviewLimits,
   type UploadResponse,
   type PreviewStatus,
 } from "@/lib/api/anonymousPreview"
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-const MAX_FILE_BYTES = 200 * 1024 * 1024 // 200 MB
+// 大小/时长限制不再硬编码：mount 时从 /gateway/anonymous-preview/limits 拉取
+// （admin 后台热配置），拉不到回落 DEFAULT_PREVIEW_LIMITS（200MB / 180s）。
 const ACCEPTED_TYPES = ['video/mp4', 'video/quicktime', 'video/x-m4v', 'video/webm']
 const ACCEPTED_EXTENSIONS = ['.mp4', '.mov', '.m4v', '.webm']
 const POLL_INTERVAL_MS = 5_000
@@ -70,13 +75,13 @@ const INITIAL_STATE: PanelState = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function validateFile(file: File): string | null {
+function validateFile(file: File, maxUploadMb: number): string | null {
   if (!ACCEPTED_TYPES.includes(file.type) && !ACCEPTED_EXTENSIONS.some((ext) => file.name.toLowerCase().endsWith(ext))) {
     return `不支持的格式"${file.name.split('.').pop()?.toUpperCase() ?? '?'}"，请上传 MP4、MOV、M4V 或 WebM`
   }
-  if (file.size > MAX_FILE_BYTES) {
+  if (file.size > maxUploadMb * 1024 * 1024) {
     const mb = (file.size / 1024 / 1024).toFixed(1)
-    return `文件大小 ${mb}MB 超过 200MB 限制`
+    return `文件大小 ${mb}MB 超过 ${maxUploadMb}MB 限制`
   }
   return null
 }
@@ -86,9 +91,11 @@ function validateFile(file: File): string | null {
 function UploadZone({
   onFile,
   disabled,
+  maxUploadMb,
 }: {
   onFile: (file: File) => void
   disabled: boolean
+  maxUploadMb: number
 }) {
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -131,7 +138,7 @@ function UploadZone({
       <UploadCloud className="h-9 w-9 text-primary/70" aria-hidden="true" />
       <div>
         <p className="text-sm font-semibold text-foreground">点击选择或拖放视频</p>
-        <p className="text-xs text-muted-foreground mt-1">MP4 · MOV · M4V · WebM · 最大 200MB</p>
+        <p className="text-xs text-muted-foreground mt-1">MP4 · MOV · M4V · WebM · 最大 {maxUploadMb}MB</p>
       </div>
       <input
         ref={inputRef}
@@ -184,12 +191,29 @@ function ErrorBlock({ message, onRetry }: { message: string; onRetry: () => void
 export function AnonymousTrialPanel({ className }: { className?: string }) {
   const [open, setOpen] = useState(false)
   const [state, setState] = useState<PanelState>(INITIAL_STATE)
+  // 服务端热配置的大小/时长限制；拉取失败保持出厂默认（200MB / 180s）。
+  const [limits, setLimits] = useState<PreviewLimits>(DEFAULT_PREVIEW_LIMITS)
   const abortRef = useRef<AbortController | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollErrorsRef = useRef(0)
   // Poll generation: bumped on reset/unmount so an in-flight status fetch
   // that resolves afterwards can't setState + re-arm the timer (轮询复活).
   const pollGenRef = useRef(0)
+
+  // mount 时拉取当前生效限制（admin 后台改完即时反映到文案与本地校验）
+  useEffect(() => {
+    let cancelled = false
+    getPreviewLimits()
+      .then((l) => {
+        if (!cancelled) setLimits(l)
+      })
+      .catch(() => {
+        // 拉不到（flag 关 / 网络异常）→ 保持 DEFAULT_PREVIEW_LIMITS 兜底
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // cleanup on unmount / close
   useEffect(() => {
@@ -216,7 +240,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   // ── File selected ──
 
   async function handleFile(file: File) {
-    const validationError = validateFile(file)
+    const validationError = validateFile(file, limits.max_upload_mb)
     if (validationError) {
       setState((s) => ({ ...s, step: 'error', errorMsg: validationError }))
       return
@@ -355,13 +379,13 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     const { step } = state
 
     if (step === 'idle') {
-      return <UploadZone onFile={(f) => void handleFile(f)} disabled={false} />
+      return <UploadZone onFile={(f) => void handleFile(f)} disabled={false} maxUploadMb={limits.max_upload_mb} />
     }
 
     if (step === 'uploading') {
       return (
         <div className="flex flex-col gap-4">
-          <UploadZone onFile={() => undefined} disabled />
+          <UploadZone onFile={() => undefined} disabled maxUploadMb={limits.max_upload_mb} />
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
@@ -403,7 +427,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
               <span className="font-medium text-foreground">视频上传成功</span>
             </div>
             <p className="text-xs text-muted-foreground">
-              我们将为您生成带水印的前 3 分钟中文配音预览。
+              我们将为您生成带水印的前 {formatPreviewDuration(limits.preview_seconds)}中文配音预览。
               继续前请确认以下声明：
             </p>
           </div>
@@ -467,7 +491,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           <div className="flex items-center gap-2 text-sm">
             <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" aria-hidden="true" />
             <span className="font-medium text-foreground">配音预览已就绪</span>
-            <span className="text-xs text-muted-foreground">（带水印，前 3 分钟）</span>
+            <span className="text-xs text-muted-foreground">（带水印，前 {formatPreviewDuration(limits.preview_seconds)}）</span>
           </div>
           <div className="overflow-hidden rounded-xl border border-border bg-black">
             {/* No download attribute, no download button, controlsList nodownload */}
@@ -529,7 +553,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         </div>
 
         <p className="text-center text-xs text-muted-foreground">
-          本地视频 · 前 3 分钟预览 · 带水印
+          本地视频 · 前 {formatPreviewDuration(limits.preview_seconds)}预览 · 带水印
         </p>
       </DialogContent>
     </Dialog>
