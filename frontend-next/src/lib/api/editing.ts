@@ -382,7 +382,9 @@ export async function suggestSplitForSegment(
 ): Promise<SuggestSplitResponse> {
   return apiClient.post(
     `/jobs/${jobId}/segments/${segmentId}/suggest-split`,
-    { body },
+    // 同步多模态 LLM 识别（音频+文本），常超 30s；且服务端按任务配额
+    // 计数——客户端超时丢弃结果等于白烧一次配额。禁用默认超时。
+    { body, timeoutMs: 0 },
   )
 }
 
@@ -494,7 +496,9 @@ export async function regenerateSegmentTts(
 }> {
   return apiClient.post(
     `/jobs/${jobId}/segments/${segmentId}/regenerate-tts`,
-    { body: {} },
+    // 同步 TTS 合成写 draft，provider 延迟不可预估；客户端超时会造成
+    // "draft 已写入但前端报失败 → 用户再点一次重复合成"。禁用默认超时。
+    { body: {}, timeoutMs: 0 },
   )
 }
 

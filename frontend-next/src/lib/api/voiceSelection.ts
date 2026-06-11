@@ -51,6 +51,10 @@ export async function cloneVoiceForSelection(
         speaker_id: input.speakerId,
         segment_ids: input.segmentIds,
       },
+      // 后端同步执行音频拼接 + MiniMax 上传 + clone（provider 单次 180s
+      // 且带重试），且扣点在服务端完成。客户端超时只会造成"前端报失败、
+      // 后端照样扣点入库"的脱节 + 用户重试重复扣点，必须禁用默认 30s。
+      timeoutMs: 0,
     },
   )
   return { voiceId: result.voice_id, status: result.status }
