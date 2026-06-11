@@ -174,6 +174,13 @@
   --cinnabar-soft: oklch(0.55 0.18 25 / 0.08);
   --bamboo: oklch(0.55 0.07 145);
   --ochre: oklch(0.62 0.13 60);
+
+  /* Ultramarine — Western pigment counterpart to cinnabar.
+     Semantic: target-language / translated-text identity. NOT a CTA color.
+     Measured contrast on bg/card/muted: 8.41 / 7.68 / 7.45 (≥4.5 required). */
+  --ultramarine: oklch(0.40 0.13 265);
+  --ultramarine-soft: oklch(0.40 0.13 265 / 0.08);
+  --gallery-vignette: rgba(0, 0, 0, 0.18);
 }
 
 /* ==========================================
@@ -265,6 +272,12 @@
   --cinnabar-soft: oklch(0.62 0.18 25 / 0.12);
   --bamboo: oklch(0.55 0.07 145);
   --ochre: oklch(0.55 0.12 70);
+
+  /* Ultramarine — lifted for the charcoal scope.
+     Measured contrast on bg(0.22)/card(0.27)/muted(0.32): 6.42 / 5.59 / 4.71 (≥4.5 required). */
+  --ultramarine: oklch(0.70 0.11 265);
+  --ultramarine-soft: oklch(0.70 0.11 265 / 0.12);
+  --gallery-vignette: rgba(0, 0, 0, 0.30);
 }
 
 /* Subtle rice-paper noise texture for the ink-dark scope.
