@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import { Loader2, ClipboardList, Sparkles, ChevronDown, Cloud, X } from "lucide-react"
 import { toast } from "sonner"
+import { useConfirmDialog } from "@/components/ui/confirm-dialog"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { LogViewer } from "@/components/log-viewer"
 import { toJobLogEntries } from "@/lib/api/mappers"
@@ -123,6 +124,7 @@ export default function AdminJobsPage() {
   // same 412 + per-row failed[] reporting via POST /api/admin/pan/backups/batch.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [bulkBackingUp, setBulkBackingUp] = useState(false)
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   // Log expansion state
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null)
@@ -202,17 +204,17 @@ export default function AdminJobsPage() {
   const handleBulkBackup = useCallback(async () => {
     if (selectedIds.size === 0) return
     const ids = Array.from(selectedIds)
-    if (
-      !window.confirm(
+    const confirmed = await confirm({
+      title: "批量备份到网盘",
+      description:
         `确认将 ${ids.length} 个已完成任务批量备份到百度网盘?\n\n` +
-          "每个任务会:\n" +
-          "• 打包工程目录为 tar.gz\n" +
-          "• 跨境上传到 admin 网盘 (1GB 任务约 15-30 分钟)\n" +
-          "• 成功后任务状态变为「已归档」, 本地原文件被删除\n\n" +
-          "失败任务会单独在结果中列出,可后续单独重试。",
-      )
-    )
-      return
+        "每个任务会:\n" +
+        "• 打包工程目录为 tar.gz\n" +
+        "• 跨境上传到 admin 网盘 (1GB 任务约 15-30 分钟)\n" +
+        "• 成功后任务状态变为「已归档」, 本地原文件被删除\n\n" +
+        "失败任务会单独在结果中列出,可后续单独重试。",
+    })
+    if (!confirmed) return
 
     setBulkBackingUp(true)
     try {
@@ -239,7 +241,7 @@ export default function AdminJobsPage() {
     } finally {
       setBulkBackingUp(false)
     }
-  }, [selectedIds, loadJobs, clearSelection])
+  }, [confirm, selectedIds, loadJobs, clearSelection])
   // Subsequent silent polling (no spinner flicker)
   usePollingTask(() => loadJobs(true), { intervalMs: 10000, immediate: false })
 
@@ -357,7 +359,12 @@ export default function AdminJobsPage() {
   }
 
   const handleDelete = async (jobId: string) => {
-    if (!confirm("确定要删除该任务吗？此操作不可恢复。")) return
+    const confirmed = await confirm({
+      title: "删除任务",
+      description: "确定要删除该任务吗？此操作不可恢复。",
+      destructive: true,
+    })
+    if (!confirmed) return
     setActing(jobId)
     try {
       const res = await fetch(`/api/admin/jobs/${jobId}/delete`, {
@@ -499,6 +506,8 @@ export default function AdminJobsPage() {
           </table>
         </div>
       )}
+
+      {confirmDialog}
     </div>
   )
 }

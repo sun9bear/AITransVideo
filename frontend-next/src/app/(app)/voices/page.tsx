@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { EmptyState } from "@/components/empty-state"
+import { useConfirmDialog } from "@/components/ui/confirm-dialog"
 import {
   addUserVoice,
   calibrateVoiceSpeed,
@@ -28,6 +29,7 @@ export default function VoiceLibraryPage() {
   const [audioUrls, setAudioUrls] = useState<Record<string, string>>({})
   const [showAdd, setShowAdd] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   useEffect(() => {
     getVoiceLibrary()
@@ -106,7 +108,11 @@ export default function VoiceLibraryPage() {
 
   // --- Delete voice ---
   const handleDelete = useCallback(async (voiceId: string, label: string) => {
-    const confirmed = window.confirm(`确定删除音色「${label}」吗？删除后不可恢复。`)
+    const confirmed = await confirm({
+      title: "删除音色",
+      description: `确定删除音色「${label}」吗？删除后不可恢复。`,
+      destructive: true,
+    })
     if (!confirmed) return
     try {
       const resp = await fetch(`/gateway/user-voices/${encodeURIComponent(voiceId)}`, {
@@ -124,7 +130,7 @@ export default function VoiceLibraryPage() {
     } catch (err) {
       setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : "删除失败" }))
     }
-  }, [])
+  }, [confirm])
 
   // --- Add voice modal callback ---
   const handleAddSuccess = useCallback(() => {
@@ -353,6 +359,7 @@ export default function VoiceLibraryPage() {
         </div>
       ) : null}
 
+      {confirmDialog}
     </div>
   )
 }
