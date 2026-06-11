@@ -206,9 +206,32 @@ def upgrade() -> None:
     # IF NOT EXISTS keeps re-runs idempotent. (The three new tables' indexes
     # stay plain/transactional — they're built on empty tables, no lock risk.)
     with op.get_context().autocommit_block():
-        op.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_jobs_anon_preview_status "
-            "ON jobs (status) WHERE is_anonymous_preview"
+        # First drop any INVALID leftover from a previously cancelled /
+        # interrupted CREATE INDEX CONCURRENTLY. Without this, the
+        # if_not_exists below would see the dead-name slot and let alembic
+        # mark this revision applied while the index is unusable (mirrors the
+        # migration 021 pattern).
+        conn = op.get_bind()
+        invalid_row = conn.execute(
+            sa.text(
+                "SELECT 1 FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid "
+                "WHERE c.relname = :idx_name AND i.indisvalid = false"
+            ),
+            {"idx_name": "ix_jobs_anon_preview_status"},
+        ).first()
+        if invalid_row is not None:
+            op.execute(
+                "DROP INDEX CONCURRENTLY IF EXISTS ix_jobs_anon_preview_status"
+            )
+
+        op.create_index(
+            "ix_jobs_anon_preview_status",
+            "jobs",
+            ["status"],
+            postgresql_where=sa.text("is_anonymous_preview"),
+            postgresql_concurrently=True,
+            if_not_exists=True,
         )
 
     # ------------------------------------------------------------------
@@ -252,7 +275,12 @@ def downgrade() -> None:
     # 4. jobs column + partial index. DROP INDEX CONCURRENTLY (also outside a
     # transaction) so downgrade never takes the ACCESS EXCLUSIVE lock either.
     with op.get_context().autocommit_block():
-        op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_jobs_anon_preview_status")
+        op.drop_index(
+            "ix_jobs_anon_preview_status",
+            table_name="jobs",
+            postgresql_concurrently=True,
+            if_exists=True,
+        )
     op.drop_column("jobs", "is_anonymous_preview")
 
     # 3. anonymous_preview_records
