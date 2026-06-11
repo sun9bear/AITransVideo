@@ -242,7 +242,8 @@ def upgrade() -> None:
             """
             INSERT INTO users (id, email, display_name, password_hash,
                                is_active, role, plan_code,
-                               free_jobs_quota_total, free_jobs_quota_used)
+                               free_jobs_quota_total, free_jobs_quota_used,
+                               created_at, updated_at)
             VALUES (
                 gen_random_uuid(),
                 :email,
@@ -252,7 +253,9 @@ def upgrade() -> None:
                 'user',
                 'free',
                 0,
-                0
+                0,
+                now(),
+                now()
             )
             ON CONFLICT (email) DO NOTHING
             """
