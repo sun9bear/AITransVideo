@@ -459,16 +459,26 @@ def test_frontend_projects_page_edit_button_is_feature_flag_gated() -> None:
         "feature flag env var must be referenced"
     )
     assert "POST_EDIT_ENABLED" in src
-    # Scan for the three gate conditions: feature flag + studio + succeeded.
+    # The studio service mode must be in the editable allow-list. The check was
+    # refactored (2026-05-16) from an inline ``serviceMode === 'studio'`` into a
+    # named ``EDITABLE_SERVICE_MODES`` Set (which also added "smart" per master
+    # plan §6.2), so scan the Set membership rather than inline adjacency.
+    editable_set = re.search(
+        r"EDITABLE_SERVICE_MODES[^\n]*=\s*[^\n]*Set\(\[([\s\S]*?)\]\)", src
+    )
+    assert editable_set and '"studio"' in editable_set.group(1), (
+        "EDITABLE_SERVICE_MODES allow-list must include 'studio'"
+    )
+    # The eligibility gate must AND-combine all three conditions in ONE
+    # expression (multi-line tolerant): feature flag + editable service mode +
+    # status === 'succeeded'. Bounded [\\s\\S]{0,200}? keeps it scoped to the gate.
     assert re.search(
-        r"POST_EDIT_ENABLED[^\n]*serviceMode[^\n]*[\"']studio[\"'][^\n]*[\"']succeeded[\"']",
-        src,
-    ) or re.search(
-        r"serviceMode[^\n]*[\"']studio[\"'][^\n]*[\"']succeeded[\"'][^\n]*POST_EDIT_ENABLED",
+        r"POST_EDIT_ENABLED\s*&&[\s\S]{0,200}?EDITABLE_SERVICE_MODES\.has\([^\n]*serviceMode"
+        r"[\s\S]{0,200}?status\s*===\s*[\"']succeeded[\"']",
         src,
     ), (
-        "D43 button gate must combine POST_EDIT_ENABLED + serviceMode === 'studio' "
-        "+ status === 'succeeded' on a single expression"
+        "D43 button gate must AND-combine POST_EDIT_ENABLED + an editable "
+        "serviceMode (EDITABLE_SERVICE_MODES.has) + status === 'succeeded'"
     )
 
 
