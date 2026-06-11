@@ -169,6 +169,8 @@ git commit -m "feat(ui): ink/ink-dark 注入 --ultramarine/--gallery-vignette to
 
 ## 评审记录
 
+**第四轮（2026-06-11，Codex `codex review --base main`，GPT-5.5 xhigh，审 P0 实码 diff）：GATE PASS，零发现。** 原话："The changes are limited to frontend theme tokens and visual presentation for existing components. I did not find any correctness regressions introduced by the diff; `npm run lint` completes with warnings only, all pre-existing or unrelated." P0 四 commit + lint 0 errors + `next build` exit 0 + 真机样张（token 双 scope 解析 + 视觉截图）。
+
 **第一轮（2026-06-11，独立子代理 fresh context）：Approved**。裁决：Q1 connector-only（采纳）、Q2 不混淆不扩 scope、Q3 vignette 安全 + overflow/outline 实测点；必修项：字体变量挂载、除零护卫。
 
 **第三轮（2026-06-11，Codex GPT-5.5 xhigh 复审 v2）：GATE FAIL（新 2 P1 + 2 P2）→ 已修入 v3。** 12 条旧账判定 10 FIXED / 1 PARTIAL / 1 NOT_FIXED。新发现与修正：① Task 6 faux-bold 残留——EB Garamond 最高 800 对不上 `.ink-display` 900 → Garamond 只套 `.ink-heading`，display 保持宋体 900；② Task 2 豁免不够窄——译文是可编辑 textarea → 收窄为仅外层容器左边线、文字色一律不动；③ `.marketing-root .ink-heading` 与既有规则 specificity 同级会静默失效 → 改 `.marketing-root[data-theme="ink"]` (0,3,0)；④ `--gallery-vignette` 无兜底 → 消费点加 fallback 值。
