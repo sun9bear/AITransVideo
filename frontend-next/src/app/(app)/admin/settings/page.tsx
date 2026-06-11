@@ -979,7 +979,7 @@ export default function AdminSettingsPage() {
             </p>
             <p className="text-xs text-muted-foreground mt-1">
               开启后（需同时配置前端 env），未登录用户可在首页上传本地视频，获取带水印的前 3 分钟配音预览。
-              关闭时 gateway 拒绝所有匿名上传请求，前端占位框继续显示"即将开放"。
+              关闭时 gateway 拒绝所有匿名上传请求，前端占位框继续显示「即将开放」。
             </p>
           </div>
         </label>
@@ -988,7 +988,7 @@ export default function AdminSettingsPage() {
           <div>
             <p className="text-sm font-medium text-foreground">全局同时处理上限</p>
             <p className="text-xs text-muted-foreground mt-1">
-              同一时刻允许同时进行处理的匿名预览任务数。超出后新上传返回 429（"预览通道繁忙"）。
+              同一时刻允许同时进行处理的匿名预览任务数。超出后新上传返回 429（「预览通道繁忙」）。
               默认 2，建议根据实际服务器负载调整（范围 1–100）。
             </p>
           </div>

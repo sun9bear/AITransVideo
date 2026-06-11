@@ -187,18 +187,23 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   const abortRef = useRef<AbortController | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollErrorsRef = useRef(0)
+  // Poll generation: bumped on reset/unmount so an in-flight status fetch
+  // that resolves afterwards can't setState + re-arm the timer (轮询复活).
+  const pollGenRef = useRef(0)
 
   // cleanup on unmount / close
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+      pollGenRef.current += 1
     }
   }, [])
 
   function resetPanel() {
     abortRef.current?.abort()
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    pollGenRef.current += 1
     pollErrorsRef.current = 0
     setState(INITIAL_STATE)
   }
@@ -277,15 +282,24 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
 
   function schedulePoll(previewId: string, delayMs: number = POLL_INTERVAL_MS) {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
-    pollTimerRef.current = setTimeout(() => void doPoll(previewId), delayMs)
+    const gen = pollGenRef.current
+    pollTimerRef.current = setTimeout(() => void doPoll(previewId, gen), delayMs)
   }
 
-  async function doPoll(previewId: string) {
+  async function doPoll(previewId: string, gen: number) {
+    if (gen !== pollGenRef.current) return
+    // Tab hidden → skip the request, re-check next interval.
+    if (typeof document !== 'undefined' && document.hidden) {
+      schedulePoll(previewId)
+      return
+    }
     let statusResp: Awaited<ReturnType<typeof getPreviewStatus>>
     try {
       statusResp = await getPreviewStatus(previewId)
+      if (gen !== pollGenRef.current) return
       pollErrorsRef.current = 0
     } catch (err) {
+      if (gen !== pollGenRef.current) return
       // 401 = session expired → stop and tell the user; never silently spin.
       const httpStatus = err instanceof PreviewStatusError ? err.status : 0
       if (httpStatus === 401) {
