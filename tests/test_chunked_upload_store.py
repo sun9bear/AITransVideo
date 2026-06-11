@@ -409,6 +409,46 @@ def test_complete_second_disk_precheck_507_reverts_nothing(uploads_env, monkeypa
     assert after["state"] == store.STATE_RECEIVING  # 分片保留可重试
 
 
+def test_complete_finalize_failure_reverts_to_receiving_and_is_retryable(
+    uploads_env, monkeypatch,
+):
+    """Codex review 2026-06-11 P2 回归：completing 落盘后 finalization
+    （mkdir/改名/状态写盘）任何意外异常必须回 receiving + 分片完整保留，
+    不许卡死在 completing（202 死循环）也不许留孤儿终文件。"""
+    data = b"0123456789"
+    st = init_for(data)
+    uid = st["upload_id"]
+    for n in range(st["total_parts"]):
+        st = put_part("user-a", uid, st, data, n)
+
+    original_finalize = store._finalize_move
+
+    def boom(_tmp, _final):
+        raise RuntimeError("disk glitch during finalize")
+
+    monkeypatch.setattr(store, "_finalize_move", boom)
+    with pytest.raises(ChunkedUploadError) as e:
+        store.complete_upload(user_id="user-a", upload_id=uid, limits=make_limits())
+    assert e.value.status_code == 500 and e.value.code == "merge_failed"
+
+    after = store.load_state("user-a", uid)
+    assert after["state"] == store.STATE_RECEIVING, "不许卡死在 completing"
+    assert "finalize_error" in (after["failure_reason"] or "")
+    # 分片完整保留 → 故障恢复后可直接重试 complete
+    assert store.received_part_indices(after) == list(range(after["total_parts"]))
+    # 无孤儿终文件 / merged.tmp 残留
+    assert not (store.uploads_root() / "user-a").exists() or not list(
+        (store.uploads_root() / "user-a").glob(f"{uid[:12]}_*")
+    )
+    assert not (store.upload_dir("user-a", uid) / "merged.tmp").exists()
+
+    # 故障消除后重试成功
+    monkeypatch.setattr(store, "_finalize_move", original_finalize)
+    final = store.complete_upload(user_id="user-a", upload_id=uid, limits=make_limits())
+    assert final["state"] == store.STATE_READY
+    assert Path(final["final_path"]).read_bytes() == data
+
+
 def test_concurrent_double_complete_single_merge(uploads_env):
     data = b"0123456789" * 100
     st = init_for(data, chunk_size=256)

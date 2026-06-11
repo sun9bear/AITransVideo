@@ -558,9 +558,16 @@ def complete_upload(
         state["state"] = STATE_COMPLETING
         _save_state(user_id, upload_id, state)
 
+        # Codex review 2026-06-11 P2：completing 落盘之后的**任何**意外异常
+        # （合并 IO、mkdir、改名、ready 状态写盘）都必须回退 receiving——
+        # 否则 upload 卡在 completing，/complete 永远 202、/status 永远不
+        # ready，直到 24h sweeper TTL 才清盘。回退顺序保证：分片删除挪到
+        # ready 落盘**之后**，任何回退点分片都完整可重试；ready 写盘失败
+        # 时已改名的终文件被删除，不留孤儿。
         updir = upload_dir(user_id, upload_id)
         merged_tmp = updir / "merged.tmp"
         digest = hashlib.sha256()
+        final_path: Optional[Path] = None
         try:
             with open(merged_tmp, "wb") as out:
                 for n in range(total_parts):
@@ -578,50 +585,70 @@ def complete_upload(
                                 break
                             digest.update(buf)
                             out.write(buf)
-        except OSError as exc:
-            # 瞬时 IO 错：回 receiving，分片保留，客户端可重试 complete。
-            _safe_unlink(merged_tmp)
-            state["state"] = STATE_RECEIVING
-            state["failure_reason"] = f"merge_io_error: {exc}"
+
+            if digest.hexdigest() != state["declared_sha256"]:
+                # r3：片级已有 X-Chunk-SHA256 把关，走到这步 = 声明哈希错或
+                # 磁盘损坏 → failed_integrity，清空全部分片（位图保留只会
+                # 无限 422）。状态先落盘再删文件：状态写失败会走下面的
+                # 回退分支，此时分片仍完整。
+                state["state"] = STATE_FAILED_INTEGRITY
+                state["parts"] = {}
+                state["failure_reason"] = "sha256_mismatch"
+                _save_state(user_id, upload_id, state)
+                _safe_unlink(merged_tmp)
+                for n in range(total_parts):
+                    _safe_unlink(part_path(user_id, upload_id, n))
+                raise ChunkedUploadError(
+                    422, "sha256_mismatch",
+                    "文件完整性校验失败，已清空分片，请重新上传",
+                )
+
+            # 移入正式 uploads/ 路径（与 gateway/upload.py 命名约定一致：
+            # uploads/{user_id}/{upload_id 前 12 位}_{safe_name}）。
+            final_path = (
+                uploads_root() / _safe_segment(user_id)
+                / f"{upload_id[:12]}_{state['safe_file_name']}"
+            )
+            _finalize_move(merged_tmp, final_path)
+
+            state["state"] = STATE_READY
+            state["final_path"] = str(final_path)
+            state["failure_reason"] = None
+            state["completed_at"] = _now_iso()
             _save_state(user_id, upload_id, state)
+        except ChunkedUploadError:
+            raise
+        except Exception as exc:
+            _safe_unlink(merged_tmp)
+            if final_path is not None:
+                # 改名已发生但 ready 写盘失败：删终文件防孤儿（分片仍在）。
+                _safe_unlink(final_path)
+            state["state"] = STATE_RECEIVING
+            state["failure_reason"] = f"finalize_error: {exc}"
+            try:
+                _save_state(user_id, upload_id, state)
+            except Exception:
+                # state.json 都写不动（磁盘级故障）：sweeper TTL 是最终兜底。
+                logger.exception(
+                    "chunked_upload: failed to revert state for %.8s", upload_id
+                )
             raise ChunkedUploadError(500, "merge_failed", "合并失败，请重试") from exc
 
-        if digest.hexdigest() != state["declared_sha256"]:
-            # r3：片级已有 X-Chunk-SHA256 把关，走到这步 = 声明哈希错或
-            # 磁盘损坏 → failed_integrity，清空全部分片（位图保留只会无限 422）。
-            _safe_unlink(merged_tmp)
-            for n in range(total_parts):
-                _safe_unlink(part_path(user_id, upload_id, n))
-            state["state"] = STATE_FAILED_INTEGRITY
-            state["parts"] = {}
-            state["failure_reason"] = "sha256_mismatch"
-            _save_state(user_id, upload_id, state)
-            raise ChunkedUploadError(
-                422, "sha256_mismatch",
-                "文件完整性校验失败，已清空分片，请重新上传",
-            )
-
-        # 移入正式 uploads/ 路径（与 gateway/upload.py 命名约定一致：
-        # uploads/{user_id}/{upload_id 前 12 位}_{safe_name}）。
-        final_dir = uploads_root() / _safe_segment(user_id)
-        final_dir.mkdir(parents=True, exist_ok=True)
-        final_path = final_dir / f"{upload_id[:12]}_{state['safe_file_name']}"
-        os.replace(merged_tmp, final_path)
-
+        # ready 已落盘，分片清理转为 best-effort（残留由 sweeper 随目录回收）。
         for n in range(total_parts):
             _safe_unlink(part_path(user_id, upload_id, n))
-
-        state["state"] = STATE_READY
-        state["final_path"] = str(final_path)
-        state["failure_reason"] = None
-        state["completed_at"] = _now_iso()
-        _save_state(user_id, upload_id, state)
         return state
 
 
 # ---------------------------------------------------------------------------
 # R5 — abort（用户主动放弃）
 # ---------------------------------------------------------------------------
+
+
+def _finalize_move(merged_tmp: Path, final_path: Path) -> None:
+    """mkdir + 原子改名（独立 seam：finalize 失败回退的回归测试注入点）。"""
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(merged_tmp, final_path)
 
 
 def abort_upload(*, user_id: str, upload_id: str) -> None:
