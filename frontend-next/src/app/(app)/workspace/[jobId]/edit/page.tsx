@@ -15,6 +15,7 @@ import {
 
 import { Button } from "@/components/ui/button"
 import { useConfirmDialog } from "@/components/ui/confirm-dialog"
+import { sleep, useIsMountedRef } from "@/lib/react/useIsMountedRef"
 import {
   acceptSegmentDraft,
   cancelEditing,
@@ -117,6 +118,7 @@ export default function VideoEditPage() {
   const router = useRouter()
   const jobId = ((params.jobId as string) ?? "").trim()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const isMountedRef = useIsMountedRef()
 
   const [job, setJob] = useState<JobSummary | null>(null)
   const [resource, setResource] = useState<EditingSegmentsResponse | null>(null)
@@ -738,12 +740,22 @@ export default function VideoEditPage() {
       let lastDisplayedProgress = ""
 
       while (polls < MAX_POLLS) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        await sleep(POLL_INTERVAL_MS)
+        if (!isMountedRef.current) {
+          // Page left mid-batch: the backend task keeps running on its own;
+          // just stop tracking and drop the orphaned loading toast.
+          toast.dismiss(toastId)
+          return false
+        }
         if (typeof document !== "undefined" && document.hidden) {
           continue
         }
         polls += 1
         const status = await getRegenerateAllStatus(jobId, taskId)
+        if (!isMountedRef.current) {
+          toast.dismiss(toastId)
+          return false
+        }
 
         // Someone launched another batch — old task id orphaned.
         if (status.mismatch) {
@@ -824,7 +836,7 @@ export default function VideoEditPage() {
       setBatchTaskId(null)
       setIsCancellingBatch(false)
     }
-  }, [isBatchRegenerating, jobId, loadData])
+  }, [isBatchRegenerating, isMountedRef, jobId, loadData])
 
   // D39 user-initiated cancel of a running batch. Writes the
   // cancel_requested flag on the backend; the running polling loop
@@ -923,12 +935,20 @@ export default function VideoEditPage() {
       let polls = 0
       let lastDisplayedProgress = ""
       while (polls < MAX_POLLS) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        await sleep(POLL_INTERVAL_MS)
+        if (!isMountedRef.current) {
+          toast.dismiss(toastId)
+          return
+        }
         if (typeof document !== "undefined" && document.hidden) {
           continue
         }
         polls += 1
         const status = await getRegenerateAllStatus(jobId, taskId)
+        if (!isMountedRef.current) {
+          toast.dismiss(toastId)
+          return
+        }
         if (status.mismatch) {
           toast.warning("检测到新的合成任务，已停止跟踪当前进度", { id: toastId })
           break
@@ -987,6 +1007,7 @@ export default function VideoEditPage() {
     bulkReplacePreview,
     isBulkReplaceApplying,
     isBatchRegenerating,
+    isMountedRef,
     jobId,
     loadData,
   ])
