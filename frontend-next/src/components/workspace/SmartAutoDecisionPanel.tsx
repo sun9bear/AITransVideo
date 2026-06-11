@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronUp, Loader2, Sparkles, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 
 import { getSmartQualityReport } from '@/lib/api/jobs'
+import { formatTimestamp } from '@/lib/format'
 import type { SmartQualityReport } from '@/types/smart'
 
 /**
@@ -415,20 +416,4 @@ function creditsPolicyLabel(policy: string): string {
   if (policy === 'refund_full') return '全额退款'
   if (policy === 'pending_settle') return '待结算'
   return policy
-}
-
-function formatTimestamp(iso: string): string {
-  try {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
-    return d.toLocaleString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return iso
-  }
 }

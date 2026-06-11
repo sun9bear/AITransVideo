@@ -41,6 +41,7 @@ import {
   getSpeakerAudioSegments,
   type SpeakerAudioSegment,
 } from "@/lib/api/voiceSelection"
+import { formatTimecode } from "@/lib/format"
 
 /**
  * Props 契约（Phase 4.2 E.2 spec v2.1 §4 锁定）。
@@ -121,13 +122,6 @@ const MAX_DURATION_MS = 60000
 /** 推荐区间（毫秒，仅提示，不强制）。后端 `RECOMMENDED_MIN/MAX_DURATION_MS`. */
 const RECOMMENDED_MIN_MS = 10000
 const RECOMMENDED_MAX_MS = 20000
-
-function formatTimecode(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`
-}
 
 export function CosyVoiceSegmentPicker({
   speakerId,
