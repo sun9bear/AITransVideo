@@ -1,157 +1,196 @@
-# 阿里云 OSS 大文件直传通道方案（2026-06-11）
+# 大文件上传通道方案：Cloudflare 分片上传（主）+ OSS 直传（后备）
 
-> 状态：**已降级为后备方案**（2026-06-11 晚，见 §0）。主方案改为应用层分片上传。
-
-## 0. 决策更新（2026-06-11 晚）：分片上传取代 OSS 成为主方案
-
-**事实核实**：Cloudflare 100MB 限制作用于**单个 HTTP 请求体**，不是业务文件大小
-（官方 413 文档口径；本日实测一致：120MB 单请求 413、小请求全通）。应用层分片
-（每片 <100MB 的独立请求）可合法绕过，CF 官方亦将 "break up requests into smaller
-chunks" 列为推荐做法。
-
-**决策**：>95MB 大文件上传 v1 走**应用层分片**（沿现有 CF Tunnel 路径），理由：
-零新增基础设施、零流量费（CF 入口免费 + Hetzner 含量）、零新增密钥面。OSS 方案
-（本文 §2-§9）**保留为后备**，触发条件：分片方案上线后实测中国用户大文件
-成功率/耗时不达标（CF 免费版无中国节点，2GB 上传可能 10-30 分钟级）。
-
-**分片方案要点**（实施时展开为独立设计节）：
-- 协议：`POST /gateway/uploads/chunked/init`（声明 size/sha256/分片数，发 upload_id）
-  → `PUT .../part/{n}`（每片 50-80MB，幂等：同片重传覆盖，校验片级 checksum/长度）
-  → `POST .../complete`（服务端按序合并 → 全文件 sha256 比对 → 转入现有 uploads/
-  落盘约定，pipeline 零感知）。
-- 不能用单请求 `Transfer-Encoding: chunked` 伪装——CF 仍按总请求体计 413。
-- 断点续传：init 幂等（同 sha256 复用 upload_id）+ `GET .../status` 返已收分片位图。
-- 清扫：过期未 complete 的分片目录由 sweeper 定时清（复用 reservation sweeper 模式），
-  防磁盘被半截上传堆满；per-user 并发 upload_id 上限。
-- 限额：单片上限/总大小上限/每日配额全部入 admin 热旋钮（复用 2026-06-11 APF
-  旋钮机制）；gateway 自身 body limit 须放行单片大小。
-- 安全：登录态必须（匿名档不开放）；分片写入隔离目录
-  `uploads/_chunked/{user_id}/{upload_id}/`，路径组件 0 信任拼接。
-
-以下 OSS 方案全文保留备查，外审请按"后备方案"口径评审。
-
----
+> 状态：**r2 修订版，待 CodeX 复审**。本文档是大文件上传的完整设计真值；实施偏离须回写。
+>
+> 修订记录：
+> - r0（2026-06-11 午）：OSS 直传为主方案。
+> - r1（2026-06-11 晚）：实测核实 CF 100MB 为单请求体限制 → 分片上传取代 OSS 为主方案，但只有摘要。
+> - **r2（2026-06-11 夜）：按 CodeX 外审 7 条 findings 把分片方案扩成完整设计**（路由契约/状态机/
+>   锁与幂等/磁盘 reserve/CSRF/admin 三处同步/测试矩阵）；OSS 全文降为附录 A。
 
 ## 1. 背景与问题（已实证）
 
-- 生产公网唯一入口 = Cloudflare Tunnel（源站 443/80 实测不可达，2026-06-11 探测）。
-- **Cloudflare 免费计划对请求体有 100MB 硬上限**。2026-06-11 实测：120MB POST 到
-  `/gateway/anonymous-preview/upload` 被 CF 边缘直接 413（响应签名 cloudflare，
-  Caddy/gateway 全程无痕迹）。
-- 用户实际被卡：394.5MB 视频上传两次失败，前端只显示"网络错误"（admin 已把应用层
-  上限调到 1024MB，但基础设施天花板是 100MB，应用旋钮无法突破）。
-- **影响面**：匿名预览上传 + 注册用户本地视频上传走同一域名，全部受 100MB 限制。
-  注册/付费用户传不了大视频是真实产品缺口。
+- 生产公网唯一入口 = Cloudflare Tunnel（源站 443/80 实测不可达）。
+- **CF 免费计划单 HTTP 请求体上限 100MB**，三重证据（2026-06-11）：
+  官方 413 文档原文 "Max upload size: 100/100/200/500+ MB (Free/Pro/Business/Enterprise)"；
+  120MB 实弹 → CF 边缘 413；**80MB 实弹 → 穿过边缘抵达源站**（返回源站 405 JSON）。
+  官方对策原文："break up requests into smaller chunks, change DNS to DNS-only, or upgrade"。
+- 用户实际被卡：394.5MB 视频上传失败；admin 应用层旋钮（已调至 1024MB）无法突破边缘上限。
+- 限制是**单请求体**而非业务文件 → 应用层分片（每片 <100MB 独立请求）合法绕过。
 
 ## 2. 目标 / 非目标
 
 **目标**
-- 注册用户本地视频上传支持 **≤2GB**（上限做成 admin 旋钮，OSS 自身能力远超此值）。
-- 上传体验：分片直传 + 断点续传 + 进度条（中国大陆用户走 OSS 国内链路，速度优）。
-- 保住 pipeline **本地路径契约**：管线只见美国主机本地文件，OSS 对 pipeline 不可见
-  （对齐 memory `feedback_deployment_plan_pitfalls` 第 3 条红线）。
+- 注册用户本地视频上传支持 ≤2GB（admin 旋钮可调），走现有 CF Tunnel，**零新增基础设施/密钥/流量费**。
+- 断点续传 + 进度可见；合并后接入**现有** uploads/ 落盘约定与 job 创建流（pipeline 零感知）。
 
 **非目标**
-- 匿名免费预览不走 OSS（免费样本调回 ≤95MB 走现有 CF 路径即可，防滥用面更小）。
-- 不动下载/交付路径（R2 切面不变），不动 `前端零感知 R2` 守卫覆盖的任何约束。
-- v1 不统一所有上传到 OSS：≤95MB 仍走现有 CF 直传（少一次跨境回拉，省 ¥0.5/GB）；
-  仅 >95MB 走 OSS 通道。前端按文件大小自动选路。
+- 匿名免费档不开放分片（保持 ≤95MB 单请求路径，滥用面小）。
+- 不动下载/R2 切面；不做 OSS（降为附录 A 后备，触发条件见 §6-Q2）。
+- v1 不替换 ≤95MB 的现有单请求上传路径（前端按文件大小自动选路）。
 
-## 3. 现有资产盘点
+## 3. 主方案设计：应用层分片上传
 
-| 资产 | 位置 | 复用方式 |
-|---|---|---|
-| OSS 账号 + AccessKey | 生产 `.env`：`AVT_COSYVOICE_OSS_ACCESS_KEY_ID/SECRET/BUCKET/ENDPOINT/REGION`（为 CosyVoice 样本中转配置，默认 region cn-beijing） | **不直接复用 key**——它是服务端长期凭证。本方案需要为浏览器签发 STS 临时凭证，应新建独立 RAM 角色（§5）。账号/计费体系复用 |
-| S3-compatible uploader 实现 | 未合并分支 `codex/cosyvoice-aliyun-oss-uploader` 的 `gateway/cosyvoice_clone/sample_uploader.py`（229 行，含 endpoint/超时/错误处理模式） | 回拉 worker 的 OSS client 写法参考；不直接合并该分支 |
-| 阿里云运维经验 | 武汉 CosyVoice worker ECS 同账号体系 | 控制台操作熟路 |
+### 3.1 路由契约
 
-## 4. 架构设计
+所有路由挂 gateway（FastAPI），**全部要求登录态**（沿用现有 auth dependency）；
+所有状态变更方法（POST/PUT/DELETE）**必须过 `require_same_origin_state_change`**
+（CodeX P0：与现有 gateway 写路由一致，session cookie 不是 CSRF 防线）。
+
+| # | Method/Path | 作用 | 关键校验 | 主要错误 |
+|---|---|---|---|---|
+| R1 | `POST /gateway/uploads/chunked/init` | 声明 `{size, sha256, chunk_size, file_name}` → 返回 `{upload_id, chunk_size, total_parts, received_parts:[]}` | CSRF；size ≤ admin 上限；chunk_size ∈ [admin 下限, 80MB]；**磁盘 reserve（§3.4）**；per-user 活跃 upload 数 ≤ 旋钮；**同 user 续传复用（§3.5）** | 403 csrf/未登录、413 over_limit、429 too_many_active、507 insufficient_storage |
+| R2 | `PUT /gateway/uploads/chunked/{upload_id}/part/{n}` | raw body 写第 n 片（**`request.stream()` 流式落盘，禁 `request.form()`**，CodeX P2） | CSRF；ownership（§3.5）；state==receiving（§3.2）；n ∈ [0,total_parts)；Content-Length 必带且 ≤ chunk_size（末片 ≤ 余量）；流式超量即断 | 404 not_found（含非本人）、409 wrong_state、413 part_too_large |
+| R3 | `POST /gateway/uploads/chunked/{upload_id}/complete` | 持锁合并 → 全文件 sha256 比对 → 移入 uploads/ 正式路径 → 返回现有 upload ref | CSRF；ownership；state receiving→completing（原子，§3.3）；分片齐全；**合并前磁盘二次 reserve** | 409 missing_parts/wrong_state、422 sha256_mismatch、507 |
+| R4 | `GET /gateway/uploads/chunked/{upload_id}/status` | `{state, received_parts 位图, bytes_received}`（断点续传依据） | ownership（404 同形） | 404 |
+| R5 | `DELETE /gateway/uploads/chunked/{upload_id}` | 用户主动放弃，清分片目录 | CSRF；ownership；state ∈ {receiving, failed} | 404、409 |
+
+分片落盘隔离目录：`uploads/_chunked/{user_id}/{upload_id}/part_{n:05d}`；
+`upload_id = uuid4().hex`（服务端生成，路径组件零信任拼接，正则 `^[a-f0-9]{32}$` 深度防御）。
+
+### 3.2 状态机（CodeX P1：并发锁的前提）
 
 ```
-浏览器(中国)                         Gateway(US, 经CF Tunnel)               OSS(cn-beijing)
-   │ ① POST /gateway/uploads/oss/sts ──→ 鉴权+限频 → STS AssumeRole
-   │ ←─ 临时凭证(15min,仅限前缀PutObject) ┘
-   │ ② OSS JS SDK multipart 直传(10-20MB/片,并发,断点续传) ─────────────→ uploads/{uid}/{uuid}/src.mp4
-   │ ③ POST /gateway/uploads/oss/complete ─→ 校验声明(key/size/sha256) → 入回拉队列
-   │                                        ④ 回拉 worker: GetObject → 落盘
-   │                                           uploads/ 本地(沿用现有 native
-   │                                           upload 落盘/命名约定) → 校验
-   │                                           sha256 → DeleteObject
-   │ ⑤ 轮询 /gateway/uploads/{id}/status ←─ ready + 本地 upload ref
-   │ ⑥ 用 upload ref 走【现有】job 创建流（pipeline 零改动）
+receiving ──complete(全片齐+锁获取成功)──→ completing ──合并+校验成功──→ ready
+    │                                         │
+    │←──────(校验失败/IO错: 回 receiving 并记 failure_reason，或→failed)──┘
+    │
+    ├──TTL 到期(sweeper)──→ expired（清盘删除）
+    └──DELETE──→ aborted（清盘删除）
 ```
 
-**关键决策**
-- **D1 STS 而非 AccessKey 进前端**：浏览器只见 15 分钟过期、仅能 `oss:PutObject` 到
-  `uploads/{user_id}/{uuid}/` 单一前缀的临时凭证。长期 key 永不出 gateway。
-- **D2 回拉而非挂载**：pipeline 契约 = 本地文件路径。回拉 worker 是唯一 OSS 读取方，
-  落盘后 OSS 对象即删（双保险：bucket 生命周期 24h 兜底删 `uploads/` 前缀）。
-- **D3 complete 不信客户端**：客户端只声明 key；gateway 用服务端凭证 HeadObject 校验
-  实际 size/存在性，sha256 在回拉后本地复算比对。声明不符 → 拒绝 + 删对象。
-- **D4 双路径按大小自动选**：`文件 ≤95MB → 现有 CF 直传`；`>95MB → OSS 通道`。
-  阈值与 2GB 上限均为 admin 热旋钮（沿用 2026-06-11 APF 旋钮同一套 admin_settings 机制）。
-- **D5 endpoint 不硬编码进前端 bundle**：STS 响应携带 endpoint/bucket/前缀，前端动态读。
-  （类比"前端零感知 R2"精神；该守卫本身只扫 R2 字样，OSS 不触发，但同样理由适用。）
+| 状态 | part 写入 | complete | status | 持久化 |
+|---|---|---|---|---|
+| receiving | ✅ | ✅（转 completing） | ✅ | `state.json`（upload 目录内，含声明元数据+状态） |
+| completing | ❌ 409 | ❌ 409（幂等：返回 in_progress） | ✅ | 同上 |
+| ready | ❌ 409 | ✅ 幂等返回同一 upload ref | ✅ | 合并文件已移交 uploads/，目录留 state.json 短期供幂等 |
+| failed/expired/aborted | ❌ | ❌ | ✅（failed 含 reason） | 清盘 |
 
-## 5. 安全清单（外审重点）
+### 3.3 锁与幂等（CodeX P1）
 
-- [ ] **新建独立 bucket**（建议 `avt-user-uploads`，区别于 CosyVoice 样本 bucket）：
-      私有读写、关闭公共访问、仅开 CORS 给 `https://aitrans.video`（PUT/POST，
-      暴露 ETag header——分片上传必需）。
-- [ ] **新建 RAM 角色 + 最小 STS policy**：仅 `oss:PutObject`/`oss:AbortMultipartUpload`
-      resource 限定 `acs:oss:*:*:avt-user-uploads/uploads/${user_id}/*`；签发时注入
-      user_id 到 policy（per-session 收窄），15min 过期。
-- [ ] **签发端点防滥用**：登录态必须；per-user 限频（次/日 + 总 GB/日，admin 旋钮）；
-      审计 JSONL 落 `runtime_logs/`（who/when/前缀/配额消耗）。
-- [ ] **回拉前校验**：HeadObject size ≤ admin 上限；本地落盘后 sha256 比对 + ffprobe
-      预检沿用现有上传后置校验链。失败 → 删对象 + 记审计 + 用户可见错误。
-- [ ] **凭证卫生**：长期 AccessKey 仅存 gateway env；STS 凭证不落任何日志；
-      守卫测试：AST 扫前端 bundle 源码不得出现 AccessKeyId 字面量/长期 key 模式。
-- [ ] **生命周期规则**：`uploads/` 前缀 24h 过期删除 + `AbortIncompleteMultipartUpload`
-      1 天（防半截分片堆积计费）。
-- [ ] 付费约束定位：OSS 属**基础设施成本**（同 R2 先例，见 memory
-      `feedback_paid_api_constraint_scope`），不触付费 API 硬约束；但回拉流量有真实
-      成本 → per-user/全局配额旋钮即成本红线（§6）。
+- **每 upload_id 一把跨进程文件锁**：复用 `src/services/_file_lock.py`（项目现有 reentrant
+  file lock），锁文件 `uploads/_chunked/_locks/{upload_id}`（独立于数据目录，同 R2 lock 先例）。
+- **part 写入**：先写 `part_{n}.tmp` → fsync → `os.replace()` 原子改名。同片重传 = 覆盖
+  （仅 receiving 态允许；改名原子性保证读端永不见半截片）。
+- **complete**：获锁 → 复检 state==receiving 且分片齐全 → 置 completing（state.json 原子写）
+  → 释放期间 part 全被 409 → 顺序合并（流式 append，逐片校验长度）→ 全文件 sha256 比对
+  → `os.replace()` 移入正式 uploads/ 路径 → 置 ready → 删分片。
+- **幂等**：R3 在 ready 态重复调用返回同一 upload ref；completing 态返回 202 in_progress
+  （客户端轮询 R4）。init 幂等见 §3.5。
 
-## 6. 成本模型（中国内地区域标准价，以控制台计费页为准）
+### 3.4 磁盘预算与 reserve（CodeX P1：放大没算）
 
-| 计费项 | 单价 | 2GB 一次 |
-|---|---|---|
-| 上行（用户→OSS） | 免费 | ¥0 |
-| 存储（标准型，瞬态 <24h） | ~¥0.12/GB/月 | ≈¥0.00 |
-| **公网流出（OSS→美国主机回拉）** | **~¥0.50/GB** | **~¥1.00** |
-| 请求 | ¥0.01/万次 | 忽略 |
+放大事实：分片目录 S + 合并文件 S 同时存在（合并完成才删分片）= **上传层峰值 2S**；
+随后 pipeline 对 local_video 还会复制进 workspace（process.py 现有行为）= 任务期再 +S。
+2GB 文件 → 上传层峰值 4GB、任务全程峰值 ~6GB。
 
-- 规模估算：50 个 2GB/天 ≈ ¥50/天；对比单任务 AI 成本（ASR+翻译+TTS）占比小。
-- **成本守卫**：per-user 每日上传 GB 配额 + 全局每日 GB 配额（admin 旋钮，超额 fail-closed
-  拒签 STS）≈ 跨境流量费日上界 = 全局配额 × ¥0.5/GB。
-- 传输加速**先不开**（额外 ~¥0.5-1.25/GB）：回拉是后台行为，慢 1-3 分钟用户无感；
-  实测公网链路不够再议。
+控制三层：
+1. **init 预检**：`statvfs 可用空间 - admin 磁盘保底(默认 20GB) ≥ 2×declared_size +
+   Σ(全局 in-flight uploads 的 2×declared 未落地余量)`，不满足 → 507 fail-closed。
+2. **complete 合并前二次预检**（init 后磁盘可能被别的任务吃掉）：可用 - 保底 ≥ declared_size。
+3. **in-flight bytes 旋钮**：per-user 并发 upload 总声明字节 ≤ 旋钮（默认 4GB）、全局 ≤ 旋钮
+  （默认 20GB）；每日配额（次数/GB）另设。全部 fail-closed。
 
-## 7. 分期实施
+### 3.5 断点续传与复用收窄（CodeX P1：杜绝跨用户探测）
 
-- **P1 后端通道**（gateway）：STS 签发端点 + complete/status 端点 + 回拉 worker
-  （asyncio 任务，沿用 reservation sweeper 模式）+ admin 旋钮（阈值/上限/配额）
-  + 审计 + 全部单测。隐藏灰度：仅 admin 账号可签 STS。
-- **P2 前端**：上传组件分路逻辑 + OSS JS SDK 分片直传 + 进度/断点续传 UI + 失败回退
-  提示（不自动回退到 CF 路径——大文件回 CF 必死，明确报错）。
-- **P3 评估**：灰度数据（成功率/回拉时延/成本）→ 决定是否放开全部注册用户 + 是否
-  下调双路径阈值统一走 OSS。
+- 续传键 = **(user_id, sha256, size, chunk_size)** 四元组，只在**该用户自己的活跃
+  （receiving）upload** 里查找；命中 → 返回原 upload_id + received_parts 位图；不命中 → 新建。
+  **绝不**做全局 sha256 去重/秒传（跨用户存在性探测 + 状态泄漏）。
+- R2-R5 一律按 `upload_id AND user_id` 查 ownership；不存在与不属于本人**返回同形 404**
+  （响应体逐字节一致，无时序侧信道放大）。
 
-## 8. 测试计划
+### 3.6 流式接收（CodeX P2）
 
-- 单测：STS policy 模板（前缀注入/过期）、签发限频 fail-closed、complete 校验矩阵
-  （size 超限/key 越前缀/对象不存在）、回拉幂等（重复 complete 只拉一次）。
-- 集成：fakes 跑全链（签发→mock OSS→回拉→落盘→job 创建 ref 可用）。
-- e2e（用户显式触发，真实流量费 ~¥1）：真传一个 >100MB 视频走完整漏斗到 job 创建。
-- 守卫：前端 bundle 无长期凭证模式；回拉 worker 不被 pipeline import（路径契约隔离）。
+- part 端点用 raw `PUT` + `async for chunk in request.stream()` 直写 `.tmp`，
+  **不经过 `request.form()`/multipart**（避免 Starlette 临时文件双拷贝；参照
+  `anonymous_preview_upload.handle_anonymous_upload` 现有流式实现）。
+- 流式计数超 `min(chunk_size, 末片余量) + 1KB 容差` → 立即断流、删 tmp、413。
+- gateway 自身无全局 body limit（uvicorn 默认不限），Caddy 不在 Tunnel 路径上；
+  实施时复核 cloudflared → gateway 链路无中间 body 上限（80MB 实测已通过该链路）。
 
-## 9. 开放问题（外审请给意见）
+### 3.7 admin 旋钮（CodeX P2：full-body 语义，三处同步）
 
-1. bucket region：cn-beijing（与现有一致）vs cn-shanghai/就近——用户上传体验差异小，
-   建议沿用 cn-beijing 降低运维面。
-2. 回拉失败重试策略：建议 3 次指数退避后置 failed + 用户可重新触发 complete，
-   不自动无限重试（跨境链路抖动场景）。
-3. 匿名档未来是否接入：倾向永不（滥用面/成本面均不划算），免费档保持 ≤95MB。
-4. 是否同时给武汉 CosyVoice worker 的样本中转切到同一 bucket 体系——不在本方案范围，
-   但 RAM 角色设计预留命名空间（`uploads/` vs `cosyvoice/` 前缀已天然隔离）。
+新增字段（独立命名空间 `chunked_upload_*`，**不复用任何 `anonymous_preview_*` 字段**）：
+
+| 字段 | 默认 |
+|---|---|
+| `chunked_upload_enabled`（StrictBool，总开关） | False（部署后灰度开） |
+| `chunked_upload_max_file_mb` | 2048 |
+| `chunked_upload_chunk_mb` | 64（≤80 硬上限 validator） |
+| `chunked_upload_per_user_active` | 2 |
+| `chunked_upload_per_user_inflight_gb` / `_global_inflight_gb` | 4 / 20 |
+| `chunked_upload_daily_per_user_gb` | 8 |
+| `chunked_upload_disk_floor_gb` | 20 |
+| `chunked_upload_ttl_hours`（未完成清扫） | 24 |
+
+**硬性同步要求**：`/api/admin/settings` 是 full-body 整文档替换语义——新增字段必须**同一
+commit** 内完成：① gateway `AdminSettings` Pydantic 字段+validator；② 前端 admin 设置页
+类型 + `DEFAULT_SETTINGS`；③ 守卫测试断言两端字段集一致（防旧前端保存把新字段打回默认）。
+
+### 3.8 清扫 sweeper
+
+`chunked_upload_sweeper`（gateway 后台任务，复用 reservation sweeper 模式）：
+每 10min 扫 `uploads/_chunked/`，state.json 超 TTL 且非 ready → 置 expired 清盘；
+ready 超 1h（job 已创建或被放弃）→ 清 state.json 残留；孤儿目录（无 state.json）直接删。
+日志计数进 runtime_logs JSONL。
+
+### 3.9 前端
+
+- 选路：文件 ≤95MB → 现有单请求路径；>95MB → 分片（阈值与 2GB 上限从 limits 类端点动态拉取，
+  不硬编码——沿用 2026-06-11 APF limits 端点先例）。
+- 切片 `chunk_mb`（init 返回为准）；并发 3 片；片级失败指数退避重试 3 次；
+  页面刷新后凭文件重算 sha256 → init 命中续传 → 按位图补传。
+- 进度 = bytes_received/size；complete 后轮询至 ready 拿 upload ref → 走现有 job 创建表单流。
+- 失败文案明确（**不**自动回退单请求路径——大文件回 CF 单请求必 413）。
+
+## 4. 分期实施
+
+- **P1 后端**：R1-R5 + 状态机/锁/reserve/sweeper + admin 字段三处同步 + 全部单测；
+  `chunked_upload_enabled=False` 上线休眠，admin 账号灰度。
+- **P2 前端**：选路 + 切片上传组件 + 进度/续传 UI；灰度开放全部注册用户。
+- **P3 评估**：实测中国用户大文件成功率/速度（CF 免费版无中国节点）；不达标 → 启动附录 A
+  的 OSS 后备。
+
+## 5. 测试矩阵
+
+| 类 | 用例 |
+|---|---|
+| 状态机 | receiving/completing/ready/failed/expired 全转换；completing 拒 part(409)；ready 幂等 complete |
+| 并发 | 双 complete 竞争只一个获锁；part 重传与 complete 互斥；锁释放后状态一致 |
+| 安全 | 全部写方法缺 Origin → 403；跨用户 upload_id → 404 与不存在同形；upload_id 非法格式拒绝；路径穿越（n 越界/负数） |
+| 限额 | size/chunk_size 超旋钮；per-user active 超限；inflight GB 超限；磁盘 reserve 不足 507（statvfs mock） |
+| 完整性 | 片级长度/末片余量校验；全文件 sha256 不匹配 422 + 状态回退；tmp 残留不被当作有效片 |
+| 续传 | 四元组命中返回位图；不同 user 同 sha256 不互通；位图补传后 complete 成功 |
+| 流式 | 超量中断删 tmp；Content-Length 缺失拒绝 |
+| admin 同步守卫 | 后端字段集 == 前端 DEFAULT_SETTINGS 字段集（AST/JSON 断言）；full-body 保存不丢新字段 |
+| sweeper | TTL 过期清盘；孤儿目录清理；ready 残留回收 |
+| e2e（显式触发） | 真实 >100MB 文件经公网 CF 全链到 job 创建（80MB/片以下已实证可过边缘） |
+
+## 6. 开放问题（复审请给意见）
+
+1. **Q1 合并 IO**：2GB 顺序合并约数十秒（Hetzner NVMe），completing 期间客户端轮询 R4——
+   是否需要合并进度百分比？（倾向不做，v1 简单。）
+2. **Q2 OSS 后备触发阈值**：建议"中国用户 >500MB 文件 P50 上传耗时 >15min 或成功率 <80%"
+   时启动附录 A；阈值请复审定夺。
+3. **Q3 sha256 前端计算成本**：2GB 浏览器端 WebCrypto 流式哈希约 10-20s——是否改为可选
+   （无 sha256 则不支持续传、complete 只校验长度）？（倾向必算，完整性优先。）
+
+---
+
+# 附录 A：阿里云 OSS 直传方案（后备，r0 原文压缩保留）
+
+> 仅当 §4-P3 实测不达标时启动。密钥资产：生产 `.env` 已有 `AVT_COSYVOICE_OSS_*` 五件套
+> （CosyVoice 样本中转用，cn-beijing）；未合并分支 `codex/cosyvoice-aliyun-oss-uploader`
+> 有 S3-compatible uploader 参考实现。
+
+- **架构**：gateway 签 STS（15min、仅 `oss:PutObject` 限定 `uploads/{user_id}/{uuid}/` 前缀）
+  → 浏览器 OSS JS SDK 分片直传（国内链路快一个量级）→ complete 后 gateway 回拉 worker
+  GetObject 落盘本地 uploads/（守住 pipeline 本地路径契约）→ 校验 sha256 → 删 OSS 对象
+  （bucket 生命周期 24h 兜底 + AbortIncompleteMultipartUpload 1 天）。
+- **安全**：新建独立私有 bucket（`avt-user-uploads`）+ 独立 RAM 角色最小 policy（user_id
+  注入收窄）；CORS 仅 aitrans.video；长期 AccessKey 永不出 gateway；签发限频+审计 JSONL；
+  回拉前 HeadObject 校验 size、落盘后 sha256+ffprobe。
+- **成本**：上行免费；回拉公网流出 ~¥0.50/GB（2GB ≈ ¥1/次）；存储瞬态忽略；
+  per-user/全局每日 GB 配额旋钮 = 成本红线；传输加速先不开。
+- **不选为主案的原因**（r1 决策）：分片方案零基础设施/零流量费/零新密钥面已可满足
+  "能传 2GB"；OSS 仅在"传得快"上占优，留作实测兜底。
