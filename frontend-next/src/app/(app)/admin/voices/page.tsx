@@ -19,8 +19,6 @@ import {
   deleteVoice,
   finalizeLabel,
   getLabelStatus,
-  triggerTextLabeling,
-  triggerAudioLabeling,
   submitLabelTask,
   pollLabelTask,
   batchFinalizeLabels,

@@ -42,10 +42,6 @@ export interface VoiceLibrarySummary {
   voices: VoiceLibraryEntry[]
 }
 
-interface UserVoicesResponse {
-  voices?: Array<Record<string, unknown>>
-}
-
 interface CalibrateSpeedResponse {
   ok: boolean
   voice?: Record<string, unknown>
@@ -233,11 +229,4 @@ function asString(value: unknown): string | null {
     return value.trim()
   }
   return null
-}
-
-function asArray(value: unknown): Record<string, unknown>[] {
-  if (Array.isArray(value)) {
-    return value as Record<string, unknown>[]
-  }
-  return []
 }

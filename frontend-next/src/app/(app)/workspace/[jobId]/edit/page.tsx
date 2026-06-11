@@ -37,7 +37,6 @@ import {
   revertUnsyncedTextSegments,
   getRegenerateAllStatus,
   cancelRegenerateAll,
-  splitEditingSegment,
   splitEditingSegmentMany,
   type CommitStrategy,
   type BulkReplacePreviewResponse,
@@ -206,7 +205,7 @@ export default function VideoEditPage() {
   const stickyOffsetPx = isMobileLayout ? stickyVideoHeight + 56 : 0
 
   // Mirror stickyOffsetPx into a ref so imperative scroll callbacks
-  // (handleSplitSegment, scrollToSegment) always read the LATEST value
+  // (handleSplitSegmentMany, scrollToSegment) always read the LATEST value
   // without re-creating themselves on every mobile resize. Adding
   // stickyOffsetPx to those callbacks' deps would cascade re-renders
   // through every memoized child (Codex round-7 P2 #1).
@@ -486,67 +485,6 @@ export default function VideoEditPage() {
         )
       } catch (error) {
         toast.error(`保存失败: ${getErrorMessage(error)}`)
-      } finally {
-        setSavingSegmentIds((prev) => {
-          const next = new Set(prev)
-          next.delete(segmentId)
-          return next
-        })
-      }
-    },
-    [jobId],
-  )
-
-  // ---- Split segment ----
-  // Plan §7.4: user chooses character positions in source_text + cn_text;
-  // backend computes new timestamps proportionally and returns both halves
-  // + refreshed status map for in-place splice into local state.
-  const handleSplitSegment = useCallback(
-    async (
-      segmentId: string,
-      body: {
-        split_source_index: number
-        split_cn_index: number
-        speaker_a: string
-        speaker_b: string
-      },
-    ) => {
-      setSavingSegmentIds((prev) => new Set(prev).add(segmentId))
-      try {
-        const result = await splitEditingSegment(jobId, segmentId, body)
-        const firstNewSegmentId = result.new_segments[0]?.segment_id
-        const revealFirstNewSegment = () => {
-          if (!firstNewSegmentId) return
-          window.requestAnimationFrame(() => {
-            virtualListRef.current?.scrollToId(firstNewSegmentId, { align: "start", stickyOffset: stickyOffsetRef.current })
-          })
-        }
-        setResource((prev) => {
-          if (!prev) return prev
-          const index = prev.segments.findIndex(
-            (s) => s.segment_id === segmentId,
-          )
-          if (index < 0) return prev
-          const nextSegments = [...prev.segments]
-          nextSegments.splice(index, 1, ...result.new_segments)
-          return {
-            ...prev,
-            segments: nextSegments,
-            segment_status: result.segment_status,
-            total: result.total_count,
-          }
-        })
-        revealFirstNewSegment()
-        try {
-          const refreshed = await getEditingSegments(jobId)
-          setResource(refreshed)
-          revealFirstNewSegment()
-        } catch {
-          // Keep the optimistic split visible; the next normal reload will resync.
-        }
-        toast.success(`拆分完成：${result.new_segments.length} 段，共 ${result.total_count} 段`)
-      } catch (error) {
-        toast.error(`拆分失败: ${getErrorMessage(error)}`)
       } finally {
         setSavingSegmentIds((prev) => {
           const next = new Set(prev)
