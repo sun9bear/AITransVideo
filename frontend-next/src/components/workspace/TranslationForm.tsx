@@ -16,6 +16,11 @@ import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
 import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
 import { getVoiceSelectionPricing } from "@/lib/api/voiceSelection"
+import {
+  getChunkedUploadLimits,
+  uploadFileInChunks,
+  type ChunkedUploadLimits,
+} from "@/lib/upload/chunkedUpload"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { ACTIVE_JOB_STATUSES, type JobSummary } from "@/types/jobs"
 
@@ -35,6 +40,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [uploadFileName, setUploadFileName] = useState("")
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState("")
+  // 分片上传选路参数（plan 2026-06-11 §3.9）：阈值 / 切片大小从 R6 limits
+  // 端点动态拉取，不硬编码。null = 端点不可用 → 一律走单请求路径。
+  const [chunkedLimits, setChunkedLimits] = useState<ChunkedUploadLimits | null>(null)
   const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
   const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart" | "free">("express")
@@ -176,6 +184,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     getExpressAutoCloneAvailability()
       .then((a) => setExpressAutoCloneAvailable(a.available === true))
       .catch(() => setExpressAutoCloneAvailable(false))
+    // 分片上传通道可用性（admin 开关 + 阈值）。失败 → null（走单请求路径）。
+    getChunkedUploadLimits()
+      .then((l) => setChunkedLimits(l))
+      .catch(() => setChunkedLimits(null))
   }, [])
 
   // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
@@ -353,8 +365,32 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       const file = event.target.files?.[0]
                       if (!file) return
                       setIsUploading(true)
-                      setUploadProgress(`正在上传 ${file.name}…`)
                       try {
+                        // 选路（plan 2026-06-11 §3.9）：> 阈值且分片通道开启
+                        // → 分片上传（绕过 CF 免费版 100MB 单请求体限制）；
+                        // 否则走现有单请求路径（通道关闭时保持旧行为，
+                        // 不在前端硬拦——非 CF 部署单请求仍可用）。
+                        const thresholdBytes =
+                          (chunkedLimits?.threshold_mb ?? 95) * 1024 * 1024
+                        if (chunkedLimits?.enabled && file.size > thresholdBytes) {
+                          const result = await uploadFileInChunks(file, chunkedLimits, (p) => {
+                            if (p.phase === "hashing") {
+                              setUploadProgress(`正在校验文件完整性… ${p.percent}%`)
+                            } else if (p.phase === "uploading") {
+                              setUploadProgress(`正在分片上传 ${file.name}… ${p.percent}%`)
+                            } else {
+                              // Q1 落定：合并阶段无百分比，但不能像卡死
+                              setUploadProgress("正在合并校验…（大文件需要数十秒，请勿关闭页面）")
+                            }
+                          })
+                          // opaque upload ref（chunked:{upload_id}），创建任务时
+                          // 由 gateway 解析为服务端 final_path——前端不接触路径。
+                          setUploadedFilePath(result.uploadRef)
+                          setUploadFileName(file.name)
+                          setUploadProgress("")
+                          return
+                        }
+                        setUploadProgress(`正在上传 ${file.name}…`)
                         const formData = new FormData()
                         formData.append("file", file)
                         // P2-18E (audit 2026-05-07, F-HIGH-3): send the
@@ -381,6 +417,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                         setUploadFileName(file.name)
                         setUploadProgress("")
                       } catch (err) {
+                        // 分片失败不自动回退单请求（大文件回 CF 单请求必 413，
+                        // plan §3.9）——失败文案直接展示，用户可重选文件重试
+                        // （同文件续传：init 四元组命中后按位图补传）。
                         setUploadProgress(err instanceof Error ? err.message : "上传失败")
                       } finally {
                         setIsUploading(false)

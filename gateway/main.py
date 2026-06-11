@@ -382,6 +382,23 @@ async def lifespan(app: FastAPI):
             "TTL cleanup will not run (manual cleanup required)",
         )
 
+    # Chunked upload TTL sweeper (plan 2026-06-11 §3.8). Reclaims expired
+    # part directories, orphan dirs, and unclaimed ready files (claim 闭环).
+    # Deliberately NOT gated on chunked_upload_enabled — disk residue must
+    # be reclaimed even while the admin kill-switch is off. Same fail-safe
+    # pattern as all other sweepers above.
+    try:
+        from chunked_upload_sweeper import sweeper_loop as _chunked_upload_sweeper_loop
+        _chunked_upload_sweeper_task = _asyncio.create_task(
+            _chunked_upload_sweeper_loop(), name="chunked-upload-sweeper",
+        )
+        app.state.chunked_upload_sweeper_task = _chunked_upload_sweeper_task
+    except Exception:
+        logger.exception(
+            "Failed to start chunked_upload_sweeper; chunked upload TTL "
+            "cleanup will not run (manual cleanup required)",
+        )
+
     # Seed pricing runtime
     try:
         from pricing_runtime import get_runtime_pricing
@@ -409,6 +426,8 @@ async def lifespan(app: FastAPI):
         "pan_stale_reaper_task",
         # APF P0 T9: anonymous preview TTL sweeper.
         "anonymous_preview_sweeper_task",
+        # Chunked upload TTL sweeper (plan 2026-06-11 §3.8).
+        "chunked_upload_sweeper_task",
     ):
         handle = getattr(app.state, attr, None)
         if handle is not None:
@@ -555,6 +574,12 @@ app.post(
     "/gateway/upload-video",
     dependencies=[Depends(require_same_origin_state_change)],
 )(_gateway_upload_video)
+
+# Chunked upload R1-R6 (plan 2026-06-11 §3.1) — >95MB 大文件经 CF Tunnel 的
+# 应用层分片通道。router 自带 CSRF dependency；登录态在各 handler 内显式
+# 检查（require_auth + user 非 None）。
+from chunked_upload_api import router as chunked_upload_router  # noqa: E402
+app.include_router(chunked_upload_router)
 
 # Rename a job's user-visible display_name (plan §6.5 / D16). Lives on
 # the /gateway/* namespace, not /job-api/*, because the collision +
