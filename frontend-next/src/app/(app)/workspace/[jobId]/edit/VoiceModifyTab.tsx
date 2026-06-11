@@ -64,10 +64,11 @@ import {
   type VoiceMatchScope,
   type VoiceSelectionPricingResponse,
 } from "@/lib/api/voiceSelection"
-import { VoiceCloneModal, SpeakerAudioAuditModal } from "@/components/workspace/VoiceSelectionPanel"
+import { SpeakerAudioAuditModal } from "@/components/workspace/SpeakerAudioAuditModal"
+import { VoiceCloneModal } from "@/components/workspace/VoiceCloneModal"
 // Phase 4.2 E.1 — CosyVoice clone wiring in editing-state tab. Mirror of
 // VoiceSelectionPanel: button onClick splits by provider; MiniMax stays in
-// the legacy VoiceCloneModal (re-exported from VoiceSelectionPanel),
+// the legacy VoiceCloneModal (workspace/VoiceCloneModal.tsx),
 // CosyVoice opens the dedicated D.2 modal.
 import { CosyVoiceCloneModal } from "@/components/voice-clone/CosyVoiceCloneModal"
 import {
