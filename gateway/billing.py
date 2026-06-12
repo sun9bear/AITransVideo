@@ -915,9 +915,12 @@ async def _validate_paddle_event_against_order(
 
     data = (payload or {}).get("data") or {}
 
-    if str((payload or {}).get("event_type") or "").strip() == "adjustment.created":
+    if str((payload or {}).get("event_type") or "").strip() in (
+        "adjustment.created", "adjustment.updated",
+    ):
         # R7 退款 fact-gate：adjustment 不是 transaction 对象，不能走下面的
-        # transaction 校验（必失败）。绑定即事实：adjustment.transaction_id
+        # transaction 校验（必失败）。created/updated 同门控（审批通过走
+        # updated）。绑定即事实：adjustment.transaction_id
         # 必须等于本单 provider_order_id，且必须是已批准的退款语义。
         # 金额不做 gate：Paddle 是 MoR，adjustment totals 含税，与
         # amount_cny 没有恒等关系（见文件头 Amount-gate design note）。
@@ -976,24 +979,26 @@ async def _validate_wechat_event_against_order(
 
     if str((payload or {}).get("event_type") or "").strip().upper().startswith("REFUND."):
         # R7 退款 fact-gate：refund 对象没有 trade_state/attach/payer，不能走
-        # 下面的 transaction 校验。Gates：out_trade_no 绑定、refund_status
-        # 必须 SUCCESS、原单总额 amount.total 必须等于本单金额。
-        if str(transaction.get("out_trade_no") or "").strip() != str(order.provider_order_id or ""):
-            logger.warning("WeChat refund out_trade_no mismatch for %s", order_id)
-            return False
-        if str(transaction.get("refund_status") or "").strip().upper() != "SUCCESS":
-            logger.warning("WeChat refund status not SUCCESS for %s", order_id)
-            return False
-        amount = transaction.get("amount") or {}
-        total = amount.get("total")
+        # 下面的 transaction 校验。专用 gate 与支付 gate 同层（provider 模块），
+        # 含 mchid 硬门 / out_trade_no 绑定 / SUCCESS / 原单总额 fail-closed。
+        from payment_provider_wechat import (
+            WechatPayConfig,
+            validate_wechat_refund_payload,
+        )
+
         try:
-            if total is not None and int(total) != int(order.amount_cny):
-                logger.warning("WeChat refund original amount mismatch for %s", order_id)
-                return False
-        except (TypeError, ValueError):
-            logger.warning("WeChat refund amount unparsable for %s", order_id)
+            validate_wechat_refund_payload(
+                WechatPayConfig.from_env(),
+                transaction,
+                amount_cny=order.amount_cny,
+                provider_order_id=order.provider_order_id,
+            )
+            return True
+        except ValueError as exc:
+            logger.warning(
+                "WeChat refund payload validation failed for %s: %s", order_id, exc
+            )
             return False
-        return True
 
     from payment_provider_wechat import (
         WechatPayConfig,
@@ -1080,8 +1085,14 @@ async def _process_payment_event(
         select(PaymentWebhookEvent).where(PaymentWebhookEvent.id == inserted_id)
     )).scalar_one()
 
-    # Find the order
-    result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
+    # Find the order. FOR UPDATE 行锁（Codex review 2026-06-13 P1）：webhook 与
+    # 对账 sweeper / 用户轮询 refresh 是三个并发入口，query 路径合成的
+    # provider_event_id 与 webhook 不同，事件级幂等键挡不住跨入口并发——
+    # 必须在订单行上串行化，后到者拿锁后重读到终态被守卫挡掉，防止
+    # 双结算/重复发订阅点数。sqlite（测试）方言无 FOR UPDATE，自动忽略。
+    result = await db.execute(
+        select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update()
+    )
     order = result.scalar_one_or_none()
     if order is None:
         event.processed = True

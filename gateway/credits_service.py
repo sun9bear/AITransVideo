@@ -1384,14 +1384,27 @@ async def ensure_subscription_bucket(
 ) -> CreditsBucket | None:
     """Create a subscription credits bucket for a new billing period.
 
-    Unlike free/trial, subscription buckets are created per billing period,
-    so this is NOT idempotent in the same way — it creates a new bucket each
-    time a new subscription period starts. Callers must guard against
-    duplicate calls (e.g. via idempotent webhook processing).
+    Unlike free/trial, subscription buckets are created per billing period —
+    each new period gets a new bucket. 同一结算（同一 ``related_order_id``）
+    则幂等：webhook / 对账 sweeper / 用户轮询 refresh 三个并发入口都可能
+    触发同一订单的 paid 结算，订单行锁是主防线，这里按 related_order_id
+    查重是纵深防御（Codex review 2026-06-13 P1）。
 
     Shadow mode: failures are logged, never block subscription settlement.
     """
     try:
+        if related_order_id is not None:
+            existing = (
+                await db.execute(
+                    select(CreditsBucket).where(
+                        CreditsBucket.user_id == user_id,
+                        CreditsBucket.bucket_type == "subscription",
+                        CreditsBucket.related_order_id == related_order_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing
         grants = _get_runtime_grant_amounts()
         amount = grants.get(plan_code, grants.get("plus", GRANT_AMOUNTS.get("plus", 3500)))
         return await shadow_grant(

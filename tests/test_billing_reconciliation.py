@@ -58,6 +58,9 @@ class _FakeSession:
         self.executed.append(stmt)
         return _FakeResult(self._results.pop(0))
 
+    async def commit(self):
+        pass
+
     async def __aenter__(self):
         return self
 
@@ -132,14 +135,35 @@ async def test_reconcile_once_empty_batch_is_noop():
 
 
 def test_candidate_stmt_window_and_exclusions():
-    """选单语句必须：限定 created/pending、排除 fake、带上下两端时间窗。"""
+    """选单语句必须：限定 created/pending、排除 fake、带上下两端时间窗、
+    按 updated_at 节流+轮转（Codex P2：防最老一批饿死后续订单）。"""
     sql = str(recon._candidate_orders_stmt(datetime.now(timezone.utc)))
     assert "payment_orders.status IN" in sql
     assert "payment_orders.provider !=" in sql
     # 上下两端窗口（MIN_AGE 防与前端轮询打架；MAX_AGE 防滞留单无限打 provider）
     assert "payment_orders.created_at <=" in sql
     assert "payment_orders.created_at >=" in sql
+    # 单单重试节流 + 最久未检查优先的轮转排序
+    assert "payment_orders.updated_at IS NULL" in sql
+    assert "payment_orders.updated_at <=" in sql
+    assert "ORDER BY payment_orders.updated_at ASC NULLS FIRST" in sql
     assert "LIMIT" in sql
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_bumps_updated_at_even_on_error():
+    """每次尝试后无条件 bump updated_at——失败的单也要让位（轮转语义）。"""
+    explodes = _order("pending")
+    explodes.updated_at = None
+
+    async def boom(*, db, order):
+        raise RuntimeError("provider down")
+
+    await recon.reconcile_once(
+        session_factory=_fake_factory([explodes]),
+        refresh_fn=boom,
+    )
+    assert explodes.updated_at is not None
 
 
 # ---------------------------------------------------------------------------

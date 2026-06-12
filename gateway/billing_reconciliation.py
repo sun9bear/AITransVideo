@@ -28,7 +28,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from database import async_session
 from models import PaymentOrder
@@ -45,6 +45,10 @@ MIN_AGE_S = int(os.environ.get("AVT_BILLING_RECONCILE_MIN_AGE_S", "600"))
 # 单龄上限：超过此窗口的滞留单停止自动查询（provider 查询接口也有配额），
 # 只留 admin 端点可见。
 MAX_AGE_S = int(os.environ.get("AVT_BILLING_RECONCILE_MAX_AGE_S", str(72 * 3600)))
+# 单单重试间隔（Codex review 2026-06-13 P2）：同一单两次对账之间至少隔这么久，
+# 配合按 updated_at 升序轮转，防止最老的一批 pending 单饿死后续订单、
+# 72 小时内反复打 provider。
+RETRY_INTERVAL_S = int(os.environ.get("AVT_BILLING_RECONCILE_RETRY_INTERVAL_S", "1800"))
 
 # 对账只针对未结算态。terminal 态（paid/refunded/cancelled/expired/failed）
 # 由 _process_payment_event 的终态守卫负责，这里连选都不选。
@@ -52,9 +56,15 @@ _UNSETTLED_STATUSES = ("created", "pending")
 
 
 def _candidate_orders_stmt(now: datetime):
-    """滞留订单的选单语句：created/pending、非 fake、落在对账窗口内。"""
+    """滞留订单的选单语句：created/pending、非 fake、落在对账窗口内。
+
+    轮转语义：按 ``updated_at`` 升序（最久未检查的优先；NULL 视为从未检查
+    排最前），且距上次检查至少 ``RETRY_INTERVAL_S``——reconcile_once 在每次
+    尝试后无条件 bump ``updated_at``，保证失败/无结果的单也会让位。
+    """
     newest_allowed = now - timedelta(seconds=MIN_AGE_S)
     oldest_allowed = now - timedelta(seconds=MAX_AGE_S)
+    retry_cutoff = now - timedelta(seconds=RETRY_INTERVAL_S)
     return (
         select(PaymentOrder)
         .where(
@@ -62,8 +72,15 @@ def _candidate_orders_stmt(now: datetime):
             PaymentOrder.provider != "fake",
             PaymentOrder.created_at <= newest_allowed,
             PaymentOrder.created_at >= oldest_allowed,
+            or_(
+                PaymentOrder.updated_at.is_(None),
+                PaymentOrder.updated_at <= retry_cutoff,
+            ),
         )
-        .order_by(PaymentOrder.created_at.asc())
+        .order_by(
+            PaymentOrder.updated_at.asc().nulls_first(),
+            PaymentOrder.created_at.asc(),
+        )
         .limit(SWEEP_BATCH_SIZE)
     )
 
@@ -104,7 +121,12 @@ async def reconcile_once(
                     order.id,
                     order.provider,
                 )
-                continue
+            finally:
+                # 无条件 bump：让本单在 RETRY_INTERVAL_S 内不再被选中——
+                # refresh 内部只有 pending 结果会 commit updated_at，
+                # 早退（provider 无结果 / NotImplementedError / 异常）不会，
+                # 不补这里就会出现「最老一批永远霸占批次」（Codex P2）。
+                order.updated_at = datetime.now(timezone.utc)
             if order.status == "paid" and status_before != "paid":
                 stats["settled"] += 1
                 logger.warning(
@@ -114,6 +136,7 @@ async def reconcile_once(
                     order.provider,
                     status_before,
                 )
+        await db.commit()
     return stats
 
 
