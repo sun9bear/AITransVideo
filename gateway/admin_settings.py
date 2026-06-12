@@ -76,6 +76,11 @@ _APF_LIMIT_BOUNDS = {
     "anonymous_preview_cap_per_source": (1, 100),
 }
 
+# APF 匿名 Express lane 子闸边界（plan 2026-06-12 anonymous-express-preview T0）。
+# 刻意不进 _APF_LIMIT_BOUNDS——那张表被 test_anonymous_preview_limits_knobs
+# 钉死为 free 6 旋钮契约（dict 整表相等断言），扩表会破坏既有契约。
+_ANON_EXPRESS_CAP_BOUNDS = (1, 100000)
+
 # 分片上传旋钮边界（plan 2026-06-11 §3.7）：{field: (min, max)}。
 # chunk_mb 上界 80 是硬约束（CF 免费版单请求体 100MB，留余量）；
 # 其余下界 ≥1 防误设 0（等效误关停难排查——紧急关停用 chunked_upload_enabled
@@ -373,6 +378,24 @@ class AdminSettings(BaseModel):
     anonymous_preview_cap_per_device: int = 1
     anonymous_preview_cap_per_source: int = 1
 
+    # --- APF 匿名 Express 预览 lane（plan 2026-06-12 anonymous-express-preview T0）---
+    # express lane 主开关：lane resolver express 优先于 free。开启后匿名预览
+    # 走真实快捷版管线（Pass 1-3 + CosyVoice TTS），单次成本远高于 free lane。
+    #
+    # **类型用 StrictBool**（同 anonymous_free_preview_enabled）：宽松 bool 下
+    # "1" / "on" / "true" 字符串会被解析为 True，admin UI bug 可能意外打开
+    # 匿名 express 面（Gemini + CosyVoice 真实成本）。
+    #
+    # 与 express_tts_provider="mimo" 互斥：保存时 422
+    # （validate_anonymous_express_tts_exclusion，POST /settings 调用）；
+    # 手改 admin_settings.json 绕过保存校验的情形由 runtime lane resolver
+    # 防御纵深兜底（解析到 express 时若 provider=mimo → 拒绝 express lane）。
+    anonymous_express_enabled: StrictBool = False
+    # express lane 每日全局子闸：独立于 anonymous_preview_cap_global_per_day
+    # 总闸（500，跨 lane）。判定顺序：总闸 → 本子闸 → per-scope per-mode。
+    # 默认 50 控制灰度期日成本敞口。
+    anonymous_express_daily_global_cap: int = 50
+
     # --- 分片上传（plan 2026-06-11 §3.7，独立命名空间 chunked_upload_*）---
     # 注册用户大文件（>95MB）经 CF Tunnel 的应用层分片上传通道。
     # 主开关默认 False：部署后休眠，admin 账号灰度验证再打开。
@@ -426,6 +449,21 @@ class AdminSettings(BaseModel):
         if not (low <= int(v) <= high):
             raise ValueError(
                 f"{info.field_name} 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator("anonymous_express_daily_global_cap")
+    @classmethod
+    def validate_anonymous_express_cap_bounds(cls, v: int) -> int:
+        """express 子闸边界（plan 2026-06-12 T0）：[1, 100000]。
+
+        下界 ≥1 防误设 0（等效误关停且难排查——紧急关停用
+        anonymous_express_enabled 主开关）；上界防天文数字（成本敞口失控）。
+        """
+        low, high = _ANON_EXPRESS_CAP_BOUNDS
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"anonymous_express_daily_global_cap 必须在 [{low}, {high}]，收到 {v!r}"
             )
         return int(v)
 
@@ -621,6 +659,31 @@ def _require_admin(user: User | None) -> User:
     return user
 
 
+def validate_anonymous_express_tts_exclusion(s: AdminSettings) -> None:
+    """MiMo 组合硬拒（plan 2026-06-12 §E 双层之一：admin 保存校验 422）。
+
+    ``anonymous_express_enabled=True`` ⇄ ``express_tts_provider="mimo"``
+    互斥。POST /settings 是 full-body 语义，本检查看终态——无论本次保存
+    翻的是哪个字段，组合命中即拒，天然覆盖双向。
+
+    背景：MiMo 海外端点恒定 mia 音色（gender 不参与选音），匿名 express
+    用它必然音色错配，违背"免费触点必须体验真实管线效果"最高指导原则
+    （US prod 实证 job_0d71b65d594e410d9716a77507619d45 全员女声错配）。
+
+    手改 admin_settings.json 绕过本校验的情形由 runtime lane resolver
+    防御纵深兜底（plan §E②）。
+    """
+    if s.anonymous_express_enabled and s.express_tts_provider.strip().lower() == "mimo":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "匿名 Express 预览与 MiMo TTS 互斥（MiMo 恒定单音色会导致"
+                "预览音色错配）：请先切换 express TTS provider（如 cosyvoice）"
+                "再开启匿名 Express lane。"
+            ),
+        )
+
+
 def load_settings() -> AdminSettings:
     """Load settings from JSON file, returning defaults if missing."""
     if SETTINGS_FILE.exists():
@@ -696,6 +759,9 @@ async def update_admin_settings(
     for the contract-lock regression.
     """
     _require_admin(user)
+    # plan 2026-06-12 T0：匿名 express lane 与 MiMo provider 互斥（双向 422，
+    # 命中即拒、不落盘）。详见 validate_anonymous_express_tts_exclusion docstring。
+    validate_anonymous_express_tts_exclusion(body)
     save_settings(body)
     return {"settings": body.model_dump()}
 
