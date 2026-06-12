@@ -91,6 +91,11 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/model_cache
         target: /opt/aivideotrans/model_cache
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "python", "scripts/linux_remote_workbench_preflight.py", "app-health"]
       interval: 30s
@@ -114,6 +119,11 @@ services:
     network_mode: host
     volumes:
       - pgdata:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U avt -d aivideotrans"]
       interval: 10s
@@ -162,6 +172,11 @@ services:
       # Mirror the build arg for SSR runtime reads (sitemap.ts / robots.ts
       # generate at request time, not build time).
       NEXT_PUBLIC_SITE_URL: "${NEXT_PUBLIC_SITE_URL:-https://aitrans.video}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/healthz.txt"]
       interval: 15s
@@ -410,6 +425,11 @@ services:
       # 公网开启前置条件：T1–T9 全部合并 + secret 已配 + §5 成本确认。
       AVT_ENABLE_ANONYMOUS_PREVIEW: "${AVT_ENABLE_ANONYMOUS_PREVIEW:-false}"
       AVT_ANONYMOUS_PREVIEW_HASH_SECRET: "${AVT_ANONYMOUS_PREVIEW_HASH_SECRET:-}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s
@@ -435,6 +455,11 @@ services:
       # Keep the raw block device out of the main Gateway container. The helper
       # exposes only fixed-device status/resize endpoints on 127.0.0.1.
       - "${AVT_ADMIN_DISK_RESIZE_DEVICE:-/dev/null}:${AVT_ADMIN_DISK_RESIZE_DEVICE:-/dev/null}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8891/health', timeout=3).read()"]
       interval: 30s
@@ -467,6 +492,11 @@ services:
     # functioning origin. No service_healthy dependency — tunnel should
     # register even if origin is briefly down (Cloudflare returns 502 to
     # clients while connector stays connected).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     depends_on:
       - gateway
       - next
@@ -502,6 +532,11 @@ services:
         source: ${AIVIDEOTRANS_ROOT}/probe_samples
         target: /srv/probe
         read_only: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
       interval: 30s
