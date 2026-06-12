@@ -3400,22 +3400,44 @@ class ProcessPipeline:
                         )
                         if _anon_express_pass3:
                             # §E：超时落在调用点（不改 review_pass3 内部签名
-                            # transcript_reviewer.py:1945）。注意不能用
-                            # ThreadPoolExecutor 的 with 语法——__exit__ 会
-                            # wait 挂死的 worker 线程，超时形同虚设。
-                            import concurrent.futures as _futures
-                            _pool = _futures.ThreadPoolExecutor(max_workers=1)
-                            try:
-                                _fut = _pool.submit(
-                                    review_pass3_voice_profiles,
-                                    transcript_result.lines,
-                                    **_pass3_kwargs,
+                            # transcript_reviewer.py:1945）。CodeX 复审 P2：
+                            # 不用 ThreadPoolExecutor——超时后其非 daemon
+                            # worker 既停不下来，进程退出时 concurrent.futures
+                            # 的 atexit 钩子还会 join 它，挂死的 Pass 3 调用
+                            # 会拖住整个 pipeline 进程不退出。改用 daemon
+                            # 线程 + join(timeout)：超时即放弃，任务失败后
+                            # 进程退出时 daemon 线程随进程终止，挂死的付费
+                            # 调用不再延命（残余窗口=失败到进程退出的秒级
+                            # 间隙，成本上界为单次调用）。
+                            import threading as _threading
+
+                            _pass3_box: dict = {}
+
+                            def _pass3_worker(_box=_pass3_box, _kwargs=_pass3_kwargs):
+                                try:
+                                    _box["profiles"] = review_pass3_voice_profiles(
+                                        transcript_result.lines, **_kwargs
+                                    )
+                                except BaseException as _exc:  # noqa: BLE001
+                                    _box["error"] = _exc
+                            _t = _threading.Thread(
+                                target=_pass3_worker,
+                                daemon=True,
+                                name="anon-express-pass3",
+                            )
+                            _t.start()
+                            _t.join(timeout=ANON_EXPRESS_PASS3_TIMEOUT_SECONDS)
+                            if _t.is_alive():
+                                print(
+                                    "[S2.5] 匿名 express Pass 3 超时"
+                                    f"（>{ANON_EXPRESS_PASS3_TIMEOUT_SECONDS}s）"
+                                    "——放弃等待，按失败处理",
+                                    flush=True,
                                 )
-                                _pass3_profiles = _fut.result(
-                                    timeout=ANON_EXPRESS_PASS3_TIMEOUT_SECONDS
-                                )
-                            finally:
-                                _pool.shutdown(wait=False, cancel_futures=True)
+                            elif "error" in _pass3_box:
+                                raise _pass3_box["error"]
+                            else:
+                                _pass3_profiles = _pass3_box.get("profiles")
                         else:
                             _pass3_profiles = review_pass3_voice_profiles(
                                 transcript_result.lines,

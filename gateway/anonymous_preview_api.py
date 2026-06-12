@@ -979,6 +979,150 @@ async def _reset_create_claim_to(
         )
 
 
+async def _abort_create_claim(
+    db: "AsyncSession", preview_id: str, retry_of: Optional[str]
+) -> None:
+    """claim 后失败路径的统一回退（CodeX 复审 2026-06-12 P2）。
+
+    初次 create → job_id 复位 NULL（既有语义）；**重试** → 恢复旧 failed
+    job_id——复位 NULL 会让下次 create 被当作初次创建，绕过重试守卫 /
+    次数上限 / 子闸计费。
+    """
+    if retry_of is None:
+        await _reset_create_claim(db, preview_id)
+    else:
+        await _reset_create_claim_to(db, preview_id, retry_of)
+
+
+_USAGE_UPSERT_SQL = """
+    INSERT INTO anonymous_preview_daily_usage
+        (id, scope, scope_key, mode, usage_date, count,
+         created_at, updated_at)
+    VALUES
+        (gen_random_uuid(), :scope, :key, :mode, :day, 1,
+         now(), now())
+    ON CONFLICT (scope, scope_key, mode, usage_date)
+    DO UPDATE SET
+        count = anonymous_preview_daily_usage.count + 1,
+        updated_at = now()
+    WHERE anonymous_preview_daily_usage.count < :cap
+    RETURNING count
+"""
+
+_USAGE_DECREMENT_SQL = """
+    UPDATE anonymous_preview_daily_usage
+    SET count = GREATEST(count - 1, 0),
+        updated_at = now()
+    WHERE scope = :scope AND scope_key = :key
+      AND mode = :mode AND usage_date = :day
+"""
+
+
+async def _try_acquire_usage_row(
+    db: "AsyncSession", scope_key: str, mode: str, day: str, cap: int
+) -> bool:
+    """单行原子 increment-and-check（SQL 与 PgRateLimitCounterStore.try_acquire
+    同构）。False = 打满或任何异常（fail-closed）。"""
+    from sqlalchemy import text as _sa_text
+
+    try:
+        row = await db.execute(
+            _sa_text(_USAGE_UPSERT_SQL),
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": scope_key,
+                "mode": mode,
+                "day": day,
+                "cap": int(cap),
+            },
+        )
+        return row.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning("anon_create: usage row acquire 失败 — fail-closed: %s", exc)
+        return False
+
+
+async def _decrement_usage_row(
+    db: "AsyncSession", scope_key: str, mode: str, day: str
+) -> None:
+    """best-effort 回退（拒绝不落计数语义；floor 0）。"""
+    from sqlalchemy import text as _sa_text
+
+    try:
+        await db.execute(
+            _sa_text(_USAGE_DECREMENT_SQL),
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": scope_key,
+                "mode": mode,
+                "day": day,
+            },
+        )
+    except Exception:  # noqa: BLE001 — 回退 best-effort
+        logger.warning("anon_create: usage row decrement 失败（best-effort）")
+
+
+async def _charge_retry_quota(
+    db: "AsyncSession", record, record_mode: str
+) -> Optional[JSONResponse]:
+    """重试的配额重新计费（CodeX 外审 P1 + 复审 P2 第三条）。
+
+    1. **per-mode 行重新取额**：若上次失败已退款（audit
+       ``pass3_quota_refund == "done"``），把退掉的 per-IP/device/source
+       行原子 re-acquire（cap=1）——否则重试成功后这些行仍处于退款态，
+       同一匿名身份当日可再开一个 express 预览，违背 per-scope per-mode
+       cap 本意。任一行打满（退款后的 slot 已被该身份的新上传用掉）→
+       429。注：行沿用 intake 时落盘的 day（重试按钮典型同日；跨午夜
+       边缘由 record TTL ≤ 24h 兜底）。
+    2. **express 全局子闸计费**：每次重试 increment-and-check 一次——
+       子闸语义 = express 付费管线启动数/日。
+    3. 重新计费成功 → 清除退款幂等标记，下次再失败 mirror 可再次退款，
+       账本闭环。
+
+    返回 None = 放行；JSONResponse = 调用方回退抢占后原样返回。
+    本函数不 commit——计费与后续 record 写回同事务落地；POST 失败路径的
+    计费泄漏方向是少跑管线（安全侧）。
+    """
+    audit = dict(getattr(record, "audit", None) or {})
+    recharge_rows: list[dict] = []
+    if audit.get("pass3_quota_refund") == "done":
+        recharge_rows = [
+            r for r in (audit.get("quota_mode_rows") or []) if isinstance(r, dict)
+        ]
+    acquired: list[dict] = []
+    for row in recharge_rows:
+        scope_key = str(row.get("scope_key") or "")
+        mode = str(row.get("mode") or "")
+        day = str(row.get("day") or "")
+        if not (scope_key and mode and day):
+            continue
+        if not await _try_acquire_usage_row(
+            db, scope_key, mode, day, PER_SCOPE_PER_MODE_DAILY_CAP
+        ):
+            for done in acquired:
+                await _decrement_usage_row(
+                    db, str(done["scope_key"]), str(done["mode"]), str(done["day"])
+                )
+            return JSONResponse(status_code=429, content={"error": "rate_limited"})
+        acquired.append(row)
+
+    if record_mode == "express":
+        if not await _charge_express_retry_subgate(db):
+            for done in acquired:
+                await _decrement_usage_row(
+                    db, str(done["scope_key"]), str(done["mode"]), str(done["day"])
+                )
+            return JSONResponse(
+                status_code=429, content={"error": "preview_queue_full"}
+            )
+
+    if audit.get("pass3_quota_refund"):
+        audit.pop("pass3_quota_refund", None)
+        audit.pop("pass3_quota_refund_rows", None)
+        record.audit = audit
+    return None
+
+
 async def _charge_express_retry_subgate(db: "AsyncSession") -> bool:
     """CodeX 外审 2026-06-12 P1：express 重试按全局子闸计费。
 
@@ -1232,16 +1376,17 @@ async def anonymous_preview_create(
     if not won_claim:
         return JSONResponse(status_code=409, content={"error": "already_created"})
 
-    # CodeX 外审 2026-06-12 P1：express 重试按全局子闸计费（intake 已计
-    # 首次；重试每次再 increment-and-check 一次）。打满 → 抢占回退到旧
-    # failed job_id（保留明日重试资格）+ 429。在 POST Job API 之前执行，
-    # 付费管线启动数恒 ≤ anonymous_express_daily_global_cap。
-    if retry_of is not None and record_mode == "express":
-        if not await _charge_express_retry_subgate(db):
+    # CodeX 外审 2026-06-12 P1 + 复审 P2：重试配额重新计费——①退款过的
+    # per-mode 行原子 re-acquire（否则重试成功后该身份当日可再开一个
+    # express 预览）；②express 全局子闸 increment-and-check（付费管线
+    # 启动数恒 ≤ cap）；③成功后清退款幂等标记（下次失败可再退款）。
+    # 任一打满 → 抢占回退到旧 failed job_id（保留重试资格）+ 429。
+    # 在 POST Job API 之前执行。
+    if retry_of is not None:
+        _retry_reject = await _charge_retry_quota(db, record, record_mode)
+        if _retry_reject is not None:
             await _reset_create_claim_to(db, safe_id, retry_of)
-            return JSONResponse(
-                status_code=429, content={"error": "preview_queue_full"}
-            )
+            return _retry_reject
 
     # payload（白名单深度防御：违规字段=代码 bug，拒绝并回滚抢占）
     payload = {
@@ -1268,7 +1413,7 @@ async def anonymous_preview_create(
     violations = validate_create_payload(payload)
     if violations:
         logger.error("anon_create: payload spec violations: %s", violations)
-        await _reset_create_claim(db, safe_id)
+        await _abort_create_claim(db, safe_id, retry_of)
         return JSONResponse(status_code=500, content={"error": "payload_spec_violation"})
 
     # POST Job API
@@ -1283,15 +1428,15 @@ async def anonymous_preview_create(
             logger.error(
                 "anon_create: job api returned %d", create_resp.status_code
             )
-            await _reset_create_claim(db, safe_id)
+            await _abort_create_claim(db, safe_id, retry_of)
             return JSONResponse(status_code=502, content={"error": "job_create_failed"})
         job_id = str(create_resp.json().get("job_id") or "").strip()
         if not job_id:
-            await _reset_create_claim(db, safe_id)
+            await _abort_create_claim(db, safe_id, retry_of)
             return JSONResponse(status_code=502, content={"error": "job_create_failed"})
     except Exception as exc:
         logger.error("anon_create: job api error: %s", exc)
-        await _reset_create_claim(db, safe_id)
+        await _abort_create_claim(db, safe_id, retry_of)
         return JSONResponse(status_code=502, content={"error": "job_create_failed"})
 
     # 对抗审核 P1 修复——写入顺序对调：先把 record 指向真实 job_id（单独

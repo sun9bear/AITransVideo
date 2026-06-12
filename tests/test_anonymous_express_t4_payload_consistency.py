@@ -222,9 +222,10 @@ def _job_status_client(status_code=200, status="failed", smart_state=_PASS3_MARK
     return client
 
 
-def _retry_db(*, charge_ok=True):
-    """t8._db 的重试变体：第 4 个 execute 是 express 子闸计费 upsert，
-    第 5 个（仅 charge 拒绝路径）是 claim 回退 UPDATE。"""
+def _retry_db(*, charges=([2],)):
+    """t8._db 的重试变体：claim 之后的 execute 依次是配额计费 upsert
+    （per-mode re-acquire × N + express 子闸），``charges`` 按序给出各次
+    fetchone 返回（None=打满拒绝）；尾部再垫 reset/decrement 兜底结果。"""
     db = t8._db()
     count_result = MagicMock()
     count_result.scalar.return_value = 0
@@ -232,11 +233,14 @@ def _retry_db(*, charge_ok=True):
     sentinel_result.scalar_one_or_none.return_value = SimpleNamespace(id="u-sentinel")
     claim_result = MagicMock()
     claim_result.first = MagicMock(return_value=("prv-won",))
-    charge_result = MagicMock()
-    charge_result.fetchone = MagicMock(return_value=[2] if charge_ok else None)
-    reset_result = MagicMock()
+    charge_results = []
+    for value in charges:
+        r = MagicMock()
+        r.fetchone = MagicMock(return_value=value)
+        charge_results.append(r)
+    trailing = [MagicMock() for _ in range(4)]  # reset / decrement 兜底
     db.execute = AsyncMock(
-        side_effect=[count_result, sentinel_result, claim_result, charge_result, reset_result]
+        side_effect=[count_result, sentinel_result, claim_result, *charge_results, *trailing]
     )
     return db
 
@@ -275,12 +279,81 @@ class TestFailedRetryReentry:
         wired_express["record"].job_id = "job-exp-failed"
         client = _job_status_client(status="failed")
         wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
-        db = _retry_db(charge_ok=False)
+        db = _retry_db(charges=[None])
         resp = _call(db)
         assert resp.status_code == 429
         client.post.assert_not_awaited()
         # 第 5 个 execute 是 claim 回退 UPDATE（__creating__ → 旧 job_id）
         assert len(db.execute.call_args_list) == 5
+
+    def test_retry_recharges_refunded_per_mode_rows(self, wired_express):
+        """CodeX 复审 P2：上次失败已退款（pass3_quota_refund=done）的重试
+        必须把 per-mode 行重新取额（cap=1），成功后清除退款幂等标记——
+        否则重试成功后同一身份当日还能再开一个 express 预览。"""
+        rows = [
+            {"scope_key": "ip:h:D:mode:express", "mode": "express", "day": "2026-06-12"},
+            {"scope_key": "device:d:D:mode:express", "mode": "express", "day": "2026-06-12"},
+        ]
+        wired_express["record"].job_id = "job-exp-failed"
+        wired_express["record"].audit = {
+            **wired_express["record"].audit,
+            "quota_mode_rows": rows,
+            "pass3_quota_refund": "done",
+            "pass3_quota_refund_rows": 2,
+        }
+        client = _job_status_client(status="failed")
+        wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
+        # 3 次计费：recharge ip + recharge device + express 子闸
+        db = _retry_db(charges=[[1], [1], [2]])
+        resp = _call(db)
+        assert resp.status_code == 202
+        recharge_params = [db.execute.call_args_list[i][0][1] for i in (3, 4)]
+        assert recharge_params[0]["key"] == "ip:h:D:mode:express"
+        assert recharge_params[0]["cap"] == 1
+        assert recharge_params[1]["key"] == "device:d:D:mode:express"
+        # 退款幂等标记被清除（下次失败 mirror 可再次退款，账本闭环）
+        assert "pass3_quota_refund" not in wired_express["record"].audit
+        assert "pass3_quota_refund_rows" not in wired_express["record"].audit
+
+    def test_retry_per_mode_recharge_denied_429(self, wired_express):
+        """退款 slot 已被该身份的新上传用掉 → re-acquire 打满 → 429，
+        不 POST、退款标记保持原样。"""
+        wired_express["record"].job_id = "job-exp-failed"
+        wired_express["record"].audit = {
+            **wired_express["record"].audit,
+            "quota_mode_rows": [
+                {"scope_key": "ip:h:D:mode:express", "mode": "express", "day": "2026-06-12"}
+            ],
+            "pass3_quota_refund": "done",
+        }
+        client = _job_status_client(status="failed")
+        wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
+        db = _retry_db(charges=[None])
+        resp = _call(db)
+        assert resp.status_code == 429
+        client.post.assert_not_awaited()
+        assert wired_express["record"].audit["pass3_quota_refund"] == "done"
+
+    def test_retry_abort_after_job_api_failure_restores_failed_job_id(
+        self, wired_express
+    ):
+        """CodeX 复审 P2：重试抢占后下游（Job API）失败，回退必须恢复旧
+        failed job_id 而非清 NULL——否则下次 create 被当初次创建，绕过
+        重试守卫/次数上限/子闸计费。"""
+        wired_express["record"].job_id = "job-exp-failed"
+        client = _job_status_client(status="failed")
+        post_fail = MagicMock(status_code=500)
+        post_fail.json.return_value = {}
+        client.post = AsyncMock(return_value=post_fail)
+        wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
+        reset_to_spy = AsyncMock()
+        wired_express["monkeypatch"].setattr(api, "_reset_create_claim_to", reset_to_spy)
+        db = _retry_db()
+        resp = _call(db)
+        assert resp.status_code == 502
+        reset_to_spy.assert_awaited_once_with(db, "p1", "job-exp-failed")
+        # 初次 create 的 NULL 复位路径不得被触发
+        wired_express["reset"].assert_not_awaited()
 
     def test_failed_without_pass3_marker_blocks_409(self, wired_express):
         """CodeX P2：非 Pass 3 的确定性失败（合规拒绝/输入不支持/存储错）

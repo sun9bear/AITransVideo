@@ -114,13 +114,16 @@ class TestCallSiteSourceGuards:
     def test_timeout_budget_is_120s(self):
         assert ANON_EXPRESS_PASS3_TIMEOUT_SECONDS == 120
 
-    def test_futures_timeout_at_call_site(self):
+    def test_daemon_thread_timeout_at_call_site(self):
+        """CodeX 复审 P2：ThreadPoolExecutor 超时后非 daemon worker 停不
+        下来且 atexit join 会拖住进程退出——必须 daemon 线程 + join(timeout)
+        （超时放弃；进程退出时 daemon 线程随之终止，挂死的付费调用不延命）。"""
         src = self._src()
-        assert "_fut.result(" in src
-        assert "timeout=ANON_EXPRESS_PASS3_TIMEOUT_SECONDS" in src
-        # with 语法的 __exit__ 会 wait 挂死线程，超时形同虚设——必须手动
-        # shutdown(wait=False)
-        assert "shutdown(wait=False, cancel_futures=True)" in src
+        assert "daemon=True" in src
+        assert "join(timeout=ANON_EXPRESS_PASS3_TIMEOUT_SECONDS)" in src
+        assert 'name="anon-express-pass3"' in src
+        # 旧形状（futures 包裹 + shutdown）不得回潮
+        assert "shutdown(wait=False, cancel_futures=True)" not in src
 
     def test_honest_failure_raises_and_emits_marker(self):
         src = self._src()
