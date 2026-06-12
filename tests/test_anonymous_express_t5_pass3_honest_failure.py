@@ -178,6 +178,19 @@ class TestCallSiteSourceGuards:
             in compact
         )
 
+    def test_timeout_is_hard_failure_independent_of_artifact(self):
+        """CodeX 第四轮 P2：超时本身就是失败条件——daemon 线程超时后可能
+        在 artifact 判定前恰好写出产物，但 profiles 没 merge 回
+        _review_speaker_styles，放行=错误音色预览。判定必须
+        `timed_out OR not artifact_ok`。"""
+        src = self._src()
+        compact = src.replace("\n", "").replace(" ", "")
+        assert "_anon_express_pass3_timed_out=True" in compact
+        assert (
+            "if_anon_express_pass3and(_anon_express_pass3_timed_out"
+            "ornot_anon_express_pass3_artifact_ok(" in compact
+        )
+
     def test_verdict_applies_even_when_pass3_not_attempted(self):
         """speaker styles 为空导致 Pass 3 根本没跑时，artifact 判定仍然
         生效（验收：express 匿名必产 s2_pass3_result.json，否则诚实失败）。

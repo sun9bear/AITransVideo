@@ -3384,6 +3384,11 @@ class ProcessPipeline:
                 job_anonymous_preview
                 and str(job_service_mode or "").strip() == "express"
             )
+            # CodeX 第四轮 P2：超时是硬失败信号（plan §E"超时按失败处理"
+            # 的字面语义）。daemon 线程超时后仍可能在 artifact 判定前恰好
+            # 写出 s2_pass3_result.json——但 profiles 没有 merge 回
+            # _review_speaker_styles，放行会出错误音色预览。
+            _anon_express_pass3_timed_out = False
             if _review_speaker_styles and job_anonymous_preview and not _anon_express_pass3:
                 print("[S2.5] 匿名预览任务：跳过 Pass 3 音色画像（付费多模态调用，APF P0 T5）", flush=True)
             if _should_run_pass3(_review_speaker_styles, job_anonymous_preview, job_service_mode):
@@ -3439,6 +3444,7 @@ class ProcessPipeline:
                             _t.start()
                             _t.join(timeout=ANON_EXPRESS_PASS3_TIMEOUT_SECONDS)
                             if _t.is_alive():
+                                _anon_express_pass3_timed_out = True
                                 print(
                                     "[S2.5] 匿名 express Pass 3 超时"
                                     f"（>{ANON_EXPRESS_PASS3_TIMEOUT_SECONDS}s）"
@@ -3484,17 +3490,22 @@ class ProcessPipeline:
                     print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
 
             # --- 匿名 express Pass 3 诚实失败判定（plan 2026-06-12 §E）---
-            # artifact 是唯一可信信号：s2_pass3_result.json 缺失、profiles
-            # 为空（含 speaker styles 为空导致根本没跑 Pass 3 的情形）、或
-            # 未覆盖全部说话人（CodeX 第三轮 P2：部分产物=部分说话人无
-            # gender 进音色匹配）→ 任务 terminal failed。绝不降级出片——
-            # 无 gender 时 CosyVoice 全员回落 longanyang，坏预览正是本计划
-            # 要消灭的路径。
-            if _anon_express_pass3 and not _anon_express_pass3_artifact_ok(
-                _pass3_cache_path,
-                expected_speaker_ids=(
-                    _review_speaker_styles.keys() if _review_speaker_styles else ()
-                ),
+            # 失败条件（任一命中 → terminal failed，绝不降级出片）：
+            # ① 120s 超时（CodeX 第四轮 P2：硬失败——超时后 daemon 线程
+            #    可能在本判定前恰好写出 artifact，但 profiles 没有 merge 回
+            #    _review_speaker_styles，放行会出错误音色预览）；
+            # ② artifact 缺失 / profiles 为空（含 speaker styles 为空导致
+            #    根本没跑 Pass 3 的情形）；
+            # ③ 未覆盖全部说话人（CodeX 第三轮 P2：部分产物=部分说话人无
+            #    gender 进音色匹配，全员回落 longanyang）。
+            if _anon_express_pass3 and (
+                _anon_express_pass3_timed_out
+                or not _anon_express_pass3_artifact_ok(
+                    _pass3_cache_path,
+                    expected_speaker_ids=(
+                        _review_speaker_styles.keys() if _review_speaker_styles else ()
+                    ),
+                )
             ):
                 from services.smart.state import emit_smart_state_marker
 
