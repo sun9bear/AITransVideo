@@ -269,10 +269,31 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     // 分片选路（plan §9.5）：三与门开 且 文件超阈值（95MB，CF 边缘安全线）
     // → 走分片；否则维持单请求 XHR。分片路径无 abort 语义，用 generation
     // guard 防 reset 后 setState 复活（同 doPoll 纪律）。
+    //
+    // A6 在选文件时实时重拉（2026-06-12 现网事故）：mount 快照会把 admin
+    // 热开关锁死在页面打开那一刻——开关保存前就打开的标签页拿到
+    // enabled:false，>95MB 文件回落单请求、死在 CF 边缘报"网络错误"。
+    // getChunkedUploadLimits 失败返回 null，此时回落 mount 快照。
+    const freshChunked = await getChunkedUploadLimits(ANONYMOUS_CHUNKED_PREFIX)
+    const activeChunked: ChunkedUploadLimits | null = freshChunked
+      ? (freshChunked.enabled ? freshChunked : null)
+      : chunkedLimits
+    if (freshChunked) setChunkedLimits(activeChunked)
     const useChunked =
-      chunkedLimits !== null &&
-      chunkedLimits.enabled &&
-      file.size > chunkedLimits.threshold_mb * 1024 * 1024
+      activeChunked !== null &&
+      activeChunked.enabled &&
+      file.size > activeChunked.threshold_mb * 1024 * 1024
+
+    // CF 免费版单请求体硬限 100MB：分片通道不可用时大文件必死在边缘
+    // （浏览器只能看到连接被切 →"网络错误"，极具误导性）。改为前置明示。
+    if (!useChunked && file.size > 100 * 1024 * 1024) {
+      setState((s) => ({
+        ...s,
+        step: 'error',
+        errorMsg: '大文件上传通道暂未开放，请将视频压缩到 95MB 以内后重试',
+      }))
+      return
+    }
 
     let uploadResp: UploadResponse
     if (useChunked) {
@@ -282,7 +303,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         uploadStageLabel: '校验文件…',
       }))
       try {
-        const body = await uploadFileInChunksAnonymous(file, chunkedLimits, (p) => {
+        const body = await uploadFileInChunksAnonymous(file, activeChunked, (p) => {
           if (gen !== pollGenRef.current) return
           const label =
             p.phase === 'hashing' ? '校验文件…'
