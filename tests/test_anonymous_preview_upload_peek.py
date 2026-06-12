@@ -414,8 +414,9 @@ class TestPeekPassThrough:
 
             async def _execute(stmt, params=None):
                 call_index["n"] += 1
-                if call_index["n"] <= 2:
-                    # First two calls: peek queries → return count = 0 (below any cap)
+                if call_index["n"] <= 3:
+                    # First three calls: peek queries（T2 起 free lane =
+                    # legacy global + legacy ip + per-mode ip）→ count = 0
                     row_mock = MagicMock()
                     row_mock.fetchone = MagicMock(return_value=[0])
                     return row_mock
@@ -606,24 +607,35 @@ class TestPeekKeyDerivationConsistency:
         day_after = shanghai_today()
 
         assert resp.status_code == 415  # peek 已放行，止于 fail-fast upload
-        assert len(captured) == 2, f"expected exactly 2 peek SELECTs, got {captured}"
+        # plan 2026-06-12 §B：free lane peek = legacy global + legacy ip +
+        # per-mode ip（1 次/日）三条 SELECT。
+        assert len(captured) == 3, f"expected exactly 3 peek SELECTs, got {captured}"
 
         secret = api.settings.anonymous_preview_hash_secret
-        g_params, ip_params = captured
+        g_params, ip_params, ip_mode_params = captured
         assert g_params["scope"] == ANON_PREVIEW_COUNTER_SCOPE
         assert ip_params["scope"] == ANON_PREVIEW_COUNTER_SCOPE
+        assert ip_mode_params["scope"] == ANON_PREVIEW_COUNTER_SCOPE
+        assert ip_mode_params["mode"] == "free"
 
         # TestClient 的 socket peer 固定为 "testclient"（非可信代理 →
         # extract_client_ip 直接返回它）。day 用请求前后两个快照之一，
         # 容忍跨午夜边界。
+        from anonymous_preview_intake_wiring import peek_mode_counter_keys
+
         matched = False
         for day in {day_before, day_after}:
             exp_global, exp_ip = peek_counter_keys("testclient", day, secret=secret)
+            _exp_subgate, exp_ip_mode = peek_mode_counter_keys(
+                "testclient", day, "free", secret=secret
+            )
             if (
                 g_params["key"] == exp_global
                 and g_params["day"] == day
                 and ip_params["key"] == exp_ip
                 and ip_params["day"] == day
+                and ip_mode_params["key"] == exp_ip_mode
+                and ip_mode_params["day"] == day
             ):
                 matched = True
                 break

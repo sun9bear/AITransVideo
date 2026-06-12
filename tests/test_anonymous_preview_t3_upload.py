@@ -638,7 +638,12 @@ class TestWiringFullChain:
 
 class TestDecrementGuard:
     """T3 gateway 新模块不得直接调用 counter_store.decrement()。
-    唯一合法调用方是 adapter._rollback_admitted（在 src/ 里）。
+
+    合法调用方：adapter._rollback_admitted（src/）+ wiring 的
+    ``LaneAwareCounterStore``（plan 2026-06-12 §B 三层叠加 store——
+    counter store 协议的组合实现，其 decrement 调用与 adapter 回滚同语义，
+    属于原守卫预告的"接线后放宽"情形）。业务代码仍不得手动 decrement
+    （配额操纵）。
     """
 
     _NEW_MODULES = [
@@ -647,24 +652,44 @@ class TestDecrementGuard:
         _REPO_ROOT / "gateway" / "anonymous_preview_intake_wiring.py",
     ]
 
-    def _has_direct_decrement_call(self, source_path: Path) -> bool:
-        """Return True if source contains a direct attribute call `.decrement(`."""
+    # {文件名: 允许包含 decrement 调用的类名集合}
+    _ALLOWED_CLASSES = {
+        "anonymous_preview_intake_wiring.py": {"LaneAwareCounterStore"},
+    }
+
+    def _disallowed_decrement_lines(self, source_path: Path) -> list[int]:
+        """Return line numbers of `.decrement(` calls outside allowed classes."""
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        allowed_classes = self._ALLOWED_CLASSES.get(source_path.name, set())
+        allowed_nodes: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name in allowed_classes:
+                for sub in ast.walk(node):
+                    if (
+                        isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "decrement"
+                    ):
+                        allowed_nodes.add(id(sub))
+        violations: list[int] = []
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "decrement"
+                and id(node) not in allowed_nodes
             ):
-                return True
-        return False
+                violations.append(node.lineno)
+        return violations
 
     def test_no_direct_decrement_in_t3_modules(self):
         for module_path in self._NEW_MODULES:
             assert module_path.exists(), f"Missing: {module_path}"
-            assert not self._has_direct_decrement_call(module_path), (
-                f"{module_path.name} contains a direct .decrement() call — "
-                "decrement is reserved for adapter._rollback_admitted only"
+            violations = self._disallowed_decrement_lines(module_path)
+            assert not violations, (
+                f"{module_path.name}:{violations} contains a direct "
+                ".decrement() call outside LaneAwareCounterStore — decrement "
+                "is reserved for adapter rollback / LaneAwareCounterStore only"
             )
 
 

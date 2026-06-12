@@ -240,9 +240,18 @@ async def anon_chunked_init(
         return _not_found()
     assert isinstance(session_ctx, AnonymousSessionContext)
 
+    # lane 锁定时机 = init（plan 2026-06-12 §A）：chunked 在 init 不建
+    # record（record 到 complete 才生成），lane 必须随 upload state 持久化；
+    # part/complete 读 state 的 lane，不重新 resolve、不再查 lane 开关。
+    # 三与门刚过，这里 resolve 出 None 只可能是开关竞态 → 同形 404。
+    # peek 也按本 lane 查对应计数（§A AD-8 验收）。
+    active_lane = _resolve_active_lane()
+    if active_lane is None:
+        return _carry_session_cookies(_not_found(), response)
+
     # AD-8 body-before peek（与 /upload 共享；429/503 fail-closed）。
     apf_limits = resolve_apf_limits()
-    peek = await ad8_peek_precheck(db, request, apf_limits)
+    peek = await ad8_peek_precheck(db, request, apf_limits, lane=active_lane)
     if peek is not None:
         return _carry_session_cookies(peek, response)
 
@@ -272,14 +281,6 @@ async def anon_chunked_init(
     hasher = build_scope_hasher(settings.anonymous_preview_hash_secret)
     client_ip = extract_client_ip(request) or ""
     ip_hash = hasher("ip", client_ip)
-
-    # lane 锁定时机 = init（plan 2026-06-12 §A）：chunked 在 init 不建
-    # record（record 到 complete 才生成），lane 必须随 upload state 持久化；
-    # part/complete 读 state 的 lane，不重新 resolve、不再查 lane 开关。
-    # 三与门刚过，这里 resolve 出 None 只可能是开关竞态 → 同形 404。
-    active_lane = _resolve_active_lane()
-    if active_lane is None:
-        return _carry_session_cookies(_not_found(), response)
 
     try:
         state = await asyncio.to_thread(

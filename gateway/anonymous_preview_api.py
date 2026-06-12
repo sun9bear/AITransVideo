@@ -51,7 +51,10 @@ from anonymous_preview_record_store import RecordStoreError
 from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anonymous_upload, extract_client_ip
 from anonymous_preview_intake_wiring import (
     ANON_PREVIEW_COUNTER_SCOPE,
+    PER_SCOPE_PER_MODE_DAILY_CAP,
     peek_counter_keys,
+    peek_mode_counter_keys,
+    resolve_express_global_cap,
     run_intake_and_save,
 )
 from anonymous_preview_limits import resolve_apf_limits
@@ -224,19 +227,27 @@ def _make_sync_intake_session():
 # AD-8 body-before peek（/upload 与 §9 匿名分片 init 共享）
 # ---------------------------------------------------------------------------
 
-async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optional[JSONResponse]:
+async def ad8_peek_precheck(
+    db: AsyncSession, request: Request, limits, lane: str = "free"
+) -> Optional[JSONResponse]:
     """Non-authoritative global + per-IP rate-limit pre-check（AD-8）。
 
     Body 读取/磁盘写入**之前**调用；超 cap 直接拒（瞬时磁盘 = 并发数×200MB
     防护）。SELECT-only，权威 try_acquire 仍在 run_intake_and_save →
-    adapter._enforce_rate_limits。返回 None = 放行；返回 JSONResponse =
-    调用方原样返回（429 / 503 fail-closed）。
+    adapter._enforce_rate_limits（LaneAwareCounterStore 三层叠加）。返回
+    None = 放行；返回 JSONResponse = 调用方原样返回（429 / 503 fail-closed）。
 
     (scope, scope_key) 必须与权威计数器写入形状逐字节一致：scope 列恒为
     ANON_PREVIEW_COUNTER_SCOPE（wiring 单实例 store），scope_key 是 adapter
     复合键 "global:{day}" / "ip:{hmac('ip:'+ip)}:{day}"。推导只许走
-    peek_counter_keys——此前 peek 自行用 scope='global'/'ip' + 裸值哈希，
-    两个维度恒查 0 行、cap 预检恒放行（2026-06-11 bug ⑤）。
+    peek_counter_keys / peek_mode_counter_keys——此前 peek 自行用
+    scope='global'/'ip' + 裸值哈希，两个维度恒查 0 行、cap 预检恒放行
+    （2026-06-11 bug ⑤）。
+
+    plan 2026-06-12 §A/§B：``lane`` = resolver 结果，peek 按 lane 查对应
+    计数——判定顺序与权威侧一致：总闸（legacy global，mode='free' 是历史
+    key 形状的一部分、express intake 也累加它）→ express 子闸 →
+    legacy per-ip → per-mode per-ip（1 次/日）。
     """
     client_ip_peek = extract_client_ip(request) or ""
     day_key_peek = shanghai_today()
@@ -247,6 +258,17 @@ async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optio
             client_ip_peek,
             day_key_peek,
             secret=settings.anonymous_preview_hash_secret,
+        )
+        _express_key, _ip_mode_key = peek_mode_counter_keys(
+            client_ip_peek,
+            day_key_peek,
+            lane,
+            secret=settings.anonymous_preview_hash_secret,
+        )
+        _mode_sql = _sa_text(
+            "SELECT count FROM anonymous_preview_daily_usage "
+            "WHERE scope = :scope AND scope_key = :key "
+            "  AND mode = :mode AND usage_date = :day"
         )
         _global_row = await db.execute(
             _sa_text(
@@ -265,6 +287,27 @@ async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optio
             )
             return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
 
+        if lane == "express":
+            _express_cap = int(resolve_express_global_cap())
+            _express_row = await db.execute(
+                _mode_sql,
+                {
+                    "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                    "key": _express_key,
+                    "mode": "express",
+                    "day": day_key_peek,
+                },
+            )
+            _express_count = int((_express_row.fetchone() or [0])[0])
+            if _express_count >= _express_cap:
+                logger.info(
+                    "anon_upload: AD-8 peek express subgate cap reached "
+                    "count=%d cap=%d", _express_count, _express_cap,
+                )
+                return JSONResponse(
+                    status_code=429, content={"error": "preview_queue_full"}
+                )
+
         _ip_row = await db.execute(
             _sa_text(
                 "SELECT count FROM anonymous_preview_daily_usage "
@@ -280,6 +323,23 @@ async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optio
                 _ip_count,
                 limits.anonymous_preview_cap_per_ip,
                 _ip_key,
+            )
+            return JSONResponse(status_code=429, content={"error": "rate_limited"})
+
+        _ip_mode_row = await db.execute(
+            _mode_sql,
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": _ip_mode_key,
+                "mode": lane,
+                "day": day_key_peek,
+            },
+        )
+        _ip_mode_count = int((_ip_mode_row.fetchone() or [0])[0])
+        if _ip_mode_count >= PER_SCOPE_PER_MODE_DAILY_CAP:
+            logger.info(
+                "anon_upload: AD-8 peek per-mode ip cap reached "
+                "count=%d lane=%s", _ip_mode_count, lane,
             )
             return JSONResponse(status_code=429, content={"error": "rate_limited"})
     except RateLimitCounterUnavailable:
@@ -333,8 +393,10 @@ async def anonymous_upload(
     limits = resolve_apf_limits()
 
     # AD-8 body-before peek（抽出为 ad8_peek_precheck 与 §9 分片 init 共享；
-    # fail-closed：DB 错 → 503 gate_unavailable）。
-    _peek_reject = await ad8_peek_precheck(db, request, limits)
+    # fail-closed：DB 错 → 503 gate_unavailable）。lane 维度按 resolver 结果查。
+    _peek_reject = await ad8_peek_precheck(
+        db, request, limits, lane=active_lane or "free"
+    )
     if _peek_reject is not None:
         return _peek_reject
 

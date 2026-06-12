@@ -62,7 +62,7 @@ async def _fake_get_db():
     yield AsyncMock()
 
 
-async def _noop_peek(db, request, limits):
+async def _noop_peek(db, request, limits, lane="free"):
     return None
 
 
@@ -216,7 +216,7 @@ def test_no_session_401(uploads_env, monkeypatch):
 def test_ad8_peek_reject_blocks_init(uploads_env, monkeypatch):
     client = make_client(monkeypatch)
 
-    async def _reject_peek(db, request, limits):
+    async def _reject_peek(db, request, limits, lane="free"):
         return JSONResponse(status_code=429, content={"error": "rate_limited"})
 
     monkeypatch.setattr(api, "ad8_peek_precheck", _reject_peek)

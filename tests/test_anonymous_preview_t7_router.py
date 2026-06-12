@@ -437,6 +437,9 @@ class TestUploadEndpoint:
             _orm_row.audit = {}
             _result = MagicMock()
             _result.scalar_one_or_none = MagicMock(return_value=_orm_row)
+            # AD-8 peek（T2 起含 per-mode 行，cap=1）也走同一 execute——
+            # MagicMock 的 __int__ 默认返回 1 会撞 per-mode cap；钉成 [0]。
+            _result.fetchone = MagicMock(return_value=[0])
             db.execute = AsyncMock(return_value=_result)
             db.commit = AsyncMock()
             yield db

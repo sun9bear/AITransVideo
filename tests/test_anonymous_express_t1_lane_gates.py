@@ -199,7 +199,7 @@ class TestUploadLaneSemantics:
             ),
         )
 
-        async def _noop_peek(db, request, limits):
+        async def _noop_peek(db, request, limits, lane="free"):
             return None
 
         monkeypatch.setattr(api, "ad8_peek_precheck", _noop_peek)
@@ -242,7 +242,7 @@ class TestUploadLaneSemantics:
             ),
         )
 
-        async def _noop_peek(db, request, limits):
+        async def _noop_peek(db, request, limits, lane="free"):
             return None
 
         monkeypatch.setattr(api, "ad8_peek_precheck", _noop_peek)
