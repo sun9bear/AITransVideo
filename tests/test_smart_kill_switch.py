@@ -343,10 +343,18 @@ _VALID_SMART_CONSENT = {
 
 def _stub_database_module():
     """Install a stub `database` module before importing job_intercept.
-    Mirrors test_gateway_create_job.py's pattern."""
-    if "database" not in sys.modules or not hasattr(
-        sys.modules["database"], "_kill_switch_stub"
-    ):
+    Mirrors test_gateway_create_job.py's pattern.
+
+    NEVER replace an existing sys.modules["database"] entry. Swapping the
+    module object mid-run changes the identity of `database.get_db`, so
+    FastAPI tests that resolve `from database import get_db` at fixture
+    time (e.g. test_voice_catalog_api) key their dependency_overrides on
+    a different object than their routers bound at import time — the
+    override silently stops matching and requests 422 (order-dependent
+    pollution). job_intercept only needs `get_db` to exist at import
+    time, so whatever module is already installed (shared fake or the
+    real lazy-proxy module) is sufficient."""
+    if "database" not in sys.modules:
         fake = types.ModuleType("database")
         fake.get_db = _MagicMock()
         fake.engine = _MagicMock()

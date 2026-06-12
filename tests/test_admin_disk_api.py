@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import types
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -26,6 +28,17 @@ def _jsonb_sqlite(element, compiler, **kw):  # noqa: ARG001
 def _uuid_sqlite(element, compiler, **kw):  # noqa: ARG001
     return "CHAR(36)"
 
+
+# Stub database before importing gateway modules (matches other gateway tests).
+# Without this, the real `database` module gets cached in sys.modules during
+# collection and later test files' `sys.modules.setdefault("database", fake)`
+# becomes a no-op (order-dependent pollution).
+_fake_database = types.ModuleType("database")
+_fake_database.get_db = MagicMock()
+_fake_database.engine = MagicMock()
+_fake_database.async_session = MagicMock()
+_fake_database.init_db = MagicMock()
+sys.modules.setdefault("database", _fake_database)
 
 from models import Job  # noqa: E402
 import admin_disk_api  # noqa: E402
