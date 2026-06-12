@@ -876,6 +876,68 @@ _CREATING_SENTINEL = "__creating__"
 _SENTINEL_USER_EMAIL = "anonymous-preview@system"
 _READY_STATUS = "ready_for_mode"  # PreviewStatus.READY_FOR_MODE.value（契约钉死）
 
+# 匿名 express payload 的 tts_provider 白名单（plan 2026-06-12 §D）。
+# 语义对齐 job_intercept._VALID_EXPRESS_PROVIDERS（:537-558 登录 express
+# 解析），但**刻意剔除 mimo**——MiMo 恒定单音色违背"免费触点必须真实管线
+# 效果"最高原则（§E）；admin 保存校验（T0）+ lane resolver 纵深（T1）之外
+# 的 create 侧第三层。
+_VALID_ANON_EXPRESS_TTS_PROVIDERS = frozenset({"cosyvoice", "volcengine"})
+
+# 重试可重入的 Job API 终态（plan §E：仅诚实失败可重入 create）。
+_RETRYABLE_JOB_STATUSES = frozenset({"failed", "cancelled"})
+
+
+def _resolve_express_payload_tts_provider() -> Optional[str]:
+    """express record 的 create payload tts_provider（plan §D）。
+
+    admin ``express_tts_provider`` 经白名单解析；mimo / 未知值 / 读取异常
+    → None（调用方 fail-closed 拒绝 create，不静默回落默认 provider——
+    与登录 express 的"回落 cosyvoice"不同，匿名面宁可失败不猜）。
+    """
+    try:
+        from admin_settings import load_settings
+
+        provider = (load_settings().express_tts_provider or "").strip().lower()
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning(
+            "anon_create: express_tts_provider 读取失败 — fail-closed: %s", exc
+        )
+        return None
+    if provider in _VALID_ANON_EXPRESS_TTS_PROVIDERS:
+        return provider
+    logger.warning(
+        "anon_create: express_tts_provider=%r 不在匿名白名单 %s — 拒绝 create",
+        provider, sorted(_VALID_ANON_EXPRESS_TTS_PROVIDERS),
+    )
+    return None
+
+
+async def _job_is_terminal_failed(job_id: str) -> bool:
+    """重试重入判定（plan §E）：仅当既有 job 处于诚实失败终态才允许
+    failed → 重新 create。
+
+    * 200 且 status ∈ {failed, cancelled} → True
+    * 404（job 已被 TTL 清理）→ True（record 仍在，允许重试）
+    * 其它状态 / 任何异常 → False（fail-closed：409 already_created）
+    """
+    try:
+        client = get_client()
+        resp = await client.get(
+            f"{settings.job_api_upstream}/jobs/{job_id}",
+            headers=internal_headers(),
+        )
+        if resp.status_code == 404:
+            return True
+        if resp.status_code != 200:
+            return False
+        return str(resp.json().get("status") or "") in _RETRYABLE_JOB_STATUSES
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning(
+            "anon_create: retry 终态判定失败 job=%s — fail-closed: %s",
+            job_id, exc,
+        )
+        return False
+
 
 async def _reset_create_claim(db: "AsyncSession", preview_id: str) -> None:
     """create 下游失败时回滚原子抢占（job_id 复位 NULL，允许重试）。"""
@@ -940,9 +1002,17 @@ async def anonymous_preview_create(
     if record is None or _is_record_expired(record):
         return JSONResponse(status_code=404, content={"error": "not_found"})
 
-    # F6 硬门：仅 READY_FOR_MODE 且未建过 job（job_id 兼作防重放闸）
+    # F6 硬门：仅 READY_FOR_MODE；job_id 兼作防重放闸。
+    # plan 2026-06-12 §E 重试扩展：既有 job 处于诚实失败终态（failed/
+    # cancelled/已被清理）时允许 failed → 重新 create（复用 preview_id，
+    # 无需重新上传）；进行中 / 成功 / 判定失败一律 409 fail-closed。
+    retry_of: Optional[str] = None
     if record.job_id:
-        return JSONResponse(status_code=409, content={"error": "already_created"})
+        if record.job_id == _CREATING_SENTINEL:
+            return JSONResponse(status_code=409, content={"error": "already_created"})
+        if not await _job_is_terminal_failed(record.job_id):
+            return JSONResponse(status_code=409, content={"error": "already_created"})
+        retry_of = record.job_id
     if str(record.status) != _READY_STATUS:
         return JSONResponse(
             status_code=409,
@@ -972,6 +1042,18 @@ async def anonymous_preview_create(
     _mode_gate_reject = _create_mode_gate(record_mode)
     if _mode_gate_reject is not None:
         return _mode_gate_reject
+
+    # plan 2026-06-12 §D：payload / PG mirror 按 record.mode 同步写。
+    # express 的 tts_provider 在 claim 之前解析（白名单 + mimo 拒绝），
+    # 解析失败提前 503，不消耗原子抢占。
+    if record_mode == "express":
+        _payload_tts_provider = _resolve_express_payload_tts_provider()
+        if _payload_tts_provider is None:
+            return JSONResponse(status_code=503, content={"error": "misconfigured"})
+        _payload_service_mode = "express"
+    else:
+        _payload_service_mode = "free"
+        _payload_tts_provider = "mimo"
 
     # teaser 文件在场（路径由 upload 阶段写入 audit）
     audit = dict(record.audit or {})
@@ -1033,11 +1115,18 @@ async def anonymous_preview_create(
     # 原子抢占：job_id IS NULL → __creating__（并发双 create 只有一个赢）。
     # 对抗审核 P1：用 RETURNING 判定胜出，不依赖 asyncpg 的 rowcount
     # （某些驱动/配置下 UPDATE 的 rowcount 不可靠 → 合法抢占被误判 409）。
+    # 重试路径（§E）：条件改为 job_id == 旧 failed job_id——并发双重试
+    # 同样只有一个赢（第二个看到 __creating__ 不匹配 → 409）。
+    _claim_predicate = (
+        AnonymousPreviewRecord.job_id.is_(None)
+        if retry_of is None
+        else AnonymousPreviewRecord.job_id == retry_of
+    )
     claim = await db.execute(
         _sa_update(AnonymousPreviewRecord)
         .where(
             AnonymousPreviewRecord.preview_id == safe_id,
-            AnonymousPreviewRecord.job_id.is_(None),
+            _claim_predicate,
         )
         .values(job_id=_CREATING_SENTINEL)
         .returning(AnonymousPreviewRecord.preview_id)
@@ -1059,10 +1148,13 @@ async def anonymous_preview_create(
         # stream/video 撞 "outside projects root" 400（2026-06-11 冒烟）。
         "user_id": str(sentinel.id),
         "output_target": "editor",
-        "service_mode": "free",
+        # plan 2026-06-12 §D：mode 同步写（record.mode → payload → PG 行）。
+        "service_mode": _payload_service_mode,
         "requires_review": False,
+        # 防 clone 第一道防线：匿名任务（free 与 express 两个 lane）的
+        # voice_strategy 恒为 preset_mapping，绝不出现 clone 字段。
         "voice_strategy": "preset_mapping",
-        "tts_provider": "mimo",
+        "tts_provider": _payload_tts_provider,
         "source_content_hash": record.source_hash,
         "anonymous_preview": True,
     }
@@ -1106,6 +1198,11 @@ async def anonymous_preview_create(
             fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
             merged = dict(fresh.audit or {})
             merged["anonymous_consent"] = consent_payload
+            # §E 审计：重试链（旧 failed job_id 追加，支持多次重试追溯）
+            if retry_of is not None:
+                _chain = list(merged.get("retry_chain") or [])
+                _chain.append(retry_of)
+                merged["retry_chain"] = _chain
             fresh.audit = merged
         await db.commit()
     except Exception as exc:
@@ -1132,8 +1229,10 @@ async def anonymous_preview_create(
                 title="匿名预览",
                 speakers="auto",
                 status="queued",
-                service_mode="free",
-                tts_provider="mimo",
+                # §D：与 create payload 同值（record/payload/PG 三处一致）；
+                # sentinel / plan_code_snapshot / role_snapshot 语义不变。
+                service_mode=_payload_service_mode,
+                tts_provider=_payload_tts_provider,
                 requires_review=False,
                 voice_clone_enabled=False,
                 voice_strategy="preset_mapping",
