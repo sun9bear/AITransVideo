@@ -2262,15 +2262,59 @@ def _resolve_projects_root() -> Path:
 
 ANONYMOUS_PREVIEW_MIN_TRANSCRIPT_CHARS = 20
 
+# plan 2026-06-12 anonymous-express-preview §E：匿名 express 的 Pass 3
+# 调用预算（秒）。超时按失败处理（诚实失败 → 任务 terminal failed），
+# 超时机制落在 pipeline 调用点（concurrent.futures 包裹），不改
+# review_pass3_voice_profiles 内部。
+ANON_EXPRESS_PASS3_TIMEOUT_SECONDS = 120
 
-def _should_run_pass3(review_speaker_styles: object, anonymous_preview: bool) -> bool:
-    """S2.5 Pass 3 gate（APF P0 T5）。
 
-    匿名预览 lane 跳过 Pass 3：音色画像是付费多模态调用，对 3 分钟
-    预设音色预览不必要（MiMo style 回落 Pass 1/2 已有字段或默认音色）。
-    登录任务行为不变。
+class AnonymousExpressPass3Failed(RuntimeError):
+    """匿名 express 任务 Pass 3 诚实失败（plan 2026-06-12 §E）。
+
+    artifact 判定不过（s2_pass3_result.json 缺失 / profiles 为空）或
+    120s 超时 → 抛出本异常使任务 terminal failed。**不降级出片**：
+    Pass 3 失败时 CosyVoice 无 gender 全员回落 longanyang，把坏预览
+    交给用户违背"免费触点必须真实管线效果"最高指导原则。
     """
-    return bool(review_speaker_styles) and not anonymous_preview
+
+
+def _should_run_pass3(
+    review_speaker_styles: object,
+    anonymous_preview: bool,
+    service_mode: str = "",
+) -> bool:
+    """S2.5 Pass 3 gate（APF P0 T5 + plan 2026-06-12 §E 按 lane 分流）。
+
+    * 登录任务：行为不变（有 speaker styles 即跑）。
+    * 匿名 free：跳过不变——音色画像是付费多模态调用，对预设音色预览
+      不必要（MiMo style 回落 Pass 1/2 已有字段或默认音色）。
+    * 匿名 express（D6 必选）：必须跑——CosyVoice 选音依赖 gender，
+      无画像会全员回落 longanyang（US prod 实证音色错配）。
+    """
+    if not review_speaker_styles:
+        return False
+    if not anonymous_preview:
+        return True
+    return str(service_mode or "").strip() == "express"
+
+
+def _anon_express_pass3_artifact_ok(pass3_cache_path: Path) -> bool:
+    """匿名 express Pass 3 的 artifact 判定（plan §E 唯一可信信号）。
+
+    ``review_pass3_voice_profiles()`` 内部 retry+fallback 会吞错
+    （transcript_reviewer.py:2161/:2208），成功 artifact 只在 :2189 写——
+    所以只认 ``s2_pass3_result.json`` 存在且 ``speaker_profiles`` 非空。
+    任何读取/解析异常 → False（fail-closed）。
+    """
+    try:
+        if not pass3_cache_path.is_file():
+            return False
+        data = json.loads(pass3_cache_path.read_text(encoding="utf-8"))
+        profiles = data.get("speaker_profiles")
+        return isinstance(profiles, dict) and len(profiles) > 0
+    except Exception:  # noqa: BLE001 — fail-closed
+        return False
 
 
 def _anonymous_compliance_fail_closed_result(
@@ -3323,9 +3367,15 @@ class ProcessPipeline:
 
             # --- Pass 3: voice profiling (before voice selection, before translation) ---
             _pass3_cache_path = (final_project_dir / "transcript" / "s2_pass3_result.json").resolve(strict=False)
-            if _review_speaker_styles and job_anonymous_preview:
+            # plan 2026-06-12 §E：匿名按 lane 分流——free 跳过不变；express
+            # 必跑 + artifact 判定 + 120s 超时 + 诚实失败（不降级出片）。
+            _anon_express_pass3 = (
+                job_anonymous_preview
+                and str(job_service_mode or "").strip() == "express"
+            )
+            if _review_speaker_styles and job_anonymous_preview and not _anon_express_pass3:
                 print("[S2.5] 匿名预览任务：跳过 Pass 3 音色画像（付费多模态调用，APF P0 T5）", flush=True)
-            if _should_run_pass3(_review_speaker_styles, job_anonymous_preview):
+            if _should_run_pass3(_review_speaker_styles, job_anonymous_preview, job_service_mode):
                 _pass3_profiles: dict | None = None
                 if _pass3_cache_path.exists():
                     try:
@@ -3340,8 +3390,7 @@ class ProcessPipeline:
                         from services.transcript_reviewer import review_pass3_voice_profiles
 
                         print("[S2.5] Running Pass 3: voice profiling...", flush=True)
-                        _pass3_profiles = review_pass3_voice_profiles(
-                            transcript_result.lines,
+                        _pass3_kwargs = dict(
                             source_audio_path=source_audio_path if source_audio_path.exists() else None,
                             speakers=_review_speaker_styles,
                             video_title=download_result.video_title,
@@ -3349,7 +3398,33 @@ class ProcessPipeline:
                             mode=job_service_mode,
                             usage_meter=usage_meter,
                         )
+                        if _anon_express_pass3:
+                            # §E：超时落在调用点（不改 review_pass3 内部签名
+                            # transcript_reviewer.py:1945）。注意不能用
+                            # ThreadPoolExecutor 的 with 语法——__exit__ 会
+                            # wait 挂死的 worker 线程，超时形同虚设。
+                            import concurrent.futures as _futures
+                            _pool = _futures.ThreadPoolExecutor(max_workers=1)
+                            try:
+                                _fut = _pool.submit(
+                                    review_pass3_voice_profiles,
+                                    transcript_result.lines,
+                                    **_pass3_kwargs,
+                                )
+                                _pass3_profiles = _fut.result(
+                                    timeout=ANON_EXPRESS_PASS3_TIMEOUT_SECONDS
+                                )
+                            finally:
+                                _pool.shutdown(wait=False, cancel_futures=True)
+                        else:
+                            _pass3_profiles = review_pass3_voice_profiles(
+                                transcript_result.lines,
+                                **_pass3_kwargs,
+                            )
                     except Exception as exc:
+                        # 匿名 express 不在此处抛——成功与否统一由下方
+                        # artifact 判定裁决（内部 retry+fallback 会吞错，
+                        # 异常缺席不等于成功，artifact 才是唯一可信信号）。
                         print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
                 if _pass3_profiles:
                     for spk_id, profile in _pass3_profiles.items():
@@ -3374,6 +3449,27 @@ class ProcessPipeline:
                     )
                     self._log_speaker_structure_profiles(_speaker_structure_profiles)
                     print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
+
+            # --- 匿名 express Pass 3 诚实失败判定（plan 2026-06-12 §E）---
+            # artifact 是唯一可信信号：s2_pass3_result.json 缺失或 profiles
+            # 为空（含 speaker styles 为空导致根本没跑 Pass 3 的情形）→
+            # 任务 terminal failed。绝不降级出片——无 gender 时 CosyVoice
+            # 全员回落 longanyang，坏预览正是本计划要消灭的路径。
+            if _anon_express_pass3 and not _anon_express_pass3_artifact_ok(_pass3_cache_path):
+                from services.smart.state import emit_smart_state_marker
+
+                # gateway 终态镜像（mirror_job_terminal_state 单一结算入口）
+                # 凭此 marker 退还 per-scope per-mode 配额（global 总闸与
+                # express 子闸不退，防刷失败穿透成本闸）。
+                emit_smart_state_marker({"anon_pass3_failed": True})
+                print(
+                    "[S2.5] 匿名 express Pass 3 诚实失败：artifact 判定不过"
+                    "（s2_pass3_result.json 缺失/为空或 120s 超时）——任务终止",
+                    flush=True,
+                )
+                raise AnonymousExpressPass3Failed(
+                    "预览生成失败：声音画像分析未完成，请稍后点击「重试」"
+                )
 
             # --- S4-probe Phase 1: 预翻译（音色确认前） ---
             _probe_segments: list[DubbingSegment] = []

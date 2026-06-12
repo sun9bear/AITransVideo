@@ -38,7 +38,7 @@ from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 
-from anonymous_preview_quota import PgRateLimitCounterStore, hash_scope_key
+from anonymous_preview_quota import PgRateLimitCounterStore, hash_scope_key, shanghai_today
 from anonymous_preview_record_store import PgPreviewRecordStore, RecordStoreError
 from config import settings
 
@@ -203,6 +203,11 @@ class LaneAwareCounterStore:
         self._mode = mode_store
         self._lane = lane
         self._express_cap = int(express_global_cap)
+        # plan §E 配额退还需要的可退行清单：本次 intake 实际持有的
+        # per-scope per-mode 行（ip/device/source × lane）。**刻意不含**
+        # express 全局子闸与 legacy 总闸行（失败不退，防刷失败穿透成本闸）。
+        # decrement 回滚时同步移除——清单始终反映"仍被占用"的行。
+        self.acquired_mode_scope_keys: list[str] = []
 
     def _companion(self, key: str):
         """返回 (companion_key, cap) 或 None（无叠加层）。"""
@@ -239,6 +244,9 @@ class LaneAwareCounterStore:
         if not comp_ok:
             self._safe_legacy_decrement(key)
             return (False, comp_count)
+        if not key.startswith("global:"):
+            # 仅 per-scope per-mode 行可退（§E）；global 子闸不进清单。
+            self.acquired_mode_scope_keys.append(comp_key)
         return (True, count)
 
     def get(self, key: str) -> int:
@@ -271,6 +279,8 @@ class LaneAwareCounterStore:
                 self._mode.decrement(comp[0])
             except Exception:  # noqa: BLE001
                 pass
+            if comp[0] in self.acquired_mode_scope_keys:
+                self.acquired_mode_scope_keys.remove(comp[0])
         return n
 
 
@@ -518,6 +528,18 @@ def run_intake_and_save(
     import dataclasses as _dc
 
     record = _dc.replace(record, mode=mode)
+
+    # plan §E 配额退还锚点：把本次 intake 实际持有的 per-scope per-mode
+    # 行（HMAC 复合键，无原始 PII）落进 record audit——Pass 3 诚实失败时
+    # gateway 终态镜像凭它精确退还（global 总闸与 express 子闸不在清单）。
+    if counter_store.acquired_mode_scope_keys:
+        _day_key = shanghai_today(now_fn())
+        _meta = dict(record.compliance_audit_metadata or {})
+        _meta["quota_mode_rows"] = [
+            {"scope_key": k, "mode": mode, "day": _day_key}
+            for k in counter_store.acquired_mode_scope_keys
+        ]
+        record = _dc.replace(record, compliance_audit_metadata=_meta)
 
     # Persist record — RecordStoreError propagates to caller.
     store = PgPreviewRecordStore(db_session)
