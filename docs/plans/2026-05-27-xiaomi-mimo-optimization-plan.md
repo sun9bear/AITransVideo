@@ -5,6 +5,8 @@
 **范围**：MiMo LLM / MiMo TTS / OpenAI-compatible usage 计量 / `mimo_omni` 强制迁移（deadline 2026-06-30）/ Smart、Studio、Express 模型选择策略  
 **原则**：先做 response spike 和成本观测，再做 shadow / 试点；不因为价格下降直接替换跨 provider 主链路默认模型。`mimo-v2-omni` 已确认 2026-06-30 下线，属可用性问题须强制迁移；`mimo-v2-tts` **无**官方下线公告，按主动升级处理，不混为同一事实。
 
+> ⚠️ **2026-06-12 更新注记**：本文撰写时的前提 "`mimo-v2-tts` 无官方下线公告 / 可回退无 deadline"（见 line 6/15/24/77-80/160/241/457/485/650 等处）**已被官方公告推翻**。小米官方 deprecate 公告（2026-06，https://platform.xiaomimimo.com/docs/zh-CN/updates/deprecate）：`mimo-v2-tts` 自 **2026-06-18** 起请求自动转发到 `mimo-v2.5-tts`，**2026-06-30 00:00** 原模型名失效。即 `MIMO_TTS_MODEL=mimo-v2-tts` 回退通道仅在 2026-06-30 前有效，此后 TTS V2 与 omni/pro 同属强制下线。正文保留撰写时原貌作为历史记录，不逐句改写；现行事实以本注记和 `src/services/tts/mimo_tts_provider.py` 顶部 docstring 为准。
+
 ## 0. TL;DR
 
 小米 MiMo-V2.5 系列在 2026-05-27 00:00 起大幅降价，按量 API 价格已经进入可以认真评估的区间。**同时官方已公告 `mimo-v2-pro` / `mimo-v2-omni` 退役**：2026-06-01 00:00 自动转发到 V2.5，2026-06-30 00:00 原模型名正式下线。本项目的 `mimo_omni` 逻辑模型据此必须强制迁移。
