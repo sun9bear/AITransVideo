@@ -13,6 +13,12 @@ Covers:
      one handler (regression guard for the US prod 2026-06-13 incident where
      gateway/main.py executed twice — as __main__ and as uvicorn's "main:app"
      re-import — and every gateway.app.log line was written twice).
+  6. AST contract: BOTH job-api entry paths (main.run_job_api_command and
+     scripts/run_remote_workbench_service._run_job_api) call
+     attach_rotating_file_log("jobapi.app.log") inside a fail-safe try/except
+     (regression guard for the US prod 2026-06-13 finding where the container
+     entry — linux_app_service.sh → run_remote_workbench_service.py — never
+     attached the handler, so jobapi.app.log did not exist in production).
 """
 from __future__ import annotations
 
@@ -248,6 +254,72 @@ def _load_gateway_attach_fn():
         namespace,
     )
     return namespace["_attach_rotating_file_log"]
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — AST contract: both job-api entry paths attach jobapi.app.log
+# ---------------------------------------------------------------------------
+
+_JOB_API_ENTRY_FUNCTIONS = [
+    # (source file, function holding the job-api startup path)
+    (_WORKTREE_ROOT / "main.py", "run_job_api_command"),
+    (
+        _WORKTREE_ROOT / "scripts" / "run_remote_workbench_service.py",
+        "_run_job_api",
+    ),
+]
+
+
+def _find_function_def(path: Path, name: str):
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{path.name}: function {name!r} not found")
+
+
+def _has_failsafe_jobapi_log_attach(fn_node) -> bool:
+    """True if the function calls attach_rotating_file_log("jobapi.app.log")
+    somewhere inside a try block that has at least one exception handler."""
+    import ast
+
+    for node in ast.walk(fn_node):
+        if not isinstance(node, ast.Try) or not node.handlers:
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == "attach_rotating_file_log"
+                and inner.args
+                and isinstance(inner.args[0], ast.Constant)
+                and inner.args[0].value == "jobapi.app.log"
+            ):
+                return True
+    return False
+
+
+@pytest.mark.parametrize(
+    ("path", "function_name"),
+    _JOB_API_ENTRY_FUNCTIONS,
+    ids=[p.name for p, _ in _JOB_API_ENTRY_FUNCTIONS],
+)
+def test_job_api_entry_attaches_rotating_log(path: Path, function_name: str):
+    """Every job-api entry path must attach jobapi.app.log fail-safely.
+
+    The production container starts job-api via linux_app_service.sh →
+    scripts/run_remote_workbench_service.py, NOT via ``python main.py
+    job-api`` — if either path drops the attach call, the on-disk rotating
+    log silently disappears in that deployment mode.
+    """
+    fn_node = _find_function_def(path, function_name)
+    assert _has_failsafe_jobapi_log_attach(fn_node), (
+        f"{path.name}::{function_name} must call "
+        'attach_rotating_file_log("jobapi.app.log") inside a try/except '
+        "fail-safe wrap (see main.run_job_api_command for the pattern)"
+    )
 
 
 def test_gateway_attach_rotating_file_log_idempotent(tmp_path, monkeypatch):
