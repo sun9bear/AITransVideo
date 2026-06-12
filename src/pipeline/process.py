@@ -6142,11 +6142,16 @@ class ProcessPipeline:
             )
             # Phase 2a Task 8 (gate #8): free service-mode jobs get a burned-in
             # watermark on publish.dubbed_video (paid modes ship clean).
+            # plan 2026-06-12 §C ①：策略档经 effective_policy_mode——匿名
+            # 预览（含匿名 express）恒水印，不看 service_mode 字面量。
+            from services.r2_publisher_lib.downloadable_keys import effective_policy_mode
             from utils.free_watermark import free_watermark_text_for
             output_bundle = self._dispatch_process_output_bundle(
                 project_dir=final_project_dir,
                 build_result=build_result,
-                watermark_text=free_watermark_text_for(job_service_mode),
+                watermark_text=free_watermark_text_for(
+                    effective_policy_mode(job_service_mode, job_anonymous_preview)
+                ),
             )
             assert output_bundle.editor_result is not None
             output_result = output_bundle.editor_result

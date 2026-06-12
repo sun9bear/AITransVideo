@@ -102,6 +102,29 @@ EAGER_PUSH_TO_R2_KEYS_FREE: frozenset[str] = frozenset({
 })
 
 
+def effective_policy_mode(service_mode: str | None, anonymous_preview) -> str | None:
+    """策略档单点解析（plan 2026-06-12 anonymous-express-preview §C）。
+
+    ``anonymous_preview`` 真值 → 恒返回 ``"anonymous_preview"``（最严档：
+    恒水印 / 零下载 / 仅 stream video / 不进 R2）。否则原样透传
+    ``service_mode``——非匿名任务的策略行为零变化。
+
+    背景：匿名 express 任务的 ``service_mode == "express"``，直接拿
+    service_mode 查策略表会命中 express 档（放行成片下载、R2 redirect）。
+    所有 mode→策略 判定点必须先经本函数（AST 守卫：
+    tests/test_anonymous_express_t3_policy_fail_closed.py 钉死 §C 文件
+    不得新增绕过 helper 的 service_mode 字面量比较）。
+
+    八点清单（§C）：① 水印 free_watermark_text_for ② download_keys_for
+    ③ stream_kinds_for ④ Job API 下载门 ⑤ Job API stream 门
+    ⑥ Gateway R2 redirect（download/stream）⑦ Job API artifacts 列表
+    ⑧ R2 sweeper（既有 is_anonymous_preview 短路）。
+    """
+    if anonymous_preview:
+        return "anonymous_preview"
+    return service_mode
+
+
 def download_keys_for(service_mode: str | None) -> frozenset[str]:
     """Return the download-permission set for the given service_mode.
 
