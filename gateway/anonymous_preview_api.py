@@ -143,12 +143,61 @@ def _is_record_expired(record: AnonymousPreviewRecord) -> bool:
 
 
 def _get_admin_enabled() -> bool:
-    """Read admin anonymous_free_preview_enabled — fail-closed on any error."""
+    """Read admin anonymous_free_preview_enabled — fail-closed on any error.
+
+    plan 2026-06-12 §A 起仅供 **free lane** 语义的门使用（create 的
+    free-mode 分支）；新 intake 的 master gate 走 ``_resolve_active_lane``。
+    """
     try:
         from admin_settings import load_settings as _load
         return bool(_load().anonymous_free_preview_enabled)
     except Exception:
         return False
+
+
+def _resolve_active_lane() -> Optional[str]:
+    """当前活动 lane（"express"/"free"/None）。模块级薄包装便于测试注入。"""
+    from anonymous_lane import resolve_anonymous_lane
+
+    return resolve_anonymous_lane()
+
+
+def _create_mode_gate(record_mode: str) -> Optional[JSONResponse]:
+    """create 端按 record.mode 分流的开关门（plan 2026-06-12 §A/D2）。
+
+    * ``free``：既有双门逐字节不变——``enable_free_tier`` env +
+      ``anonymous_free_preview_enabled`` admin（AD-7：匿名 surface 不绕过
+      free tier 总开关语义）。
+    * ``express``：``anonymous_express_enabled`` admin（含 §E② mimo runtime
+      防御纵深，经 ``express_lane_open``）；不查 free tier env——express
+      不是 free tier。
+    * 其它值：fail-closed 403（record.mode 只可能由 intake 写入合法值，
+      未知值=数据损坏）。
+
+    返回 None = 放行；JSONResponse = 调用方原样返回。
+    """
+    if record_mode == "free":
+        if not getattr(settings, "enable_free_tier", False):
+            return JSONResponse(status_code=403, content={"error": "free_disabled"})
+        if not _get_admin_enabled():
+            return JSONResponse(
+                status_code=403, content={"error": "anonymous_preview_disabled"}
+            )
+        return None
+    if record_mode == "express":
+        from anonymous_lane import express_lane_open
+
+        if not express_lane_open():
+            return JSONResponse(
+                status_code=403, content={"error": "anonymous_preview_disabled"}
+            )
+        return None
+    logger.warning(
+        "anon_create: unknown record mode %r — fail-closed", record_mode
+    )
+    return JSONResponse(
+        status_code=403, content={"error": "anonymous_preview_disabled"}
+    )
 
 
 def _make_sync_intake_session():
@@ -274,7 +323,10 @@ async def anonymous_upload(
 
     assert isinstance(session_ctx, AnonymousSessionContext)
 
-    admin_enabled = _get_admin_enabled()
+    # lane 单点解析（plan 2026-06-12 §A/D1）：本次请求内只 resolve 一次，
+    # 同一值用于 master gate（admin_enabled）、record.mode 锁定、响应 mode。
+    active_lane = _resolve_active_lane()
+    admin_enabled = active_lane is not None
 
     # APF 限制旋钮（2026-06-11）：admin 热配置优先、env fallback。本次请求内
     # 只 resolve 一次，peek / upload / admission 用同一份快照保证一致。
@@ -358,6 +410,9 @@ async def anonymous_upload(
                     upload_facts=upload_facts,
                     probe_fn=_probe_fn,
                     prescreen_fn=_prescreen_fn,
+                    # lane 锁定时机=intake（plan §A）：record.mode 一经写入，
+                    # 后续 create 读 record.mode，不再重新 resolve。
+                    mode=active_lane or "free",
                 )
                 # run_intake_and_save 契约（wiring docstring）："the caller
                 # commits/rolls back"。store 内部只 flush；漏 commit → close()
@@ -448,7 +503,7 @@ async def anonymous_upload(
             "preview_id": record.record_id,
             "status": status_str,
             "status_reason": _redact_reason(record.status_reason),
-            "mode": "free",
+            "mode": getattr(record, "mode", None) or "free",
             "admission_decision": admission_decision,
         },
     )
@@ -478,11 +533,17 @@ async def anonymous_preview_limits() -> Response:
     if not settings.enable_anonymous_preview:
         return JSONResponse(status_code=404, content={"error": "not_found"})
     limits = resolve_apf_limits()
+    # plan 2026-06-12 §G：lane 三态由 limits 下发（free/express/关闭），
+    # 前端面板据此渲染，lane 切换无需重建镜像。master_open = env（已过）
+    # AND 任一 lane 开。
+    active_lane = _resolve_active_lane()
     return JSONResponse(
         status_code=200,
         content={
             "max_upload_mb": limits.anonymous_preview_max_upload_bytes // (1024 * 1024),
             "preview_seconds": limits.anonymous_preview_max_seconds,
+            "active_lane": active_lane,
+            "master_open": active_lane is not None,
         },
     )
 
@@ -651,9 +712,12 @@ async def anonymous_preview_stream(
             content={"error": "preview_not_ready", "detail": "no_job"},
         )
 
-    # Admin gate (re-check at stream time — hot-switch must take effect)
-    if not _get_admin_enabled():
-        return JSONResponse(status_code=403, content={"error": "anonymous_preview_disabled"})
+    # 生命周期不变量（plan 2026-06-12 §A，R2 #4）：stream 对 lane 开关
+    # 零感知——原 admin 热开关 re-check 已移除，已建 record 凭存在性 +
+    # env master flag 服务到 TTL（否则关 lane 会立刻杀旧 record 的回放，
+    # 回滚语义就坏了）。紧急全停用 env enable_anonymous_preview。
+    # 守卫：tests/test_anonymous_express_t1_lane_gates.py::
+    # TestLifecycleSourceGuards::test_stream_handler_no_admin_lane_recheck。
 
     # T6 stream gate —— ORM record 行不带 duration 列，从 audit 读
     # upload 阶段落盘的契约 teaser 时长（CodeX P1）。
@@ -838,11 +902,14 @@ async def anonymous_preview_create(
         )
     consent_payload["server_confirmed_at"] = datetime.now(_tz.utc).isoformat()
 
-    # 双门（AD-7）：匿名 surface 不绕过 free tier 总开关语义
-    if not getattr(settings, "enable_free_tier", False):
-        return JSONResponse(status_code=403, content={"error": "free_disabled"})
-    if not _get_admin_enabled():
-        return JSONResponse(status_code=403, content={"error": "anonymous_preview_disabled"})
+    # 开关门按 record.mode 分流（plan 2026-06-12 §A/D2）：free 保持既有
+    # 双门（enable_free_tier env + free admin flag）逐字节不变；express 查
+    # anonymous_express_enabled（含 §E② mimo runtime 防御纵深）。create 是
+    # 花钱动作，归新-intake 侧——lane 关掉后不再为旧 record 起新管线。
+    record_mode = str(getattr(record, "mode", None) or "free")
+    _mode_gate_reject = _create_mode_gate(record_mode)
+    if _mode_gate_reject is not None:
+        return _mode_gate_reject
 
     # teaser 文件在场（路径由 upload 阶段写入 audit）
     audit = dict(record.audit or {})

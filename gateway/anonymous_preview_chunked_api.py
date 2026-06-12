@@ -118,20 +118,33 @@ def _carry_session_cookies(out: JSONResponse, response: Response) -> JSONRespons
     return out
 
 
+def _resolve_active_lane():
+    """当前活动 lane（"express"/"free"/None）。薄包装便于测试注入。"""
+    from anonymous_lane import resolve_anonymous_lane
+
+    return resolve_anonymous_lane()
+
+
 def three_gates_open() -> bool:
-    """三与门（§9.1 A1）：env flag AND admin 匿名预览 AND admin 匿名分片。
+    """三与门（§9.1 A1 + plan 2026-06-12 §A 改造）：env flag AND
+    「任一 lane 开启」AND admin 匿名分片。**只 gate 新 intake（init）**——
+    part/complete 读 state 锁定的 lane、不再过本门（R3：init 后翻转任意
+    lane 开关，part/complete/status/delete 全部不受影响）。
+
+    原第二与门是 free 专属 ``anonymous_free_preview_enabled``——free 下线
+    后会关死匿名分片；现改为 lane resolver（express 优先，含 mimo 防御纵深）。
 
     admin 读取任何异常 → fail-closed False。
     """
     if not settings.enable_anonymous_preview:
         return False
+    if _resolve_active_lane() is None:
+        return False
     try:
         from admin_settings import load_settings
 
         adm = load_settings()
-        return bool(adm.anonymous_free_preview_enabled) and bool(
-            adm.chunked_upload_anonymous_enabled
-        )
+        return bool(adm.chunked_upload_anonymous_enabled)
     except Exception:  # noqa: BLE001 — fail-closed
         logger.warning(
             "anon_chunked: admin settings unavailable, gate closed", exc_info=True
@@ -260,6 +273,14 @@ async def anon_chunked_init(
     client_ip = extract_client_ip(request) or ""
     ip_hash = hasher("ip", client_ip)
 
+    # lane 锁定时机 = init（plan 2026-06-12 §A）：chunked 在 init 不建
+    # record（record 到 complete 才生成），lane 必须随 upload state 持久化；
+    # part/complete 读 state 的 lane，不重新 resolve、不再查 lane 开关。
+    # 三与门刚过，这里 resolve 出 None 只可能是开关竞态 → 同形 404。
+    active_lane = _resolve_active_lane()
+    if active_lane is None:
+        return _carry_session_cookies(_not_found(), response)
+
     try:
         state = await asyncio.to_thread(
             store.init_upload,
@@ -272,6 +293,7 @@ async def anon_chunked_init(
             owner_scope=store.OWNER_SCOPE_ANONYMOUS,
             client_ip_hash=ip_hash,
             per_ip_active=int(apf_limits.anonymous_preview_cap_per_ip),
+            lane=active_lane,
         )
     except ChunkedUploadError as exc:
         return _carry_session_cookies(_from_store_error(exc), response)
@@ -306,11 +328,12 @@ async def anon_chunked_part(
     csrf = _csrf_reject(request)
     if csrf is not None:
         return csrf
-    if not three_gates_open():
-        return _not_found()
+    # plan 2026-06-12 §A（R3）：part 是传输续段，lane 已在 init 锁进 state
+    # ——不再过 three_gates_open / 不重新 resolve。env master flag 由
+    # require_anonymous_session 把守；state 不存在自然 404。
     session_ctx = await require_anonymous_session(request, db)
     if isinstance(session_ctx, Response):
-        return session_ctx  # 401（env/admin 关已被三与门拦成 404）
+        return session_ctx
     assert isinstance(session_ctx, AnonymousSessionContext)
     return await receive_part(
         request,
@@ -339,6 +362,7 @@ def _run_intake_single_commit(
     session_id_hash: str,
     client_ip: str,
     apf_limits,
+    mode: str = "free",
 ) -> dict[str, Any]:
     """intake + ORM audit 持久化，单 sync session 单 commit（§9 A3 r1 P1）。
 
@@ -388,6 +412,9 @@ def _run_intake_single_commit(
             upload_facts=upload_facts,
             probe_fn=probe_fn,
             prescreen_fn=_prescreen_fn,
+            # lane 来自 init 锁定的 state（plan 2026-06-12 §A），不在
+            # complete 时重新 resolve——init 后翻开关不影响本次 intake。
+            mode=mode,
         )
         orm_row = sync_db.execute(
             _sa_select(AnonymousPreviewRecord).where(
@@ -433,7 +460,7 @@ def _run_intake_single_commit(
         "preview_id": record.record_id,
         "status": status_str,
         "status_reason": _redact_reason(record.status_reason),
-        "mode": "free",
+        "mode": getattr(record, "mode", None) or "free",
         "admission_decision": admission_decision,
     }
 
@@ -488,6 +515,9 @@ def _complete_consume_sync(
                 session_id_hash=session_id_hash,
                 client_ip=client_ip,
                 apf_limits=apf_limits,
+                # lane 读 init 锁定的 state（§A）；旧 state（lane 字段
+                # 缺失，本次部署前 init 的存量上传）回落 free。
+                mode=str(state.get("lane") or "free"),
             )
         except BaseException:
             # intake 失败：record/计数已随 rollback 回滚 → 删媒体 + 整目录
@@ -514,8 +544,10 @@ async def anon_chunked_complete(
     csrf = _csrf_reject(request)
     if csrf is not None:
         return csrf
-    if not three_gates_open():
-        return _not_found()
+    # plan 2026-06-12 §A（R3）：complete 消费的是 init 锁定的 state lane
+    # ——不再过 three_gates_open / 不重新 resolve；init 后翻转任意 lane
+    # 开关不影响本次 complete。env master flag 由 require_anonymous_session
+    # 把守；state 不存在自然 404。
     session_ctx = await require_anonymous_session(request, db)
     if isinstance(session_ctx, Response):
         return session_ctx

@@ -171,6 +171,9 @@ def _patch_settings(monkeypatch):
     monkeypatch.setattr(anon_session_mod, "AnonymousSession", _FakeAnonymousSessionModel, raising=False)
     # Patch _get_admin_enabled in api (used by router handlers)
     monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
+    # plan 2026-06-12 §A：upload 的 master gate 改走 lane resolver——
+    # 测试默认 free lane 开（与原 _get_admin_enabled=True 行为等价）。
+    monkeypatch.setattr(api, "_resolve_active_lane", lambda: "free")
     # Patch admin flag in anonymous_session module
     monkeypatch.setattr(anon_session_mod, "_get_admin_flag", lambda: True)
 
@@ -357,6 +360,9 @@ class TestUploadEndpoint:
         # 契约真实字段是 duration_seconds（不是 teaser_duration_seconds）；
         # 用错字段名会让未来读测试者误判生产读哪个字段（CodeX 测试卫生点）。
         r.duration_seconds = 30.0
+        # plan 2026-06-12 §A：响应 mode 改读 record.mode（lane 锁定值）。
+        # MagicMock 属性不可 JSON 序列化，必须钉成真实字符串。
+        r.mode = "free"
         return r
 
     @pytest.mark.asyncio

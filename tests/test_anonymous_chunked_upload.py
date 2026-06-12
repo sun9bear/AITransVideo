@@ -74,9 +74,14 @@ def uploads_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def make_client(monkeypatch, *, session=SESSION_A, gates=True, intake=None):
-    """构造仅挂匿名分片 router 的 TestClient，全部外部依赖打桩。"""
+def make_client(monkeypatch, *, session=SESSION_A, gates=True, intake=None, lane="free"):
+    """构造仅挂匿名分片 router 的 TestClient，全部外部依赖打桩。
+
+    plan 2026-06-12 §A：init 还会经 _resolve_active_lane 锁 lane 进 state，
+    测试默认钉成 free（与既有行为等价）；express 用例显式传 lane。
+    """
     monkeypatch.setattr(api, "three_gates_open", lambda: gates)
+    monkeypatch.setattr(api, "_resolve_active_lane", lambda: lane)
     monkeypatch.setattr(api, "resolve_anonymous_chunked_limits", anon_limits)
     monkeypatch.setattr(api, "resolve_apf_limits", lambda: FAKE_APF)
     monkeypatch.setattr(api, "ad8_peek_precheck", _noop_peek)
@@ -482,3 +487,57 @@ def test_module_has_no_services_jobs_import():
             assert not name.startswith("services.jobs"), (
                 f"anonymous_preview_chunked_api 不得 import {name}（pydub guard）"
             )
+
+
+# ---------------------------------------------------------------------------
+# plan 2026-06-12 anonymous-express-preview §A（R3 验收）：
+# lane 在 init 锁进 state；init 后翻转任意 lane 开关，
+# part / complete / status / delete 全部不受影响。
+# ---------------------------------------------------------------------------
+
+
+def test_lane_locked_at_init_flip_switch_transfer_unaffected(uploads_env, monkeypatch):
+    """init（express lane）→ 翻关所有开关 → part/complete 照常工作，
+    且 complete 的 intake 用 init 时锁定的 state lane（express）。"""
+    recorded: dict = {}
+
+    def _fake_intake(**kwargs):
+        recorded.update(kwargs)
+        return dict(FAKE_INTAKE_PAYLOAD, mode=kwargs.get("mode"))
+
+    client = make_client(monkeypatch, intake=_fake_intake, lane="express")
+    data = b"0123456789"
+    r = do_init(client, data)
+    assert r.status_code == 200, r.text
+    uid = r.json()["upload_id"]
+
+    # state 落盘带 lane=express
+    st = store.load_state(f"anon:{SESSION_A.session_id_hash}", uid)
+    assert st is not None and st["lane"] == "express"
+
+    # —— 翻转开关：三与门关 + lane resolver 返回 None ——
+    monkeypatch.setattr(api, "three_gates_open", lambda: False)
+    monkeypatch.setattr(api, "_resolve_active_lane", lambda: None)
+
+    # part 不受影响
+    upload_all_parts(client, uid, data)
+    # complete 不受影响，intake 拿到 init 锁定的 express
+    r2 = client.post(f"{PREFIX}/{uid}/complete", headers=ORIGIN)
+    assert r2.status_code == 200, r2.text
+    assert recorded.get("mode") == "express"
+    assert r2.json()["mode"] == "express"
+
+
+def test_status_and_delete_unaffected_by_gate_flip(uploads_env, monkeypatch):
+    """status / delete 是生命周期端点：开关全关后照常服务。"""
+    client = make_client(monkeypatch, lane="free")
+    data = b"0123456789"
+    r = do_init(client, data)
+    assert r.status_code == 200, r.text
+    uid = r.json()["upload_id"]
+
+    monkeypatch.setattr(api, "three_gates_open", lambda: False)
+    monkeypatch.setattr(api, "_resolve_active_lane", lambda: None)
+
+    assert client.get(f"{PREFIX}/{uid}/status").status_code == 200
+    assert client.delete(f"{PREFIX}/{uid}", headers=ORIGIN).status_code == 200

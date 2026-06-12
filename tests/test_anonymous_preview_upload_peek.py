@@ -98,6 +98,9 @@ def _patch_settings(monkeypatch):
     monkeypatch.setattr(api, "AnonymousPreviewRecord", _FakePreviewRecordModel)
     monkeypatch.setattr(anon_session_mod, "AnonymousSession", _FakeSessionModel, raising=False)
     monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
+    # plan 2026-06-12 §A：upload 的 master gate 改走 lane resolver——
+    # 测试默认 free lane 开（与原 _get_admin_enabled=True 行为等价）。
+    monkeypatch.setattr(api, "_resolve_active_lane", lambda: "free")
     monkeypatch.setattr(anon_session_mod, "_get_admin_flag", lambda: True)
     # 2026-06-11 APF 限制旋钮：peek/upload/admission 改读 resolve_apf_limits()
     # （admin 热配置优先）。测试里把 resolver 钉死为上面 settings 同款数值，
@@ -357,6 +360,9 @@ class TestPeekPassThrough:
         r.status.value = "ready_for_mode"
         r.status_reason = None
         r.duration_seconds = 30.0
+        # plan 2026-06-12 §A：响应 mode 改读 record.mode（lane 锁定值）。
+        # MagicMock 属性不可 JSON 序列化，必须钉成真实字符串。
+        r.mode = "free"
         return r
 
     @pytest.mark.asyncio

@@ -228,6 +228,7 @@ def run_intake_and_save(
     counter_store_factory: Optional[Callable] = None,
     upload_root: Optional[Path] = None,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    mode: str = "free",
 ) -> PreviewRecord:
     """Assemble and run the adapter, then persist the resulting record.
 
@@ -258,6 +259,12 @@ def run_intake_and_save(
         Override for the project root (for tests).
     now_fn:
         Clock override (for tests).
+    mode:
+        lane 锁定值（plan 2026-06-12 §A）："free" / "express"。调用方在
+        intake 时由 ``resolve_anonymous_lane()`` 解析（普通上传）或从
+        chunked upload state 读取（init 时锁定）。持久化前经
+        ``dataclasses.replace`` 写进契约 record → ``_to_orm`` 落 mode 列。
+        默认 "free" 保持既有调用点行为不变。
 
     Returns
     -------
@@ -312,12 +319,20 @@ def run_intake_and_save(
     # Run intake — adapter NEVER raises; failure → status-only record.
     record = adapter.handle_intake(request_facts, upload_facts)
 
+    # lane 落盘（plan 2026-06-12 §A）：纯 intake/adapter 不感知 lane，
+    # 在持久化边界统一盖上 mode。失败 record 也盖——审计/监控按 lane 维度
+    # 统计需要拒绝行也带 mode。
+    import dataclasses as _dc
+
+    record = _dc.replace(record, mode=mode)
+
     # Persist record — RecordStoreError propagates to caller.
     store = PgPreviewRecordStore(db_session)
     store.save_record(record)
     logger.info(
-        "anon_intake_saved preview_id=%s status=%s",
+        "anon_intake_saved preview_id=%s status=%s mode=%s",
         record.record_id,
         record.status.value,
+        mode,
     )
     return record

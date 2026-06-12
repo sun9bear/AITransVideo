@@ -80,20 +80,17 @@ class AnonymousSessionContext:
 # ---------------------------------------------------------------------------
 
 def _get_admin_flag() -> bool:
-    """Return ``anonymous_free_preview_enabled`` from admin settings.
+    """Master gate 的 admin 分量：「任一 lane 开启」（plan 2026-06-12 §A）。
 
-    Fail-closed (F9): any exception reading admin settings → return False.
+    原实现只看 ``anonymous_free_preview_enabled``——free 下线后会把整个
+    匿名漏斗关死。现在改为 ``resolve_anonymous_lane() is not None``：
+    express / free 任一开即放行新 intake（session 创建）。
+
+    Fail-closed (F9)：resolver 内部已兜 admin 读取异常 → None → False。
     """
-    try:
-        from admin_settings import load_settings as _load
-        admin = _load()
-        return bool(admin.anonymous_free_preview_enabled)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "anonymous_session: failed to read admin_settings, defaulting to closed: %s",
-            exc,
-        )
-        return False
+    from anonymous_lane import resolve_anonymous_lane
+
+    return resolve_anonymous_lane() is not None
 
 
 def _hash_token(raw: str) -> str:
@@ -221,23 +218,23 @@ async def require_anonymous_session(
     """FastAPI dependency for ``GET /{id}/status`` and ``GET /{id}/stream``.
 
     Returns an ``AnonymousSessionContext`` on success.
-    Returns a ``JSONResponse`` (404 / 403 / 401) on failure — callers must
+    Returns a ``JSONResponse`` (404 / 401) on failure — callers must
     check ``isinstance(ctx, Response)`` and return it early.
 
     Does NOT create a new session on miss — 401 instead.
+
+    生命周期不变量（plan 2026-06-12 §A，R2 #4）：本依赖服务的是已建
+    record/state 的生命周期端点（status/stream、chunked part/complete/
+    status/delete）——对 lane 开关**零感知**，只看 env master flag +
+    session 本身。否则关 lane 开关会立刻杀掉旧 record 的 status/stream，
+    回滚语义（旧 express record 服务到 TTL）就坏了。守卫：
+    tests/test_anonymous_express_t1_lane_gates.py::TestSessionGates。
     """
-    # --- gate 1: env flag ---
+    # --- gate 1: env flag（部署级 master，生命周期端点唯一的开关 gate）---
     if not settings.enable_anonymous_preview:
         return JSONResponse(
             status_code=404,
             content={"error": "feature_not_available"},
-        )
-
-    # --- gate 2: admin hot-switch (fail-closed) ---
-    if not _get_admin_flag():
-        return JSONResponse(
-            status_code=403,
-            content={"error": "anonymous_preview_disabled"},
         )
 
     # --- require existing valid session ---

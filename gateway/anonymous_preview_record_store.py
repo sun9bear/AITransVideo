@@ -86,7 +86,9 @@ def _to_orm(record: PreviewRecord) -> AnonymousPreviewRecord:
         if isinstance(record.source_type, SourceType)
         else str(record.source_type),
         source_hash=record.source_hash or "",
-        mode="free",
+        # plan 2026-06-12 §A：mode 来自契约 record（wiring 的 mode 入参
+        # 经 dataclasses.replace 填充），不再硬写 "free"。
+        mode=getattr(record, "mode", None) or "free",
         job_id=None,
         claim_token_placeholder=record.claim_token_placeholder,
         audit=audit,
@@ -131,6 +133,7 @@ def _from_orm(row: AnonymousPreviewRecord) -> PreviewRecord:
         created_at=row.created_at,
         expires_at=row.expires_at,
         claim_token_placeholder=row.claim_token_placeholder,
+        mode=row.mode or "free",
     )
 
 
