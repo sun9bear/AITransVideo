@@ -147,10 +147,12 @@ def test_wechat_payment_event_unchanged(monkeypatch):
 # Paddle adjustment 解析
 # ---------------------------------------------------------------------------
 
-def _paddle_adjustment(action="refund", status="approved") -> bytes:
+def _paddle_adjustment(
+    action="refund", status="approved", event_type="adjustment.created"
+) -> bytes:
     return json.dumps({
         "event_id": "evt_adj_1",
-        "event_type": "adjustment.created",
+        "event_type": event_type,
         "data": {
             "id": "adj_1",
             "transaction_id": "txn_1",
@@ -161,6 +163,7 @@ def _paddle_adjustment(action="refund", status="approved") -> bytes:
     }).encode("utf-8")
 
 
+@pytest.mark.parametrize("event_type", ["adjustment.created", "adjustment.updated"])
 @pytest.mark.parametrize(
     ("action", "status", "expected"),
     [
@@ -171,8 +174,12 @@ def _paddle_adjustment(action="refund", status="approved") -> bytes:
         ("credit", "approved", "pending"),
     ],
 )
-def test_paddle_adjustment_status_gating(action, status, expected):
-    parsed = paddle.parse_paddle_webhook(_paddle_adjustment(action, status))
+def test_paddle_adjustment_status_gating(action, status, expected, event_type):
+    """created/updated 必须走同一门控——live 环境人工审批的退款先发
+    created(pending_approval)、审批后由 updated 携带 approved（Codex P1）。"""
+    parsed = paddle.parse_paddle_webhook(
+        _paddle_adjustment(action, status, event_type)
+    )
     assert parsed.new_status == expected
     assert parsed.provider_event_id == "evt_adj_1"
     assert parsed.order_id == ""  # adjustment 无 custom_data，绑定走反查
@@ -252,35 +259,55 @@ async def test_paddle_refund_gate_pass_and_txn_mismatch():
 
 
 @pytest.mark.asyncio
-async def test_wechat_refund_gate_amount_and_status():
+async def test_wechat_refund_gate_mirrors_payment_gate(monkeypatch):
+    """退款 gate 不得比支付 gate 松（Codex P2）：mchid 硬门 + out_trade_no
+    绑定 + SUCCESS + 原单总额 fail-closed（缺失即拒）。"""
+    monkeypatch.setattr(
+        wechat.WechatPayConfig, "from_env",
+        classmethod(lambda cls: SimpleNamespace(mchid="MCH1", appid="")),
+    )
     order = _order()
-    def payload(total=990, refund_status="SUCCESS", out_trade_no="AVT_abc123"):
-        return {
-            "event_type": "REFUND.SUCCESS",
-            "transaction": {
-                "out_trade_no": out_trade_no,
-                "refund_status": refund_status,
-                "amount": {"total": total, "refund": 990},
-            },
-        }
 
-    assert await billing._validate_wechat_event_against_order(
-        db=_FakeSession([[order]]), order_id="ord-1", payload=payload()
-    ) is True
+    def payload(total=990, refund_status="SUCCESS",
+                out_trade_no="AVT_abc123", mchid="MCH1"):
+        body = {
+            "out_trade_no": out_trade_no,
+            "refund_status": refund_status,
+            "mchid": mchid,
+        }
+        if total is not None:
+            body["amount"] = {"total": total, "refund": 990}
+        return {"event_type": "REFUND.SUCCESS", "transaction": body}
+
+    async def gate(p):
+        return await billing._validate_wechat_event_against_order(
+            db=_FakeSession([[order]]), order_id="ord-1", payload=p
+        )
+
+    assert await gate(payload()) is True
+    # mchid 不符（商户号与 AiPlay 共用，转发回调必须拒）→ 拒
+    assert await gate(payload(mchid="MCH_OTHER")) is False
     # 原单总额不符 → 拒
-    assert await billing._validate_wechat_event_against_order(
-        db=_FakeSession([[order]]), order_id="ord-1", payload=payload(total=100)
-    ) is False
+    assert await gate(payload(total=100)) is False
+    # 金额缺失 → 拒（fail-closed，不再放行）
+    assert await gate(payload(total=None)) is False
     # refund_status 非 SUCCESS → 拒
-    assert await billing._validate_wechat_event_against_order(
-        db=_FakeSession([[order]]), order_id="ord-1",
-        payload=payload(refund_status="CLOSED"),
-    ) is False
+    assert await gate(payload(refund_status="CLOSED")) is False
     # out_trade_no 不符 → 拒
-    assert await billing._validate_wechat_event_against_order(
-        db=_FakeSession([[order]]), order_id="ord-1",
-        payload=payload(out_trade_no="AVT_other"),
-    ) is False
+    assert await gate(payload(out_trade_no="AVT_other")) is False
+
+
+@pytest.mark.asyncio
+async def test_paddle_refund_gate_accepts_adjustment_updated():
+    """审批通过走 adjustment.updated——validator 必须与 created 同门控。"""
+    order = _order(provider="paddle", provider_order_id="txn_1")
+    payload = {
+        "event_type": "adjustment.updated",
+        "data": {"transaction_id": "txn_1", "action": "refund", "status": "approved"},
+    }
+    assert await billing._validate_paddle_event_against_order(
+        db=_FakeSession([[order]]), order_id="ord-1", payload=payload
+    ) is True
 
 
 # ---------------------------------------------------------------------------

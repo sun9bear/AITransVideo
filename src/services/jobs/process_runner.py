@@ -440,15 +440,21 @@ class ProcessJobRunner:
             current_job = None
         deadline_seconds = self._compute_deadline_seconds(current_job)
 
+        # 超时标记：callback 只 kill + 置位，事件日志由 monitor 线程在循环
+        # 结束后单线程写——append JSONL 无锁，不允许 timer 线程并发写入。
+        watchdog_timed_out = threading.Event()
+
         def _watchdog_kill() -> None:
+            # 与正常退出撞车的守卫：timer 到点时进程可能刚好退完——
+            # cancel() 拦不住已开始执行的 callback，这里用 poll() 二次确认，
+            # 避免给成功任务写假超时日志/做无意义 kill。
+            if process.poll() is not None:
+                return
+            watchdog_timed_out.set()
             logger.warning(
                 "[watchdog] job_id=%s 超时 %ss，强制终止子进程",
                 job_id,
                 deadline_seconds,
-            )
-            self._record_line(
-                job_id,
-                f"[JOB] 任务超时（{deadline_seconds}s）被 watchdog 终止。",
             )
             self._kill_process(process)
 
@@ -469,6 +475,12 @@ class ProcessJobRunner:
             watchdog.cancel()
             with self._lock:
                 self._processes.pop(job_id, None)
+        # 超时事件日志在这里（monitor 线程）补写，保证 JSONL 单写者。
+        if watchdog_timed_out.is_set():
+            self._record_line(
+                job_id,
+                f"[JOB] 任务超时（{deadline_seconds}s）被 watchdog 终止。",
+            )
         self._finalize_process(job_id, returncode)
 
     @staticmethod
