@@ -55,6 +55,9 @@ type PanelStep =
   | 'consent'
   | 'processing'
   | 'ready'
+  // 任务诚实失败（plan 2026-06-12 §E）：record/teaser 保留，可一键重试
+  // （复用 preview_id 重新 create，无需重新上传）。
+  | 'failed'
   | 'error'
 
 interface PanelState {
@@ -443,6 +446,27 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     schedulePoll(previewId)
   }
 
+  // ── Failed → retry（复用 preview_id，不重新上传） ──
+
+  async function handleRetry() {
+    if (!state.previewId) return
+    const gen = pollGenRef.current
+    const previewId = state.previewId
+    setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null, errorMsg: '' }))
+    try {
+      // create 端仅 failed 终态可重入（服务端原子抢占防并发双重试）；
+      // 重试仍走全部闸判定（in-flight / lane 开关 / admission）。
+      await createPreview(previewId, new Date().toISOString())
+    } catch (err) {
+      if (gen !== pollGenRef.current) return
+      const msg = err instanceof Error ? err.message : '重试失败，请稍后再试'
+      setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
+      return
+    }
+    if (gen !== pollGenRef.current) return
+    schedulePoll(previewId)
+  }
+
   // ── Polling ──
 
   function schedulePoll(previewId: string, delayMs: number = POLL_INTERVAL_MS) {
@@ -493,7 +517,9 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     }
 
     if (ps === 'failed') {
-      setState((s) => ({ ...s, step: 'error', errorMsg: '预览生成失败，请重新上传一个视频试试' }))
+      // §E 诚实失败：record 与已上传文件保留（沿用 TTL），展示「重试」
+      // 按钮——复用同一 preview_id 重新 create，无需重新上传。
+      setState((s) => ({ ...s, step: 'failed', errorMsg: '预览生成失败' }))
       return
     }
 
@@ -511,6 +537,25 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
 
   function renderBody() {
     const { step } = state
+
+    // lane 三态（plan 2026-06-12 §G）：两 lane 都关 → 「暂未开放」。
+    // 生命周期端点对 lane 开关零感知——进行中/已就绪的预览不受影响，
+    // 所以只在 idle（新 intake 入口）拦。
+    if (!limits.master_open && step === 'idle') {
+      return (
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-border bg-muted/30 px-6 py-10 text-center">
+          <AlertCircle className="h-8 w-8 text-muted-foreground" aria-hidden="true" />
+          <p className="text-sm font-medium text-foreground">免注册试用暂未开放</p>
+          <p className="text-xs text-muted-foreground">
+            可以先
+            <a href="/auth" className="mx-1 text-primary hover:underline font-medium">
+              注册账号
+            </a>
+            体验完整的视频翻译配音
+          </p>
+        </div>
+      )
+    }
 
     if (step === 'idle') {
       return <UploadZone onFile={(f) => void handleFile(f)} disabled={false} maxUploadMb={limits.max_upload_mb} />
@@ -564,7 +609,9 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
               <span className="font-medium text-foreground">视频上传成功</span>
             </div>
             <p className="text-xs text-muted-foreground">
-              我们将为您生成带水印的前 {formatPreviewDuration(limits.preview_seconds)}中文配音预览。
+              {limits.active_lane === 'express'
+                ? `我们将用快捷版完整管线（含说话人音色匹配）为您生成带水印的前 ${formatPreviewDuration(limits.preview_seconds)}中文配音预览。`
+                : `我们将为您生成带水印的前 ${formatPreviewDuration(limits.preview_seconds)}中文配音预览。`}
               继续前请确认以下声明：
             </p>
           </div>
@@ -647,9 +694,20 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           </div>
           <p className="text-xs text-muted-foreground">
             预览效果满意？
-            <a href="/auth" className="ml-1 text-primary hover:underline font-medium">
+            <a
+              href={`/auth?from=${encodeURIComponent('/translations/new')}`}
+              className="ml-1 text-primary hover:underline font-medium"
+            >
               注册账号体验完整翻译
             </a>
+            ，登录后还可使用
+            <a
+              href={`/auth?from=${encodeURIComponent('/translations/new')}`}
+              className="mx-1 text-primary hover:underline font-medium"
+            >
+              智能版
+            </a>
+            获得更高质量的全自动翻译
           </p>
           <button
             type="button"
@@ -658,6 +716,40 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           >
             上传另一个视频
           </button>
+        </div>
+      )
+    }
+
+    if (step === 'failed') {
+      // §E 诚实失败态：「重试」复用 preview_id 重新 create（不重新上传，
+      // per-scope 配额已由服务端退还）；「重新上传」回 idle。
+      return (
+        <div className="flex flex-col gap-3">
+          <div className="flex items-start gap-3 rounded-xl border border-destructive/20 bg-destructive/5 p-4">
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" aria-hidden="true" />
+            <div>
+              <p className="text-sm text-destructive font-medium">{state.errorMsg || '预览生成失败'}</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                已上传的视频仍然保留，点击「重试」无需重新上传。
+              </p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={cn(buttonVariants({ variant: "default", size: "sm" }))}
+              onClick={() => void handleRetry()}
+            >
+              重试
+            </button>
+            <button
+              type="button"
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+              onClick={resetPanel}
+            >
+              重新上传
+            </button>
+          </div>
         </div>
       )
     }
@@ -691,6 +783,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
 
         <p className="text-center text-xs text-muted-foreground">
           本地视频 · 前 {formatPreviewDuration(limits.preview_seconds)}预览 · 带水印
+          {limits.active_lane === 'express' ? ' · 快捷版真实管线' : ''}
         </p>
       </DialogContent>
     </Dialog>

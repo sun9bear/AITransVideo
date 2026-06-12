@@ -30,10 +30,12 @@ WATERMARK_BOXCOLOR = "black@0.35"
 def free_watermark_text_for(service_mode: str | None) -> str | None:
     """Return the watermark text for a job, or ``None`` for no watermark.
 
-    Only ``service_mode == "free"`` is watermarked; paid modes ship clean video.
-    Single source of truth for the free -> watermark policy.
+    Watermarked modes: ``free`` + ``anonymous_preview``（plan 2026-06-12 §C
+    第①点——匿名预览恒水印，调用方传 ``effective_policy_mode(...)`` 结果，
+    匿名 express 任务因此也命中本分支）。Paid modes ship clean video.
+    Single source of truth for the mode -> watermark policy.
     """
-    if (service_mode or "").strip() == "free" and FREE_WATERMARK_TEXT:
+    if (service_mode or "").strip() in ("free", "anonymous_preview") and FREE_WATERMARK_TEXT:
         return FREE_WATERMARK_TEXT
     return None
 

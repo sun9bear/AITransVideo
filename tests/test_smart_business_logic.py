@@ -12,6 +12,7 @@ trust them without re-deriving the math at each call site.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -2099,10 +2100,19 @@ class TestB3DCloneSampleExtractorContract:
 
         # Anchor 1: admin-policy variable is read with a fail-open
         # default so missing admin_settings.json doesn't disable reuse.
-        assert "_smart_admin_reuse_enabled = True" in block, (
-            "Phase 3: process.py must default _smart_admin_reuse_enabled "
-            "to True so a missing/corrupt admin_settings.json preserves "
-            "the legacy reuse-enabled behavior.\n"
+        # (41f5743b switched the literal ``= True`` default to the
+        # app-safe ``read_admin_setting(..., default=True)`` form —
+        # same invariant, pinned against the new shape.)
+        assert re.search(
+            r'_smart_admin_reuse_enabled = bool\(\s*'
+            r'read_admin_setting\(\s*'
+            r'"smart_reuse_user_voice_enabled",\s*default=True,?\s*\)',
+            block,
+        ), (
+            "Phase 3: process.py must read smart_reuse_user_voice_enabled "
+            "via read_admin_setting(..., default=True) so a missing/"
+            "corrupt admin_settings.json preserves the legacy "
+            "reuse-enabled behavior.\n"
             f"Block (first 4000 chars):\n{block[:4000]}"
         )
         # The admin field is read off the loaded settings object.
@@ -2170,11 +2180,21 @@ class TestB3DCloneSampleExtractorContract:
         block = "\n".join(lines[:1500])
 
         # Anchor 1: admin field is loaded with a fail-closed default.
-        assert "_smart_admin_pause_on_possible = False" in block, (
-            "Phase 4: process.py must initialize "
-            "_smart_admin_pause_on_possible = False before reading "
-            "admin_settings so a missing/corrupt JSON keeps Smart in "
-            "the legacy (no surprise pause) behavior.\n"
+        # (41f5743b switched the literal ``= False`` default to the
+        # app-safe ``read_admin_setting(..., default=False)`` form —
+        # same invariant, pinned against the new shape.)
+        assert re.search(
+            r'_smart_admin_pause_on_possible = bool\(\s*'
+            r'read_admin_setting\(\s*'
+            r'"smart_pause_on_possible_user_voice_match",\s*'
+            r'default=False,?\s*\)',
+            block,
+        ), (
+            "Phase 4: process.py must read "
+            "smart_pause_on_possible_user_voice_match via "
+            "read_admin_setting(..., default=False) so a missing/corrupt "
+            "JSON keeps Smart in the legacy (no surprise pause) "
+            "behavior.\n"
             f"Block (first 4000 chars):\n{block[:4000]}"
         )
         # Anchor 2: the admin field name is read off the settings object.

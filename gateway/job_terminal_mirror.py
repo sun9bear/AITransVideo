@@ -153,6 +153,24 @@ async def mirror_job_terminal_state(
                 "mirror: anonymous preview job=%s terminal=%s — settlement bypassed",
                 db_job.job_id, upstream_status,
             )
+            # plan 2026-06-12 §E：Pass 3 诚实失败 → 按 [SMART_STATE]
+            # anon_pass3_failed marker 退还 per-scope per-mode 配额
+            # （global 总闸/express 子闸不退）。终态结算单一入口在此
+            # （feedback_terminal_state_single_entry）；幂等由 record
+            # audit 标记保证（mirror level-triggered 反复观察同一终态）。
+            if upstream_status == "failed":
+                try:
+                    from anonymous_preview_quota_refund import (
+                        refund_pass3_failed_quota,
+                    )
+
+                    if await refund_pass3_failed_quota(db, db_job):
+                        changed = True
+                except Exception as exc:  # noqa: BLE001 — 退还失败不阻断镜像
+                    logger.warning(
+                        "mirror: anon pass3 quota refund failed job=%s (%s)",
+                        db_job.job_id, exc,
+                    )
             return changed
         quota_state_before = getattr(db_job, "quota_state", None)
         try:

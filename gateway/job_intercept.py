@@ -2106,7 +2106,10 @@ async def _resolve_r2_redirect(
     """
     try:
         from storage.backend_router import is_r2_enabled
-        from services.r2_publisher_lib.downloadable_keys import download_keys_for
+        from services.r2_publisher_lib.downloadable_keys import (
+            download_keys_for,
+            effective_policy_mode,
+        )
     except Exception as exc:  # pragma: no cover - boto3/storage missing
         logger.warning(
             "storage package import failed (%s); falling back to local", exc,
@@ -2134,7 +2137,13 @@ async def _resolve_r2_redirect(
     # job's permission set, return None and let Job API produce the
     # canonical 403 / 404. Doing the check here means Gateway never
     # short-circuits a 302 for a key the user shouldn't see.
-    if artifact_key not in download_keys_for(job.service_mode):
+    # plan 2026-06-12 §C ⑥：策略档经 effective_policy_mode——匿名预览任务
+    # （含匿名 express，service_mode=="express"）零下载 key，不进 R2 302。
+    if artifact_key not in download_keys_for(
+        effective_policy_mode(
+            job.service_mode, bool(getattr(job, "is_anonymous_preview", False))
+        )
+    ):
         return None, ""
 
     expected_gen = job.edit_generation or 0
@@ -2282,6 +2291,7 @@ async def _resolve_r2_stream_redirect(
         from storage.backend_router import is_r2_enabled
         from services.r2_publisher_lib.downloadable_keys import (
             artifact_key_for_stream_kind,
+            effective_policy_mode,
             stream_kinds_for,
         )
     except Exception as exc:  # pragma: no cover - boto3/storage missing
@@ -2318,7 +2328,17 @@ async def _resolve_r2_stream_redirect(
     # Express jobs requesting /stream/audio land here; we refuse so the
     # Gateway 302 path can't smuggle past the Job API enforcement at
     # src/services/jobs/api.py:459-464.
-    if stream_kind not in stream_kinds_for(job.service_mode):
+    # plan 2026-06-12 §C ⑥：策略档经 effective_policy_mode。匿名预览任务
+    # **整体**不进 R2 stream redirect（本地 stream-only，AD-6）——注意
+    # stream_kinds_for("anonymous_preview")={"video"} 只约束 kind，video
+    # 本身在集合内，必须显式短路否则仍会 302；anonymous_preview 档
+    # eager-push 集为空、本来不该有 registry 条目，这里是双保险。
+    _policy_mode = effective_policy_mode(
+        job.service_mode, bool(getattr(job, "is_anonymous_preview", False))
+    )
+    if _policy_mode == "anonymous_preview":
+        return None, ""
+    if stream_kind not in stream_kinds_for(_policy_mode):
         return None, ""
 
     expected_gen = job.edit_generation or 0

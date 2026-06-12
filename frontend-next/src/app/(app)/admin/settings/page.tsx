@@ -127,6 +127,13 @@ interface AdminSettings {
   anonymous_preview_cap_per_ip: number
   anonymous_preview_cap_per_device: number
   anonymous_preview_cap_per_source: number
+  // --- APF 匿名 Express 预览 lane（plan 2026-06-12 T0）---
+  // express lane 主开关 + 每日全局子闸。full-body POST 语义同上——必须进
+  // state 才不会被静默覆盖。守卫：tests/test_anonymous_express_t0_admin_sync_guard.py。
+  // 注意：anonymous_express_enabled=true 与 express_tts_provider='mimo'
+  // 互斥，后端保存校验 422（文案提示先切换 provider）。
+  anonymous_express_enabled: boolean
+  anonymous_express_daily_global_cap: number
   // --- 分片上传（plan 2026-06-11 §3.7，chunked_upload_* 独立命名空间）---
   // 注册用户大文件（>95MB）经 CF Tunnel 的应用层分片上传。full-body POST
   // 语义同上——10 个字段全部进 state，否则保存其它设置会把后端这些字段
@@ -227,6 +234,12 @@ const DEFAULT_SETTINGS: AdminSettings = {
   anonymous_preview_cap_per_ip: 3,
   anonymous_preview_cap_per_device: 1,
   anonymous_preview_cap_per_source: 1,
+  // --- APF 匿名 Express lane 默认值（plan 2026-06-12 T0）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致：
+  //   anonymous_express_enabled          = False（休眠上线，项目主自行灰度）
+  //   anonymous_express_daily_global_cap = 50
+  anonymous_express_enabled: false,
+  anonymous_express_daily_global_cap: 50,
   // --- 分片上传默认值（plan 2026-06-11 §3.7）---
   // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致；
   // enabled 默认 false（部署后休眠，admin 灰度验证再打开）。
@@ -1205,6 +1218,55 @@ export default function AdminSettingsPage() {
           </div>
         </label>
 
+        {/* APF Express lane（plan 2026-06-12 T0）：express 优先于 free，
+            开启后匿名预览走真实快捷版管线（Pass 3 + CosyVoice TTS）。
+            与 express TTS provider = MiMo 互斥，后端保存校验 422。 */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.anonymous_express_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, anonymous_express_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              开启匿名 Express 快捷版 lane
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                APF Express · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后匿名预览走真实快捷版管线（Pass 3 音色画像 + 快捷版 TTS），优先级高于免费 lane
+              （free 开关保持开也会走 express）。单次成本高于免费 lane，请配合下方每日子闸控制敞口。
+              与 express TTS provider = MiMo 互斥：保存会被拒绝（先切换 provider）。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">Express lane 每日全局上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              express lane 独立每日子闸（在全局总闸之内再限 express 次数），控制真实管线成本敞口。
+              默认 50（范围 1–100000）。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={100000}
+            step={1}
+            value={settings.anonymous_express_daily_global_cap}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 100000) {
+                setSettings((s) => ({ ...s, anonymous_express_daily_global_cap: v }))
+              }
+            }}
+            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+
         <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
           <div>
             <p className="text-sm font-medium text-foreground">全局同时处理上限</p>
@@ -1434,6 +1496,13 @@ export default function AdminSettingsPage() {
               DEFAULT_SETTINGS.anonymous_free_preview_enabled,
             anonymous_preview_max_in_flight:
               DEFAULT_SETTINGS.anonymous_preview_max_in_flight,
+            // --- APF Express lane reset 规则（plan 2026-06-12 T0）---
+            // visible toggle 显式回 DEFAULT（false），让 admin 在 UI 上看到
+            // 复位生效 + fail-safe-off；cap 数字显式回出厂默认 50。
+            anonymous_express_enabled:
+              DEFAULT_SETTINGS.anonymous_express_enabled,
+            anonymous_express_daily_global_cap:
+              DEFAULT_SETTINGS.anonymous_express_daily_global_cap,
             // --- 分片上传 reset 规则（2026-06-11）---
             // 10 个 chunked_upload_* 字段全部渲染为可见控件（toggle + 9 个
             // 数字输入），「恢复默认」语义就是全部回出厂默认——经

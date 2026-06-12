@@ -56,6 +56,8 @@ from services.r2_publisher_lib.downloadable_keys import (
     EXPRESS_ALLOWED_ARTIFACT_KEYS,
     EXPRESS_ALLOWED_DOWNLOAD_KEYS,
     EXPRESS_ALLOWED_STREAM_KINDS,
+    effective_policy_mode,
+    stream_kinds_for,
 )
 
 
@@ -82,6 +84,19 @@ def _parse_list_pagination(query: str) -> tuple[int | None, int]:
 def _is_express_job(record) -> bool:
     """Check if a JobRecord is in Express mode. Safe for missing attribute."""
     return getattr(record, "service_mode", None) == "express"
+
+
+def _policy_mode_for(record) -> str | None:
+    """JobRecord → 策略档（plan 2026-06-12 §C）。
+
+    匿名预览任务（record.anonymous_preview 真值）恒为 "anonymous_preview"
+    最严档——匿名 express 任务的 service_mode=="express" 不得直接拿去查
+    策略表（会放行下载/poster stream）。
+    """
+    return effective_policy_mode(
+        getattr(record, "service_mode", None),
+        getattr(record, "anonymous_preview", False),
+    )
 
 
 # 2026-04-21: stdlib ThreadingHTTPServer's BufferedIOBase wfile enters a
@@ -229,8 +244,22 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     artifacts_payload = service.get_artifacts(path_parts[1])
                     # Express 过滤：只暴露 publish.dubbed_video + publish.dubbed_video_poster
                     # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
+                    # plan 2026-06-12 §C ⑦：匿名预览任务按零下载档过滤——
+                    # artifacts 列表不暴露任何 key（stream-only，AD-6/R3）。
                     record = service.require_job(path_parts[1])
-                    if _is_express_job(record):
+                    if effective_policy_mode(
+                        getattr(record, "service_mode", None),
+                        getattr(record, "anonymous_preview", False),
+                    ) == "anonymous_preview":
+                        artifacts_payload = {
+                            **artifacts_payload,
+                            "artifacts": [],
+                            "manifest": {
+                                **artifacts_payload.get("manifest", {}),
+                                "artifact_count": 0,
+                            },
+                        }
+                    elif _is_express_job(record):
                         items = artifacts_payload.get("artifacts") or []
                         filtered = [
                             it for it in items
@@ -522,6 +551,15 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     job_id = path_parts[1]
                     download_key = path_parts[3]
                     record = service.require_job(job_id)
+                    # plan 2026-06-12 §C ④：匿名预览任务零下载（stream-only，
+                    # AD-6）。先于 express 白名单——匿名 express 任务的
+                    # service_mode=="express" 不得落进下载放行分支。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "匿名预览任务不提供下载（仅在线预览）"},
+                        )
+                        return
                     # Express 白名单：只允许 publish.dubbed_video
                     # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
                     if _is_express_job(record) and download_key not in EXPRESS_ALLOWED_DOWNLOAD_KEYS:
@@ -556,6 +594,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "tts-segments-zip":
                     job_id = path_parts[1]
                     record = service.require_job(job_id)
+                    # §C 深度防御：匿名预览任务（含匿名 free）一律禁
+                    # tts-segments-zip（零下载档；express 分支在下面单独拦）。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "匿名预览任务不提供下载（仅在线预览）"},
+                        )
+                        return
                     # Express 禁 tts-segments-zip（editor-only 产物）
                     if _is_express_job(record):
                         self._write_json(
@@ -636,6 +682,19 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     job_id = path_parts[1]
                     kind = path_parts[3]
                     record = service.require_job(job_id)
+                    # plan 2026-06-12 §C ⑤：匿名预览任务仅允许 stream video
+                    # （stream_kinds_for("anonymous_preview") = {"video"}）。
+                    # 先于 express 白名单——匿名 express 的 poster/audio 也拦。
+                    _policy_mode = _policy_mode_for(record)
+                    if (
+                        _policy_mode == "anonymous_preview"
+                        and kind not in stream_kinds_for(_policy_mode)
+                    ):
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": f"该媒体流对匿名预览任务不可访问: {kind}"},
+                        )
+                        return
                     # Express 禁 stream/audio（只允许 video + poster）
                     # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
                     if _is_express_job(record) and kind not in EXPRESS_ALLOWED_STREAM_KINDS:

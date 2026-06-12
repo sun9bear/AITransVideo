@@ -40,17 +40,29 @@ export interface StatusResponse {
   mode: PreviewMode | null
 }
 
+// 当前活动 lane（plan 2026-06-12 §G：服务端单点解析，前端零选择）。
+// 'express' = 真实快捷版管线；'free' = 免费档；null = 两 lane 都关。
+export type ActiveLane = 'free' | 'express' | null
+
 // 当前生效的匿名预览限制（gateway GET /gateway/anonymous-preview/limits，
 // 管理员后台热配置）。拉取失败时面板用 DEFAULT_PREVIEW_LIMITS 兜底。
 export interface PreviewLimits {
   max_upload_mb: number
   preview_seconds: number
+  // plan 2026-06-12 §G：lane 三态（free/express/关闭）由 limits 下发，
+  // lane 切换无需重建前端镜像。
+  active_lane: ActiveLane
+  master_open: boolean
 }
 
 // 兜底值与后端出厂默认严格一致（gateway/admin_settings.py APF 限制旋钮段）。
+// lane 字段 fail-open（free/开）：拉取失败（网络抖动）时保持既有 UX——
+// 上传面板照常渲染，真正的 gate 在服务端（上传会被 404/403 并映射文案）。
 export const DEFAULT_PREVIEW_LIMITS: PreviewLimits = {
   max_upload_mb: 200,
   preview_seconds: 180,
+  active_lane: 'free',
+  master_open: true,
 }
 
 /** Fetch the currently effective anonymous-preview limits（只读，无需会话）. */
@@ -59,13 +71,26 @@ export async function getPreviewLimits(): Promise<PreviewLimits> {
   if (!resp.ok) {
     throw new Error(`限制查询失败（HTTP ${resp.status}）`)
   }
-  const body = (await resp.json()) as Partial<PreviewLimits>
+  const body = (await resp.json()) as Record<string, unknown>
   const maxUploadMb = Number(body.max_upload_mb)
   const previewSeconds = Number(body.preview_seconds)
   if (!Number.isFinite(maxUploadMb) || maxUploadMb <= 0 || !Number.isFinite(previewSeconds) || previewSeconds <= 0) {
     throw new Error('限制响应格式无效')
   }
-  return { max_upload_mb: maxUploadMb, preview_seconds: previewSeconds }
+  // lane 三态解析：旧网关（无字段）按 free/开兼容；显式 null/未知值 = 关闭。
+  const rawLane = body.active_lane
+  const activeLane: ActiveLane =
+    rawLane === 'express' ? 'express'
+    : rawLane === 'free' ? 'free'
+    : rawLane === undefined ? 'free'
+    : null
+  const masterOpen = body.master_open === undefined ? activeLane !== null : body.master_open === true
+  return {
+    max_upload_mb: maxUploadMb,
+    preview_seconds: previewSeconds,
+    active_lane: activeLane,
+    master_open: masterOpen,
+  }
 }
 
 /** 把预览秒数格式化成提示文案用的时长（180 → "3 分钟"，90 → "90 秒"）. */
@@ -202,8 +227,11 @@ export function mapStatusReason(reason: string | null): string {
 }
 
 function mapCreateError(status: number, raw: string): string {
+  // CodeX 外审 2026-06-12 P1/P2 配套：重试重入被服务端收紧后，409 不再
+  // 恒等于"处理中"——区分重试次数耗尽 / 不可重试失败，引导重新上传。
+  if (raw === 'retry_exhausted') return '重试次数已用完，请重新上传一个视频'
   if (status === 403) return '需要先确认版权声明才能继续'
-  if (status === 409) return '该预览已在处理中，请稍候'
+  if (status === 409) return '该预览已在处理中或无法重试，请稍候或重新上传'
   if (status === 429) return '预览通道繁忙，请稍后再试'
   return raw || `创建预览失败（HTTP ${status}）`
 }

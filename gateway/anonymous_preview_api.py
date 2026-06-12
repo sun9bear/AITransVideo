@@ -51,7 +51,11 @@ from anonymous_preview_record_store import RecordStoreError
 from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anonymous_upload, extract_client_ip
 from anonymous_preview_intake_wiring import (
     ANON_PREVIEW_COUNTER_SCOPE,
+    PER_SCOPE_PER_MODE_DAILY_CAP,
+    express_subgate_key,
     peek_counter_keys,
+    peek_mode_counter_keys,
+    resolve_express_global_cap,
     run_intake_and_save,
 )
 from anonymous_preview_limits import resolve_apf_limits
@@ -143,12 +147,61 @@ def _is_record_expired(record: AnonymousPreviewRecord) -> bool:
 
 
 def _get_admin_enabled() -> bool:
-    """Read admin anonymous_free_preview_enabled — fail-closed on any error."""
+    """Read admin anonymous_free_preview_enabled — fail-closed on any error.
+
+    plan 2026-06-12 §A 起仅供 **free lane** 语义的门使用（create 的
+    free-mode 分支）；新 intake 的 master gate 走 ``_resolve_active_lane``。
+    """
     try:
         from admin_settings import load_settings as _load
         return bool(_load().anonymous_free_preview_enabled)
     except Exception:
         return False
+
+
+def _resolve_active_lane() -> Optional[str]:
+    """当前活动 lane（"express"/"free"/None）。模块级薄包装便于测试注入。"""
+    from anonymous_lane import resolve_anonymous_lane
+
+    return resolve_anonymous_lane()
+
+
+def _create_mode_gate(record_mode: str) -> Optional[JSONResponse]:
+    """create 端按 record.mode 分流的开关门（plan 2026-06-12 §A/D2）。
+
+    * ``free``：既有双门逐字节不变——``enable_free_tier`` env +
+      ``anonymous_free_preview_enabled`` admin（AD-7：匿名 surface 不绕过
+      free tier 总开关语义）。
+    * ``express``：``anonymous_express_enabled`` admin（含 §E② mimo runtime
+      防御纵深，经 ``express_lane_open``）；不查 free tier env——express
+      不是 free tier。
+    * 其它值：fail-closed 403（record.mode 只可能由 intake 写入合法值，
+      未知值=数据损坏）。
+
+    返回 None = 放行；JSONResponse = 调用方原样返回。
+    """
+    if record_mode == "free":
+        if not getattr(settings, "enable_free_tier", False):
+            return JSONResponse(status_code=403, content={"error": "free_disabled"})
+        if not _get_admin_enabled():
+            return JSONResponse(
+                status_code=403, content={"error": "anonymous_preview_disabled"}
+            )
+        return None
+    if record_mode == "express":
+        from anonymous_lane import express_lane_open
+
+        if not express_lane_open():
+            return JSONResponse(
+                status_code=403, content={"error": "anonymous_preview_disabled"}
+            )
+        return None
+    logger.warning(
+        "anon_create: unknown record mode %r — fail-closed", record_mode
+    )
+    return JSONResponse(
+        status_code=403, content={"error": "anonymous_preview_disabled"}
+    )
 
 
 def _make_sync_intake_session():
@@ -175,19 +228,27 @@ def _make_sync_intake_session():
 # AD-8 body-before peek（/upload 与 §9 匿名分片 init 共享）
 # ---------------------------------------------------------------------------
 
-async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optional[JSONResponse]:
+async def ad8_peek_precheck(
+    db: AsyncSession, request: Request, limits, lane: str = "free"
+) -> Optional[JSONResponse]:
     """Non-authoritative global + per-IP rate-limit pre-check（AD-8）。
 
     Body 读取/磁盘写入**之前**调用；超 cap 直接拒（瞬时磁盘 = 并发数×200MB
     防护）。SELECT-only，权威 try_acquire 仍在 run_intake_and_save →
-    adapter._enforce_rate_limits。返回 None = 放行；返回 JSONResponse =
-    调用方原样返回（429 / 503 fail-closed）。
+    adapter._enforce_rate_limits（LaneAwareCounterStore 三层叠加）。返回
+    None = 放行；返回 JSONResponse = 调用方原样返回（429 / 503 fail-closed）。
 
     (scope, scope_key) 必须与权威计数器写入形状逐字节一致：scope 列恒为
     ANON_PREVIEW_COUNTER_SCOPE（wiring 单实例 store），scope_key 是 adapter
     复合键 "global:{day}" / "ip:{hmac('ip:'+ip)}:{day}"。推导只许走
-    peek_counter_keys——此前 peek 自行用 scope='global'/'ip' + 裸值哈希，
-    两个维度恒查 0 行、cap 预检恒放行（2026-06-11 bug ⑤）。
+    peek_counter_keys / peek_mode_counter_keys——此前 peek 自行用
+    scope='global'/'ip' + 裸值哈希，两个维度恒查 0 行、cap 预检恒放行
+    （2026-06-11 bug ⑤）。
+
+    plan 2026-06-12 §A/§B：``lane`` = resolver 结果，peek 按 lane 查对应
+    计数——判定顺序与权威侧一致：总闸（legacy global，mode='free' 是历史
+    key 形状的一部分、express intake 也累加它）→ express 子闸 →
+    legacy per-ip → per-mode per-ip（1 次/日）。
     """
     client_ip_peek = extract_client_ip(request) or ""
     day_key_peek = shanghai_today()
@@ -198,6 +259,17 @@ async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optio
             client_ip_peek,
             day_key_peek,
             secret=settings.anonymous_preview_hash_secret,
+        )
+        _express_key, _ip_mode_key = peek_mode_counter_keys(
+            client_ip_peek,
+            day_key_peek,
+            lane,
+            secret=settings.anonymous_preview_hash_secret,
+        )
+        _mode_sql = _sa_text(
+            "SELECT count FROM anonymous_preview_daily_usage "
+            "WHERE scope = :scope AND scope_key = :key "
+            "  AND mode = :mode AND usage_date = :day"
         )
         _global_row = await db.execute(
             _sa_text(
@@ -216,6 +288,27 @@ async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optio
             )
             return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
 
+        if lane == "express":
+            _express_cap = int(resolve_express_global_cap())
+            _express_row = await db.execute(
+                _mode_sql,
+                {
+                    "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                    "key": _express_key,
+                    "mode": "express",
+                    "day": day_key_peek,
+                },
+            )
+            _express_count = int((_express_row.fetchone() or [0])[0])
+            if _express_count >= _express_cap:
+                logger.info(
+                    "anon_upload: AD-8 peek express subgate cap reached "
+                    "count=%d cap=%d", _express_count, _express_cap,
+                )
+                return JSONResponse(
+                    status_code=429, content={"error": "preview_queue_full"}
+                )
+
         _ip_row = await db.execute(
             _sa_text(
                 "SELECT count FROM anonymous_preview_daily_usage "
@@ -231,6 +324,23 @@ async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optio
                 _ip_count,
                 limits.anonymous_preview_cap_per_ip,
                 _ip_key,
+            )
+            return JSONResponse(status_code=429, content={"error": "rate_limited"})
+
+        _ip_mode_row = await db.execute(
+            _mode_sql,
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": _ip_mode_key,
+                "mode": lane,
+                "day": day_key_peek,
+            },
+        )
+        _ip_mode_count = int((_ip_mode_row.fetchone() or [0])[0])
+        if _ip_mode_count >= PER_SCOPE_PER_MODE_DAILY_CAP:
+            logger.info(
+                "anon_upload: AD-8 peek per-mode ip cap reached "
+                "count=%d lane=%s", _ip_mode_count, lane,
             )
             return JSONResponse(status_code=429, content={"error": "rate_limited"})
     except RateLimitCounterUnavailable:
@@ -274,15 +384,20 @@ async def anonymous_upload(
 
     assert isinstance(session_ctx, AnonymousSessionContext)
 
-    admin_enabled = _get_admin_enabled()
+    # lane 单点解析（plan 2026-06-12 §A/D1）：本次请求内只 resolve 一次，
+    # 同一值用于 master gate（admin_enabled）、record.mode 锁定、响应 mode。
+    active_lane = _resolve_active_lane()
+    admin_enabled = active_lane is not None
 
     # APF 限制旋钮（2026-06-11）：admin 热配置优先、env fallback。本次请求内
     # 只 resolve 一次，peek / upload / admission 用同一份快照保证一致。
     limits = resolve_apf_limits()
 
     # AD-8 body-before peek（抽出为 ad8_peek_precheck 与 §9 分片 init 共享；
-    # fail-closed：DB 错 → 503 gate_unavailable）。
-    _peek_reject = await ad8_peek_precheck(db, request, limits)
+    # fail-closed：DB 错 → 503 gate_unavailable）。lane 维度按 resolver 结果查。
+    _peek_reject = await ad8_peek_precheck(
+        db, request, limits, lane=active_lane or "free"
+    )
     if _peek_reject is not None:
         return _peek_reject
 
@@ -358,6 +473,9 @@ async def anonymous_upload(
                     upload_facts=upload_facts,
                     probe_fn=_probe_fn,
                     prescreen_fn=_prescreen_fn,
+                    # lane 锁定时机=intake（plan §A）：record.mode 一经写入，
+                    # 后续 create 读 record.mode，不再重新 resolve。
+                    mode=active_lane or "free",
                 )
                 # run_intake_and_save 契约（wiring docstring）："the caller
                 # commits/rolls back"。store 内部只 flush；漏 commit → close()
@@ -448,7 +566,7 @@ async def anonymous_upload(
             "preview_id": record.record_id,
             "status": status_str,
             "status_reason": _redact_reason(record.status_reason),
-            "mode": "free",
+            "mode": getattr(record, "mode", None) or "free",
             "admission_decision": admission_decision,
         },
     )
@@ -478,11 +596,17 @@ async def anonymous_preview_limits() -> Response:
     if not settings.enable_anonymous_preview:
         return JSONResponse(status_code=404, content={"error": "not_found"})
     limits = resolve_apf_limits()
+    # plan 2026-06-12 §G：lane 三态由 limits 下发（free/express/关闭），
+    # 前端面板据此渲染，lane 切换无需重建镜像。master_open = env（已过）
+    # AND 任一 lane 开。
+    active_lane = _resolve_active_lane()
     return JSONResponse(
         status_code=200,
         content={
             "max_upload_mb": limits.anonymous_preview_max_upload_bytes // (1024 * 1024),
             "preview_seconds": limits.anonymous_preview_max_seconds,
+            "active_lane": active_lane,
+            "master_open": active_lane is not None,
         },
     )
 
@@ -651,9 +775,12 @@ async def anonymous_preview_stream(
             content={"error": "preview_not_ready", "detail": "no_job"},
         )
 
-    # Admin gate (re-check at stream time — hot-switch must take effect)
-    if not _get_admin_enabled():
-        return JSONResponse(status_code=403, content={"error": "anonymous_preview_disabled"})
+    # 生命周期不变量（plan 2026-06-12 §A，R2 #4）：stream 对 lane 开关
+    # 零感知——原 admin 热开关 re-check 已移除，已建 record 凭存在性 +
+    # env master flag 服务到 TTL（否则关 lane 会立刻杀旧 record 的回放，
+    # 回滚语义就坏了）。紧急全停用 env enable_anonymous_preview。
+    # 守卫：tests/test_anonymous_express_t1_lane_gates.py::
+    # TestLifecycleSourceGuards::test_stream_handler_no_admin_lane_recheck。
 
     # T6 stream gate —— ORM record 行不带 duration 列，从 audit 读
     # upload 阶段落盘的契约 teaser 时长（CodeX P1）。
@@ -750,6 +877,301 @@ _CREATING_SENTINEL = "__creating__"
 _SENTINEL_USER_EMAIL = "anonymous-preview@system"
 _READY_STATUS = "ready_for_mode"  # PreviewStatus.READY_FOR_MODE.value（契约钉死）
 
+# 匿名 express payload 的 tts_provider 白名单（plan 2026-06-12 §D）。
+# 唯一真源在 anonymous_lane.VALID_ANON_EXPRESS_TTS_PROVIDERS（CodeX 第三轮
+# P2：lane 开关判定与 create 解析必须同一份白名单，否则 lane 开了 create
+# 拒，preview 被锁死还烧配额）。语义对齐登录 express 解析但剔除 mimo。
+from anonymous_lane import VALID_ANON_EXPRESS_TTS_PROVIDERS as _VALID_ANON_EXPRESS_TTS_PROVIDERS
+
+# 重试可重入的 Job API 终态（plan §E：仅诚实失败可重入 create）。
+_RETRYABLE_JOB_STATUSES = frozenset({"failed", "cancelled"})
+
+# CodeX 外审 2026-06-12 P1：单个 preview 的重试次数上限（retry_chain 长度）。
+# 没有上限时，一个 admitted preview 可以反复发起付费 express 管线（每次
+# 重试 = 完整 转录+Gemini Pass1-3 成本）而不再过任何计数闸。
+ANON_CREATE_MAX_RETRIES = 2
+
+
+def _resolve_express_payload_tts_provider() -> Optional[str]:
+    """express record 的 create payload tts_provider（plan §D）。
+
+    admin ``express_tts_provider`` 经白名单解析；mimo / 未知值 / 读取异常
+    → None（调用方 fail-closed 拒绝 create，不静默回落默认 provider——
+    与登录 express 的"回落 cosyvoice"不同，匿名面宁可失败不猜）。
+    """
+    try:
+        from admin_settings import load_settings
+
+        provider = (load_settings().express_tts_provider or "").strip().lower()
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning(
+            "anon_create: express_tts_provider 读取失败 — fail-closed: %s", exc
+        )
+        return None
+    if provider in _VALID_ANON_EXPRESS_TTS_PROVIDERS:
+        return provider
+    logger.warning(
+        "anon_create: express_tts_provider=%r 不在匿名白名单 %s — 拒绝 create",
+        provider, sorted(_VALID_ANON_EXPRESS_TTS_PROVIDERS),
+    )
+    return None
+
+
+async def _job_is_terminal_failed(job_id: str) -> bool:
+    """重试重入判定（plan §E + CodeX 外审 2026-06-12 P2 收紧）：仅当既有
+    job 是 **Pass 3 诚实失败**（终态 failed/cancelled 且带
+    ``smart_state.anon_pass3_failed`` marker）才允许 failed → 重新 create。
+
+    P2 背景：终态判定若只看 status，内容合规拒绝 / 输入不支持 / 存储错误
+    等确定性失败也会被同 payload 反复重提。marker 由 pipeline 在 artifact
+    判定失败瞬间经 [SMART_STATE] 写入 JSON store（JobRecord.smart_state，
+    GET /jobs/{id} 响应直接携带，无 mirror 滞后）。
+
+    * 200 且 status ∈ {failed, cancelled} 且 marker 为 True → True
+    * 404（job 已被清理，无法核验 marker）→ False（fail-closed；用户走
+      重新上传）
+    * 其它状态 / 任何异常 → False（fail-closed：409 already_created）
+    """
+    try:
+        client = get_client()
+        resp = await client.get(
+            f"{settings.job_api_upstream}/jobs/{job_id}",
+            headers=internal_headers(),
+        )
+        if resp.status_code != 200:
+            return False
+        payload = resp.json()
+        if str(payload.get("status") or "") not in _RETRYABLE_JOB_STATUSES:
+            return False
+        smart_state = payload.get("smart_state") or {}
+        return isinstance(smart_state, dict) and smart_state.get(
+            "anon_pass3_failed"
+        ) is True
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning(
+            "anon_create: retry 终态判定失败 job=%s — fail-closed: %s",
+            job_id, exc,
+        )
+        return False
+
+
+async def _reset_create_claim_to(
+    db: "AsyncSession", preview_id: str, job_id_value: str
+) -> None:
+    """重试路径的抢占回退：__creating__ → 旧 failed job_id（保持可再重试）。"""
+    from sqlalchemy import update as _sa_update
+
+    try:
+        await db.execute(
+            _sa_update(AnonymousPreviewRecord)
+            .where(
+                AnonymousPreviewRecord.preview_id == preview_id,
+                AnonymousPreviewRecord.job_id == _CREATING_SENTINEL,
+            )
+            .values(job_id=job_id_value)
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "anon_create: retry claim reset failed preview_id=%s: %s",
+            preview_id, exc,
+        )
+
+
+async def _abort_create_claim(
+    db: "AsyncSession", preview_id: str, retry_of: Optional[str]
+) -> None:
+    """claim 后失败路径的统一回退（CodeX 复审 2026-06-12 P2）。
+
+    初次 create → job_id 复位 NULL（既有语义）；**重试** → 恢复旧 failed
+    job_id——复位 NULL 会让下次 create 被当作初次创建，绕过重试守卫 /
+    次数上限 / 子闸计费。
+    """
+    if retry_of is None:
+        await _reset_create_claim(db, preview_id)
+    else:
+        await _reset_create_claim_to(db, preview_id, retry_of)
+
+
+_USAGE_UPSERT_SQL = """
+    INSERT INTO anonymous_preview_daily_usage
+        (id, scope, scope_key, mode, usage_date, count,
+         created_at, updated_at)
+    VALUES
+        (gen_random_uuid(), :scope, :key, :mode, :day, 1,
+         now(), now())
+    ON CONFLICT (scope, scope_key, mode, usage_date)
+    DO UPDATE SET
+        count = anonymous_preview_daily_usage.count + 1,
+        updated_at = now()
+    WHERE anonymous_preview_daily_usage.count < :cap
+    RETURNING count
+"""
+
+_USAGE_DECREMENT_SQL = """
+    UPDATE anonymous_preview_daily_usage
+    SET count = GREATEST(count - 1, 0),
+        updated_at = now()
+    WHERE scope = :scope AND scope_key = :key
+      AND mode = :mode AND usage_date = :day
+"""
+
+
+async def _try_acquire_usage_row(
+    db: "AsyncSession", scope_key: str, mode: str, day: str, cap: int
+) -> bool:
+    """单行原子 increment-and-check（SQL 与 PgRateLimitCounterStore.try_acquire
+    同构）。False = 打满或任何异常（fail-closed）。"""
+    from sqlalchemy import text as _sa_text
+
+    try:
+        row = await db.execute(
+            _sa_text(_USAGE_UPSERT_SQL),
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": scope_key,
+                "mode": mode,
+                "day": day,
+                "cap": int(cap),
+            },
+        )
+        return row.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning("anon_create: usage row acquire 失败 — fail-closed: %s", exc)
+        return False
+
+
+async def _decrement_usage_row(
+    db: "AsyncSession", scope_key: str, mode: str, day: str
+) -> None:
+    """best-effort 回退（拒绝不落计数语义；floor 0）。"""
+    from sqlalchemy import text as _sa_text
+
+    try:
+        await db.execute(
+            _sa_text(_USAGE_DECREMENT_SQL),
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": scope_key,
+                "mode": mode,
+                "day": day,
+            },
+        )
+    except Exception:  # noqa: BLE001 — 回退 best-effort
+        logger.warning("anon_create: usage row decrement 失败（best-effort）")
+
+
+async def _charge_retry_quota(
+    db: "AsyncSession", record, record_mode: str
+) -> Optional[JSONResponse]:
+    """重试的配额重新计费（CodeX 外审 P1 + 复审 P2 第三条）。
+
+    1. **per-mode 行重新取额**：若上次失败已退款（audit
+       ``pass3_quota_refund == "done"``），把退掉的 per-IP/device/source
+       行原子 re-acquire（cap=1）——否则重试成功后这些行仍处于退款态，
+       同一匿名身份当日可再开一个 express 预览，违背 per-scope per-mode
+       cap 本意。任一行打满（退款后的 slot 已被该身份的新上传用掉）→
+       429。注：行沿用 intake 时落盘的 day（重试按钮典型同日；跨午夜
+       边缘由 record TTL ≤ 24h 兜底）。
+    2. **express 全局子闸计费**：每次重试 increment-and-check 一次——
+       子闸语义 = express 付费管线启动数/日。
+    3. 重新计费成功 → 清除退款幂等标记，下次再失败 mirror 可再次退款，
+       账本闭环。
+
+    返回 None = 放行；JSONResponse = 调用方回退抢占后原样返回。
+    本函数不 commit——计费与后续 record 写回同事务落地；POST 失败路径的
+    计费泄漏方向是少跑管线（安全侧）。
+    """
+    audit = dict(getattr(record, "audit", None) or {})
+    recharge_rows: list[dict] = []
+    if audit.get("pass3_quota_refund") == "done":
+        recharge_rows = [
+            r for r in (audit.get("quota_mode_rows") or []) if isinstance(r, dict)
+        ]
+    acquired: list[dict] = []
+    for row in recharge_rows:
+        scope_key = str(row.get("scope_key") or "")
+        mode = str(row.get("mode") or "")
+        day = str(row.get("day") or "")
+        if not (scope_key and mode and day):
+            continue
+        if not await _try_acquire_usage_row(
+            db, scope_key, mode, day, PER_SCOPE_PER_MODE_DAILY_CAP
+        ):
+            for done in acquired:
+                await _decrement_usage_row(
+                    db, str(done["scope_key"]), str(done["mode"]), str(done["day"])
+                )
+            return JSONResponse(status_code=429, content={"error": "rate_limited"})
+        acquired.append(row)
+
+    if record_mode == "express":
+        if not await _charge_express_retry_subgate(db):
+            for done in acquired:
+                await _decrement_usage_row(
+                    db, str(done["scope_key"]), str(done["mode"]), str(done["day"])
+                )
+            return JSONResponse(
+                status_code=429, content={"error": "preview_queue_full"}
+            )
+
+    if audit.get("pass3_quota_refund"):
+        audit.pop("pass3_quota_refund", None)
+        audit.pop("pass3_quota_refund_rows", None)
+        record.audit = audit
+    return None
+
+
+async def _charge_express_retry_subgate(db: "AsyncSession") -> bool:
+    """CodeX 外审 2026-06-12 P1：express 重试按全局子闸计费。
+
+    intake 时子闸已为首次管线计 1；每次重试再原子 increment-and-check
+    一次（SQL 形状与 PgRateLimitCounterStore.try_acquire 逐字节同构、
+    key 经 express_subgate_key 单点推导）——子闸语义从「express intake
+    数/日」收紧为「express 管线启动数/日」，cap 即日成本敞口上限。
+    Pass 3 失败退款刻意不退本行（plan §E），重试在此重新扣减。
+
+    返回 False = 子闸打满或任何异常（fail-closed，拒绝重试）。
+    注：扣减成功后若下游 Job API POST 失败，本次扣减不回退——泄漏方向
+    是少跑管线（安全侧），且 claim 回退后用户可明日再试。
+    """
+    from sqlalchemy import text as _sa_text
+
+    try:
+        cap = int(resolve_express_global_cap())
+        day = shanghai_today()
+        row = await db.execute(
+            _sa_text(
+                """
+                INSERT INTO anonymous_preview_daily_usage
+                    (id, scope, scope_key, mode, usage_date, count,
+                     created_at, updated_at)
+                VALUES
+                    (gen_random_uuid(), :scope, :key, :mode, :day, 1,
+                     now(), now())
+                ON CONFLICT (scope, scope_key, mode, usage_date)
+                DO UPDATE SET
+                    count = anonymous_preview_daily_usage.count + 1,
+                    updated_at = now()
+                WHERE anonymous_preview_daily_usage.count < :cap
+                RETURNING count
+                """
+            ),
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": express_subgate_key(day),
+                "mode": "express",
+                "day": day,
+                "cap": cap,
+            },
+        )
+        return row.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning(
+            "anon_create: express retry 子闸计费失败 — fail-closed: %s", exc
+        )
+        return False
+
 
 async def _reset_create_claim(db: "AsyncSession", preview_id: str) -> None:
     """create 下游失败时回滚原子抢占（job_id 复位 NULL，允许重试）。"""
@@ -814,9 +1236,22 @@ async def anonymous_preview_create(
     if record is None or _is_record_expired(record):
         return JSONResponse(status_code=404, content={"error": "not_found"})
 
-    # F6 硬门：仅 READY_FOR_MODE 且未建过 job（job_id 兼作防重放闸）
+    # F6 硬门：仅 READY_FOR_MODE；job_id 兼作防重放闸。
+    # plan 2026-06-12 §E 重试扩展：既有 job 处于诚实失败终态（failed/
+    # cancelled/已被清理）时允许 failed → 重新 create（复用 preview_id，
+    # 无需重新上传）；进行中 / 成功 / 判定失败一律 409 fail-closed。
+    retry_of: Optional[str] = None
     if record.job_id:
-        return JSONResponse(status_code=409, content={"error": "already_created"})
+        if record.job_id == _CREATING_SENTINEL:
+            return JSONResponse(status_code=409, content={"error": "already_created"})
+        if not await _job_is_terminal_failed(record.job_id):
+            return JSONResponse(status_code=409, content={"error": "already_created"})
+        # CodeX P1：重试次数上限——retry_chain 已达上限即拒，付费管线
+        # 启动次数有界（叠加下方 express 子闸计费双保险）。
+        _prior_retries = len(list((record.audit or {}).get("retry_chain") or []))
+        if _prior_retries >= ANON_CREATE_MAX_RETRIES:
+            return JSONResponse(status_code=409, content={"error": "retry_exhausted"})
+        retry_of = record.job_id
     if str(record.status) != _READY_STATUS:
         return JSONResponse(
             status_code=409,
@@ -838,11 +1273,26 @@ async def anonymous_preview_create(
         )
     consent_payload["server_confirmed_at"] = datetime.now(_tz.utc).isoformat()
 
-    # 双门（AD-7）：匿名 surface 不绕过 free tier 总开关语义
-    if not getattr(settings, "enable_free_tier", False):
-        return JSONResponse(status_code=403, content={"error": "free_disabled"})
-    if not _get_admin_enabled():
-        return JSONResponse(status_code=403, content={"error": "anonymous_preview_disabled"})
+    # 开关门按 record.mode 分流（plan 2026-06-12 §A/D2）：free 保持既有
+    # 双门（enable_free_tier env + free admin flag）逐字节不变；express 查
+    # anonymous_express_enabled（含 §E② mimo runtime 防御纵深）。create 是
+    # 花钱动作，归新-intake 侧——lane 关掉后不再为旧 record 起新管线。
+    record_mode = str(getattr(record, "mode", None) or "free")
+    _mode_gate_reject = _create_mode_gate(record_mode)
+    if _mode_gate_reject is not None:
+        return _mode_gate_reject
+
+    # plan 2026-06-12 §D：payload / PG mirror 按 record.mode 同步写。
+    # express 的 tts_provider 在 claim 之前解析（白名单 + mimo 拒绝），
+    # 解析失败提前 503，不消耗原子抢占。
+    if record_mode == "express":
+        _payload_tts_provider = _resolve_express_payload_tts_provider()
+        if _payload_tts_provider is None:
+            return JSONResponse(status_code=503, content={"error": "misconfigured"})
+        _payload_service_mode = "express"
+    else:
+        _payload_service_mode = "free"
+        _payload_tts_provider = "mimo"
 
     # teaser 文件在场（路径由 upload 阶段写入 audit）
     audit = dict(record.audit or {})
@@ -904,11 +1354,18 @@ async def anonymous_preview_create(
     # 原子抢占：job_id IS NULL → __creating__（并发双 create 只有一个赢）。
     # 对抗审核 P1：用 RETURNING 判定胜出，不依赖 asyncpg 的 rowcount
     # （某些驱动/配置下 UPDATE 的 rowcount 不可靠 → 合法抢占被误判 409）。
+    # 重试路径（§E）：条件改为 job_id == 旧 failed job_id——并发双重试
+    # 同样只有一个赢（第二个看到 __creating__ 不匹配 → 409）。
+    _claim_predicate = (
+        AnonymousPreviewRecord.job_id.is_(None)
+        if retry_of is None
+        else AnonymousPreviewRecord.job_id == retry_of
+    )
     claim = await db.execute(
         _sa_update(AnonymousPreviewRecord)
         .where(
             AnonymousPreviewRecord.preview_id == safe_id,
-            AnonymousPreviewRecord.job_id.is_(None),
+            _claim_predicate,
         )
         .values(job_id=_CREATING_SENTINEL)
         .returning(AnonymousPreviewRecord.preview_id)
@@ -917,6 +1374,18 @@ async def anonymous_preview_create(
     await db.commit()
     if not won_claim:
         return JSONResponse(status_code=409, content={"error": "already_created"})
+
+    # CodeX 外审 2026-06-12 P1 + 复审 P2：重试配额重新计费——①退款过的
+    # per-mode 行原子 re-acquire（否则重试成功后该身份当日可再开一个
+    # express 预览）；②express 全局子闸 increment-and-check（付费管线
+    # 启动数恒 ≤ cap）；③成功后清退款幂等标记（下次失败可再退款）。
+    # 任一打满 → 抢占回退到旧 failed job_id（保留重试资格）+ 429。
+    # 在 POST Job API 之前执行。
+    if retry_of is not None:
+        _retry_reject = await _charge_retry_quota(db, record, record_mode)
+        if _retry_reject is not None:
+            await _reset_create_claim_to(db, safe_id, retry_of)
+            return _retry_reject
 
     # payload（白名单深度防御：违规字段=代码 bug，拒绝并回滚抢占）
     payload = {
@@ -930,17 +1399,20 @@ async def anonymous_preview_create(
         # stream/video 撞 "outside projects root" 400（2026-06-11 冒烟）。
         "user_id": str(sentinel.id),
         "output_target": "editor",
-        "service_mode": "free",
+        # plan 2026-06-12 §D：mode 同步写（record.mode → payload → PG 行）。
+        "service_mode": _payload_service_mode,
         "requires_review": False,
+        # 防 clone 第一道防线：匿名任务（free 与 express 两个 lane）的
+        # voice_strategy 恒为 preset_mapping，绝不出现 clone 字段。
         "voice_strategy": "preset_mapping",
-        "tts_provider": "mimo",
+        "tts_provider": _payload_tts_provider,
         "source_content_hash": record.source_hash,
         "anonymous_preview": True,
     }
     violations = validate_create_payload(payload)
     if violations:
         logger.error("anon_create: payload spec violations: %s", violations)
-        await _reset_create_claim(db, safe_id)
+        await _abort_create_claim(db, safe_id, retry_of)
         return JSONResponse(status_code=500, content={"error": "payload_spec_violation"})
 
     # POST Job API
@@ -955,15 +1427,15 @@ async def anonymous_preview_create(
             logger.error(
                 "anon_create: job api returned %d", create_resp.status_code
             )
-            await _reset_create_claim(db, safe_id)
+            await _abort_create_claim(db, safe_id, retry_of)
             return JSONResponse(status_code=502, content={"error": "job_create_failed"})
         job_id = str(create_resp.json().get("job_id") or "").strip()
         if not job_id:
-            await _reset_create_claim(db, safe_id)
+            await _abort_create_claim(db, safe_id, retry_of)
             return JSONResponse(status_code=502, content={"error": "job_create_failed"})
     except Exception as exc:
         logger.error("anon_create: job api error: %s", exc)
-        await _reset_create_claim(db, safe_id)
+        await _abort_create_claim(db, safe_id, retry_of)
         return JSONResponse(status_code=502, content={"error": "job_create_failed"})
 
     # 对抗审核 P1 修复——写入顺序对调：先把 record 指向真实 job_id（单独
@@ -977,6 +1449,11 @@ async def anonymous_preview_create(
             fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
             merged = dict(fresh.audit or {})
             merged["anonymous_consent"] = consent_payload
+            # §E 审计：重试链（旧 failed job_id 追加，支持多次重试追溯）
+            if retry_of is not None:
+                _chain = list(merged.get("retry_chain") or [])
+                _chain.append(retry_of)
+                merged["retry_chain"] = _chain
             fresh.audit = merged
         await db.commit()
     except Exception as exc:
@@ -1003,8 +1480,10 @@ async def anonymous_preview_create(
                 title="匿名预览",
                 speakers="auto",
                 status="queued",
-                service_mode="free",
-                tts_provider="mimo",
+                # §D：与 create payload 同值（record/payload/PG 三处一致）；
+                # sentinel / plan_code_snapshot / role_snapshot 语义不变。
+                service_mode=_payload_service_mode,
+                tts_provider=_payload_tts_provider,
                 requires_review=False,
                 voice_clone_enabled=False,
                 voice_strategy="preset_mapping",

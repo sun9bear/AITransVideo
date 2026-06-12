@@ -328,6 +328,7 @@ def init_upload(
     owner_scope: Optional[str] = None,
     client_ip_hash: Optional[str] = None,
     per_ip_active: Optional[int] = None,
+    lane: Optional[str] = None,
 ) -> dict[str, Any]:
     """声明一次分片上传。返回 state dict（新建或续传命中的既有 upload）。
 
@@ -340,6 +341,11 @@ def init_upload(
     reserve 全局锁内与 state 注册同锁完成——身份可重置（清 cookie 即新
     session）时这是唯一不可绕的并发锚点，锁外检查会被并发 init 穿透。
     声明字节和上限 = per_ip_active × max_file_bytes（字节聚合免单独旋钮）。
+
+    ``lane``（plan 2026-06-12 anonymous-express-preview §A）：匿名档 lane
+    锁定值（"free"/"express"），init 时随 state 持久化；PUT /part 与
+    complete 读 state 的 lane、不重新 resolve。续传命中既有 receiving
+    upload 时维持首次 init 锁定的 lane（不被新值覆盖）。注册档不传。
     """
     if not user_id:
         raise ChunkedUploadError(401, "auth_required", "未登录")
@@ -491,6 +497,8 @@ def init_upload(
             state["owner_scope"] = owner_scope
         if client_ip_hash:
             state["client_ip_hash"] = client_ip_hash
+        if lane is not None:
+            state["lane"] = lane
         _save_state(user_id, upload_id, state)
         _add_usage_bytes(user_id, day, declared_size)
         state["resumed"] = False

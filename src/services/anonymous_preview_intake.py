@@ -226,6 +226,14 @@ class PreviewRecord:
     recommended_mode_placeholder: Optional[str] = None
     claim_token_placeholder: Optional[str] = None
     login_escalation_hint: Optional[bool] = None
+    # plan 2026-06-12 anonymous-express-preview §A：lane 锁定值
+    # （"free" / "express"）。status-only 标识字段（与
+    # selected_mode_placeholder 同性质），不是 preview/clone/pricing
+    # surface，不属于 FORBIDDEN_PREVIEW_RECORD_FIELDS。纯 intake 模块
+    # 不读它；由 gateway wiring（run_intake_and_save 的 mode 入参）在
+    # 持久化前经 dataclasses.replace 填充。默认 "free" 保持既有
+    # 构造点零改动。
+    mode: str = "free"
 
 
 # ---------------------------------------------------------------------------
