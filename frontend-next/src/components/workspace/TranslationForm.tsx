@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState, type FormEvent } from "react"
+import Link from "next/link"
 import { toast } from "sonner"
 
 import { StatusBadge } from "@/components/status-badge"
@@ -58,6 +59,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // checked before a free job may be submitted; reset on mode switch.
   const [freeVoiceRightsConfirmed, setFreeVoiceRightsConfirmed] = useState(false)
   const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
+  // 扣费门拦截（点数不足/额度用尽）不走转瞬即逝的 toast，落成持久 banner，
+  // 带升级入口——这是购买意图最高的时刻。
+  const [creditGateError, setCreditGateError] = useState<string | null>(null)
+  const [creditsLoadFailed, setCreditsLoadFailed] = useState(false)
+  const [ratesLoadFailed, setRatesLoadFailed] = useState(false)
   const [credits, setCredits] = useState<CreditsResponse | null>(null)
   const [creditRates, setCreditRates] = useState<{
     expressStandard: number | null
@@ -111,8 +117,17 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         : serviceMode === "studio"
           ? creditRates.studioStandard
           : creditRates.expressStandard
-  const balanceLabel = credits ? `${credits.total_available} 点` : "读取中"
-  const rateLabel = currentRate != null ? `${currentRate} 点/分钟` : "读取中"
+  const balanceLabel = credits
+    ? `${credits.total_available} 点`
+    : creditsLoadFailed
+      ? "暂时无法读取"
+      : "读取中"
+  const rateLabel =
+    currentRate != null
+      ? `${currentRate} 点/分钟`
+      : ratesLoadFailed
+        ? "暂时无法读取"
+        : "读取中"
   // For UI display: show the most recent active job if blocked
   const latestActiveJob = activeJobs.length > 0 ? activeJobs[0] : null
   const planCardBaseClass = "relative rounded-xl border-2 p-4 text-left transition"
@@ -148,7 +163,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       .catch(() => {})
     getMyCredits()
       .then((value) => setCredits(value))
-      .catch(() => {})
+      .catch(() => setCreditsLoadFailed(true))
     Promise.all([
       getCreditsEstimate(1, "express", "standard"),
       getCreditsEstimate(1, "studio", "standard"),
@@ -169,7 +184,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           smartStandard: smartStandard?.estimated_credits ?? null,
         })
       })
-      .catch(() => {})
+      .catch(() => setRatesLoadFailed(true))
     // Phase 4: read admin smart_pause_warning_enabled off the pricing
     // endpoint. The flag piggybacks on this endpoint to avoid a new
     // public admin-policy endpoint. Defaults to false (no warning)
@@ -214,6 +229,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       return
     }
     setSubmitState("submitting")
+    setCreditGateError(null)
     try {
       const createdJob = await submitTranslationJob({
         speakers,
@@ -242,7 +258,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       }
       setSubmitState("error")
       const msg = getErrorMessage(error)
-      if (msg.includes("still active")) {
+      if (isCreditGateError(error)) {
+        setCreditGateError(msg)
+      } else if (msg.includes("still active")) {
         toast.error("当前有未完成的任务，请先完成或取消后再创建新翻译。")
       } else {
         toast.error(msg)
@@ -549,9 +567,18 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
-                    <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
-                      {entitlements?.ui.allow_upgrade ? "升级解锁" : "即将开放"}
-                    </div>
+                    {entitlements?.ui.allow_upgrade ? (
+                      <Link
+                        href="/settings/billing"
+                        className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"
+                      >
+                        升级解锁
+                      </Link>
+                    ) : (
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        即将开放
+                      </div>
+                    )}
                   </div>
                 )
               })()}
@@ -605,9 +632,18 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">100 点/分钟固定价，AI 自动审核翻译并自动克隆音色，无需人工操作。</p>
-                    <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
-                      {entitlements?.ui.allow_upgrade ? "升级解锁" : "即将开放"}
-                    </div>
+                    {entitlements?.ui.allow_upgrade ? (
+                      <Link
+                        href="/settings/billing"
+                        className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"
+                      >
+                        升级解锁
+                      </Link>
+                    ) : (
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        即将开放
+                      </div>
+                    )}
                   </div>
                 )
               })()}
@@ -631,7 +667,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             ) : serviceMode === "express" ? (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                快捷版按源视频时长扣点，当前标准为 {rateLabel}。创建任务时会按可识别的时长预扣；点数不足会停止创建并提示充值或升级。
+                快捷版按源视频时长扣点，当前标准为 {rateLabel}。创建任务时会按可识别的时长预扣；点数不足会停止创建，可前往账单页升级套餐。
               </p>
             ) : serviceMode === "smart" ? (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
@@ -795,6 +831,20 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
             快捷版自动完成全部流程，无需人工操作。工作台版可审核译文、克隆原声音色。
           </p>
 
+          {creditGateError && (
+            <section className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm leading-relaxed text-foreground">{creditGateError}</p>
+                <Link
+                  href="/settings/billing"
+                  className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                >
+                  去升级
+                </Link>
+              </div>
+            </section>
+          )}
+
           <button
             type="submit"
             disabled={Boolean(validationError) || isBlockedByConcurrency || submitState === "submitting" || isLoadingGuard}
@@ -809,6 +859,22 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
 }
 
 /* ---------- internal helpers ---------- */
+
+// Gateway 扣费门错误码（402/403 detail.error_code），命中时改走持久 banner。
+const CREDIT_GATE_ERROR_CODES = new Set([
+  "insufficient_credits",
+  "quota_exhausted",
+  "free_daily_quota_exceeded",
+])
+
+function isCreditGateError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false
+  if (!error.payload || typeof error.payload !== "object") return false
+  const detail = (error.payload as { detail?: unknown }).detail
+  if (!detail || typeof detail !== "object") return false
+  const code = (detail as { error_code?: unknown }).error_code
+  return typeof code === "string" && CREDIT_GATE_ERROR_CODES.has(code)
+}
 
 function validateYoutubeUrl(value: string) {
   const v = value.trim()
