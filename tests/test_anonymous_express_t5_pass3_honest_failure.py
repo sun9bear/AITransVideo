@@ -99,6 +99,48 @@ class TestArtifactVerdict:
         )
         assert _anon_express_pass3_artifact_ok(p) is True
 
+    def test_partial_speaker_coverage_false(self, tmp_path):
+        """CodeX 第三轮 P2：多说话人任务的部分产物必须判失败——缺失的
+        说话人无 gender 进音色匹配会回落错误默认音色。"""
+        p = tmp_path / "s2_pass3_result.json"
+        p.write_text(
+            json.dumps({"speaker_profiles": {"speaker_a": {"gender": "male"}}}),
+            encoding="utf-8",
+        )
+        assert _anon_express_pass3_artifact_ok(
+            p, expected_speaker_ids=["speaker_a", "speaker_b"]
+        ) is False
+
+    def test_full_speaker_coverage_true(self, tmp_path):
+        p = tmp_path / "s2_pass3_result.json"
+        p.write_text(
+            json.dumps({
+                "speaker_profiles": {
+                    "speaker_a": {"gender": "male"},
+                    "speaker_b": {"gender": "female"},
+                }
+            }),
+            encoding="utf-8",
+        )
+        assert _anon_express_pass3_artifact_ok(
+            p, expected_speaker_ids=["speaker_a", "speaker_b"]
+        ) is True
+
+    def test_extra_profiles_beyond_expected_ok(self, tmp_path):
+        p = tmp_path / "s2_pass3_result.json"
+        p.write_text(
+            json.dumps({
+                "speaker_profiles": {
+                    "speaker_a": {"gender": "male"},
+                    "speaker_b": {"gender": "female"},
+                }
+            }),
+            encoding="utf-8",
+        )
+        assert _anon_express_pass3_artifact_ok(
+            p, expected_speaker_ids=["speaker_a"]
+        ) is True
+
 
 # ---------------------------------------------------------------------------
 # C. 调用点源码钉子（run() 不可单测，钉关键结构）
@@ -129,8 +171,12 @@ class TestCallSiteSourceGuards:
         src = self._src()
         assert 'emit_smart_state_marker({"anon_pass3_failed": True})' in src
         assert "raise AnonymousExpressPass3Failed(" in src
-        # 判定走 artifact helper，不信内部返回值
-        assert "_anon_express_pass3_artifact_ok(_pass3_cache_path)" in src
+        # 判定走 artifact helper（带说话人覆盖校验），不信内部返回值
+        compact = src.replace("\n", "").replace(" ", "")
+        assert (
+            "_anon_express_pass3_artifact_ok(_pass3_cache_path,expected_speaker_ids="
+            in compact
+        )
 
     def test_verdict_applies_even_when_pass3_not_attempted(self):
         """speaker styles 为空导致 Pass 3 根本没跑时，artifact 判定仍然

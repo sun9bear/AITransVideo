@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 LANE_EXPRESS = "express"
 LANE_FREE = "free"
 
+# 匿名 express 的 tts_provider 白名单——lane 开关判定与 create payload
+# 解析共用的唯一真源（CodeX 第三轮 P2：只拒 mimo 不够，minimax 等不支持
+# 的 provider 会让 lane 照开、上传锁进 express、而 /create 又拒绝同一
+# provider → 被接收的 preview 永远无法 create 还烧配额）。
+# 刻意不含 mimo：恒定单音色违背"免费触点必须真实管线效果"最高原则（§E）。
+VALID_ANON_EXPRESS_TTS_PROVIDERS = frozenset({"cosyvoice", "volcengine"})
+
 
 def _load_admin_settings():
     """惰性读 admin settings（独立函数便于测试注入；调用方自行兜底异常）。"""
@@ -39,21 +46,24 @@ def _load_admin_settings():
 
 
 def _express_lane_open(adm) -> bool:
-    """express lane 是否可用：主开关开 + runtime mimo 防御纵深（§E②）。
+    """express lane 是否可用：主开关开 + provider 白名单（§E② 防御纵深）。
 
     admin 保存校验（validate_anonymous_express_tts_exclusion，T0）已在 POST
     /settings 双向 422 拦截 express+mimo 组合；这里兜手改 admin_settings.json
-    绕过保存校验的情形——MiMo 海外端点恒定 mia 音色（gender 不参与选音），
-    匿名 express 用它必然音色错配，违背"免费触点必须真实管线效果"最高原则。
+    / 旧 full-body POST 残留的情形。CodeX 第三轮 P2 收紧：判定与 create 的
+    payload provider 解析共用 VALID_ANON_EXPRESS_TTS_PROVIDERS——任何白名单
+    外的 provider（mimo / minimax / 未知值）都不开 express lane（回落
+    free/None），否则上传会被锁进 express 而 /create 拒绝同一 provider，
+    被接收的 preview 永远无法 create 还消耗配额。
     """
     if not bool(getattr(adm, "anonymous_express_enabled", False)):
         return False
     provider = str(getattr(adm, "express_tts_provider", "") or "").strip().lower()
-    if provider == "mimo":
+    if provider not in VALID_ANON_EXPRESS_TTS_PROVIDERS:
         logger.warning(
-            "anonymous_lane: express lane enabled but express_tts_provider=mimo "
-            "— 防御纵深拒绝 express lane（回落 free/None）；请检查 "
-            "admin_settings.json 是否绕过保存校验被手改"
+            "anonymous_lane: express lane enabled but express_tts_provider=%r "
+            "不在匿名白名单 %s — 拒绝 express lane（回落 free/None）；请检查 "
+            "admin 配置", provider, sorted(VALID_ANON_EXPRESS_TTS_PROVIDERS),
         )
         return False
     return True

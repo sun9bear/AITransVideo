@@ -878,11 +878,10 @@ _SENTINEL_USER_EMAIL = "anonymous-preview@system"
 _READY_STATUS = "ready_for_mode"  # PreviewStatus.READY_FOR_MODE.value（契约钉死）
 
 # 匿名 express payload 的 tts_provider 白名单（plan 2026-06-12 §D）。
-# 语义对齐 job_intercept._VALID_EXPRESS_PROVIDERS（:537-558 登录 express
-# 解析），但**刻意剔除 mimo**——MiMo 恒定单音色违背"免费触点必须真实管线
-# 效果"最高原则（§E）；admin 保存校验（T0）+ lane resolver 纵深（T1）之外
-# 的 create 侧第三层。
-_VALID_ANON_EXPRESS_TTS_PROVIDERS = frozenset({"cosyvoice", "volcengine"})
+# 唯一真源在 anonymous_lane.VALID_ANON_EXPRESS_TTS_PROVIDERS（CodeX 第三轮
+# P2：lane 开关判定与 create 解析必须同一份白名单，否则 lane 开了 create
+# 拒，preview 被锁死还烧配额）。语义对齐登录 express 解析但剔除 mimo。
+from anonymous_lane import VALID_ANON_EXPRESS_TTS_PROVIDERS as _VALID_ANON_EXPRESS_TTS_PROVIDERS
 
 # 重试可重入的 Job API 终态（plan §E：仅诚实失败可重入 create）。
 _RETRYABLE_JOB_STATUSES = frozenset({"failed", "cancelled"})

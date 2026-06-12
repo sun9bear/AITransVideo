@@ -90,6 +90,36 @@ class TestResolveAnonymousLane:
             is None
         )
 
+    def test_unsupported_provider_rejected(self):
+        """CodeX 第三轮 P2：lane 开关与 create 共用 provider 白名单——
+        minimax / 未知值同样不开 express（否则上传锁进 express 而
+        /create 拒绝，preview 永远无法 create 还烧配额）。"""
+        assert (
+            resolve_anonymous_lane(_adm(express=True, free=True, provider="minimax"))
+            == "free"
+        )
+        assert (
+            resolve_anonymous_lane(_adm(express=True, free=False, provider="minimax"))
+            is None
+        )
+        assert (
+            resolve_anonymous_lane(_adm(express=True, free=False, provider=""))
+            is None
+        )
+
+    def test_whitelist_single_source_with_create(self):
+        """白名单唯一真源：lane resolver 与 create payload 解析共用同一
+        frozenset（防两侧漂移再次产生"lane 开 create 拒"组合）。"""
+        import anonymous_preview_api as api_mod
+
+        assert (
+            api_mod._VALID_ANON_EXPRESS_TTS_PROVIDERS
+            is anonymous_lane.VALID_ANON_EXPRESS_TTS_PROVIDERS
+        )
+        assert anonymous_lane.VALID_ANON_EXPRESS_TTS_PROVIDERS == frozenset(
+            {"cosyvoice", "volcengine"}
+        )
+
 
 # ---------------------------------------------------------------------------
 # B. session 层 gate：intake 走任一 lane 开；lifecycle 零感知

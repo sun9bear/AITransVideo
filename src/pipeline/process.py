@@ -2299,12 +2299,21 @@ def _should_run_pass3(
     return str(service_mode or "").strip() == "express"
 
 
-def _anon_express_pass3_artifact_ok(pass3_cache_path: Path) -> bool:
+def _anon_express_pass3_artifact_ok(
+    pass3_cache_path: Path,
+    expected_speaker_ids=(),
+) -> bool:
     """匿名 express Pass 3 的 artifact 判定（plan §E 唯一可信信号）。
 
     ``review_pass3_voice_profiles()`` 内部 retry+fallback 会吞错
     （transcript_reviewer.py:2161/:2208），成功 artifact 只在 :2189 写——
     所以只认 ``s2_pass3_result.json`` 存在且 ``speaker_profiles`` 非空。
+
+    CodeX 第三轮 P2 收紧：多说话人任务的**部分**产物（如只有 speaker_a）
+    也必须判失败——merge 只更新产物里有的说话人，缺失者无 gender/style
+    进音色匹配会回落错误默认音色（正是本计划要消灭的坏预览路径）。
+    ``expected_speaker_ids`` 全部出现在 profiles 中才算成功。
+
     任何读取/解析异常 → False（fail-closed）。
     """
     try:
@@ -2312,7 +2321,9 @@ def _anon_express_pass3_artifact_ok(pass3_cache_path: Path) -> bool:
             return False
         data = json.loads(pass3_cache_path.read_text(encoding="utf-8"))
         profiles = data.get("speaker_profiles")
-        return isinstance(profiles, dict) and len(profiles) > 0
+        if not isinstance(profiles, dict) or len(profiles) == 0:
+            return False
+        return set(expected_speaker_ids).issubset(profiles.keys())
     except Exception:  # noqa: BLE001 — fail-closed
         return False
 
@@ -3473,11 +3484,18 @@ class ProcessPipeline:
                     print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
 
             # --- 匿名 express Pass 3 诚实失败判定（plan 2026-06-12 §E）---
-            # artifact 是唯一可信信号：s2_pass3_result.json 缺失或 profiles
-            # 为空（含 speaker styles 为空导致根本没跑 Pass 3 的情形）→
-            # 任务 terminal failed。绝不降级出片——无 gender 时 CosyVoice
-            # 全员回落 longanyang，坏预览正是本计划要消灭的路径。
-            if _anon_express_pass3 and not _anon_express_pass3_artifact_ok(_pass3_cache_path):
+            # artifact 是唯一可信信号：s2_pass3_result.json 缺失、profiles
+            # 为空（含 speaker styles 为空导致根本没跑 Pass 3 的情形）、或
+            # 未覆盖全部说话人（CodeX 第三轮 P2：部分产物=部分说话人无
+            # gender 进音色匹配）→ 任务 terminal failed。绝不降级出片——
+            # 无 gender 时 CosyVoice 全员回落 longanyang，坏预览正是本计划
+            # 要消灭的路径。
+            if _anon_express_pass3 and not _anon_express_pass3_artifact_ok(
+                _pass3_cache_path,
+                expected_speaker_ids=(
+                    _review_speaker_styles.keys() if _review_speaker_styles else ()
+                ),
+            ):
                 from services.smart.state import emit_smart_state_marker
 
                 # gateway 终态镜像（mirror_job_terminal_state 单一结算入口）
