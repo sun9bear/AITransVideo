@@ -296,6 +296,14 @@ def cut_teaser(
 # build_probe_fn — assemble the adapter-compatible probe callable
 # ---------------------------------------------------------------------------
 
+# ffmpeg -t 重编码切割会因帧边界/音频 priming 轻微越界 cap（2026-06-12 现网
+# 实测 180.014s）。teaser 是我们自己切出来的产物、不是用户提交的超长片段——
+# 越界 ≤ 此容差视为达标并钳回 cap；不豁免的话严格 > 180s 比较会把**所有
+# >3min 源视频**一刀切成 FAILED "probe failure"（分片通道首次把长视频送进
+# intake 即触发；短视频 teaser=源时长 ≤180s 故从未暴露）。容差 0.5s = 实测
+# 越界（0.014s）的 35 倍余量；越界 >0.5s 不是编码噪声而是切割逻辑故障，仍拒。
+_TEASER_OVERSHOOT_TOLERANCE_S = 0.5
+
 
 def build_probe_fn(
     settings: Any,
@@ -363,6 +371,20 @@ def build_probe_fn(
             )
 
         teaser_dur = teaser.duration_seconds  # already validated by cut_teaser
+
+        # 编码越界钳制（理由见 _TEASER_OVERSHOOT_TOLERANCE_S）。钳回 cap 同时
+        # 保证下游 admission（同样以 180s 为界）不会对 180.0xx 二次误判。
+        if (
+            teaser_dur > max_teaser_seconds  # type: ignore[operator]
+            and teaser_dur <= max_teaser_seconds + _TEASER_OVERSHOOT_TOLERANCE_S  # type: ignore[operator]
+        ):
+            logger.info(
+                "[build_probe_fn] teaser duration %.3fs within encode overshoot "
+                "tolerance, clamping to %.1fs",
+                teaser_dur,
+                max_teaser_seconds,
+            )
+            teaser_dur = float(max_teaser_seconds)
 
         # Step 3 — evaluate duration cap on teaser
         # teaser_dur is guaranteed finite positive by cut_teaser / probe_source

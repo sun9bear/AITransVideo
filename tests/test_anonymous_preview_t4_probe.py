@@ -282,6 +282,18 @@ class TestBuildProbeFnUnit:
             with patch("subprocess.run", side_effect=[src_ok, ffmpeg_ok, teaser_ok]):
                 return probe_fn(src, "aabbccdd")
 
+    def test_180_014s_overshoot_clamped_passes(self):
+        """ffmpeg 重编码切割实测越界（2026-06-12 现网）：180.014s 应钳回
+        180.0 并通过——严格比较会把所有 >3min 源拒成 probe failure。"""
+        result = self._probe_with_teaser_duration(180.014)
+        assert result.failure_reason is None
+        assert abs(result.duration_seconds - 180.0) < 1e-6
+
+    def test_overshoot_beyond_tolerance_still_fails(self):
+        """越界超容差（>1s）不豁免——那不是编码噪声，是切割逻辑坏了。"""
+        result = self._probe_with_teaser_duration(181.5)
+        assert result.failure_reason is not None
+
     def test_179s_teaser_passes_cap_gate(self):
         """179 s → 179000 ms / 60000 = 2.983... ≤ 3.0 → None → pass."""
         result = self._probe_with_teaser_duration(179.0)
@@ -294,16 +306,16 @@ class TestBuildProbeFnUnit:
         assert result.failure_reason is None
         assert abs(result.duration_seconds - 180.0) < 1e-6
 
-    def test_180_04s_teaser_fails_cap_gate(self):
-        """180.04 s → 180040 ms / 60000 = 3.0006... > 3.0 → REJECT_OVER_CAP → failure.
+    def test_180_04s_teaser_clamped_passes(self):
+        """180.04 s → 越界 0.04s ≤ 容差 0.5s → 钳回 180.0 → 通过。
 
-        Conclusion: 180.04s teaser FAILS the cap gate.  In practice the
-        ffmpeg re-encode at -t 180 produces a teaser slightly *below* 180s
-        due to frame-boundary rounding, so this edge case is unlikely in
-        production.  The test pins the pure-gate behavior.
+        本测试原断言"180.04s FAILS"并注释"实践中 ffmpeg 会切出略低于
+        180s，此边界不太可能发生"——2026-06-12 现网恰好证伪（实测
+        180.014s，把所有 >3min 源拒成 probe failure）。现在钉死钳制行为。
         """
         result = self._probe_with_teaser_duration(180.04)
-        assert result.failure_reason is not None
+        assert result.failure_reason is None
+        assert abs(result.duration_seconds - 180.0) < 1e-6
 
     def test_181s_teaser_fails_cap_gate(self):
         """181 s → 181000 ms / 60000 = 3.016... > 3.0 → REJECT_OVER_CAP → failure."""
