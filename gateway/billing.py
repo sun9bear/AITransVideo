@@ -41,6 +41,7 @@ from models import (
     BillingInvoice,
     PaymentOrder,
     PaymentWebhookEvent,
+    Subscription,
     User,
 )
 from payment_providers import (
@@ -745,10 +746,21 @@ async def receive_webhook(
     if not event.provider_event_id:
         raise HTTPException(status_code=400, detail="missing provider_event_id")
 
+    # R7 退款绑定：退款语义事件不携带我们的 order_id（paddle adjustment 无
+    # custom_data、微信 refund resource 无 attach），用 provider 侧主键反查
+    # provider_order_id。只为 refunded 事件做绑定——paid 语义事件缺 order_id
+    # 仍走 order-not-found no-op（见 _validate_*_event_against_order 的
+    # INVARIANT 注记），不得借道结算。
+    resolved_order_id = event.order_id
+    if event.new_status == "refunded" and not resolved_order_id:
+        resolved_order_id = await _resolve_refund_order_id(
+            db, provider_name=provider_name, raw_payload=event.raw_payload
+        )
+
     if provider_name == "alipay":
         signature_valid = signature_valid and await _validate_alipay_event_against_order(
             db=db,
-            order_id=event.order_id,
+            order_id=resolved_order_id,
             payload=event.raw_payload,
             is_query_result=False,
         )
@@ -756,14 +768,14 @@ async def receive_webhook(
     if provider_name == "paddle":
         signature_valid = signature_valid and await _validate_paddle_event_against_order(
             db=db,
-            order_id=event.order_id,
+            order_id=resolved_order_id,
             payload=event.raw_payload,
         )
 
     if provider_name == "wechatpay":
         signature_valid = signature_valid and await _validate_wechat_event_against_order(
             db=db,
-            order_id=event.order_id,
+            order_id=resolved_order_id,
             payload=event.raw_payload,
         )
 
@@ -772,13 +784,66 @@ async def receive_webhook(
         provider=provider_name,
         provider_event_id=event.provider_event_id,
         event_type=event.event_type,
-        order_id=event.order_id,
+        order_id=resolved_order_id,
         new_status=event.new_status,
         signature_valid=signature_valid,
         raw_payload=event.raw_payload,
+        refund_amount_fen=(
+            _extract_refund_amount_fen(provider_name, event.raw_payload)
+            if event.new_status == "refunded"
+            else None
+        ),
     )
 
     return _provider_webhook_response(provider_name, settled)
+
+
+async def _resolve_refund_order_id(
+    db: AsyncSession,
+    *,
+    provider_name: str,
+    raw_payload: dict | None,
+) -> str:
+    """退款事件 → 我方订单 ID 的反查绑定（R7）。
+
+    - paddle:    adjustment.data.transaction_id == PaymentOrder.provider_order_id
+    - wechatpay: refund.out_trade_no            == PaymentOrder.provider_order_id
+    查不到返回 ""——下游 _process_payment_event 记录事件后 no-op（admin
+    unsettled 面板的 suspect_webhook_events 可见），不会误结算。
+    """
+    payload = raw_payload or {}
+    token = ""
+    if provider_name == "paddle":
+        token = str(((payload.get("data") or {}).get("transaction_id")) or "").strip()
+    elif provider_name == "wechatpay":
+        token = str(((payload.get("transaction") or {}).get("out_trade_no")) or "").strip()
+    if not token:
+        return ""
+    result = await db.execute(
+        select(PaymentOrder).where(
+            PaymentOrder.provider == provider_name,
+            PaymentOrder.provider_order_id == token,
+        )
+    )
+    order = result.scalar_one_or_none()
+    return str(order.id) if order is not None else ""
+
+
+def _extract_refund_amount_fen(provider_name: str, raw_payload: dict | None) -> int | None:
+    """从退款事件里提取退款金额（分）。取不到返回 None（按全额处理）。"""
+    payload = raw_payload or {}
+    try:
+        if provider_name == "wechatpay":
+            amount = ((payload.get("transaction") or {}).get("amount")) or {}
+            refund = amount.get("refund")
+            return int(refund) if refund is not None else None
+        if provider_name == "paddle":
+            totals = ((payload.get("data") or {}).get("totals")) or {}
+            total = totals.get("total")
+            return int(str(total)) if total not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def _provider_webhook_response(
@@ -848,9 +913,30 @@ async def _validate_paddle_event_against_order(
         # settlement events before adding clawback resolution here.
         return True
 
+    data = (payload or {}).get("data") or {}
+
+    if str((payload or {}).get("event_type") or "").strip() == "adjustment.created":
+        # R7 退款 fact-gate：adjustment 不是 transaction 对象，不能走下面的
+        # transaction 校验（必失败）。绑定即事实：adjustment.transaction_id
+        # 必须等于本单 provider_order_id，且必须是已批准的退款语义。
+        # 金额不做 gate：Paddle 是 MoR，adjustment totals 含税，与
+        # amount_cny 没有恒等关系（见文件头 Amount-gate design note）。
+        txn_ref = str(data.get("transaction_id") or "").strip()
+        if not order.provider_order_id or txn_ref != str(order.provider_order_id):
+            logger.warning("Paddle adjustment transaction mismatch for %s", order_id)
+            return False
+        action = str(data.get("action") or "").strip().lower()
+        adj_status = str(data.get("status") or "").strip().lower()
+        if action not in ("refund", "chargeback") or adj_status != "approved":
+            logger.warning(
+                "Paddle adjustment not an approved refund for %s (action=%s, status=%s)",
+                order_id, action, adj_status,
+            )
+            return False
+        return True
+
     from payment_provider_paddle import PaddleConfig, validate_paddle_webhook_payload
 
-    data = (payload or {}).get("data") or {}
     try:
         validate_paddle_webhook_payload(
             PaddleConfig.from_env(),
@@ -886,12 +972,34 @@ async def _validate_wechat_event_against_order(
         # binding — return False for settle/refund-semantic events first.
         return True
 
+    transaction = (payload or {}).get("transaction") or {}
+
+    if str((payload or {}).get("event_type") or "").strip().upper().startswith("REFUND."):
+        # R7 退款 fact-gate：refund 对象没有 trade_state/attach/payer，不能走
+        # 下面的 transaction 校验。Gates：out_trade_no 绑定、refund_status
+        # 必须 SUCCESS、原单总额 amount.total 必须等于本单金额。
+        if str(transaction.get("out_trade_no") or "").strip() != str(order.provider_order_id or ""):
+            logger.warning("WeChat refund out_trade_no mismatch for %s", order_id)
+            return False
+        if str(transaction.get("refund_status") or "").strip().upper() != "SUCCESS":
+            logger.warning("WeChat refund status not SUCCESS for %s", order_id)
+            return False
+        amount = transaction.get("amount") or {}
+        total = amount.get("total")
+        try:
+            if total is not None and int(total) != int(order.amount_cny):
+                logger.warning("WeChat refund original amount mismatch for %s", order_id)
+                return False
+        except (TypeError, ValueError):
+            logger.warning("WeChat refund amount unparsable for %s", order_id)
+            return False
+        return True
+
     from payment_provider_wechat import (
         WechatPayConfig,
         validate_wechat_webhook_payload,
     )
 
-    transaction = (payload or {}).get("transaction") or {}
     try:
         validate_wechat_webhook_payload(
             WechatPayConfig.from_env(),
@@ -918,6 +1026,7 @@ async def _process_payment_event(
     new_status: str,
     signature_valid: bool,
     raw_payload: dict | None = None,
+    refund_amount_fen: int | None = None,
 ) -> bool:
     """Process a payment event idempotently. Returns True if entitlements were updated.
 
@@ -1076,14 +1185,22 @@ async def _process_payment_event(
                             user.id, old_plan, order.target_plan_code, order_id)
 
     elif new_status == "refunded":
-        # Refund truth layer (Task 4 minor revision): update billing history
-        # to reflect the refund. We deliberately do NOT touch:
-        #   - the user's active Subscription row (cancellation UX is Task 5/6)
-        #   - `user.plan_code` (entitlement rollback UX is Task 5/6)
-        # Only `billing_invoices.status` is made truthful here.
+        # Refund truth layer: billing history made truthful (T4 既有行为)。
         await record_invoice_for_order(
             db, order=order, settled_at=now, status="refunded"
         )
+        # R7 退款闭环：回收订阅 / plan 投影 / 本单关联 credits。
+        # 部分退款（已知退款金额 < 订单金额）不自动回收，留人工复核——
+        # admin /api/admin/billing/unsettled 的 recent_refunds 面板可见；
+        # 金额未知（query 路径 / 字段缺失）按全额处理。
+        if refund_amount_fen is not None and refund_amount_fen < order.amount_cny:
+            logger.warning(
+                "Partial refund for order %s (refund=%s < order=%s); "
+                "entitlements kept — manual review required",
+                order_id, refund_amount_fen, order.amount_cny,
+            )
+        else:
+            await _recall_entitlements_for_refund(db, order=order, now=now)
 
     elif new_status == "failed":
         # Keep billing history honest for failed settlement attempts.
@@ -1097,3 +1214,69 @@ async def _process_payment_event(
 
     await db.commit()
     return entitlements_updated
+
+
+async def _recall_entitlements_for_refund(
+    db: AsyncSession,
+    *,
+    order: PaymentOrder,
+    now: datetime,
+) -> None:
+    """退款结算后的权益回收（R7）。与退款结算同事务，由调用方 commit。
+
+    - active 订阅若由本单计划支撑（plan_code 匹配）→ 标 cancelled
+    - ``user.plan_code`` 投影若等于本单计划 → 回落 free（写审计日志）；
+      用户退款后又买了别的计划时两者都不动，不误伤新计划
+    - 本单关联 credits bucket 余额清零（shadow 语义，失败只告警不阻断
+      退款结算本身——发票/订单真值优先落库）
+    """
+    user = (
+        await db.execute(select(User).where(User.id == order.user_id))
+    ).scalar_one_or_none()
+    if user is None:
+        logger.warning("Refund recall: user %s not found for order %s",
+                       order.user_id, order.id)
+        return
+
+    subscription = (
+        await db.execute(
+            select(Subscription).where(
+                Subscription.user_id == user.id,
+                Subscription.status == "active",
+            )
+        )
+    ).scalar_one_or_none()
+    if subscription is not None and subscription.plan_code == order.target_plan_code:
+        subscription.status = "cancelled"
+        subscription.cancelled_at = now
+        subscription.updated_at = now
+
+    if (user.plan_code or "free") == order.target_plan_code:
+        old_plan = user.plan_code
+        user.plan_code = "free"
+        db.add(AdminAuditLog(
+            admin_user_id=user.id,
+            target_user_id=user.id,
+            action="payment_refund_downgrade",
+            field_name="plan_code",
+            old_value=old_plan,
+            new_value="free",
+        ))
+
+    try:
+        from credits_service import revoke_buckets_for_order
+        await revoke_buckets_for_order(
+            db, user_id=user.id, related_order_id=order.id
+        )
+    except Exception:
+        logger.warning(
+            "Refund credits revoke failed for order %s (non-fatal)",
+            order.id, exc_info=True,
+        )
+
+    logger.info(
+        "Refund settled for order %s: subscription_cancelled=%s plan_downgraded=%s",
+        order.id,
+        bool(subscription is not None and subscription.status == "cancelled"),
+        user.plan_code == "free",
+    )

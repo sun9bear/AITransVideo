@@ -97,12 +97,24 @@ async def list_unsettled(
     )
     suspect_events = [_serialize_event(e) for e in events_result.scalars().all()]
 
+    # R7：最近退款单。部分退款不会自动回收权益（_process_payment_event 只
+    # 告警），这里是人工复核的入口。
+    refunds_result = await db.execute(
+        select(PaymentOrder)
+        .where(PaymentOrder.status == "refunded")
+        .order_by(PaymentOrder.updated_at.desc())
+        .limit(20)
+    )
+    recent_refunds = [_serialize_order(o) for o in refunds_result.scalars().all()]
+
     return {
         "pending_orders": pending_orders,
         "suspect_webhook_events": suspect_events,
+        "recent_refunds": recent_refunds,
         "counts": {
             "pending_orders": len(pending_orders),
             "suspect_webhook_events": len(suspect_events),
+            "recent_refunds": len(recent_refunds),
         },
     }
 
