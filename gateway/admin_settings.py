@@ -93,6 +93,9 @@ _CHUNKED_UPLOAD_BOUNDS = {
     # 匿名档分片 TTL（plan §9 r1 评审裁定默认 6h）：上界 24 = 不得长于注册档
     # 默认——匿名身份可重置，TTL 是 init-abandon 滥用的资源占用窗口。
     "chunked_upload_anonymous_ttl_hours": (1, 24),
+    # 匿名档每日声明配额（2026-06-12 项目主裁定）：声明即计+放弃不退的语义
+    # 下收太紧会被失败重试烧完锁死一天；对滥用者本就无效（清 cookie 重置）。
+    "chunked_upload_anonymous_daily_gb": (1, 100),
 }
 
 
@@ -399,6 +402,9 @@ class AdminSettings(BaseModel):
     chunked_upload_anonymous_enabled: StrictBool = False
     # 匿名未 complete 分片 TTL（小时）。注册档维持 chunked_upload_ttl_hours。
     chunked_upload_anonymous_ttl_hours: int = 6
+    # 匿名档 per-session 每日声明配额（GB/天）。弱约束（session 可重置），
+    # 主要防单会话 init-spam；真正滥用锚点是 per-IP in-flight gate。
+    chunked_upload_anonymous_daily_gb: int = 5
 
     @field_validator(
         "anonymous_preview_max_upload_mb",
@@ -434,6 +440,7 @@ class AdminSettings(BaseModel):
         "chunked_upload_ttl_hours",
         "chunked_upload_ready_ttl_hours",
         "chunked_upload_anonymous_ttl_hours",
+        "chunked_upload_anonymous_daily_gb",
     )
     @classmethod
     def validate_chunked_upload_bounds(cls, v: int, info) -> int:

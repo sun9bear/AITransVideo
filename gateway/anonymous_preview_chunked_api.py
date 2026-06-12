@@ -148,19 +148,23 @@ def resolve_anonymous_chunked_limits() -> ChunkedLimits:
     * chunk_mb / global_inflight / disk_floor 与注册档**共享**同一套旋钮
       （in-flight 汇总同池）。
     * ttl_hours = ``chunked_upload_anonymous_ttl_hours``（r1 评审默认 6h）。
-    * daily_per_user_gb = 5：per-session 每日声明配额。对滥用者无效
+    * daily_per_user_gb = admin ``chunked_upload_anonymous_daily_gb``
+      （默认 5，2026-06-12 项目主裁定改为后台可调）。对滥用者无效
       （清 cookie 即新会话），收太紧只会误伤诚实用户的失败重试——
-      2026-06-12 现网：用户因我方 bug 连续重传，1GB 配额被"声明即计"
-      烧完锁死一天（项目主裁定放宽）。真正的滥用锚点是 per-IP in-flight
-      gate / APF 每日预览次数 / 全局 in-flight / 磁盘 reserve。
+      现网实测：1GB 被"声明即计"的失败重传烧完锁死一天。真正的滥用
+      锚点是 per-IP in-flight gate / APF 每日预览次数 / 全局 in-flight /
+      磁盘 reserve。
     """
     reg = resolve_chunked_limits()  # 读失败自身 fail-closed 回默认数值
     apf = resolve_apf_limits()
     anon_ttl = 6
+    anon_daily_gb = 5
     try:
         from admin_settings import load_settings
 
-        anon_ttl = int(load_settings().chunked_upload_anonymous_ttl_hours)
+        _adm = load_settings()
+        anon_ttl = int(_adm.chunked_upload_anonymous_ttl_hours)
+        anon_daily_gb = int(_adm.chunked_upload_anonymous_daily_gb)
     except Exception:  # noqa: BLE001
         pass
     return ChunkedLimits(
@@ -170,7 +174,7 @@ def resolve_anonymous_chunked_limits() -> ChunkedLimits:
         per_user_active=1,
         per_user_inflight_gb=1,
         global_inflight_gb=reg.global_inflight_gb,
-        daily_per_user_gb=5,
+        daily_per_user_gb=anon_daily_gb,
         disk_floor_gb=reg.disk_floor_gb,
         ttl_hours=anon_ttl,
         ready_ttl_hours=reg.ready_ttl_hours,

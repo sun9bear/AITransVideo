@@ -145,6 +145,7 @@ interface AdminSettings {
   // 独立熔断 + 匿名专用 TTL；同属 full-body POST 契约，守卫测试同文件。
   chunked_upload_anonymous_enabled: boolean
   chunked_upload_anonymous_ttl_hours: number
+  chunked_upload_anonymous_daily_gb: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -244,6 +245,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   // enabled 默认 false（休眠上线，项目主自行灰度）。
   chunked_upload_anonymous_enabled: false,
   chunked_upload_anonymous_ttl_hours: 6,
+  chunked_upload_anonymous_daily_gb: 5,
 }
 
 // 分片上传数字旋钮元数据：边界与 gateway _CHUNKED_UPLOAD_BOUNDS 一致。
@@ -253,6 +255,7 @@ const CHUNKED_UPLOAD_FIELDS: Array<{
     | 'chunked_upload_global_inflight_gb' | 'chunked_upload_daily_per_user_gb'
     | 'chunked_upload_disk_floor_gb' | 'chunked_upload_ttl_hours'
     | 'chunked_upload_ready_ttl_hours' | 'chunked_upload_anonymous_ttl_hours'
+    | 'chunked_upload_anonymous_daily_gb'
   label: string
   unit: string
   min: number
@@ -338,6 +341,14 @@ const CHUNKED_UPLOAD_FIELDS: Array<{
     min: 1,
     max: 24,
     description: '匿名试用分片上传的未完成清扫窗口（plan §9 r1 评审默认 6h）。匿名身份可重置，过长会拉长 init 占盘窗口；注册档维持上方独立 TTL。',
+  },
+  {
+    key: 'chunked_upload_anonymous_daily_gb',
+    label: '匿名档每日声明配额',
+    unit: 'GB/天',
+    min: 1,
+    max: 100,
+    description: '匿名试用分片的单会话每日配额（声明即计、放弃不退）。收太紧会被失败重试烧完锁死一天；对滥用者本就无效（清 cookie 即新会话），真正的滥用约束是 per-IP 在途 gate。',
   },
 ]
 

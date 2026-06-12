@@ -36,6 +36,7 @@ CHUNKED_FIELDS: dict[str, tuple[str, str, object]] = {
     # --- 匿名档分片扩展（plan §9 r1，2026-06-12）---
     "chunked_upload_anonymous_enabled": (r"boolean", r"false", False),
     "chunked_upload_anonymous_ttl_hours": (r"number", r"6", 6),
+    "chunked_upload_anonymous_daily_gb": (r"number", r"5", 5),
 }
 
 # 布尔主开关集合：StrictBool 语义 + 不参与数字下界测试。
