@@ -52,6 +52,7 @@ from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anon
 from anonymous_preview_intake_wiring import (
     ANON_PREVIEW_COUNTER_SCOPE,
     PER_SCOPE_PER_MODE_DAILY_CAP,
+    express_subgate_key,
     peek_counter_keys,
     peek_mode_counter_keys,
     resolve_express_global_cap,
@@ -886,6 +887,11 @@ _VALID_ANON_EXPRESS_TTS_PROVIDERS = frozenset({"cosyvoice", "volcengine"})
 # 重试可重入的 Job API 终态（plan §E：仅诚实失败可重入 create）。
 _RETRYABLE_JOB_STATUSES = frozenset({"failed", "cancelled"})
 
+# CodeX 外审 2026-06-12 P1：单个 preview 的重试次数上限（retry_chain 长度）。
+# 没有上限时，一个 admitted preview 可以反复发起付费 express 管线（每次
+# 重试 = 完整 转录+Gemini Pass1-3 成本）而不再过任何计数闸。
+ANON_CREATE_MAX_RETRIES = 2
+
 
 def _resolve_express_payload_tts_provider() -> Optional[str]:
     """express record 的 create payload tts_provider（plan §D）。
@@ -913,11 +919,18 @@ def _resolve_express_payload_tts_provider() -> Optional[str]:
 
 
 async def _job_is_terminal_failed(job_id: str) -> bool:
-    """重试重入判定（plan §E）：仅当既有 job 处于诚实失败终态才允许
-    failed → 重新 create。
+    """重试重入判定（plan §E + CodeX 外审 2026-06-12 P2 收紧）：仅当既有
+    job 是 **Pass 3 诚实失败**（终态 failed/cancelled 且带
+    ``smart_state.anon_pass3_failed`` marker）才允许 failed → 重新 create。
 
-    * 200 且 status ∈ {failed, cancelled} → True
-    * 404（job 已被 TTL 清理）→ True（record 仍在，允许重试）
+    P2 背景：终态判定若只看 status，内容合规拒绝 / 输入不支持 / 存储错误
+    等确定性失败也会被同 payload 反复重提。marker 由 pipeline 在 artifact
+    判定失败瞬间经 [SMART_STATE] 写入 JSON store（JobRecord.smart_state，
+    GET /jobs/{id} 响应直接携带，无 mirror 滞后）。
+
+    * 200 且 status ∈ {failed, cancelled} 且 marker 为 True → True
+    * 404（job 已被清理，无法核验 marker）→ False（fail-closed；用户走
+      重新上传）
     * 其它状态 / 任何异常 → False（fail-closed：409 already_created）
     """
     try:
@@ -926,15 +939,93 @@ async def _job_is_terminal_failed(job_id: str) -> bool:
             f"{settings.job_api_upstream}/jobs/{job_id}",
             headers=internal_headers(),
         )
-        if resp.status_code == 404:
-            return True
         if resp.status_code != 200:
             return False
-        return str(resp.json().get("status") or "") in _RETRYABLE_JOB_STATUSES
+        payload = resp.json()
+        if str(payload.get("status") or "") not in _RETRYABLE_JOB_STATUSES:
+            return False
+        smart_state = payload.get("smart_state") or {}
+        return isinstance(smart_state, dict) and smart_state.get(
+            "anon_pass3_failed"
+        ) is True
     except Exception as exc:  # noqa: BLE001 — fail-closed
         logger.warning(
             "anon_create: retry 终态判定失败 job=%s — fail-closed: %s",
             job_id, exc,
+        )
+        return False
+
+
+async def _reset_create_claim_to(
+    db: "AsyncSession", preview_id: str, job_id_value: str
+) -> None:
+    """重试路径的抢占回退：__creating__ → 旧 failed job_id（保持可再重试）。"""
+    from sqlalchemy import update as _sa_update
+
+    try:
+        await db.execute(
+            _sa_update(AnonymousPreviewRecord)
+            .where(
+                AnonymousPreviewRecord.preview_id == preview_id,
+                AnonymousPreviewRecord.job_id == _CREATING_SENTINEL,
+            )
+            .values(job_id=job_id_value)
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "anon_create: retry claim reset failed preview_id=%s: %s",
+            preview_id, exc,
+        )
+
+
+async def _charge_express_retry_subgate(db: "AsyncSession") -> bool:
+    """CodeX 外审 2026-06-12 P1：express 重试按全局子闸计费。
+
+    intake 时子闸已为首次管线计 1；每次重试再原子 increment-and-check
+    一次（SQL 形状与 PgRateLimitCounterStore.try_acquire 逐字节同构、
+    key 经 express_subgate_key 单点推导）——子闸语义从「express intake
+    数/日」收紧为「express 管线启动数/日」，cap 即日成本敞口上限。
+    Pass 3 失败退款刻意不退本行（plan §E），重试在此重新扣减。
+
+    返回 False = 子闸打满或任何异常（fail-closed，拒绝重试）。
+    注：扣减成功后若下游 Job API POST 失败，本次扣减不回退——泄漏方向
+    是少跑管线（安全侧），且 claim 回退后用户可明日再试。
+    """
+    from sqlalchemy import text as _sa_text
+
+    try:
+        cap = int(resolve_express_global_cap())
+        day = shanghai_today()
+        row = await db.execute(
+            _sa_text(
+                """
+                INSERT INTO anonymous_preview_daily_usage
+                    (id, scope, scope_key, mode, usage_date, count,
+                     created_at, updated_at)
+                VALUES
+                    (gen_random_uuid(), :scope, :key, :mode, :day, 1,
+                     now(), now())
+                ON CONFLICT (scope, scope_key, mode, usage_date)
+                DO UPDATE SET
+                    count = anonymous_preview_daily_usage.count + 1,
+                    updated_at = now()
+                WHERE anonymous_preview_daily_usage.count < :cap
+                RETURNING count
+                """
+            ),
+            {
+                "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                "key": express_subgate_key(day),
+                "mode": "express",
+                "day": day,
+                "cap": cap,
+            },
+        )
+        return row.fetchone() is not None
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning(
+            "anon_create: express retry 子闸计费失败 — fail-closed: %s", exc
         )
         return False
 
@@ -1012,6 +1103,11 @@ async def anonymous_preview_create(
             return JSONResponse(status_code=409, content={"error": "already_created"})
         if not await _job_is_terminal_failed(record.job_id):
             return JSONResponse(status_code=409, content={"error": "already_created"})
+        # CodeX P1：重试次数上限——retry_chain 已达上限即拒，付费管线
+        # 启动次数有界（叠加下方 express 子闸计费双保险）。
+        _prior_retries = len(list((record.audit or {}).get("retry_chain") or []))
+        if _prior_retries >= ANON_CREATE_MAX_RETRIES:
+            return JSONResponse(status_code=409, content={"error": "retry_exhausted"})
         retry_of = record.job_id
     if str(record.status) != _READY_STATUS:
         return JSONResponse(
@@ -1135,6 +1231,17 @@ async def anonymous_preview_create(
     await db.commit()
     if not won_claim:
         return JSONResponse(status_code=409, content={"error": "already_created"})
+
+    # CodeX 外审 2026-06-12 P1：express 重试按全局子闸计费（intake 已计
+    # 首次；重试每次再 increment-and-check 一次）。打满 → 抢占回退到旧
+    # failed job_id（保留明日重试资格）+ 429。在 POST Job API 之前执行，
+    # 付费管线启动数恒 ≤ anonymous_express_daily_global_cap。
+    if retry_of is not None and record_mode == "express":
+        if not await _charge_express_retry_subgate(db):
+            await _reset_create_claim_to(db, safe_id, retry_of)
+            return JSONResponse(
+                status_code=429, content={"error": "preview_queue_full"}
+            )
 
     # payload（白名单深度防御：违规字段=代码 bug，拒绝并回滚抢占）
     payload = {

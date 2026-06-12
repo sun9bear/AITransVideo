@@ -45,6 +45,7 @@ def _admin_stub(**overrides):
         express_tts_provider="cosyvoice",
         anonymous_express_enabled=True,
         anonymous_free_preview_enabled=False,
+        anonymous_express_daily_global_cap=50,
     )
     base.update(overrides)
     return types.SimpleNamespace(load_settings=lambda: SimpleNamespace(**base))
@@ -201,14 +202,19 @@ class TestExpressPayloadConsistency:
 
 
 # ---------------------------------------------------------------------------
-# B. 重试重入（§E：仅诚实失败终态可重入，复用 preview_id）
+# B. 重试重入（§E + CodeX 外审 2026-06-12 P1/P2 收紧）：
+#    仅 Pass 3 诚实失败（anon_pass3_failed marker）可重入；express 重试按
+#    全局子闸计费；retry_chain 次数上限。
 # ---------------------------------------------------------------------------
 
 
-def _job_status_client(status_code=200, status="failed"):
+_PASS3_MARKER = {"anon_pass3_failed": True}
+
+
+def _job_status_client(status_code=200, status="failed", smart_state=_PASS3_MARKER):
     client = MagicMock()
     get_resp = MagicMock(status_code=status_code)
-    get_resp.json.return_value = {"status": status}
+    get_resp.json.return_value = {"status": status, "smart_state": smart_state}
     client.get = AsyncMock(return_value=get_resp)
     post_resp = MagicMock(status_code=202)
     post_resp.json.return_value = {"job_id": "job-exp-2"}
@@ -216,23 +222,100 @@ def _job_status_client(status_code=200, status="failed"):
     return client
 
 
+def _retry_db(*, charge_ok=True):
+    """t8._db 的重试变体：第 4 个 execute 是 express 子闸计费 upsert，
+    第 5 个（仅 charge 拒绝路径）是 claim 回退 UPDATE。"""
+    db = t8._db()
+    count_result = MagicMock()
+    count_result.scalar.return_value = 0
+    sentinel_result = MagicMock()
+    sentinel_result.scalar_one_or_none.return_value = SimpleNamespace(id="u-sentinel")
+    claim_result = MagicMock()
+    claim_result.first = MagicMock(return_value=("prv-won",))
+    charge_result = MagicMock()
+    charge_result.fetchone = MagicMock(return_value=[2] if charge_ok else None)
+    reset_result = MagicMock()
+    db.execute = AsyncMock(
+        side_effect=[count_result, sentinel_result, claim_result, charge_result, reset_result]
+    )
+    return db
+
+
 class TestFailedRetryReentry:
-    def test_failed_job_allows_recreate_and_records_chain(self, wired_express):
+    def test_pass3_failed_job_allows_recreate_and_records_chain(self, wired_express):
         wired_express["record"].job_id = "job-exp-failed"
         client = _job_status_client(status="failed")
         wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
-        db = t8._db()
+        db = _retry_db()
         resp = _call(db)
         assert resp.status_code == 202
         assert wired_express["record"].job_id == "job-exp-2"
         assert wired_express["record"].audit["retry_chain"] == ["job-exp-failed"]
 
-    def test_cleaned_up_job_404_allows_recreate(self, wired_express):
+    def test_retry_charges_express_subgate(self, wired_express):
+        """CodeX P1：express 重试必须对全局子闸 increment-and-check——
+        key 经 express_subgate_key 单点推导、mode='express'、cap=admin 值。"""
+        from anonymous_preview_intake_wiring import express_subgate_key
+        from anonymous_preview_quota import shanghai_today
+
+        wired_express["record"].job_id = "job-exp-failed"
+        client = _job_status_client(status="failed")
+        wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
+        db = _retry_db()
+        resp = _call(db)
+        assert resp.status_code == 202
+        _stmt, params = db.execute.call_args_list[3][0]
+        assert params["key"] == express_subgate_key(shanghai_today())
+        assert params["mode"] == "express"
+        assert params["cap"] == 50
+
+    def test_retry_subgate_at_cap_429_and_claim_restored(self, wired_express):
+        """子闸打满：429 + 抢占回退到旧 failed job_id（保留明日重试）+
+        绝不 POST Job API（付费管线启动数有界）。"""
+        wired_express["record"].job_id = "job-exp-failed"
+        client = _job_status_client(status="failed")
+        wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
+        db = _retry_db(charge_ok=False)
+        resp = _call(db)
+        assert resp.status_code == 429
+        client.post.assert_not_awaited()
+        # 第 5 个 execute 是 claim 回退 UPDATE（__creating__ → 旧 job_id）
+        assert len(db.execute.call_args_list) == 5
+
+    def test_failed_without_pass3_marker_blocks_409(self, wired_express):
+        """CodeX P2：非 Pass 3 的确定性失败（合规拒绝/输入不支持/存储错）
+        不得重提——marker 缺失即 409。"""
+        wired_express["record"].job_id = "job-exp-failed"
+        client = _job_status_client(status="failed", smart_state={})
+        wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
+        resp = _call(t8._db())
+        assert resp.status_code == 409
+        client.post.assert_not_awaited()
+
+    def test_retry_exhausted_after_max_retries(self, wired_express):
+        """CodeX P1：retry_chain 达 ANON_CREATE_MAX_RETRIES 即 409，
+        不再发起任何付费管线。"""
+        wired_express["record"].job_id = "job-exp-failed"
+        wired_express["record"].audit = {
+            **wired_express["record"].audit,
+            "retry_chain": ["job-a", "job-b"],
+        }
+        client = _job_status_client(status="failed")
+        wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
+        resp = _call(t8._db())
+        assert resp.status_code == 409
+        assert b"retry_exhausted" in resp.body
+        client.post.assert_not_awaited()
+
+    def test_cleaned_up_job_404_blocks_recreate(self, wired_express):
+        """CodeX P2 收紧：job 已被清理 → 无法核验 marker → fail-closed
+        409（原为放行；用户走重新上传路径）。"""
         wired_express["record"].job_id = "job-gone"
         client = _job_status_client(status_code=404)
         wired_express["monkeypatch"].setattr(api, "get_client", lambda: client)
         resp = _call(t8._db())
-        assert resp.status_code == 202
+        assert resp.status_code == 409
+        client.post.assert_not_awaited()
 
     def test_running_job_blocks_recreate(self, wired_express):
         wired_express["record"].job_id = "job-running"

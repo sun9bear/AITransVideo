@@ -227,8 +227,11 @@ export function mapStatusReason(reason: string | null): string {
 }
 
 function mapCreateError(status: number, raw: string): string {
+  // CodeX 外审 2026-06-12 P1/P2 配套：重试重入被服务端收紧后，409 不再
+  // 恒等于"处理中"——区分重试次数耗尽 / 不可重试失败，引导重新上传。
+  if (raw === 'retry_exhausted') return '重试次数已用完，请重新上传一个视频'
   if (status === 403) return '需要先确认版权声明才能继续'
-  if (status === 409) return '该预览已在处理中，请稍候'
+  if (status === 409) return '该预览已在处理中或无法重试，请稍候或重新上传'
   if (status === 429) return '预览通道繁忙，请稍后再试'
   return raw || `创建预览失败（HTTP ${status}）`
 }
