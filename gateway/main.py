@@ -90,6 +90,20 @@ def _attach_rotating_file_log() -> None:
         log_dir = Path(log_dir_str)
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "gateway.app.log"
+        root_logger = logging.getLogger()
+        # Idempotent attach: this module executes twice in production — once
+        # as __main__ (`python main.py`, Dockerfile CMD) and once as `main`
+        # when uvicorn.run("main:app") re-imports it. Without this guard the
+        # root logger ends up with two handlers on the same file and every
+        # log line is written twice (US prod, 2026-06-13). baseFilename is
+        # the abspath FileHandler stores at construction time.
+        target = os.path.abspath(str(log_path))
+        for existing in root_logger.handlers:
+            if (
+                isinstance(existing, RotatingFileHandler)
+                and getattr(existing, "baseFilename", None) == target
+            ):
+                return
         handler = RotatingFileHandler(
             str(log_path),
             maxBytes=50 * 1024 * 1024,
@@ -99,7 +113,7 @@ def _attach_rotating_file_log() -> None:
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
-        logging.getLogger().addHandler(handler)
+        root_logger.addHandler(handler)
     except Exception as exc:  # noqa: BLE001
         print(
             f"[gateway] WARNING: could not attach rotating file handler "

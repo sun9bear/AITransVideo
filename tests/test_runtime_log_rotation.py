@@ -9,6 +9,10 @@ Covers:
      (regression guard — prevents the bound from being silently removed).
   4. _attach_rotating_file_log from gateway.main behaves the same as the
      shared helper (same contract, separate implementation path).
+  5. Idempotence: calling attach twice for the same target file adds exactly
+     one handler (regression guard for the US prod 2026-06-13 incident where
+     gateway/main.py executed twice — as __main__ and as uvicorn's "main:app"
+     re-import — and every gateway.app.log line was written twice).
 """
 from __future__ import annotations
 
@@ -164,3 +168,115 @@ def test_gateway_attach_rotating_file_log_bad_dir_no_raise(tmp_path, monkeypatch
 
     # Should not raise.
     _simulate_attach(str(collision_path))
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — idempotence: double attach must not stack a second handler
+# ---------------------------------------------------------------------------
+
+
+def test_attach_rotating_file_log_idempotent(tmp_path, monkeypatch):
+    """Calling the shared helper twice for the same file adds exactly one handler."""
+    _ensure_src_on_path()
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
+
+    root_logger = logging.getLogger()
+    pre_handlers = list(root_logger.handlers)
+
+    from utils.rotating_log import attach_rotating_file_log
+
+    attach_rotating_file_log("idempotent.log")
+    attach_rotating_file_log("idempotent.log")
+
+    new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
+    try:
+        assert len(new_handlers) == 1, (
+            f"Expected exactly 1 new handler after double attach, "
+            f"got {len(new_handlers)}"
+        )
+    finally:
+        for h in new_handlers:
+            root_logger.removeHandler(h)
+            h.close()
+
+
+def test_attach_rotating_file_log_distinct_files_both_attach(tmp_path, monkeypatch):
+    """The idempotence guard keys on the target file — distinct files still attach."""
+    _ensure_src_on_path()
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
+
+    root_logger = logging.getLogger()
+    pre_handlers = list(root_logger.handlers)
+
+    from utils.rotating_log import attach_rotating_file_log
+
+    attach_rotating_file_log("first.log")
+    attach_rotating_file_log("second.log")
+
+    new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
+    try:
+        assert len(new_handlers) == 2, (
+            f"Expected 2 new handlers for 2 distinct files, got {len(new_handlers)}"
+        )
+    finally:
+        for h in new_handlers:
+            root_logger.removeHandler(h)
+            h.close()
+
+
+def _load_gateway_attach_fn():
+    """Extract the REAL _attach_rotating_file_log from gateway/main.py source.
+
+    gateway/main.py cannot be imported wholesale in tests (it pulls FastAPI,
+    database, every router, ...), so compile just the function definition via
+    AST. The function only references the module-level ``logging`` name; its
+    other imports (os, RotatingFileHandler, Path) are local to its body.
+    """
+    import ast
+
+    gateway_main = _WORKTREE_ROOT / "gateway" / "main.py"
+    tree = ast.parse(gateway_main.read_text(encoding="utf-8"))
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_attach_rotating_file_log"
+    )
+    namespace = {"logging": logging}
+    exec(  # noqa: S102 — compiling our own source file, not external input
+        compile(ast.Module(body=[fn], type_ignores=[]), str(gateway_main), "exec"),
+        namespace,
+    )
+    return namespace["_attach_rotating_file_log"]
+
+
+def test_gateway_attach_rotating_file_log_idempotent(tmp_path, monkeypatch):
+    """gateway/main._attach_rotating_file_log called twice adds exactly one handler.
+
+    Reproduces the production double-run: module executes as __main__ (CMD
+    ``python main.py``) and again as ``main`` when uvicorn.run("main:app")
+    re-imports it. Both runs share the same root logger.
+    """
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
+
+    attach = _load_gateway_attach_fn()
+
+    root_logger = logging.getLogger()
+    pre_handlers = list(root_logger.handlers)
+
+    attach()
+    attach()
+
+    new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
+    try:
+        assert len(new_handlers) == 1, (
+            f"Expected exactly 1 new handler after double attach, "
+            f"got {len(new_handlers)}"
+        )
+        assert new_handlers[0].baseFilename == os.path.abspath(
+            str(tmp_path / "gateway.app.log")
+        )
+    finally:
+        for h in new_handlers:
+            root_logger.removeHandler(h)
+            h.close()
