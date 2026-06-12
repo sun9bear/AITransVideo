@@ -26,6 +26,12 @@ import {
   type UploadResponse,
   type PreviewStatus,
 } from "@/lib/api/anonymousPreview"
+import {
+  getChunkedUploadLimits,
+  uploadFileInChunksAnonymous,
+  ANONYMOUS_CHUNKED_PREFIX,
+  type ChunkedUploadLimits,
+} from "@/lib/upload/chunkedUpload"
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -54,6 +60,8 @@ type PanelStep =
 interface PanelState {
   step: PanelStep
   uploadPct: number
+  /** 上传阶段文案：单请求恒"上传中…"；分片路径区分 校验文件/上传/合并校验 */
+  uploadStageLabel: string
   deniedReason: string
   errorMsg: string
   previewId: string
@@ -65,6 +73,7 @@ interface PanelState {
 const INITIAL_STATE: PanelState = {
   step: 'idle',
   uploadPct: 0,
+  uploadStageLabel: '上传中…',
   deniedReason: '',
   errorMsg: '',
   previewId: '',
@@ -193,6 +202,9 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   const [state, setState] = useState<PanelState>(INITIAL_STATE)
   // 服务端热配置的大小/时长限制；拉取失败保持出厂默认（200MB / 180s）。
   const [limits, setLimits] = useState<PreviewLimits>(DEFAULT_PREVIEW_LIMITS)
+  // 匿名分片通道（plan §9.5）：A6 limits 拉不到/enabled=false → null，
+  // 大文件继续走单请求路径（会被 CF 边缘拦，但不破坏现状）。
+  const [chunkedLimits, setChunkedLimits] = useState<ChunkedUploadLimits | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollErrorsRef = useRef(0)
@@ -209,6 +221,14 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       })
       .catch(() => {
         // 拉不到（flag 关 / 网络异常）→ 保持 DEFAULT_PREVIEW_LIMITS 兜底
+      })
+    // 匿名分片 A6 limits（三与门任一关 → enabled:false → 保持 null）
+    getChunkedUploadLimits(ANONYMOUS_CHUNKED_PREFIX)
+      .then((l) => {
+        if (!cancelled && l && l.enabled) setChunkedLimits(l)
+      })
+      .catch(() => {
+        // 静默：分片不可用时大文件仍走单请求路径
       })
     return () => {
       cancelled = true
@@ -246,23 +266,59 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       return
     }
 
-    const controller = new AbortController()
-    abortRef.current = controller
-
-    setState((s) => ({ ...s, step: 'uploading', uploadPct: 0, errorMsg: '' }))
+    // 分片选路（plan §9.5）：三与门开 且 文件超阈值（95MB，CF 边缘安全线）
+    // → 走分片；否则维持单请求 XHR。分片路径无 abort 语义，用 generation
+    // guard 防 reset 后 setState 复活（同 doPoll 纪律）。
+    const useChunked =
+      chunkedLimits !== null &&
+      chunkedLimits.enabled &&
+      file.size > chunkedLimits.threshold_mb * 1024 * 1024
 
     let uploadResp: UploadResponse
-    try {
-      uploadResp = await uploadPreviewVideo(
-        file,
-        (pct) => setState((s) => ({ ...s, uploadPct: pct })),
-        controller.signal,
-      )
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') return
-      const msg = err instanceof Error ? err.message : '上传失败，请重试'
-      setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
-      return
+    if (useChunked) {
+      const gen = pollGenRef.current
+      setState((s) => ({
+        ...s, step: 'uploading', uploadPct: 0, errorMsg: '',
+        uploadStageLabel: '校验文件…',
+      }))
+      try {
+        const body = await uploadFileInChunksAnonymous(file, chunkedLimits, (p) => {
+          if (gen !== pollGenRef.current) return
+          const label =
+            p.phase === 'hashing' ? '校验文件…'
+            : p.phase === 'merging' ? '合并校验中…'
+            : '上传中…'
+          setState((s) => ({ ...s, uploadPct: p.percent, uploadStageLabel: label }))
+        })
+        if (gen !== pollGenRef.current) return
+        uploadResp = body as unknown as UploadResponse
+      } catch (err) {
+        if (gen !== pollGenRef.current) return
+        const msg = err instanceof Error ? err.message : '上传失败，请重试'
+        setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
+        return
+      }
+    } else {
+      const controller = new AbortController()
+      abortRef.current = controller
+
+      setState((s) => ({
+        ...s, step: 'uploading', uploadPct: 0, errorMsg: '',
+        uploadStageLabel: '上传中…',
+      }))
+
+      try {
+        uploadResp = await uploadPreviewVideo(
+          file,
+          (pct) => setState((s) => ({ ...s, uploadPct: pct })),
+          controller.signal,
+        )
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        const msg = err instanceof Error ? err.message : '上传失败，请重试'
+        setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
+        return
+      }
     }
 
     if (uploadResp.admission_decision !== 'admitted' || uploadResp.status !== 'ready_for_mode') {
@@ -390,7 +446,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                上传中…
+                {state.uploadStageLabel}
               </span>
               <span>{state.uploadPct}%</span>
             </div>

@@ -581,6 +581,12 @@ app.post(
 from chunked_upload_api import router as chunked_upload_router  # noqa: E402
 app.include_router(chunked_upload_router)
 
+# 匿名档分片 A1-A6 (plan 2026-06-11 §9 r1) — 试用弹窗 >95MB 文件的分片通道。
+# 三与门 gate（env + admin 匿名预览 + admin 匿名分片）在各 handler 内显式
+# 检查；CSRF 手动 try/except（/upload 同款）。
+from anonymous_preview_chunked_api import router as anonymous_chunked_router  # noqa: E402
+app.include_router(anonymous_chunked_router)
+
 # Rename a job's user-visible display_name (plan §6.5 / D16). Lives on
 # the /gateway/* namespace, not /job-api/*, because the collision +
 # ownership logic is gateway-level rather than a transparent proxy.

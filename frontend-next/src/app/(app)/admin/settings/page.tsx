@@ -141,6 +141,10 @@ interface AdminSettings {
   chunked_upload_disk_floor_gb: number
   chunked_upload_ttl_hours: number
   chunked_upload_ready_ttl_hours: number
+  // --- 匿名档分片扩展（plan §9 r1，2026-06-12）---
+  // 独立熔断 + 匿名专用 TTL；同属 full-body POST 契约，守卫测试同文件。
+  chunked_upload_anonymous_enabled: boolean
+  chunked_upload_anonymous_ttl_hours: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -235,6 +239,11 @@ const DEFAULT_SETTINGS: AdminSettings = {
   chunked_upload_disk_floor_gb: 20,
   chunked_upload_ttl_hours: 24,
   chunked_upload_ready_ttl_hours: 6,
+  // --- 匿名档分片默认值（plan §9 r1）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认严格一致；
+  // enabled 默认 false（休眠上线，项目主自行灰度）。
+  chunked_upload_anonymous_enabled: false,
+  chunked_upload_anonymous_ttl_hours: 6,
 }
 
 // 分片上传数字旋钮元数据：边界与 gateway _CHUNKED_UPLOAD_BOUNDS 一致。
@@ -243,7 +252,7 @@ const CHUNKED_UPLOAD_FIELDS: Array<{
     | 'chunked_upload_per_user_active' | 'chunked_upload_per_user_inflight_gb'
     | 'chunked_upload_global_inflight_gb' | 'chunked_upload_daily_per_user_gb'
     | 'chunked_upload_disk_floor_gb' | 'chunked_upload_ttl_hours'
-    | 'chunked_upload_ready_ttl_hours'
+    | 'chunked_upload_ready_ttl_hours' | 'chunked_upload_anonymous_ttl_hours'
   label: string
   unit: string
   min: number
@@ -321,6 +330,14 @@ const CHUNKED_UPLOAD_FIELDS: Array<{
     min: 1,
     max: 72,
     description: '合并完成但用户未据此创建任务的终文件，超时由清扫器删除（防 2GB 文件长期滞留）。',
+  },
+  {
+    key: 'chunked_upload_anonymous_ttl_hours',
+    label: '匿名档未完成上传 TTL',
+    unit: '小时',
+    min: 1,
+    max: 24,
+    description: '匿名试用分片上传的未完成清扫窗口（plan §9 r1 评审默认 6h）。匿名身份可重置，过长会拉长 init 占盘窗口；注册档维持上方独立 TTL。',
   },
 ]
 
@@ -1265,6 +1282,29 @@ export default function AdminSettingsPage() {
               关闭时前端隐藏大文件入口（&gt;95MB 仍走单请求路径，会被 CF 边缘 413 拒绝）；
               开启前请确认磁盘余量充足（2GB 文件任务全程峰值 ~6GB）。
               进行中上传的清理由后台清扫器负责，不受本开关影响。
+            </p>
+          </div>
+        </label>
+
+        {/* 匿名档分片独立熔断（plan §9 r1）：三与门之一，与上方注册档开关互不影响 */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.chunked_upload_anonymous_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, chunked_upload_anonymous_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              启用匿名试用分片上传
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                默认关闭 · 灰度开启
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              试用弹窗 &gt;95MB 文件走分片通道的独立熔断（还需「匿名免费预览」与前端 env flag 同时开启）。
+              单文件上限沿用上方匿名预览的 max_upload_mb（默认 200MB）；
+              并发滥用由 per-IP 在途会话数（复用每 IP 每日预览上限旋钮）+ 单会话 1 路在途约束。
             </p>
           </div>
         </label>

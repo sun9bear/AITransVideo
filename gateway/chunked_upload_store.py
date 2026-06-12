@@ -94,9 +94,20 @@ STATE_RECEIVING = "receiving"
 STATE_COMPLETING = "completing"
 STATE_READY = "ready"
 STATE_FAILED_INTEGRITY = "failed_integrity"
+# 匿名档一次性消费态（plan §9 r1，A3）：complete→intake 成功后由
+# ``consume_upload`` 转入，state.json 保存 /upload 同形响应体；complete
+# 超时重试 / 并发二次 complete 原样返回已存响应（幂等，杜绝双 intake 双
+# 计数）。注册档不使用此状态。
+STATE_CONSUMED = "consumed"
 
-# in-flight = 仍占用磁盘 reserve 预算的状态。
+# in-flight = 仍占用磁盘 reserve 预算的状态（consumed 不占：分片已删、
+# 终文件已移交 uploads/anonymous/ 由 anonymous_preview_sweeper 管理）。
 _INFLIGHT_STATES = frozenset({STATE_RECEIVING, STATE_COMPLETING})
+
+# 匿名档 owner_scope 标记值（plan §9.2 r1）：init 按它聚合 per-IP in-flight、
+# sweeper 按它选 TTL。注册档 state 不写 owner_scope（缺省 None 语义）——
+# 不得靠 user_id 前缀字符串猜业务类型。
+OWNER_SCOPE_ANONYMOUS = "anonymous_preview"
 
 
 class ChunkedUploadError(Exception):
@@ -314,11 +325,21 @@ def init_upload(
     chunk_size: int,
     file_name: str,
     limits: ChunkedLimits,
+    owner_scope: Optional[str] = None,
+    client_ip_hash: Optional[str] = None,
+    per_ip_active: Optional[int] = None,
 ) -> dict[str, Any]:
     """声明一次分片上传。返回 state dict（新建或续传命中的既有 upload）。
 
     整段"检查 + 注册"在全局 reserve 锁内执行（r3 P1：并发双 init 串行化，
     杜绝同时看到"空间足够"双双通过）。所有 gate fail-closed。
+
+    匿名档（plan §9 r1）：``owner_scope=OWNER_SCOPE_ANONYMOUS`` +
+    ``client_ip_hash``（HMAC，不落 raw IP）+ ``per_ip_active``（复用 AD-8
+    ``anonymous_preview_cap_per_ip`` 旋钮值）。per-IP gate 必须在本函数的
+    reserve 全局锁内与 state 注册同锁完成——身份可重置（清 cookie 即新
+    session）时这是唯一不可绕的并发锚点，锁外检查会被并发 init 穿透。
+    声明字节和上限 = per_ip_active × max_file_bytes（字节聚合免单独旋钮）。
     """
     if not user_id:
         raise ChunkedUploadError(401, "auth_required", "未登录")
@@ -376,11 +397,13 @@ def init_upload(
                     st["resumed"] = True
                     return st
 
-        # --- 限额汇总（per-user active / in-flight GB / global GB）---
+        # --- 限额汇总（per-user active / in-flight GB / global GB / per-IP）---
         user_active = 0
         user_inflight_bytes = 0
         global_inflight_bytes = 0
         inflight_reserve_remaining = 0
+        ip_active = 0
+        ip_inflight_bytes = 0
         for _updir, st in _iter_all_states():
             if st.get("state") not in _INFLIGHT_STATES:
                 continue
@@ -390,6 +413,14 @@ def init_upload(
             if st.get("user_id") == user_id:
                 user_active += 1
                 user_inflight_bytes += st_size
+            if (
+                owner_scope is not None
+                and client_ip_hash
+                and st.get("owner_scope") == owner_scope
+                and st.get("client_ip_hash") == client_ip_hash
+            ):
+                ip_active += 1
+                ip_inflight_bytes += st_size
 
         if user_active >= limits.per_user_active:
             raise ChunkedUploadError(
@@ -401,6 +432,17 @@ def init_upload(
                 429, "user_inflight_exceeded",
                 f"进行中上传总量超过 {limits.per_user_inflight_gb}GB 上限",
             )
+        # --- per-IP in-flight gate（plan §9 r1，仅匿名档传入）。错误码刻意
+        # 用泛化 rate_limited：不向可重置身份泄露具体维度。 ---
+        if per_ip_active is not None and client_ip_hash:
+            if ip_active >= per_ip_active:
+                raise ChunkedUploadError(
+                    429, "rate_limited", "上传通道繁忙，请稍后再试",
+                )
+            if ip_inflight_bytes + declared_size > per_ip_active * max_file_bytes:
+                raise ChunkedUploadError(
+                    429, "rate_limited", "上传通道繁忙，请稍后再试",
+                )
         if global_inflight_bytes + declared_size > limits.global_inflight_gb * 1024 ** 3:
             raise ChunkedUploadError(
                 429, "global_inflight_exceeded",
@@ -445,6 +487,10 @@ def init_upload(
             "completed_at": None,
             "created_at": _now_iso(),
         }
+        if owner_scope is not None:
+            state["owner_scope"] = owner_scope
+        if client_ip_hash:
+            state["client_ip_hash"] = client_ip_hash
         _save_state(user_id, upload_id, state)
         _add_usage_bytes(user_id, day, declared_size)
         state["resumed"] = False
@@ -726,11 +772,52 @@ def claim_upload(*, user_id: str, upload_id: str, job_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# §9 r1 — 匿名档一次性消费态
+# ---------------------------------------------------------------------------
+
+
+def consume_upload(
+    *,
+    user_id: str,
+    upload_id: str,
+    response_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """匿名 complete→intake 成功后持锁 READY → consumed（plan §9 A3）。
+
+    state.json 保存 /upload 同形响应体（``consumed_response``），complete
+    重试读它原样返回。``final_path`` 清空——终文件已 move 到
+    ``uploads/anonymous/`` 落点，归 anonymous_preview_sweeper 生命周期，
+    本 store 的任何路径不得再触碰它。幂等：已 consumed 直接返回。
+    """
+    with file_lock(_lock_path(upload_id)):
+        state = load_state(user_id, upload_id)
+        if state is None:
+            raise ChunkedUploadError(404, "not_found", "not_found")
+        if state.get("state") == STATE_CONSUMED:
+            return state
+        if state.get("state") != STATE_READY:
+            raise ChunkedUploadError(
+                409, "wrong_state",
+                f"当前状态 {state.get('state')} 无法标记消费",
+            )
+        state["state"] = STATE_CONSUMED
+        state["consumed_response"] = dict(response_payload)
+        state["final_path"] = None
+        _save_state(user_id, upload_id, state)
+        return state
+
+
+# ---------------------------------------------------------------------------
 # Sweeper helpers（loop 在 chunked_upload_sweeper.py）
 # ---------------------------------------------------------------------------
 
 
-def sweep_once(limits: ChunkedLimits, *, now: Optional[datetime] = None) -> dict[str, int]:
+def sweep_once(
+    limits: ChunkedLimits,
+    *,
+    now: Optional[datetime] = None,
+    anonymous_ttl_hours: Optional[int] = None,
+) -> dict[str, int]:
     """单轮清扫。返回 stats（调用方写 JSONL 审计）。
 
     - 非 ready 且超 ttl_hours → 清盘（expired）。
@@ -740,6 +827,9 @@ def sweep_once(limits: ChunkedLimits, *, now: Optional[datetime] = None) -> dict
     - ready 且已 claim 且超 ready_ttl_hours → 终文件归现有 uploads 生命周期
       管理，仅清 state 残留。
     - _usage/ 下超 7 天的日期目录 → 删。
+    - 匿名档（plan §9 r1）：``owner_scope=="anonymous_preview"`` 的 state 用
+      ``anonymous_ttl_hours``（缺省回落 ttl_hours）；consumed 态走非-ready
+      分支按同一匿名 TTL 清扫（final_path 已清空，不会触碰已移交媒体）。
     """
     stats = {
         "expired_purged": 0,
@@ -780,6 +870,11 @@ def sweep_once(limits: ChunkedLimits, *, now: Optional[datetime] = None) -> dict
             if updated_at is None:
                 updated_at = now_dt  # 无时间戳：本轮跳过，下轮按新时间计
 
+            is_anonymous = state.get("owner_scope") == OWNER_SCOPE_ANONYMOUS
+            effective_ttl = ttl
+            if is_anonymous and anonymous_ttl_hours is not None:
+                effective_ttl = timedelta(hours=anonymous_ttl_hours)
+
             st = state.get("state")
             if st == STATE_READY:
                 if now_dt - updated_at < ready_ttl:
@@ -793,7 +888,7 @@ def sweep_once(limits: ChunkedLimits, *, now: Optional[datetime] = None) -> dict
                     stats["ready_claimed_state_cleaned"] += 1
                 shutil.rmtree(updir, ignore_errors=True)
             else:
-                if now_dt - updated_at >= ttl:
+                if now_dt - updated_at >= effective_ttl:
                     shutil.rmtree(updir, ignore_errors=True)
                     stats["expired_purged"] += 1
 

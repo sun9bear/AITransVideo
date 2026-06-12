@@ -66,7 +66,19 @@ def sweep_chunked_uploads_once() -> dict:
     from chunked_upload_store import sweep_once
 
     limits = resolve_chunked_limits()
-    return sweep_once(limits)
+    # 匿名档 TTL（plan §9.4 r1）：读失败回落 None → sweep_once 用注册档
+    # ttl_hours 兜底（fail-safe 取更长 TTL，宁可晚清不误删）。
+    anon_ttl: int | None = None
+    try:
+        from admin_settings import load_settings
+
+        anon_ttl = int(load_settings().chunked_upload_anonymous_ttl_hours)
+    except Exception:
+        logger.warning(
+            "chunked_upload_sweeper: anonymous ttl unavailable, falling back to ttl_hours",
+            exc_info=True,
+        )
+    return sweep_once(limits, anonymous_ttl_hours=anon_ttl)
 
 
 async def _interruptible_sleep(delay_s: float, stop_event: asyncio.Event | None) -> bool:

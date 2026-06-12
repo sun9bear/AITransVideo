@@ -172,60 +172,28 @@ def _make_sync_intake_session():
 
 
 # ---------------------------------------------------------------------------
-# POST /upload
+# AD-8 body-before peek（/upload 与 §9 匿名分片 init 共享）
 # ---------------------------------------------------------------------------
 
-@router.post("/upload")
-async def anonymous_upload(
-    request: Request,
-    response: Response,
-    db: AsyncSession = Depends(get_db),
-) -> Response:
-    """Accept a raw binary upload for anonymous preview.
+async def ad8_peek_precheck(db: AsyncSession, request: Request, limits) -> Optional[JSONResponse]:
+    """Non-authoritative global + per-IP rate-limit pre-check（AD-8）。
 
-    1. CSRF same-origin check
-    2. Get-or-create anonymous session
-    3. Stream to disk (cheap pre-checks inside handle_anonymous_upload)
-    4. Build RequestFacts / UploadFacts → run_intake_and_save (in thread)
-    5. admit_for_free_preview → merge admission info
-    6. Return {preview_id, status, status_reason, mode}
+    Body 读取/磁盘写入**之前**调用；超 cap 直接拒（瞬时磁盘 = 并发数×200MB
+    防护）。SELECT-only，权威 try_acquire 仍在 run_intake_and_save →
+    adapter._enforce_rate_limits。返回 None = 放行；返回 JSONResponse =
+    调用方原样返回（429 / 503 fail-closed）。
+
+    (scope, scope_key) 必须与权威计数器写入形状逐字节一致：scope 列恒为
+    ANON_PREVIEW_COUNTER_SCOPE（wiring 单实例 store），scope_key 是 adapter
+    复合键 "global:{day}" / "ip:{hmac('ip:'+ip)}:{day}"。推导只许走
+    peek_counter_keys——此前 peek 自行用 scope='global'/'ip' + 裸值哈希，
+    两个维度恒查 0 行、cap 预检恒放行（2026-06-11 bug ⑤）。
     """
-    # CSRF check
-    try:
-        require_same_origin_state_change(request)
-    except Exception:
-        return JSONResponse(status_code=403, content={"error": "csrf_origin_rejected"})
-
-    # Session dependency (get-or-create)
-    session_ctx = await get_or_create_anonymous_session(request, response, db)
-    if isinstance(session_ctx, Response):
-        return session_ctx
-
-    assert isinstance(session_ctx, AnonymousSessionContext)
-
-    admin_enabled = _get_admin_enabled()
-
-    # APF 限制旋钮（2026-06-11）：admin 热配置优先、env fallback。本次请求内
-    # 只 resolve 一次，peek / upload / admission 用同一份快照保证一致。
-    limits = resolve_apf_limits()
-
-    # AD-8 body-before peek: non-authoritative global + per-IP rate-limit pre-check.
-    # Performed BEFORE reading the request body so we can reject obviously-over-cap
-    # callers without writing to disk (瞬时磁盘 = 并发数×200MB 防护).
-    # This is a cheap SELECT-only peek; the authoritative try_acquire still runs later
-    # inside run_intake_and_save → adapter._enforce_rate_limits.
-    # Fail-closed on DB error: 503 gate_unavailable (same semantics as in-flight gate).
     client_ip_peek = extract_client_ip(request) or ""
     day_key_peek = shanghai_today()
     try:
-        # Use async db session directly for the peek SELECTs (avoids sync engine spin-up)
         from sqlalchemy import text as _sa_text
 
-        # (scope, scope_key) 必须与权威计数器写入形状逐字节一致：scope 列恒为
-        # ANON_PREVIEW_COUNTER_SCOPE（wiring 单实例 store），scope_key 是
-        # adapter 复合键 "global:{day}" / "ip:{hmac('ip:'+ip)}:{day}"。
-        # 推导只许走 peek_counter_keys——此前 peek 自行用 scope='global'/'ip'
-        # + 裸值哈希，两个维度恒查 0 行、cap 预检恒放行（2026-06-11 bug ⑤）。
         _global_key, _ip_key = peek_counter_keys(
             client_ip_peek,
             day_key_peek,
@@ -271,6 +239,52 @@ async def anonymous_upload(
     except Exception as exc:
         logger.warning("anon_upload: AD-8 peek unexpected error — fail-closed: %s", exc)
         return JSONResponse(status_code=503, content={"error": "gate_unavailable"})
+    return None
+
+
+# ---------------------------------------------------------------------------
+# POST /upload
+# ---------------------------------------------------------------------------
+
+@router.post("/upload")
+async def anonymous_upload(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Accept a raw binary upload for anonymous preview.
+
+    1. CSRF same-origin check
+    2. Get-or-create anonymous session
+    3. Stream to disk (cheap pre-checks inside handle_anonymous_upload)
+    4. Build RequestFacts / UploadFacts → run_intake_and_save (in thread)
+    5. admit_for_free_preview → merge admission info
+    6. Return {preview_id, status, status_reason, mode}
+    """
+    # CSRF check
+    try:
+        require_same_origin_state_change(request)
+    except Exception:
+        return JSONResponse(status_code=403, content={"error": "csrf_origin_rejected"})
+
+    # Session dependency (get-or-create)
+    session_ctx = await get_or_create_anonymous_session(request, response, db)
+    if isinstance(session_ctx, Response):
+        return session_ctx
+
+    assert isinstance(session_ctx, AnonymousSessionContext)
+
+    admin_enabled = _get_admin_enabled()
+
+    # APF 限制旋钮（2026-06-11）：admin 热配置优先、env fallback。本次请求内
+    # 只 resolve 一次，peek / upload / admission 用同一份快照保证一致。
+    limits = resolve_apf_limits()
+
+    # AD-8 body-before peek（抽出为 ad8_peek_precheck 与 §9 分片 init 共享；
+    # fail-closed：DB 错 → 503 gate_unavailable）。
+    _peek_reject = await ad8_peek_precheck(db, request, limits)
+    if _peek_reject is not None:
+        return _peek_reject
 
     # Stream upload to disk
     upload_path: Optional[Path] = None

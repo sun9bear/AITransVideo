@@ -90,6 +90,9 @@ _CHUNKED_UPLOAD_BOUNDS = {
     "chunked_upload_disk_floor_gb": (1, 500),
     "chunked_upload_ttl_hours": (1, 168),
     "chunked_upload_ready_ttl_hours": (1, 72),
+    # 匿名档分片 TTL（plan §9 r1 评审裁定默认 6h）：上界 24 = 不得长于注册档
+    # 默认——匿名身份可重置，TTL 是 init-abandon 滥用的资源占用窗口。
+    "chunked_upload_anonymous_ttl_hours": (1, 24),
 }
 
 
@@ -389,6 +392,14 @@ class AdminSettings(BaseModel):
     chunked_upload_ttl_hours: int = 24             # 未完成上传清扫 TTL
     chunked_upload_ready_ttl_hours: int = 6        # ready 未被 job claim 的终文件 TTL
 
+    # --- 匿名档分片扩展（plan §9 r1，2026-06-12）---
+    # 独立熔断：与注册档 chunked_upload_enabled 互不影响；三与门之一
+    # （env enable_anonymous_preview AND anonymous_free_preview_enabled AND
+    # 本开关）。StrictBool 理由同上。默认 False 休眠上线，项目主自行灰度。
+    chunked_upload_anonymous_enabled: StrictBool = False
+    # 匿名未 complete 分片 TTL（小时）。注册档维持 chunked_upload_ttl_hours。
+    chunked_upload_anonymous_ttl_hours: int = 6
+
     @field_validator(
         "anonymous_preview_max_upload_mb",
         "anonymous_preview_max_seconds",
@@ -422,6 +433,7 @@ class AdminSettings(BaseModel):
         "chunked_upload_disk_floor_gb",
         "chunked_upload_ttl_hours",
         "chunked_upload_ready_ttl_hours",
+        "chunked_upload_anonymous_ttl_hours",
     )
     @classmethod
     def validate_chunked_upload_bounds(cls, v: int, info) -> int:
