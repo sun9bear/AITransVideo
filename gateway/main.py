@@ -17,6 +17,7 @@ from admin_cosyvoice_control_api import router as admin_cosyvoice_control_router
 from admin_disk_api import router as admin_disk_router
 from pan.auth import router as pan_auth_router
 from pan.admin_api import router as pan_admin_router
+from admin_billing_api import router as admin_billing_router
 from admin_cost_api import router as admin_cost_router
 from admin_smart_analytics_api import router as admin_smart_analytics_router
 from admin_support_api import router as admin_support_router
@@ -68,6 +69,46 @@ if not logging.getLogger().handlers:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def _attach_rotating_file_log() -> None:
+    """Attach a RotatingFileHandler to the root logger for persistent on-disk logs.
+
+    Completely fail-safe: any OS / permission failure is printed to stderr and
+    swallowed — gateway must never fail to start because the log directory is
+    missing (e.g. Windows local dev where the path does not exist).
+    """
+    import os
+    from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+
+    log_dir_str = os.environ.get(
+        "AIVIDEOTRANS_RUNTIME_LOGS_DIR",
+        "/opt/aivideotrans/data/runtime_logs",
+    )
+    try:
+        log_dir = Path(log_dir_str)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "gateway.app.log"
+        handler = RotatingFileHandler(
+            str(log_path),
+            maxBytes=50 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(handler)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[gateway] WARNING: could not attach rotating file handler "
+            f"(dir={log_dir_str!r}): {exc}",
+            flush=True,
+        )
+
+
+_attach_rotating_file_log()
 
 from config import settings
 from csrf import require_same_origin_state_change
@@ -399,6 +440,23 @@ async def lifespan(app: FastAPI):
             "cleanup will not run (manual cleanup required)",
         )
 
+    # 支付对账 sweeper（audit 2026-06-12 P1）：周期扫 created/pending 滞留
+    # 订单并主动调 provider query_order 对账，兜住「webhook 丢失/被拒后用户
+    # 已付款但权益未发放」的静默故障。结算仍走 billing 单一入口
+    # （_refresh_order_from_provider → _process_payment_event 幂等）。
+    # Same fail-safe pattern as all other sweepers above.
+    try:
+        from billing_reconciliation import sweeper_loop as _billing_reconcile_loop
+        _billing_reconcile_task = _asyncio.create_task(
+            _billing_reconcile_loop(), name="billing-reconciliation-sweeper",
+        )
+        app.state.billing_reconciliation_sweeper_task = _billing_reconcile_task
+    except Exception:
+        logger.exception(
+            "Failed to start billing_reconciliation sweeper; unsettled orders "
+            "will only refresh via user-initiated order polling",
+        )
+
     # Seed pricing runtime
     try:
         from pricing_runtime import get_runtime_pricing
@@ -428,6 +486,8 @@ async def lifespan(app: FastAPI):
         "anonymous_preview_sweeper_task",
         # Chunked upload TTL sweeper (plan 2026-06-11 §3.8).
         "chunked_upload_sweeper_task",
+        # 支付对账 sweeper（audit 2026-06-12 P1）。
+        "billing_reconciliation_sweeper_task",
     ):
         handle = getattr(app.state, attr, None)
         if handle is not None:
@@ -511,6 +571,7 @@ app.include_router(admin_support_router)
 app.include_router(pricing_admin_router)
 app.include_router(s2_monitor_router)
 app.include_router(admin_job_monitor_router)
+app.include_router(admin_billing_router)
 app.include_router(billing_router)
 app.include_router(cost_management_router)
 app.include_router(credits_observability_router)
