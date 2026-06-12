@@ -92,9 +92,17 @@ export function CheckoutCard({
     [plans],
   )
 
-  const [selectedPlanCode, setSelectedPlanCode] = useState<string>(
-    paidPlans[0]?.code ?? "",
-  )
+  const [selectedPlanCode, setSelectedPlanCode] = useState<string>(() => {
+    // 定价页「升级到 X」CTA 带 ?plan= 直达；本组件仅在客户端数据就绪后挂载，
+    // 不参与 SSR，读 window.location 不会产生 hydration 分歧。
+    if (typeof window !== "undefined") {
+      const fromQuery = new URLSearchParams(window.location.search).get("plan")
+      if (fromQuery && paidPlans.some((p) => p.code === fromQuery)) {
+        return fromQuery
+      }
+    }
+    return paidPlans[0]?.code ?? ""
+  })
   const [selectedPeriod, setSelectedPeriod] = useState<BillingPeriod>("monthly")
   const [submitting, setSubmitting] = useState(false)
   const [redirecting, setRedirecting] = useState(false)
