@@ -221,13 +221,21 @@ def test_unsettled_serializes_orders_and_events():
 
     order = _order("pending")
     event = _event(signature_valid=False, error_message="bad signature")
+    refunded = _order("refunded")
     client = TestClient(
-        _build_admin_app(SimpleNamespace(role="admin", id="a1"), [[order], [event]])
+        _build_admin_app(
+            SimpleNamespace(role="admin", id="a1"), [[order], [event], [refunded]]
+        )
     )
     resp = client.get("/api/admin/billing/unsettled")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["counts"] == {"pending_orders": 1, "suspect_webhook_events": 1}
+    assert body["counts"] == {
+        "pending_orders": 1,
+        "suspect_webhook_events": 1,
+        "recent_refunds": 1,
+    }
+    assert body["recent_refunds"][0]["status"] == "refunded"
     assert body["pending_orders"][0]["order_id"] == order.id
     assert body["pending_orders"][0]["amount_cny"] == 990
     assert body["suspect_webhook_events"][0]["signature_valid"] is False

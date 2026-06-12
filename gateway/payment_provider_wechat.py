@@ -355,21 +355,37 @@ def parse_wechat_webhook(
     except Exception as exc:
         raise ValueError(f"wechatpay resource decrypt failed: {type(exc).__name__}") from exc
 
-    trade_state = str(transaction.get("trade_state") or "").strip()
     out_trade_no = str(transaction.get("out_trade_no") or "").strip()
-    # transaction_id (WeChat's platform-unique id) is the idempotency key for
-    # settlement events (plan §8.3); fall back to the envelope id for events
-    # that carry no transaction (e.g. future refund notifications).
-    provider_event_id = (
-        str(transaction.get("transaction_id") or "").strip()
-        or str(envelope.get("id") or "").strip()
-    )
+    if event_type.upper().startswith("REFUND."):
+        # R7 退款通知：resource 是 refund 对象（refund_id / out_refund_no /
+        # refund_status / amount.refund），没有 trade_state，也没有 attach——
+        # order 绑定由 billing 层用 out_trade_no 反查 provider_order_id。
+        refund_status = str(transaction.get("refund_status") or "").strip().upper()
+        new_status = "refunded" if refund_status == "SUCCESS" else "pending"
+        # 幂等键不能用 transaction_id：refund 对象携带与原支付相同的
+        # transaction_id，会与已记录的支付结算事件撞 (provider,
+        # provider_event_id) 唯一键，退款事件会被当成重复投递丢弃。
+        provider_event_id = (
+            str(transaction.get("refund_id") or "").strip()
+            or str(transaction.get("out_refund_no") or "").strip()
+            or str(envelope.get("id") or "").strip()
+        )
+    else:
+        trade_state = str(transaction.get("trade_state") or "").strip()
+        new_status = map_wechat_trade_state(trade_state)
+        # transaction_id (WeChat's platform-unique id) is the idempotency key
+        # for settlement events (plan §8.3); fall back to the envelope id for
+        # events that carry no transaction.
+        provider_event_id = (
+            str(transaction.get("transaction_id") or "").strip()
+            or str(envelope.get("id") or "").strip()
+        )
     return ParsedWechatWebhook(
         provider_event_id=provider_event_id,
         event_type=event_type or "unknown",
         order_id=str(transaction.get("attach") or "").strip(),
         out_trade_no=out_trade_no,
-        new_status=map_wechat_trade_state(trade_state),
+        new_status=new_status,
         transaction=transaction,
         raw={
             "id": envelope.get("id"),
