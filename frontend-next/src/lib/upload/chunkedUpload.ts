@@ -26,6 +26,9 @@ export interface ChunkedUploadProgress {
   phase: ChunkedUploadPhase
   /** 0-100；merging 阶段无百分比语义，恒为 100（Q1 落定：只显示文案） */
   percent: number
+  /** 已完成字节数（hashing=已哈希、uploading=已上传；merging 不带）。
+   *  供调用方计算实时速度。 */
+  bytesDone?: number
 }
 
 export interface ChunkedUploadResult {
@@ -274,7 +277,7 @@ export async function uploadFileInChunks(
   // 1. 哈希（Web Worker 增量，2GB 约 10-20s，单独显示进度）
   onProgress({ phase: 'hashing', percent: 0 })
   const { fileHash, chunkHashes } = await hashFileInWorker(file, chunkSize, (bytes) => {
-    onProgress({ phase: 'hashing', percent: Math.floor((bytes / file.size) * 100) })
+    onProgress({ phase: 'hashing', percent: Math.floor((bytes / file.size) * 100), bytesDone: bytes })
   })
 
   // 2. init + 3. 并发上传（注册档/匿名档共享）
@@ -327,6 +330,7 @@ async function hashlessInitAndUploadParts(
       onProgress({
         phase: 'uploading',
         percent: Math.floor((uploadedBytes / file.size) * 100),
+        bytesDone: uploadedBytes,
       })
     }
   }
@@ -353,7 +357,7 @@ export async function uploadFileInChunksAnonymous(
 
   onProgress({ phase: 'hashing', percent: 0 })
   const { fileHash, chunkHashes } = await hashFileInWorker(file, chunkSize, (bytes) => {
-    onProgress({ phase: 'hashing', percent: Math.floor((bytes / file.size) * 100) })
+    onProgress({ phase: 'hashing', percent: Math.floor((bytes / file.size) * 100), bytesDone: bytes })
   })
 
   const init = await hashlessInitAndUploadParts(

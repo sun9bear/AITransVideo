@@ -62,6 +62,8 @@ interface PanelState {
   uploadPct: number
   /** 上传阶段文案：单请求恒"上传中…"；分片路径区分 校验文件/上传/合并校验 */
   uploadStageLabel: string
+  /** 实时上传速度文案（如 "2.3 MB/s"）；非上传阶段为空串 */
+  uploadSpeed: string
   deniedReason: string
   errorMsg: string
   previewId: string
@@ -74,6 +76,7 @@ const INITIAL_STATE: PanelState = {
   step: 'idle',
   uploadPct: 0,
   uploadStageLabel: '上传中…',
+  uploadSpeed: '',
   deniedReason: '',
   errorMsg: '',
   previewId: '',
@@ -83,6 +86,13 @@ const INITIAL_STATE: PanelState = {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+function formatSpeed(bytesPerSecond: number): string {
+  if (bytesPerSecond >= 1024 * 1024) {
+    return `${(bytesPerSecond / 1024 / 1024).toFixed(1)} MB/s`
+  }
+  return `${Math.max(1, Math.round(bytesPerSecond / 1024))} KB/s`
+}
 
 function validateFile(file: File, maxUploadMb: number): string | null {
   if (!ACCEPTED_TYPES.includes(file.type) && !ACCEPTED_EXTENSIONS.some((ext) => file.name.toLowerCase().endsWith(ext))) {
@@ -211,6 +221,23 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   // Poll generation: bumped on reset/unmount so an in-flight status fetch
   // that resolves afterwards can't setState + re-arm the timer (轮询复活).
   const pollGenRef = useRef(0)
+  // 上传速度估算：EMA 平滑 + ≥700ms 节流（进度回调可能很密）。
+  const speedRef = useRef<{ t: number; b: number; ema: number } | null>(null)
+
+  function trackSpeed(bytesDone: number): string | null {
+    const now = Date.now()
+    const prev = speedRef.current
+    if (!prev || bytesDone < prev.b) {
+      speedRef.current = { t: now, b: bytesDone, ema: 0 }
+      return null
+    }
+    const dtMs = now - prev.t
+    if (dtMs < 700) return null
+    const inst = ((bytesDone - prev.b) * 1000) / dtMs
+    const ema = prev.ema > 0 ? prev.ema * 0.7 + inst * 0.3 : inst
+    speedRef.current = { t: now, b: bytesDone, ema }
+    return formatSpeed(ema)
+  }
 
   // mount 时拉取当前生效限制（admin 后台改完即时反映到文案与本地校验）
   useEffect(() => {
@@ -249,10 +276,21 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
     pollGenRef.current += 1
     pollErrorsRef.current = 0
+    speedRef.current = null
     setState(INITIAL_STATE)
   }
 
-  function handleOpenChange(next: boolean) {
+  function handleOpenChange(next: boolean, eventDetails?: { reason?: string }) {
+    // 上传/处理中误触弹窗外区域或 Esc 不关闭（2026-06-12 用户反馈：桌面点
+    // 空白处弹窗关闭、上传作废；手机点遮罩同源）——关闭会 resetPanel 丢掉
+    // 进行中的上传/轮询。右上角 X（close-press）保留为显式退出通道。
+    if (
+      !next &&
+      (state.step === 'uploading' || state.step === 'processing') &&
+      (eventDetails?.reason === 'outside-press' || eventDetails?.reason === 'escape-key')
+    ) {
+      return
+    }
     setOpen(next)
     if (!next) resetPanel()
   }
@@ -298,8 +336,9 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     let uploadResp: UploadResponse
     if (useChunked) {
       const gen = pollGenRef.current
+      speedRef.current = null
       setState((s) => ({
-        ...s, step: 'uploading', uploadPct: 0, errorMsg: '',
+        ...s, step: 'uploading', uploadPct: 0, errorMsg: '', uploadSpeed: '',
         uploadStageLabel: '校验文件…',
       }))
       try {
@@ -309,7 +348,18 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
             p.phase === 'hashing' ? '校验文件…'
             : p.phase === 'merging' ? '合并校验中…'
             : '上传中…'
-          setState((s) => ({ ...s, uploadPct: p.percent, uploadStageLabel: label }))
+          let speed: string | null = null
+          if (p.phase === 'uploading' && typeof p.bytesDone === 'number') {
+            speed = trackSpeed(p.bytesDone)
+          } else if (p.phase !== 'uploading') {
+            speedRef.current = null
+          }
+          setState((s) => ({
+            ...s,
+            uploadPct: p.percent,
+            uploadStageLabel: label,
+            uploadSpeed: p.phase === 'uploading' ? (speed ?? s.uploadSpeed) : '',
+          }))
         })
         if (gen !== pollGenRef.current) return
         uploadResp = body as unknown as UploadResponse
@@ -323,15 +373,22 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       const controller = new AbortController()
       abortRef.current = controller
 
+      speedRef.current = null
       setState((s) => ({
-        ...s, step: 'uploading', uploadPct: 0, errorMsg: '',
+        ...s, step: 'uploading', uploadPct: 0, errorMsg: '', uploadSpeed: '',
         uploadStageLabel: '上传中…',
       }))
 
       try {
         uploadResp = await uploadPreviewVideo(
           file,
-          (pct) => setState((s) => ({ ...s, uploadPct: pct })),
+          (pct, loadedBytes) => {
+            const speed =
+              typeof loadedBytes === 'number' ? trackSpeed(loadedBytes) : null
+            setState((s) => ({
+              ...s, uploadPct: pct, uploadSpeed: speed ?? s.uploadSpeed,
+            }))
+          },
           controller.signal,
         )
       } catch (err) {
@@ -469,7 +526,10 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
                 <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
                 {state.uploadStageLabel}
               </span>
-              <span>{state.uploadPct}%</span>
+              <span>
+                {state.uploadSpeed ? `${state.uploadSpeed} · ` : ''}
+                {state.uploadPct}%
+              </span>
             </div>
             <ProgressBar pct={state.uploadPct} />
           </div>

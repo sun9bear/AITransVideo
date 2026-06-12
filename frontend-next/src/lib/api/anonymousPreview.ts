@@ -76,10 +76,11 @@ export function formatPreviewDuration(seconds: number): string {
   return `${seconds} 秒`
 }
 
-/** Upload a raw video file. Returns the upload response with admission info. */
+/** Upload a raw video file. Returns the upload response with admission info.
+ *  onProgress 第二参为已上传字节数（供调用方算实时速度），可忽略。 */
 export async function uploadPreviewVideo(
   file: File,
-  onProgress: (pct: number) => void,
+  onProgress: (pct: number, loadedBytes?: number) => void,
   signal?: AbortSignal,
 ): Promise<UploadResponse> {
   return new Promise((resolve, reject) => {
@@ -89,7 +90,7 @@ export async function uploadPreviewVideo(
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
-        onProgress(Math.round((e.loaded / e.total) * 100))
+        onProgress(Math.round((e.loaded / e.total) * 100), e.loaded)
       }
     }
 
