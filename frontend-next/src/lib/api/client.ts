@@ -100,7 +100,7 @@ export class ApiClient {
             ? stringifyErrorDetail(payload.detail)
           : payload && typeof payload === 'object' && 'error' in payload
             ? String(payload.error)
-          : `API request failed with status ${response.status}`
+          : statusFallbackMessage(response.status)
       throw new ApiError(message, response.status, payload)
     }
 
@@ -117,7 +117,18 @@ export class ApiClient {
       return null
     }
 
-    return JSON.parse(raw) as unknown
+    // 网关重启 / Cloudflare 5xx 时上游返回 HTML 错误页——不是 JSON 就不解析，
+    // 交给 status 分支生成中文兜底消息，而不是把 SyntaxError 抛给用户。
+    const contentType = response.headers.get('content-type') ?? ''
+    if (!contentType.includes('json')) {
+      return null
+    }
+
+    try {
+      return JSON.parse(raw) as unknown
+    } catch {
+      return null
+    }
   }
 
   private serializeBody(body: RequestBody, headers: Headers) {
@@ -148,9 +159,34 @@ function stringifyErrorDetail(detail: unknown): string {
   if (typeof detail === 'string') {
     return detail
   }
+  // 结构化业务错误（如 402 扣费门）的 detail 是 {error_code, message, ...}，
+  // 用户只需要 message。
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    return String((detail as { message: unknown }).message)
+  }
+  // FastAPI 422 校验错误的 detail 是数组，取首条 msg 而不是整串 JSON。
+  if (Array.isArray(detail)) {
+    const first = detail.find(
+      (item) => item && typeof item === 'object' && 'msg' in item,
+    ) as { msg?: unknown } | undefined
+    if (first?.msg) {
+      return `请求参数有误：${String(first.msg)}`
+    }
+  }
   try {
     return JSON.stringify(detail)
   } catch {
     return String(detail)
   }
+}
+
+function statusFallbackMessage(status: number): string {
+  if (status === 401) return '登录已过期，请重新登录'
+  if (status === 403) return '没有权限执行此操作'
+  if (status === 404) return '请求的资源不存在'
+  if (status === 502 || status === 503 || status === 504) {
+    return '服务暂时不可用，请稍后重试'
+  }
+  if (status >= 500) return '服务器开小差了，请稍后重试'
+  return `请求失败（${status}）`
 }
