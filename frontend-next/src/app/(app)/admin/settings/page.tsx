@@ -134,6 +134,13 @@ interface AdminSettings {
   // 互斥，后端保存校验 422（文案提示先切换 provider）。
   anonymous_express_enabled: boolean
   anonymous_express_daily_global_cap: number
+  // per-mode 三维度配额旋钮（2026-06-13）：legacy per-scope cap 之上，对每个
+  // lane 各自再限 ip/device/source 每日次数。per_ip_per_mode 是免费档"同 IP
+  // 每日次数"的实际绑定闸。full-body POST 同步必需（否则保存别的设置会把
+  // 这三个字段静默打回后端默认 1）。
+  anonymous_preview_cap_per_ip_per_mode: number
+  anonymous_preview_cap_per_device_per_mode: number
+  anonymous_preview_cap_per_source_per_mode: number
   // --- 分片上传（plan 2026-06-11 §3.7，chunked_upload_* 独立命名空间）---
   // 注册用户大文件（>95MB）经 CF Tunnel 的应用层分片上传。full-body POST
   // 语义同上——10 个字段全部进 state，否则保存其它设置会把后端这些字段
@@ -240,6 +247,10 @@ const DEFAULT_SETTINGS: AdminSettings = {
   //   anonymous_express_daily_global_cap = 50
   anonymous_express_enabled: false,
   anonymous_express_daily_global_cap: 50,
+  // per-mode 三维度旋钮默认值必须与 gateway/admin_settings.py 严格一致（全 1）：
+  anonymous_preview_cap_per_ip_per_mode: 1,
+  anonymous_preview_cap_per_device_per_mode: 1,
+  anonymous_preview_cap_per_source_per_mode: 1,
   // --- 分片上传默认值（plan 2026-06-11 §3.7）---
   // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致；
   // enabled 默认 false（部署后休眠，admin 灰度验证再打开）。
@@ -1267,6 +1278,45 @@ export default function AdminSettingsPage() {
           />
         </label>
 
+        {/* per-mode 三维度配额旋钮（2026-06-13）：在 legacy per-scope cap 之上，
+            对每个 lane（free/express）各自再限 ip/device/source 每日次数。
+            per_ip_per_mode 是免费档"同 IP 每日次数"的实际绑定闸——调高放宽
+            免费试用（注意它同时作用于 express，express 另有 50/日全局子闸兜底）。 */}
+        <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-3">
+          <div>
+            <p className="text-sm font-medium text-foreground">每模式每日次数上限（per-mode）</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              免费 / 快捷各 lane 独立计数。<strong>每 IP</strong> 是免费档"同 IP 每天能试几次"的实际限制——
+              想让用户多试就调高（如 3）；<strong>每设备 / 每视频</strong>防同一浏览器 / 同一视频刷量，默认 1。
+              范围 1–1000，保存即时生效。
+            </p>
+          </div>
+          {([
+            { key: 'anonymous_preview_cap_per_ip_per_mode', label: '每 IP' },
+            { key: 'anonymous_preview_cap_per_device_per_mode', label: '每设备' },
+            { key: 'anonymous_preview_cap_per_source_per_mode', label: '每视频' },
+          ] as const).map((f) => (
+            <label key={f.key} className="flex items-center gap-3">
+              <span className="text-sm text-foreground w-20">{f.label}</span>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                step={1}
+                value={settings[f.key]}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10)
+                  if (Number.isFinite(v) && v >= 1 && v <= 1000) {
+                    setSettings((s) => ({ ...s, [f.key]: v }))
+                  }
+                }}
+                className="w-24 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+              />
+              <span className="text-xs text-muted-foreground">次 / 天</span>
+            </label>
+          ))}
+        </div>
+
         <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
           <div>
             <p className="text-sm font-medium text-foreground">全局同时处理上限</p>
@@ -1503,6 +1553,12 @@ export default function AdminSettingsPage() {
               DEFAULT_SETTINGS.anonymous_express_enabled,
             anonymous_express_daily_global_cap:
               DEFAULT_SETTINGS.anonymous_express_daily_global_cap,
+            anonymous_preview_cap_per_ip_per_mode:
+              DEFAULT_SETTINGS.anonymous_preview_cap_per_ip_per_mode,
+            anonymous_preview_cap_per_device_per_mode:
+              DEFAULT_SETTINGS.anonymous_preview_cap_per_device_per_mode,
+            anonymous_preview_cap_per_source_per_mode:
+              DEFAULT_SETTINGS.anonymous_preview_cap_per_source_per_mode,
             // --- 分片上传 reset 规则（2026-06-11）---
             // 10 个 chunked_upload_* 字段全部渲染为可见控件（toggle + 9 个
             // 数字输入），「恢复默认」语义就是全部回出厂默认——经

@@ -19,6 +19,7 @@ import {
   getPreviewLimits,
   formatPreviewDuration,
   mapStatusReason,
+  mapUploadError,
   mapStageLabel,
   DEFAULT_PREVIEW_LIMITS,
   PreviewStatusError,
@@ -368,8 +369,8 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         uploadResp = body as unknown as UploadResponse
       } catch (err) {
         if (gen !== pollGenRef.current) return
-        const msg = err instanceof Error ? err.message : '上传失败，请重试'
-        setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
+        const raw = err instanceof Error ? err.message : '上传失败，请重试'
+        setState((s) => ({ ...s, step: 'error', errorMsg: mapUploadError(raw) || raw }))
         return
       }
     } else {
@@ -396,8 +397,8 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         )
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
-        const msg = err instanceof Error ? err.message : '上传失败，请重试'
-        setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
+        const raw = err instanceof Error ? err.message : '上传失败，请重试'
+        setState((s) => ({ ...s, step: 'error', errorMsg: mapUploadError(raw) || raw }))
         return
       }
     }

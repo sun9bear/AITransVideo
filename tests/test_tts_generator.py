@@ -499,7 +499,7 @@ def test_tts_generator_does_not_fallback_from_cosyvoice_to_mimo(
 
     attempted_providers: list[str] = []
 
-    def _fake_generate_one(segment, output_dir, *, provider=None):
+    def _fake_generate_one(segment, output_dir, *, provider=None, **kwargs):
         attempted_providers.append(str(provider))
         if len(attempted_providers) == 1:
             raise TTSGenerationError("primary failed")
@@ -548,7 +548,7 @@ def test_tts_generator_retries_invalid_cosyvoice_voice_with_safe_default(
         ),
     )
 
-    def _fake_cosyvoice_synthesize(*, text: str, voice: str, model: str = "cosyvoice-v3-flash", api_key=None) -> bytes:
+    def _fake_cosyvoice_synthesize(*, text: str, voice: str, model: str = "cosyvoice-v3-flash", api_key=None, **kwargs) -> bytes:
         del text, model, api_key
         attempts.append(voice)
         if voice == "longsanshu_v3":
@@ -589,7 +589,7 @@ def test_tts_generator_prefers_explicit_cosyvoice_builtin_voice_id_over_selector
     def _unexpected_resolver(req):
         raise AssertionError("explicit builtin cosyvoice voice_id should bypass resolver")
 
-    def _fake_cosyvoice_synthesize(*, text: str, voice: str, model: str = "cosyvoice-v3-flash", api_key=None) -> bytes:
+    def _fake_cosyvoice_synthesize(*, text: str, voice: str, model: str = "cosyvoice-v3-flash", api_key=None, **kwargs) -> bytes:
         del text, model, api_key
         attempts.append(voice)
         return wav_bytes
@@ -605,6 +605,121 @@ def test_tts_generator_prefers_explicit_cosyvoice_builtin_voice_id_over_selector
 
     assert result.duration_ms > 0
     assert attempts == ["longshu_v3"]
+
+
+def test_cosyvoice_speaker_cache_stores_fallback_voice_not_rejected_voice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A' regression: when the resolver pick is rejected by the provider and we fall
+    back to the safe default, the speaker cache must hold the *actually used* default
+    voice — never the rejected one.  Otherwise every later segment of the same speaker
+    hits the cache, re-tries the rejected voice, and falls back again on every segment.
+    """
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+    import services.tts.voice_match_resolver as resolver_module
+    from services.tts.voice_match_types import VoiceMatchResult
+
+    wav_bytes = _build_wav_bytes(duration_ms=700)
+    attempts: list[str] = []
+
+    monkeypatch.setattr(
+        resolver_module,
+        "resolve_voice_match",
+        lambda req: VoiceMatchResult(
+            voice_id="longsanshu_v3", match_reason="test", match_score=0.60,
+            match_confidence="medium", backup_voices=(),
+        ),
+    )
+
+    def _fake_cosyvoice_synthesize(*, text: str, voice: str, **kwargs) -> bytes:
+        del text, kwargs
+        attempts.append(voice)
+        if voice == "longsanshu_v3":
+            raise cosyvoice_provider_module.CosyVoiceTTSError(
+                "DashScope SDK returned None for voice=longsanshu_v3 — voice does not "
+                "match the selected model."
+            )
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_cosyvoice_synthesize)
+    monkeypatch.setattr(tts_generator_module, "_ffprobe_duration_ms", lambda _path: 700)
+
+    generator = TTSGenerator(TTSConfig(api_key="secret"))
+
+    seg1 = _build_segment(segment_id=1)
+    seg1.gender = "male"
+    generator._generate_one(seg1, str(tmp_path / "tts"), provider="cosyvoice")
+
+    # The cache must hold the *default* (actually used) voice, NOT the rejected one.
+    cached_voice, _cached_conf = generator._speaker_voice_cache["speaker_a"]
+    assert cached_voice == cosyvoice_provider_module.DEFAULT_VOICE
+    assert cached_voice != "longsanshu_v3"
+
+    seg2 = _build_segment(segment_id=2)
+    seg2.gender = "male"
+    generator._generate_one(seg2, str(tmp_path / "tts"), provider="cosyvoice")
+
+    # The 2nd same-speaker segment hits the cache → default voice directly, with NO
+    # second rejected-then-fallback round.  (Before the fix the cache held the rejected
+    # voice, so attempts would be longsanshu_v3, DEFAULT, longsanshu_v3, DEFAULT.)
+    assert attempts == [
+        "longsanshu_v3",
+        cosyvoice_provider_module.DEFAULT_VOICE,
+        cosyvoice_provider_module.DEFAULT_VOICE,
+    ]
+
+
+def test_cosyvoice_does_not_cache_resolver_match_when_gender_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A' regression: a gender-less resolver match must NOT poison the speaker cache,
+    so a later segment of the same speaker that *does* carry gender can still
+    re-resolve to a gender-appropriate voice ("首段无 gender 后段有 gender")."""
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+    import services.tts.voice_match_resolver as resolver_module
+    from services.tts.voice_match_types import VoiceMatchResult
+
+    wav_bytes = _build_wav_bytes(duration_ms=700)
+    resolved: list[str] = []
+
+    def _resolver(req):
+        if req.gender:
+            resolved.append("gendered")
+            return VoiceMatchResult(
+                voice_id="longsanshu_v3", match_reason="gendered", match_score=0.9,
+                match_confidence="high", backup_voices=(),
+            )
+        resolved.append("genderless")
+        return VoiceMatchResult(
+            voice_id="longwan_v3", match_reason="genderless_fallback", match_score=0.3,
+            match_confidence="low", backup_voices=(),
+        )
+
+    monkeypatch.setattr(resolver_module, "resolve_voice_match", _resolver)
+
+    def _fake_cosyvoice_synthesize(*, text: str, voice: str, **kwargs) -> bytes:
+        del text, voice, kwargs
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_cosyvoice_synthesize)
+    monkeypatch.setattr(tts_generator_module, "_ffprobe_duration_ms", lambda _path: 700)
+
+    generator = TTSGenerator(TTSConfig(api_key="secret"))
+
+    seg1 = _build_segment(segment_id=1)
+    seg1.gender = ""  # no gender signal — gender-less fallback must not be cached
+    generator._generate_one(seg1, str(tmp_path / "tts"), provider="cosyvoice")
+    assert "speaker_a" not in generator._speaker_voice_cache
+
+    seg2 = _build_segment(segment_id=2)
+    seg2.gender = "male"
+    generator._generate_one(seg2, str(tmp_path / "tts"), provider="cosyvoice")
+
+    # 2nd segment re-resolved (cache miss) and only now caches the gendered voice.
+    assert resolved == ["genderless", "gendered"]
+    assert generator._speaker_voice_cache["speaker_a"][0] == "longsanshu_v3"
 
 
 def test_load_tts_config_reads_retry_settings(
@@ -664,7 +779,7 @@ def test_cosyvoice_resolver_path_populates_selected_voice_and_confidence(
         ),
     )
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         attempts.append(voice)
         return wav_bytes
 
@@ -690,7 +805,7 @@ def test_cosyvoice_explicit_builtin_voice_populates_selected_voice(
 
     wav_bytes = _build_wav_bytes(duration_ms=600)
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         return wav_bytes
 
     monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
@@ -731,7 +846,7 @@ def test_cosyvoice_childlike_segment_routes_to_child_voice(
         ),
     )
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         attempts.append(voice)
         return wav_bytes
 
@@ -776,7 +891,7 @@ def test_cosyvoice_childlike_inferred_from_voice_description(
 
     monkeypatch.setattr(resolver_module, "resolve_voice_match", _fake_resolver)
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         attempts.append(voice)
         return wav_bytes
 
@@ -809,7 +924,7 @@ def test_cosyvoice_result_written_back_to_segment(
     segment.age_group = "middle"
     segment.persona_style = "warm"
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         return wav_bytes
 
     monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
@@ -837,7 +952,7 @@ def test_non_childlike_adult_not_affected(
     segment.age_group = "elderly"
     segment.voice_description = "沧桑岁月的老人声"
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         return wav_bytes
 
     monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
@@ -1184,7 +1299,7 @@ def test_speaker_cache_reuses_auto_matched_voice(
     wav_bytes = _build_wav_bytes(duration_ms=600)
     voice_selections: list[str] = []
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         voice_selections.append(voice)
         return wav_bytes
 
@@ -1222,7 +1337,7 @@ def test_speaker_cache_does_not_override_explicit_voice(
     wav_bytes = _build_wav_bytes(duration_ms=600)
     voice_selections: list[str] = []
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         voice_selections.append(voice)
         return wav_bytes
 
@@ -1280,7 +1395,7 @@ def test_different_speakers_get_different_cached_voices(
 
     wav_bytes = _build_wav_bytes(duration_ms=600)
 
-    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None, **kwargs):
         return wav_bytes
 
     monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)

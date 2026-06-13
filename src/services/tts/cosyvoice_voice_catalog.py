@@ -86,10 +86,13 @@ _COSYVOICE_V3_FLASH_VOICES: tuple[dict[str, str | bool], ...] = (
     {"voice_id": "longyichen_v3", "name": "龙逸尘", "category": "有声书", "traits": "洒脱活力男", "age": "20~30", "language": "中文（普通话）、英文", "gender": "male", "matchable": True},
     {"voice_id": "longlaobo_v3", "name": "龙老伯", "category": "有声书", "traits": "沧桑岁月爷", "age": "60", "language": "中文（普通话）、英文", "gender": "male", "matchable": True},
     {"voice_id": "longlaoyi_v3", "name": "龙老姨", "category": "有声书", "traits": "烟火从容阿姨", "age": "60", "language": "中文（普通话）、英文", "gender": "female", "matchable": True},
-    # --- 短视频配音 ---
-    {"voice_id": "longjiqi_v3", "name": "龙机器", "category": "短视频配音", "traits": "呆萌机器人", "age": "20~30", "language": "中文（普通话）、英文", "gender": "male", "matchable": True},
-    {"voice_id": "longhouge_v3", "name": "龙猴哥", "category": "短视频配音", "traits": "经典猴哥", "age": "20~25", "language": "中文（普通话）、英文", "gender": "male", "matchable": True},
-    {"voice_id": "longdaiyu_v3", "name": "龙黛玉", "category": "短视频配音", "traits": "娇率才女音", "age": "15~25", "language": "中文（普通话）、英文", "gender": "female", "matchable": True},
+    # --- 短视频配音 (角色音色, matchable=False) ---
+    # 角色/拟人音色（猴哥/机器人/黛玉）不进自动匹配池：reranker 会对"高能量男声"等画像把
+    # 角色音打高分，导致 Joe Rogan 这类普通成年男声被错配成孙悟空风音色，体验出戏。
+    # 与方言/出海营销同处理；DB 由 seed_voice_catalog.py 从本文件 seed，必须同步保持 False。
+    {"voice_id": "longjiqi_v3", "name": "龙机器", "category": "短视频配音", "traits": "呆萌机器人", "age": "20~30", "language": "中文（普通话）、英文", "gender": "male", "matchable": False},
+    {"voice_id": "longhouge_v3", "name": "龙猴哥", "category": "短视频配音", "traits": "经典猴哥", "age": "20~25", "language": "中文（普通话）、英文", "gender": "male", "matchable": False},
+    {"voice_id": "longdaiyu_v3", "name": "龙黛玉", "category": "短视频配音", "traits": "娇率才女音", "age": "15~25", "language": "中文（普通话）、英文", "gender": "female", "matchable": False},
     # --- 直播带货 ---
     {"voice_id": "longanran_v3", "name": "龙安燃", "category": "直播带货", "traits": "活泼质感女", "age": "30~40", "language": "中文（普通话）、英文", "gender": "female", "matchable": True},
     {"voice_id": "longanxuan_v3", "name": "龙安宣", "category": "直播带货", "traits": "经典直播女", "age": "30~40", "language": "中文（普通话）、英文", "gender": "female", "matchable": True},

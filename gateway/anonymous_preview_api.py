@@ -55,7 +55,9 @@ from anonymous_preview_intake_wiring import (
     express_subgate_key,
     peek_counter_keys,
     peek_mode_counter_keys,
+    per_mode_cap_for_scope_key,
     resolve_express_global_cap,
+    resolve_per_mode_caps,
     run_intake_and_save,
 )
 from anonymous_preview_limits import resolve_apf_limits
@@ -337,10 +339,13 @@ async def ad8_peek_precheck(
             },
         )
         _ip_mode_count = int((_ip_mode_row.fetchone() or [0])[0])
-        if _ip_mode_count >= PER_SCOPE_PER_MODE_DAILY_CAP:
+        # per-mode ip cap：admin 旋钮（2026-06-13），与权威侧
+        # LaneAwareCounterStore 共用 per_mode_cap_for_scope_key 推导。
+        _ip_mode_cap = per_mode_cap_for_scope_key(_ip_mode_key, resolve_per_mode_caps())
+        if _ip_mode_count >= _ip_mode_cap:
             logger.info(
                 "anon_upload: AD-8 peek per-mode ip cap reached "
-                "count=%d lane=%s", _ip_mode_count, lane,
+                "count=%d cap=%d lane=%s", _ip_mode_count, _ip_mode_cap, lane,
             )
             return JSONResponse(status_code=429, content={"error": "rate_limited"})
     except RateLimitCounterUnavailable:
@@ -1088,6 +1093,9 @@ async def _charge_retry_quota(
         recharge_rows = [
             r for r in (audit.get("quota_mode_rows") or []) if isinstance(r, dict)
         ]
+    # per-mode 行重新取额用 admin 旋钮 cap（2026-06-13），按维度（ip/device/
+    # source）各取——与 intake/peek 共用 per_mode_cap_for_scope_key 推导。
+    _per_mode_caps = resolve_per_mode_caps()
     acquired: list[dict] = []
     for row in recharge_rows:
         scope_key = str(row.get("scope_key") or "")
@@ -1096,7 +1104,8 @@ async def _charge_retry_quota(
         if not (scope_key and mode and day):
             continue
         if not await _try_acquire_usage_row(
-            db, scope_key, mode, day, PER_SCOPE_PER_MODE_DAILY_CAP
+            db, scope_key, mode, day,
+            per_mode_cap_for_scope_key(scope_key, _per_mode_caps),
         ):
             for done in acquired:
                 await _decrement_usage_row(

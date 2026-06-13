@@ -81,6 +81,11 @@ _APF_LIMIT_BOUNDS = {
 # 钉死为 free 6 旋钮契约（dict 整表相等断言），扩表会破坏既有契约。
 _ANON_EXPRESS_CAP_BOUNDS = (1, 100000)
 
+# APF per-mode 三维度配额旋钮边界（2026-06-13 项目主裁定，原硬编码常量改旋钮）。
+# 同样不进 _APF_LIMIT_BOUNDS（保持那张表的 free 6 旋钮契约不破）。上界 1000：
+# 高于此对单 IP/设备/视频已无防滥用意义，且 express 另有 50/日全局子闸兜底。
+_ANON_PER_MODE_CAP_BOUNDS = (1, 1000)
+
 # 分片上传旋钮边界（plan 2026-06-11 §3.7）：{field: (min, max)}。
 # chunk_mb 上界 80 是硬约束（CF 免费版单请求体 100MB，留余量）；
 # 其余下界 ≥1 防误设 0（等效误关停难排查——紧急关停用 chunked_upload_enabled
@@ -378,6 +383,23 @@ class AdminSettings(BaseModel):
     anonymous_preview_cap_per_device: int = 1
     anonymous_preview_cap_per_source: int = 1
 
+    # --- APF per-mode 三维度配额旋钮（2026-06-13 项目主裁定）---
+    # 原为硬编码常量 PER_SCOPE_PER_MODE_DAILY_CAP=1（T2），现改 admin 旋钮，
+    # 可热调。语义：在既有 legacy per-scope cap 之上，对 {free,express} 每个
+    # lane 各自再限 ip/device/source 每日次数。判定顺序：总闸 → express 子闸
+    # → legacy per-scope → 本 per-mode 层（任一拒即拒）。
+    #
+    # 默认全 1 = 保持 T2 上线后的现行为（不静默改 prod 行为）。调参指引：
+    #   - per_ip_per_mode 是免费档"同 IP 每日次数"的实际绑定闸——调高即放宽
+    #     免费试用（如设 3 ≈ 恢复 T2 前的 1/cookie+3/IP 体验）。注意它同时
+    #     作用于 express（贵 lane），express 另有 anonymous_express_daily_global_cap
+    #     50/日全局子闸兜底成本。
+    #   - per_device / per_source 默认 1 防同 cookie / 同视频刷量。
+    # 消费侧：resolve_per_mode_caps()（wiring）每请求重读，热生效。
+    anonymous_preview_cap_per_ip_per_mode: int = 1
+    anonymous_preview_cap_per_device_per_mode: int = 1
+    anonymous_preview_cap_per_source_per_mode: int = 1
+
     # --- APF 匿名 Express 预览 lane（plan 2026-06-12 anonymous-express-preview T0）---
     # express lane 主开关：lane resolver express 优先于 free。开启后匿名预览
     # 走真实快捷版管线（Pass 1-3 + CosyVoice TTS），单次成本远高于 free lane。
@@ -464,6 +486,26 @@ class AdminSettings(BaseModel):
         if not (low <= int(v) <= high):
             raise ValueError(
                 f"anonymous_express_daily_global_cap 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator(
+        "anonymous_preview_cap_per_ip_per_mode",
+        "anonymous_preview_cap_per_device_per_mode",
+        "anonymous_preview_cap_per_source_per_mode",
+    )
+    @classmethod
+    def validate_anonymous_per_mode_cap_bounds(cls, v: int, info) -> int:
+        """per-mode 三维度旋钮边界（2026-06-13）：[1, 1000]。
+
+        下界 ≥1 防误设 0（cap=0 → count>=0 恒真 → 该维度拒死所有 intake，
+        等效误关停且极难排查——要关 lane 用主开关）；上界 1000 见
+        ``_ANON_PER_MODE_CAP_BOUNDS`` 注释。
+        """
+        low, high = _ANON_PER_MODE_CAP_BOUNDS
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"{info.field_name} 必须在 [{low}, {high}]，收到 {v!r}"
             )
         return int(v)
 
