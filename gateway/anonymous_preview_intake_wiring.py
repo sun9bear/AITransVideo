@@ -66,17 +66,29 @@ __all__ = [
     "mode_scope_key",
     "express_subgate_key",
     "resolve_express_global_cap",
+    "resolve_per_mode_caps",
+    "per_mode_cap_for_scope_key",
     "LaneAwareCounterStore",
     "ANON_PREVIEW_COUNTER_SCOPE",
     "PER_SCOPE_PER_MODE_DAILY_CAP",
+    "PER_MODE_CAP_DIMENSIONS",
 ]
 
 logger = logging.getLogger(__name__)
 
 # plan 2026-06-12 §B 第 2 层（D3）：per-scope per-mode 配额 = ip/device/
-# source × {free,express} 各 1 次/日。常量而非旋钮——plan 未给 per-mode
-# cap 提供 admin 字段；放宽需改 plan。
+# source × {free,express}。原为硬编码常量；2026-06-13 项目主裁定改为
+# 三个 admin 旋钮（anonymous_preview_cap_per_{ip,device,source}_per_mode），
+# 本常量降级为 admin 读取失败时的 fail-safe 默认值（保持原 1 次/日行为）。
 PER_SCOPE_PER_MODE_DAILY_CAP = 1
+
+# per-mode 层的三个维度——scope_key 前缀 → admin 字段名。维度判定靠
+# scope_key 第一段（'ip'/'device'/'source'），与 adapter 复合键前缀一致。
+PER_MODE_CAP_DIMENSIONS = {
+    "ip": "anonymous_preview_cap_per_ip_per_mode",
+    "device": "anonymous_preview_cap_per_device_per_mode",
+    "source": "anonymous_preview_cap_per_source_per_mode",
+}
 
 # anonymous_preview_daily_usage.scope 列的唯一合法值——权威计数器
 # （run_intake_and_save → PgRateLimitCounterStore）和 AD-8 peek SELECT
@@ -167,6 +179,42 @@ def resolve_express_global_cap() -> int:
         return 0
 
 
+def resolve_per_mode_caps() -> dict[str, int]:
+    """per-mode 三维度 cap（admin 旋钮，2026-06-13）。
+
+    返回 ``{"ip": int, "device": int, "source": int}``。读取任何异常 →
+    **fail-safe** 回落 ``PER_SCOPE_PER_MODE_DAILY_CAP``（1，保持原行为）——
+    注意与 express 子闸的 fail-closed=0 不同：per-mode cap 读失败若回 0
+    会把**所有** intake 拒死（count>=0 恒真），所以这里 fail-safe（数值边界
+    故障不能让漏斗整体不可用，同 resolve_apf_limits 语义）。
+    """
+    try:
+        from admin_settings import load_settings
+
+        adm = load_settings()
+        return {
+            dim: int(getattr(adm, field))
+            for dim, field in PER_MODE_CAP_DIMENSIONS.items()
+        }
+    except Exception as exc:  # noqa: BLE001 — fail-safe（非 fail-closed）
+        logger.warning(
+            "anon_intake: failed to read per-mode caps — fail-safe default %d: %s",
+            PER_SCOPE_PER_MODE_DAILY_CAP, exc,
+        )
+        return {dim: PER_SCOPE_PER_MODE_DAILY_CAP for dim in PER_MODE_CAP_DIMENSIONS}
+
+
+def per_mode_cap_for_scope_key(scope_key: str, caps: dict[str, int]) -> int:
+    """按 scope_key 第一段（ip/device/source）选对应 per-mode cap。
+
+    未知维度回落 PER_SCOPE_PER_MODE_DAILY_CAP（防御：理论上只会是三维度之一）。
+    AD-8 peek、LaneAwareCounterStore._companion、retry recharge 共用本映射，
+    保证三处取的 cap 一致。
+    """
+    dim = scope_key.split(":", 1)[0]
+    return int(caps.get(dim, PER_SCOPE_PER_MODE_DAILY_CAP))
+
+
 class LaneAwareCounterStore:
     """配额三层叠加 store（plan 2026-06-12 §B v4：既有不动、叠加新增）。
 
@@ -183,7 +231,8 @@ class LaneAwareCounterStore:
     * ``global:{day}``：legacy 先过（总闸）；lane=express 再过 express
       全局子闸（cap=anonymous_express_daily_global_cap）。free 无子闸。
     * ``ip:/device:/source:``：legacy 先过（既有 per-scope cap）；再过
-      per-mode 行（cap=PER_SCOPE_PER_MODE_DAILY_CAP=1）。
+      per-mode 行（cap=admin 旋钮 anonymous_preview_cap_per_{维度}_per_mode，
+      默认 1；2026-06-13 起可热调）。
     * 任一层拒 → 本次已 acquire 的行回滚（拒绝不落计数）；adapter 的
       多 key 回滚（decrement）双行同步回退。
 
@@ -198,11 +247,17 @@ class LaneAwareCounterStore:
         *,
         lane: str,
         express_global_cap: int,
+        per_mode_caps: dict[str, int] | None = None,
     ) -> None:
         self._legacy = legacy_store
         self._mode = mode_store
         self._lane = lane
         self._express_cap = int(express_global_cap)
+        # per-mode 三维度 cap（admin 旋钮，2026-06-13）。None → fail-safe
+        # 默认 1（保持原行为）。
+        self._per_mode_caps = per_mode_caps or {
+            dim: PER_SCOPE_PER_MODE_DAILY_CAP for dim in PER_MODE_CAP_DIMENSIONS
+        }
         # plan §E 配额退还需要的可退行清单：本次 intake 实际持有的
         # per-scope per-mode 行（ip/device/source × lane）。**刻意不含**
         # express 全局子闸与 legacy 总闸行（失败不退，防刷失败穿透成本闸）。
@@ -215,7 +270,8 @@ class LaneAwareCounterStore:
             if self._lane == "express":
                 return (mode_scope_key(key, "express"), self._express_cap)
             return None
-        return (mode_scope_key(key, self._lane), PER_SCOPE_PER_MODE_DAILY_CAP)
+        cap = per_mode_cap_for_scope_key(key, self._per_mode_caps)
+        return (mode_scope_key(key, self._lane), cap)
 
     def _safe_legacy_decrement(self, key: str) -> None:
         try:
@@ -505,6 +561,7 @@ def run_intake_and_save(
         express_global_cap=(
             resolve_express_global_cap() if mode == "express" else 0
         ),
+        per_mode_caps=resolve_per_mode_caps(),
     )
 
     # Build config.
