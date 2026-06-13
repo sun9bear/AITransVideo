@@ -248,16 +248,19 @@ def _job_constructor_calls(tree: ast.AST) -> list[ast.Call]:
     ]
 
 
-def test_job_intercept_imports_registry_defaults() -> None:
+def test_job_intercept_imports_registry_helpers() -> None:
+    """create-path now RESOLVES the pair (PR-A part 2 §3), so job_intercept must
+    import the resolver + the default-pair profile from the registry (the single
+    source of truth) rather than the bare scalar default constants."""
     tree = _parse(JOB_INTERCEPT_REL)
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "services.language_registry":
             imported |= {alias.name for alias in node.names}
     assert {
-        "DEFAULT_SOURCE_LANGUAGE",
-        "DEFAULT_TARGET_LANGUAGE",
-        "DEFAULT_LANGUAGE_PAIR",
+        "resolve_language_pair",
+        "DEFAULT_LANGUAGE_PAIR_PROFILE",
+        "SUPPORTED_LANGUAGE_PAIRS",
     } <= imported
 
 
@@ -302,22 +305,22 @@ def _classify_job_calls(tree: ast.AST) -> tuple[list[ast.Call], list[ast.Call]]:
     return create_calls, copy_calls
 
 
-def test_create_path_sets_all_three_to_registry_defaults() -> None:
-    """create-path Job() must set ALL THREE language kwargs to the registry
-    default constants (not just language_pair)."""
+def test_create_path_sets_all_three_from_resolved_pair() -> None:
+    """create-path Job() must set ALL THREE language kwargs from the resolved
+    pair profile (PR-A part 2 §3): ``resolved_pair.<field>`` — NOT the bare
+    default constants. This persists an explicitly-requested pair (e.g.
+    zh-CN->en) while an absent request still resolves to the GA default."""
     create_calls, _ = _classify_job_calls(_parse(JOB_INTERCEPT_REL))
     assert len(create_calls) == 1, f"expected 1 create-path Job(), found {len(create_calls)}"
     call = create_calls[0]
-    expected_const = {
-        "source_language": "DEFAULT_SOURCE_LANGUAGE",
-        "target_language": "DEFAULT_TARGET_LANGUAGE",
-        "language_pair": "DEFAULT_LANGUAGE_PAIR",
-    }
-    for field_name, const_name in expected_const.items():
+    for field_name in LANG_FIELDS:
         value = _kw_value(call, field_name)
-        assert isinstance(value, ast.Name) and value.id == const_name, (
-            f"create-path Job() {field_name} must be {const_name}"
-        )
+        assert (
+            isinstance(value, ast.Attribute)
+            and value.attr == field_name
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "resolved_pair"
+        ), f"create-path Job() {field_name} must be resolved_pair.{field_name}"
 
 
 def test_copy_as_new_copies_all_three_from_source_row() -> None:

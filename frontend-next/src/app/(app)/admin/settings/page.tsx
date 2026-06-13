@@ -160,6 +160,12 @@ interface AdminSettings {
   chunked_upload_anonymous_enabled: boolean
   chunked_upload_anonymous_ttl_hours: number
   chunked_upload_anonymous_daily_gb: number
+  // --- 多语言互翻 language pairs（plan 2026-06-13 v3 PR-A part 2 §1/§7）---
+  // 全量 POST 契约：三字段必须同时进 interface + DEFAULT_SETTINGS + state，
+  // 否则保存时会被后端 Pydantic 默认静默覆盖（关掉非默认 pair）。
+  language_pairs_enabled: boolean
+  language_pairs_user_allowlist_enabled: boolean
+  language_pairs_allowlist: string[]
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -270,6 +276,10 @@ const DEFAULT_SETTINGS: AdminSettings = {
   chunked_upload_anonymous_enabled: false,
   chunked_upload_anonymous_ttl_hours: 6,
   chunked_upload_anonymous_daily_gb: 5,
+  // --- 多语言互翻 language pairs 默认值（必须与 gateway/admin_settings.py 严格一致）---
+  language_pairs_enabled: false,
+  language_pairs_user_allowlist_enabled: true,
+  language_pairs_allowlist: [],
 }
 
 // 分片上传数字旋钮元数据：边界与 gateway _CHUNKED_UPLOAD_BOUNDS 一致。
@@ -951,6 +961,72 @@ export default function AdminSettingsPage() {
         </label>
       </SettingSection>
 
+      {/* 多语言互翻 language pairs（PR-A part 2 §1/§7） */}
+      <SettingSection
+        title="多语言支持（内测 · 管线未就绪，勿在生产开启）"
+        description="控制非默认语言方向（首发：中文 → 英文）在前端入口的可见性。默认方向「英文 → 中文」永远可用，不受这些开关影响。⚠️ 端到端管线尚未适配非默认方向（翻译方向 / 音色池去中文 / 字幕 per-script 在后续 PR-W/CD/F）——开启主开关只会让该方向在创建页显示为「即将上线」（不可选），创建仍被后端 409 拦截（pipeline_ready 代码硬闸，翻开关绕不过）。真正放行须等管线 PR 上线并改 registry 常量。"
+      >
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.language_pairs_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, language_pairs_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              启用非默认语言方向
+              <span className="ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] bg-[color:var(--ochre)]/20 text-[color:var(--ochre)]">
+                内测 · 受控启用
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              主开关。关闭时只有「英文 → 中文」可用（零回归）。开启后，非默认方向按下方白名单规则授权。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.language_pairs_user_allowlist_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, language_pairs_user_allowlist_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">白名单模式</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启时仅白名单内的 user_id（及管理员）可用非默认方向；关闭时所有登录用户都可用。
+              <strong className="text-[color:var(--ochre)]">空白名单 + 开启 = 仅管理员可用</strong>（双保险）。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">白名单 user_id（每行一个）</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              仅在「白名单模式」开启时生效。填入允许使用非默认方向的用户 ID（与 CosyVoice 克隆白名单同口径，用 user_id 而非邮箱）。
+            </p>
+          </div>
+          <textarea
+            rows={4}
+            value={settings.language_pairs_allowlist.join('\n')}
+            onChange={(e) =>
+              setSettings((s) => ({
+                ...s,
+                language_pairs_allowlist: e.target.value
+                  .split('\n')
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+              }))
+            }
+            placeholder="00000000-0000-0000-0000-000000000001"
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+          />
+        </label>
+      </SettingSection>
+
       {/* Phase D — Whisper 字幕时间对齐 */}
       <SettingSection
         title="Whisper 字幕时间对齐"
@@ -1286,7 +1362,7 @@ export default function AdminSettingsPage() {
           <div>
             <p className="text-sm font-medium text-foreground">每模式每日次数上限（per-mode）</p>
             <p className="text-xs text-muted-foreground mt-1">
-              免费 / 快捷各 lane 独立计数。<strong>每 IP</strong> 是免费档"同 IP 每天能试几次"的实际限制——
+              免费 / 快捷各 lane 独立计数。<strong>每 IP</strong> 是免费档“同 IP 每天能试几次”的实际限制——
               想让用户多试就调高（如 3）；<strong>每设备 / 每视频</strong>防同一浏览器 / 同一视频刷量，默认 1。
               范围 1–1000，保存即时生效。
             </p>

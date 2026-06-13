@@ -145,6 +145,7 @@ from job_intercept import (
     intercept_delete_job_v2,
     intercept_get_job,
     intercept_job_subresource,
+    intercept_language_facts,
     intercept_list_jobs,
     intercept_rename_job,
     intercept_suggested_copy_name,
@@ -673,6 +674,10 @@ app.patch(
 # Suggested "save as new copy" name for the edit-page modal (plan §6.4 / D17).
 # Pure read; the user may edit the suggestion before committing.
 app.get("/gateway/jobs/{job_id}/suggested-copy-name")(intercept_suggested_copy_name)
+
+# Language directions the caller may pick (PR-A part 2 §5). Gateway-owned
+# (entitlement-filtered + display labels), not a Job API proxy. Read-only.
+app.get("/api/language-facts")(intercept_language_facts)
 
 
 # --- Job API routes ---

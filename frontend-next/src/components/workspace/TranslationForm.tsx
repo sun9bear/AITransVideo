@@ -18,6 +18,11 @@ import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/bi
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
 import { getVoiceSelectionPricing } from "@/lib/api/voiceSelection"
 import {
+  getLanguageFacts,
+  GA_DEFAULT_LANGUAGE_FACT,
+  type LanguagePairFact,
+} from "@/lib/api/languageFacts"
+import {
   getChunkedUploadLimits,
   uploadFileInChunks,
   type ChunkedUploadLimits,
@@ -47,6 +52,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
   const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart" | "free">("express")
+  // PR-A part 2 §7: language direction. Facts are entitlement-filtered by the
+  // gateway (default-only for most users → selector stays hidden); the selector
+  // appears only when the account has access to a 内测 direction.
+  const [languageFacts, setLanguageFacts] = useState<LanguagePairFact[]>([GA_DEFAULT_LANGUAGE_FACT])
+  const [languagePairKey, setLanguagePairKey] = useState<string>(GA_DEFAULT_LANGUAGE_FACT.pair_key)
   // Phase 2a free tier — entry gated by NEXT_PUBLIC_ENABLE_FREE_TIER (internal
   // until the consent/legal launch gate clears). Mirrors POST_EDIT_ENABLED.
   const freeTierEnabled = process.env.NEXT_PUBLIC_ENABLE_FREE_TIER === "1"
@@ -203,6 +213,13 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     getChunkedUploadLimits()
       .then((l) => setChunkedLimits(l))
       .catch(() => setChunkedLimits(null))
+    // PR-A part 2 §7: language directions the account may pick. Fail-closed in
+    // the client (getLanguageFacts → GA default only on any error). The GA
+    // default pair_key is always present, so the initial selection stays valid;
+    // handleSubmit also falls back to the default for any unmatched key.
+    getLanguageFacts()
+      .then((facts) => setLanguageFacts(facts.length > 0 ? facts : [GA_DEFAULT_LANGUAGE_FACT]))
+      .catch(() => setLanguageFacts([GA_DEFAULT_LANGUAGE_FACT]))
   }, [])
 
   // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
@@ -230,6 +247,15 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     }
     setSubmitState("submitting")
     setCreditGateError(null)
+    // PR-A part 2 §7: resolve the selected direction. Only send the language
+    // fields for a NON-default pair, so default submissions stay byte-identical
+    // to pre-i18n requests (zero-regression).
+    const selectedPair =
+      languageFacts.find((f) => f.pair_key === languagePairKey) ?? GA_DEFAULT_LANGUAGE_FACT
+    // 只在「非默认方向 且 管线就绪」时才发送语言字段。未就绪（即将上线）的方向在
+    // selector 里已 disabled，这里再加一道护栏：即使被强行选中也回落默认，与后端
+    // 的 409 language_pair_not_yet_available 硬闸保持一致。
+    const sendPair = !selectedPair.is_default && selectedPair.pipeline_ready
     try {
       const createdJob = await submitTranslationJob({
         speakers,
@@ -245,6 +271,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         // checkbox (mode switched away then back) can't trigger a paid clone.
         expressAutoVoiceClone: serviceMode === "express" ? expressAutoVoiceClone : false,
         freeVoiceRightsConfirmed: serviceMode === "free" ? freeVoiceRightsConfirmed : false,
+        sourceLanguage: sendPair ? selectedPair.source_language : undefined,
+        targetLanguage: sendPair ? selectedPair.target_language : undefined,
       })
       setActiveJobs((prev) => [createdJob, ...prev])
       setSubmitState("success")
@@ -779,6 +807,30 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                 管理员已开启“弱匹配确认”策略：如果系统在你的个人音色库中发现可能匹配的音色（但相似度不够强），任务会暂停在音色审核页面，等你确认是否复用，再继续后续步骤。复用个人音色不消耗克隆点；如果不想复用，可以选择官方音色或重新克隆。
               </p>
             </section>
+          ) : null}
+
+          {/* Language direction (PR-A part 2 §7). Rendered only when the account
+              has access to a non-default direction (内测); default-only users see
+              no change at all (zero-regression UI). */}
+          {languageFacts.length > 1 ? (
+            <div className="space-y-2">
+              <span className="text-xs font-medium text-muted-foreground block">语言方向</span>
+              <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                <select
+                  className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
+                  value={languagePairKey}
+                  onChange={(e) => setLanguagePairKey(e.target.value)}
+                  disabled={isBlockedByConcurrency || submitState === "submitting"}
+                >
+                  {languageFacts.map((f) => (
+                    <option key={f.pair_key} value={f.pair_key} disabled={!f.pipeline_ready}>
+                      {f.label}
+                      {f.is_default ? "" : f.pipeline_ready ? "（内测）" : "（即将上线）"}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
           ) : null}
 
           {/* Advanced options (转录方案 / 说话人数) — temporarily hidden per

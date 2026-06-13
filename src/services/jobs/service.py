@@ -158,6 +158,8 @@ class JobService:
         speakers: str = "auto",
         voice_a: str | None = None,
         voice_b: str | None = None,
+        source_language: str | None = None,
+        target_language: str | None = None,
         transcription_method: str | None = None,
         service_mode: str | None = None,
         tts_provider: str | None = None,
@@ -245,6 +247,19 @@ class JobService:
             project_dir_absolute = str(
                 (self.runner.project_root / workspace_dir).resolve(strict=False)
             )
+        # PR-A part 2 §3: persist the CANONICAL language pair so the §4
+        # capability gate (jobs/api.py) reads the correct record.language_pair.
+        # The Gateway already validated + entitlement-gated; we re-resolve via
+        # the registry to stay self-contained + fail-closed (unknown/absent →
+        # GA default pair en->zh-CN, never a silent unsupported pair).
+        from services.language_registry import (
+            DEFAULT_LANGUAGE_PAIR_PROFILE as _DEFAULT_PAIR_PROFILE,
+            resolve_language_pair as _resolve_language_pair,
+        )
+        _lang_profile = (
+            _resolve_language_pair(source_language, target_language)
+            or _DEFAULT_PAIR_PROFILE
+        )
         record = JobRecord(
             job_id=job_id,
             job_type=normalized_job_type,
@@ -254,6 +269,9 @@ class JobService:
             speakers=normalized_speakers,
             voice_a=normalized_voice_a,
             voice_b=normalized_voice_b,
+            source_language=_lang_profile.source_language,
+            target_language=_lang_profile.target_language,
+            language_pair=_lang_profile.language_pair,
             status=JOB_STATUS_QUEUED,
             current_stage=None,
             progress_message="Job queued.",

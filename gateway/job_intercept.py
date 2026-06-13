@@ -69,10 +69,20 @@ from storage.job_store_reader import JobJsonRecord, parse_iso_timestamp
 # services.language_registry is stdlib-only and does NOT drag the
 # services.jobs package init (pydub) — it's a top-level services module.
 from services.language_registry import (
-    DEFAULT_LANGUAGE_PAIR,
-    DEFAULT_SOURCE_LANGUAGE,
-    DEFAULT_TARGET_LANGUAGE,
+    DEFAULT_LANGUAGE_PAIR_PROFILE,
+    LANG_EN,
+    LANG_ZH_CN,
+    SUPPORTED_LANGUAGE_PAIRS,
+    make_pair_key,
+    resolve_language_pair,
 )
+
+# Non-default pairs that ship on the §3/D1 "non-interactive lane": the job runs
+# straight through (requires_review forced False), decoupled from Studio's
+# interactive review default. Today this is only zh-CN->en; future pairs opt in
+# EXPLICITLY here — never auto-inherited from is_default — so adding a pair can
+# never silently skip review.
+_NON_INTERACTIVE_LANGUAGE_PAIRS = frozenset({make_pair_key(LANG_ZH_CN, LANG_EN)})
 
 
 POST_EDIT_RESPONSE_FIELDS = (
@@ -310,6 +320,14 @@ def _merge_gateway_job_metadata(upstream_job: dict, db_job: Job | None) -> dict:
         value = getattr(db_job, field, None)
         if value is not None:
             merged[field] = _serialize_response_value(value)
+
+    # Language fields (PR-A part 2 §5): the Gateway PG row is the authoritative
+    # resolved pair (set at create). Overlay so the job summary always reflects
+    # it, even if an older upstream JSON record predates the language fields.
+    for lang_field in ("source_language", "target_language", "language_pair"):
+        value = getattr(db_job, lang_field, None)
+        if value is not None:
+            merged[lang_field] = value
     return merged
 
 
@@ -901,6 +919,61 @@ async def _compensate_upstream_job(job_id: str) -> None:
         logger.error("Failed to compensate upstream job %s: %s", job_id, exc)
 
 
+# ---------------------------------------------------------------------------
+# Language facts endpoint (PR-A part 2 §5 / D5)
+# ---------------------------------------------------------------------------
+# DISPLAY-layer capabilities + labels — owned HERE (the Gateway facts
+# endpoint), deliberately NOT in services.language_registry. D5 forbids reusing
+# the internal ``adapted_paid_capabilities`` constant name for the frontend
+# display bitset; these are the user-facing workflow steps every supported pair
+# runs (the paid post-edit / suggest-split gate is internal-only).
+_LANGUAGE_WORKFLOW_CAPABILITIES = ["transcribe", "translate", "tts", "subtitles", "jianying"]
+_LANGUAGE_DISPLAY_LABELS = {LANG_EN: "英文", LANG_ZH_CN: "中文"}
+
+
+def _language_pair_label(profile) -> str:
+    src = _LANGUAGE_DISPLAY_LABELS.get(profile.source_language, profile.source_language)
+    tgt = _LANGUAGE_DISPLAY_LABELS.get(profile.target_language, profile.target_language)
+    return f"{src} → {tgt}"
+
+
+async def intercept_language_facts(
+    user: User | None = Depends(require_auth),
+) -> Response:
+    """GET /api/language-facts — the language directions this user may pick.
+
+    Returns the supported pairs filtered to the caller's entitlements
+    (``get_effective_allowed_language_pairs``): every user sees the GA default
+    (en->zh-CN); zh-CN->en appears only for admin-enabled allowlisted users (or
+    admins). Each entry carries a human label + the DISPLAY
+    ``workflow_capabilities`` (D5 — distinct from the internal
+    ``adapted_paid_capabilities`` paid-gate set).
+    """
+    from entitlements import get_effective_allowed_language_pairs
+
+    allowed = set(get_effective_allowed_language_pairs(user))
+    facts = [
+        {
+            "pair_key": pair_key,
+            "source_language": profile.source_language,
+            "target_language": profile.target_language,
+            "label": _language_pair_label(profile),
+            "is_default": profile.is_default,
+            # Create-path hard gate: false → the selector shows 即将上线 + disables
+            # the option; create-path 409s `language_pair_not_yet_available`.
+            "pipeline_ready": profile.pipeline_ready,
+            "workflow_capabilities": list(_LANGUAGE_WORKFLOW_CAPABILITIES),
+        }
+        for pair_key, profile in SUPPORTED_LANGUAGE_PAIRS.items()
+        if pair_key in allowed
+    ]
+    return Response(
+        content=json.dumps({"language_pairs": facts}, ensure_ascii=False),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+
+
 async def intercept_list_jobs(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -1477,6 +1550,75 @@ async def intercept_create_job(
     # --- 5. Compute execution snapshot ---
     policy = compute_job_policy(user, service_mode) if user else {}
 
+    # --- 5a. Language pair resolution + entitlement gate (PR-A part 2 §3) ---
+    # Zero-regression default: a request with NO — or INCOMPLETE — language
+    # fields locks to the GA pair (en->zh-CN), with no validation and no
+    # entitlement check. A direction needs BOTH source and target; a single
+    # field is not a complete pair request, so it is ignored rather than
+    # rejected (a previously-ignored stray field must never start 400-ing). This
+    # is also the anonymous lane's locked path (its payload whitelist strips
+    # language fields). Only a COMPLETE source+target request is validated +
+    # gated, and only then are canonical values forwarded to the Job API.
+    _raw_source_language = str(request_data.get("source_language") or "").strip() or None
+    _raw_target_language = str(request_data.get("target_language") or "").strip() or None
+    if _raw_source_language is None or _raw_target_language is None:
+        resolved_pair = DEFAULT_LANGUAGE_PAIR_PROFILE
+    else:
+        resolved_pair = resolve_language_pair(_raw_source_language, _raw_target_language)
+        if resolved_pair is None:
+            return _error_response(
+                400,
+                "unsupported_language_pair",
+                "暂不支持所选的语言方向。",
+                {
+                    "source_language": _raw_source_language,
+                    "target_language": _raw_target_language,
+                    "supported_pairs": list(SUPPORTED_LANGUAGE_PAIRS.keys()),
+                },
+            )
+        # Lazy import (mirrors get_effective_allowed_service_modes usage below).
+        from entitlements import get_effective_allowed_language_pairs
+        if resolved_pair.language_pair not in get_effective_allowed_language_pairs(user):
+            return _error_response(
+                403,
+                "language_pair_not_allowed",
+                "当前账号未开通该语言方向（内测中）。",
+                {"language_pair": resolved_pair.language_pair},
+            )
+        # HARD create-block (code-level, independent of the admin flag): even an
+        # entitled / admin user cannot create a pair the END-TO-END pipeline
+        # can't run yet. `pipeline_ready` is a registry CONSTANT — only a
+        # pipeline PR (PR-W/CD/F) flips it, so flipping `language_pairs_enabled`
+        # can NEVER produce a broken paid job. zh-CN->en stays blocked here until
+        # the execution path is adapted. (The admin flag still controls facts
+        # visibility, so the selector can show it as 即将上线 / disabled.)
+        if not resolved_pair.pipeline_ready:
+            return _error_response(
+                409,
+                "language_pair_not_yet_available",
+                "该语言方向即将上线，敬请期待。",
+                {"language_pair": resolved_pair.language_pair},
+            )
+        # Forward the CANONICAL pair to the Job API so its JobRecord persists the
+        # normalized values — the §4 capability gate reads record.language_pair.
+        request_data["source_language"] = resolved_pair.source_language
+        request_data["target_language"] = resolved_pair.target_language
+
+    # §3 decision D1: the zh-CN->en FIRST-RELEASE lane is Studio non-interactive
+    # (requires_review forced False), decoupled from现网 Studio's True. **Scoped
+    # to Studio ONLY (codex P2)**: express/free already run requires_review=False
+    # (no-op), and clearing it for `smart` would break Smart's review-gated
+    # auto-review branch — the job would stay service_mode='smart' for routing/
+    # billing but silently skip its voice/translation decisions. Set BEFORE
+    # `request_data.update(policy)` so it reaches both the Job API (forwarded
+    # body) and the gateway PG row (policy.get below).
+    if (
+        policy
+        and service_mode == "studio"
+        and resolved_pair.language_pair in _NON_INTERACTIVE_LANGUAGE_PAIRS
+    ):
+        policy["requires_review"] = False
+
     # --- 5. Idempotency key ---
     idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
 
@@ -1656,13 +1798,13 @@ async def intercept_create_job(
                         status=job_data.get("status", "queued"),
                         current_stage=job_data.get("current_stage"),
                         project_dir=job_data.get("project_dir"),
-                        # --- Language fields: default GA pair (create-path pair
-                        # selection + validation is PR-A part 2, out of scope
-                        # for this slice). language_registry is the source of
-                        # truth for these defaults. ---
-                        source_language=DEFAULT_SOURCE_LANGUAGE,
-                        target_language=DEFAULT_TARGET_LANGUAGE,
-                        language_pair=DEFAULT_LANGUAGE_PAIR,
+                        # --- Language fields: the create-path resolved pair
+                        # (PR-A part 2 §3). Defaults to the GA pair (en->zh-CN)
+                        # when the request carries no language fields; otherwise
+                        # the validated + entitlement-gated pair. ---
+                        source_language=resolved_pair.source_language,
+                        target_language=resolved_pair.target_language,
+                        language_pair=resolved_pair.language_pair,
                         # --- Full execution snapshot ---
                         service_mode=policy.get("service_mode"),
                         tts_provider=policy.get("tts_provider"),
@@ -1717,8 +1859,8 @@ async def intercept_create_job(
                         "quality_tier": _quality_tier,
                         "tts_provider": policy.get("tts_provider"),
                         "tts_model": policy.get("tts_model"),
-                        # Language pair for Phase 8 cost-by-pair aggregation
-                        # (the aggregation itself is PR-A part 2 / out of scope).
+                        # Language pair for cost-by-pair aggregation — consumed
+                        # by cost_management.py window rollup (PR-A part 2 §6).
                         "language_pair": job.language_pair,
                     }
                     if shadow_credits > 0:

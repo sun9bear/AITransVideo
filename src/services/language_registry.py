@@ -158,6 +158,15 @@ class LanguagePairProfile:
     target_language: str
     adapted_paid_capabilities: frozenset[str] = field(default_factory=frozenset)
     is_default: bool = False
+    #: Create-path HARD gate (independent of the admin flag / entitlement): can
+    #: the END-TO-END pipeline actually execute this pair yet? Defaults to False
+    #: so a newly-registered pair is un-creatable until a pipeline PR flips it —
+    #: an ops mistake (flipping the ``language_pairs_enabled`` admin flag) can
+    #: NEVER create a broken paid job, only a code change can. ``en->zh-CN`` is
+    #: True (GA). ``zh-CN->en`` stays False until PR-W/CD/F land the execution
+    #: (translation direction / voice pool / per-script subtitles). See the
+    #: Gateway create-path ``language_pair_not_yet_available`` 409.
+    pipeline_ready: bool = False
 
     @property
     def language_pair(self) -> str:
@@ -182,12 +191,14 @@ SUPPORTED_LANGUAGE_PAIRS: dict[str, LanguagePairProfile] = {
         target_language=DEFAULT_TARGET_LANGUAGE,
         adapted_paid_capabilities=ALL_PAID_CAPABILITIES,
         is_default=True,
+        pipeline_ready=True,  # GA — the pipeline runs this end-to-end today.
     ),
     make_pair_key(LANG_ZH_CN, LANG_EN): LanguagePairProfile(
         source_language=LANG_ZH_CN,
         target_language=LANG_EN,
         adapted_paid_capabilities=frozenset(),
         is_default=False,
+        pipeline_ready=False,  # explicit: pipeline not yet adapted (PR-W/CD/F).
     ),
 }
 

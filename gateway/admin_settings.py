@@ -451,6 +451,26 @@ class AdminSettings(BaseModel):
     # 主要防单会话 init-spam；真正滥用锚点是 per-IP in-flight gate。
     chunked_upload_anonymous_daily_gb: int = 5
 
+    # --- 多语言互翻 language pairs（plan 2026-06-13 v3 PR-A part 2 / §5 Phase 1）---
+    # 非默认 language pair（首发 zh-CN->en）的运行时灰度闸。默认 pair en->zh-CN
+    # **恒可用**（零回归），不受这些开关影响——判定见
+    # entitlements.get_effective_allowed_language_pairs。
+    #
+    # 授权规则（镜像 express_cosyvoice_auto_clone_* 三件套）：
+    #   非默认 pair 可用 = language_pairs_enabled（主开关）
+    #     AND (language_pairs_user_allowlist_enabled=False → 所有登录用户
+    #          OR user 是 admin
+    #          OR user.id ∈ language_pairs_allowlist)
+    #
+    # **类型用 StrictBool**（同 cosyvoice_clone_general_availability_enabled）：
+    # 宽松 bool 下 "1"/"on"/"true" 字符串会被 Pydantic 解析为 True，admin UI
+    # bug 可能意外开启非默认 pair（付费 LLM/TTS 真实成本）。StrictBool 只接受
+    # Python True/False。空 allowlist + enabled=True + allowlist_enabled=True
+    # = 仅 admin 可用（与 enabled=False 在普通用户视角等效，双保险）。
+    language_pairs_enabled: StrictBool = False
+    language_pairs_user_allowlist_enabled: StrictBool = True
+    language_pairs_allowlist: list[str] = []  # user_id 字符串数组（beta 灰度）
+
     @field_validator(
         "anonymous_preview_max_upload_mb",
         "anonymous_preview_max_seconds",
