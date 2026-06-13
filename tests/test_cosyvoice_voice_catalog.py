@@ -33,11 +33,27 @@ def test_overseas_voices_not_matchable() -> None:
         assert v["matchable"] is False, f"overseas voice {v['voice_id']} should not be matchable"
 
 
+def test_character_voices_not_matchable() -> None:
+    """角色/拟人音色（猴哥/机器人/黛玉）不得进自动匹配池——reranker 会把它们对普通成年
+    男声/女声画像打高分，导致 Joe Rogan 这类视频被错配成孙悟空风音色（线上事故根因）。
+    本断言与 DB seed（seed_voice_catalog.py 从本静态文件 seed）保持同源，防 re-seed 复活。"""
+    character_ids = {"longhouge_v3", "longjiqi_v3", "longdaiyu_v3"}
+    by_id = {v["voice_id"]: v for v in _COSYVOICE_V3_FLASH_VOICES}
+    for vid in character_ids:
+        assert vid in by_id, f"character voice {vid} missing from catalog"
+        assert by_id[vid]["matchable"] is False, f"character voice {vid} must not be matchable"
+        assert by_id[vid]["category"] == "短视频配音"
+    # And they must be absent from the active matching pool helper.
+    matchable_ids = {v["voice_id"] for v in list_matchable_cosyvoice_voices()}
+    assert character_ids.isdisjoint(matchable_ids)
+
+
 def test_matchable_count() -> None:
     matchable = list_matchable_cosyvoice_voices()
     non_matchable = [v for v in _COSYVOICE_V3_FLASH_VOICES if not v.get("matchable", True)]
-    assert len(non_matchable) == 9
-    assert len(matchable) == len(_COSYVOICE_V3_FLASH_VOICES) - 9
+    # 6 dialect + 3 overseas + 3 character (短视频配音) = 12 non-matchable.
+    assert len(non_matchable) == 12
+    assert len(matchable) == len(_COSYVOICE_V3_FLASH_VOICES) - 12
 
 
 def test_list_matchable_excludes_non_matchable() -> None:

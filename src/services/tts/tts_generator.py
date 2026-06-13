@@ -575,6 +575,10 @@ class TTSGenerator:
 
         explicit_voice_id = _normalize_optional_text(getattr(segment, "voice_id", None))
         confidence = ""
+        # Only a fresh resolver match writes the speaker cache, and only *after* a
+        # successful synth (see below).  Caching before synth persists a voice that the
+        # provider may reject, poisoning every later segment of the same speaker.
+        resolved_fresh = False
         if explicit_voice_id and is_cosyvoice_v3_flash_builtin_voice(explicit_voice_id):
             # Explicit builtin voice — use directly, do NOT cache (user-chosen).
             voice = explicit_voice_id
@@ -624,12 +628,11 @@ class TTSGenerator:
             voice = match_result.voice_id
             confidence = match_result.match_confidence
             resolution_source = f"resolver({match_result.match_reason})"
-            # Cache the auto-matched result for this speaker
-            self._speaker_voice_cache[segment.speaker_id] = (voice, confidence)
-            print(
-                f"[CosyVoice] Speaker cache set: {segment.speaker_id} → {voice}",
-                flush=True,
-            )
+            # Defer caching until the synth succeeds (post-fallback voice), and only when
+            # this segment carried a real gender signal — caching a gender-less fallback
+            # would let a first gender-less segment poison the cache so later segments
+            # that DO carry gender never re-resolve.
+            resolved_fresh = True
 
         print(
             f"[CosyVoice] voice={voice}, confidence={confidence}, gender={gender}, age={age_group}, "
@@ -696,6 +699,19 @@ class TTSGenerator:
                 )
             else:
                 raise
+
+        # Synth succeeded — now (and only now) cache the *actually used* voice for this
+        # speaker.  `voice` here reflects any fallback-to-default that happened above, so
+        # later segments reuse the working voice instead of re-trying a rejected one.
+        # Guard on gender so a gender-less fallback match never poisons the cache.
+        if resolved_fresh and gender:
+            self._speaker_voice_cache[segment.speaker_id] = (voice, confidence)
+            print(
+                f"[CosyVoice] Speaker cache set: {segment.speaker_id} → {voice} "
+                f"(confidence={confidence})",
+                flush=True,
+            )
+
         atomic_write_bytes(str(output_path), audio_bytes)
         duration_ms = _ffprobe_duration_ms(output_path)
 
@@ -994,6 +1010,12 @@ class TTSGenerator:
         fallback_voice = default_speaker_for_resource(resource_id)
         confidence = ""
         resolution_source = ""
+        # Hoisted so the post-synth cache guard can read it in every branch.
+        gender = getattr(segment, "gender", None)
+        # Only a fresh resolver match writes the speaker cache, and only after a
+        # successful synth (mirrors the CosyVoice path) — caching before synth would
+        # persist a voice the provider then rejects, poisoning every later segment.
+        resolved_fresh = False
 
         if explicit_voice:
             # Explicit segment.voice_id — compatible with resource, use directly, do NOT cache
@@ -1006,7 +1028,6 @@ class TTSGenerator:
             resolution_source = f"speaker_cache({segment.speaker_id})"
         else:
             # Auto-match via shared resolver
-            gender = getattr(segment, "gender", None)
             if not gender:
                 print(
                     f"[VolcEngine] WARNING: segment {segment.segment_id} ({segment.speaker_id}) "
@@ -1029,12 +1050,9 @@ class TTSGenerator:
             voice_id = match_result.voice_id
             confidence = match_result.match_confidence
             resolution_source = f"resolver({match_result.match_reason})"
-            # Cache auto-matched result for this speaker
-            self._speaker_voice_cache[segment.speaker_id] = (voice_id, confidence)
-            print(
-                f"[VolcEngine] Speaker cache set: {segment.speaker_id} → {voice_id}",
-                flush=True,
-            )
+            # Defer caching until the synth succeeds (post-mismatch-retry voice), guarded
+            # on gender below.
+            resolved_fresh = True
 
         print(
             f"[VolcEngine] voice={voice_id}, resource={resource_id}, model={model}, "
@@ -1116,6 +1134,17 @@ class TTSGenerator:
                 )
             else:
                 raise
+
+        # Synth succeeded — cache the *actually used* voice (post-mismatch-retry) for this
+        # speaker, only after success and only with a real gender signal (see CosyVoice
+        # path for rationale).
+        if resolved_fresh and gender:
+            self._speaker_voice_cache[segment.speaker_id] = (voice_id, confidence)
+            print(
+                f"[VolcEngine] Speaker cache set: {segment.speaker_id} → {voice_id} "
+                f"(confidence={confidence})",
+                flush=True,
+            )
 
         atomic_write_bytes(str(output_path), audio_bytes)
         duration_ms = _ffprobe_duration_ms(output_path)
@@ -1422,6 +1451,12 @@ class TTSGenerator:
         explicit_voice = _normalize_optional_text(getattr(segment, "voice_id", None))
         mm_confidence = ""
         mm_resolution = ""
+        # Hoisted so the post-synth cache guard can read it in every branch.
+        mm_gender = getattr(segment, "gender", None)
+        # Only a fresh resolver match writes the speaker cache, and only after a
+        # successful synth (mirrors CosyVoice/VolcEngine) — caching before synth would
+        # persist a voice the provider then rejects, poisoning every retry / later segment.
+        mm_resolved_fresh = False
 
         if explicit_voice and explicit_voice != "auto":
             # Explicit voice_id — use directly, do NOT cache (user-chosen).
@@ -1436,7 +1471,6 @@ class TTSGenerator:
             from services.tts.voice_match_resolver import resolve_voice_match
             from services.tts.voice_match_types import VoiceMatchRequest
 
-            mm_gender = getattr(segment, "gender", None)
             if not mm_gender:
                 print(
                     f"[MiniMax] WARNING: segment {segment.segment_id} ({segment.speaker_id}) "
@@ -1459,11 +1493,8 @@ class TTSGenerator:
             mm_voice = match_result.voice_id
             mm_confidence = match_result.match_confidence
             mm_resolution = f"resolver({match_result.match_reason})"
-            self._speaker_voice_cache[segment.speaker_id] = (mm_voice, mm_confidence)
-            print(
-                f"[MiniMax] Speaker cache set: {segment.speaker_id} → {mm_voice}",
-                flush=True,
-            )
+            # Defer caching until the synth succeeds, guarded on gender below.
+            mm_resolved_fresh = True
 
         segment_model = _normalize_optional_text(
             getattr(segment, "tts_model_key", None)
@@ -1577,6 +1608,16 @@ class TTSGenerator:
             raise TTSGenerationError(f"Failed to write or read TTS audio output: {output_path}") from exc
         except Exception as exc:
             raise TTSGenerationError(f"Failed to decode generated wav audio: {output_path}") from exc
+
+        # Synth + write succeeded — cache the voice for this speaker, only after success
+        # and only with a real gender signal (see CosyVoice path for rationale).
+        if mm_resolved_fresh and mm_gender:
+            self._speaker_voice_cache[segment.speaker_id] = (mm_voice, mm_confidence)
+            print(
+                f"[MiniMax] Speaker cache set: {segment.speaker_id} → {mm_voice} "
+                f"(confidence={mm_confidence})",
+                flush=True,
+            )
 
         result = TTSResult(
             segment_id=segment.segment_id,

@@ -3543,6 +3543,26 @@ class ProcessPipeline:
                     print(f"[S4-probe] 探针翻译异常（非致命）：{exc}")
                     # logger removed — process.py uses print() for logging
 
+            # B': probe 段补说话人画像（gender/age_group/persona_style/energy_level +
+            # voice_description + structure 角色）。translator.translate_probe 创建的、以及
+            # probe cache 加载回来的 DubbingSegment 这些字段默认空，导致 probe TTS 校准用空
+            # 画像匹配音色并反复刷 "[CosyVoice] empty gender" 警告，cps 估计失真。
+            # 此处套用与正式段相同的两个 apply（在 _run_probe_translation 返回后、probe TTS
+            # 之前），同时覆盖 fresh 与 cache-restore 两条路径，无需再改 probe cache schema。
+            # 两个 apply 对空 dict 都是安全 no-op：Pass 3 未跑 / styles 为空时自动跳过；
+            # _review_speaker_styles 在 :3086 初始化、_speaker_structure_profiles 在 :3276
+            # 无条件赋值（Pass 3 enrichment 在 :3485 之前已 merge），故此处二者必已定义。
+            # 仅影响 probe 字/秒校准准确度——不改最终音色 / 克隆 / 人工审核语义。
+            if _probe_segments:
+                self._apply_review_speaker_styles_to_segments(
+                    _probe_segments,
+                    _review_speaker_styles,
+                )
+                self._apply_speaker_structure_profiles_to_segments(
+                    _probe_segments,
+                    _speaker_structure_profiles,
+                )
+
             # --- voice_selection_review gate (Studio mode, BEFORE translation) ---
             approved_voice_selection = self._get_approved_review_payload(
                 review_state_manager,
