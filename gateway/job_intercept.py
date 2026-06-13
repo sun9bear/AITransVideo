@@ -65,6 +65,14 @@ from credits_service import (
 # identical mirror side-effects (including quota settlement).
 from job_terminal_mirror import mirror_job_terminal_state
 from storage.job_store_reader import JobJsonRecord, parse_iso_timestamp
+# Canonical language defaults (src/ is on sys.path via the tweak above).
+# services.language_registry is stdlib-only and does NOT drag the
+# services.jobs package init (pydub) — it's a top-level services module.
+from services.language_registry import (
+    DEFAULT_LANGUAGE_PAIR,
+    DEFAULT_SOURCE_LANGUAGE,
+    DEFAULT_TARGET_LANGUAGE,
+)
 
 
 POST_EDIT_RESPONSE_FIELDS = (
@@ -1648,6 +1656,13 @@ async def intercept_create_job(
                         status=job_data.get("status", "queued"),
                         current_stage=job_data.get("current_stage"),
                         project_dir=job_data.get("project_dir"),
+                        # --- Language fields: default GA pair (create-path pair
+                        # selection + validation is PR-A part 2, out of scope
+                        # for this slice). language_registry is the source of
+                        # truth for these defaults. ---
+                        source_language=DEFAULT_SOURCE_LANGUAGE,
+                        target_language=DEFAULT_TARGET_LANGUAGE,
+                        language_pair=DEFAULT_LANGUAGE_PAIR,
                         # --- Full execution snapshot ---
                         service_mode=policy.get("service_mode"),
                         tts_provider=policy.get("tts_provider"),
@@ -1702,6 +1717,9 @@ async def intercept_create_job(
                         "quality_tier": _quality_tier,
                         "tts_provider": policy.get("tts_provider"),
                         "tts_model": policy.get("tts_model"),
+                        # Language pair for Phase 8 cost-by-pair aggregation
+                        # (the aggregation itself is PR-A part 2 / out of scope).
+                        "language_pair": job.language_pair,
                     }
                     if shadow_credits > 0:
                         try:
@@ -4777,6 +4795,12 @@ async def _apply_editing_commit_gateway_side(
         root_job_id=source_root_id,
         edit_generation=0,
         source_content_hash=source_job.source_content_hash,
+        # --- Language fields: copy verbatim from the source row so the copy
+        # preserves the original pair (feedback_copy_as_new_invariants —
+        # copy_as_new must explicitly list every identity field). ---
+        source_language=source_job.source_language,
+        target_language=source_job.target_language,
+        language_pair=source_job.language_pair,
     )
     db.add(copy_row)
     logger.info(
