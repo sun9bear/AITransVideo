@@ -2056,6 +2056,74 @@ async def intercept_create_job(
             )
         _free_reserved = True
 
+    # P3e-2b: smart 预览克隆 600 点 reserve（Option C：forward 前用**预生成**
+    # job_id 做 reserve(task_id=job_id) + 把 reservation marker 塞
+    # request_data['smart_state'] 一并 forward → Job API 用预供 job_id（P3e-2a）
+    # 并存 smart_state → pipeline `_snap` 读 + mirror→finalizer marker-gate。
+    # 同 free-tier reserve 模式：forward 前 reserve、TTL+inline-expire、crash
+    # 自动释放（smart_clone_reservation_sweeper 兜底）。
+    # **降级一律不阻断**（CLAUDE.md 免费触点不静默降级）：disabled/denied/error
+    # → 不写 marker → pipeline 退预设；skip 原因记 `_smart_clone_skipped_reason`
+    # （审计可见；前端降级提示响应字段 = P3e-4）。
+    # 触发条件 = smart + 用户 consent.auto_voice_clone + admin
+    # smart_preview_clone_enabled。reservation 真有效性由 register-billed
+    # endpoint 写 billing event 时原子再校验（gateway 不在此扣费，只预留）。
+    _smart_clone_skipped_reason: str | None = None
+    _smart_clone_reservation_id: str | None = None
+    if (
+        service_mode == "smart"
+        and user is not None
+        and isinstance(request_data.get("smart_consent"), dict)
+        and request_data["smart_consent"].get("auto_voice_clone") is True
+    ):
+        from admin_settings import load_settings as _load_admin_for_clone
+        _admin_for_clone = _load_admin_for_clone()
+        if getattr(_admin_for_clone, "smart_preview_clone_enabled", False) is not True:
+            _smart_clone_skipped_reason = "clone_disabled"
+        else:
+            try:
+                from smart_clone_reservation_service import (
+                    reserve_smart_clone_credit as _reserve_smart_clone,
+                )
+                _pre_job_id = f"job_{_uuid.uuid4().hex}"
+                await ensure_credit_buckets_for_user(db, user=user)
+                _smart_lib_cap = int(
+                    getattr(_admin_for_clone, "smart_user_voice_clone_cap", 30) or 30
+                )
+                _smart_resv = await _reserve_smart_clone(
+                    db,
+                    user_id=user.id,
+                    task_id=_pre_job_id,
+                    amount_credits=600,
+                    ttl_minutes=60,
+                    library_cap=_smart_lib_cap,
+                )
+                if _smart_resv.status == "reserved":
+                    _smart_clone_reservation_id = _smart_resv.reservation_id
+                    # Option C：把预生成 job_id + reservation marker 一并 forward。
+                    request_data["job_id"] = _pre_job_id
+                    request_data["smart_state"] = {
+                        "smart_clone_reservation_id": _smart_resv.reservation_id,
+                        "smart_clone_credit_reserved": True,
+                    }
+                else:
+                    # denied(insufficient_credits / voice_library_full) /
+                    # user_not_found → 不阻断、走预设。
+                    _smart_clone_skipped_reason = (
+                        _smart_resv.deny_reason or "user_not_found"
+                    )
+            except Exception as _smart_resv_exc:  # noqa: BLE001 — reserve 故障不阻断
+                logger.warning(
+                    "smart clone preview reserve failed user=%s: %s",
+                    user.id, _smart_resv_exc,
+                )
+                _smart_clone_skipped_reason = "reserve_error"
+        if _smart_clone_skipped_reason:
+            logger.info(
+                "smart clone preview reserve skipped user=%s reason=%s",
+                user.id, _smart_clone_skipped_reason,
+            )
+
     # Forward to upstream with modified body
     try:
         upstream_response = await proxy_request(
