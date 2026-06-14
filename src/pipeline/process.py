@@ -2894,6 +2894,16 @@ class ProcessPipeline:
         # APF P0 T5（AD-7/G3）：匿名预览标记，严格 is True gate；
         # 驱动匿名严格合规 lane + Pass 3 跳过。登录任务恒 False。
         job_anonymous_preview = _snap('anonymous_preview', False) is True
+        # P3e-3：smart 预览标记（在 ``smart_state`` 字典，create 经 preview_mode
+        # stamp）。驱动 3min teaser + 水印 + 跳分钟结算。**区别 is_anonymous_
+        # preview**：smart 预览是**登录**用户、且**保留**克隆 600 结算（只跳分钟），
+        # 故另立标记不复用匿名字段。create 未接线前 smart_state 无此键 → False
+        # （inert，既有 smart 行为不变）。
+        _job_smart_state_snap = _snap('smart_state')
+        job_smart_preview = bool(
+            isinstance(_job_smart_state_snap, dict)
+            and _job_smart_state_snap.get('smart_preview_mode') is True
+        )
         if job_anonymous_preview and job_voice_strategy != 'preset_mapping':
             # 防 clone 第三道防线（对抗审核加固）：匿名任务的 voice_strategy
             # 只允许 preset_mapping——gateway payload 硬编码是第一道、
@@ -6726,7 +6736,11 @@ class ProcessPipeline:
                 project_dir=final_project_dir,
                 build_result=build_result,
                 watermark_text=free_watermark_text_for(
-                    effective_policy_mode(job_service_mode, job_anonymous_preview)
+                    effective_policy_mode(
+                        job_service_mode,
+                        job_anonymous_preview,
+                        smart_preview=job_smart_preview,
+                    )
                 ),
             )
             assert output_bundle.editor_result is not None

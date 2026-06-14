@@ -120,13 +120,14 @@ def _read(rel: str) -> str:
 
 def test_process_wires_free_watermark_at_publish():
     """plan 2026-06-12 §C ①：水印档位经 effective_policy_mode——匿名预览
-    （含匿名 express）恒水印；非匿名任务仍按 job_service_mode。"""
+    （含匿名 express）恒水印；非匿名任务仍按 job_service_mode。
+    P3e-3：智能版 3min 预览（job_smart_preview）也经同一 helper 恒水印。"""
     src = _read("src/pipeline/process.py")
     compact = src.replace("\n", "").replace(" ", "")
     assert (
-        "free_watermark_text_for(effective_policy_mode(job_service_mode,job_anonymous_preview))"
+        "free_watermark_text_for(effective_policy_mode(job_service_mode,job_anonymous_preview,smart_preview=job_smart_preview,))"
         in compact
-    ), "run() publish must derive the watermark via effective_policy_mode"
+    ), "run() publish must derive the watermark via effective_policy_mode（含 P3e-3 smart_preview）"
 
 
 def test_dispatcher_forwards_watermark_to_publish_request():

@@ -102,12 +102,21 @@ EAGER_PUSH_TO_R2_KEYS_FREE: frozenset[str] = frozenset({
 })
 
 
-def effective_policy_mode(service_mode: str | None, anonymous_preview) -> str | None:
+def effective_policy_mode(
+    service_mode: str | None, anonymous_preview, smart_preview=False
+) -> str | None:
     """策略档单点解析（plan 2026-06-12 anonymous-express-preview §C）。
 
     ``anonymous_preview`` 真值 → 恒返回 ``"anonymous_preview"``（最严档：
     恒水印 / 零下载 / 仅 stream video / 不进 R2）。否则原样透传
     ``service_mode``——非匿名任务的策略行为零变化。
+
+    P3e-3：``smart_preview`` 真值（登录智能版 3 分钟预览 teaser）**复用同一最严
+    策略档** ``"anonymous_preview"``——预览 teaser 恒水印 + stream-only（看完
+    teaser 转完整正式流程才下载）。**默认 False → 行为字节级不变**（非预览任务
+    不受影响）。比较仍在本 helper 内，不违反 §C AST 守卫。注意：本 mode 复用只
+    影响 8 个**策略点**（水印/下载/stream/R2）；smart 预览的「**保留**克隆 600
+    结算、只跳分钟」由独立 ``smart_preview_mode`` 字段驱动，与本 mode 无关。
 
     背景：匿名 express 任务的 ``service_mode == "express"``，直接拿
     service_mode 查策略表会命中 express 档（放行成片下载、R2 redirect）。
@@ -121,6 +130,8 @@ def effective_policy_mode(service_mode: str | None, anonymous_preview) -> str | 
     ⑧ R2 sweeper（既有 is_anonymous_preview 短路）。
     """
     if anonymous_preview:
+        return "anonymous_preview"
+    if smart_preview:
         return "anonymous_preview"
     return service_mode
 
