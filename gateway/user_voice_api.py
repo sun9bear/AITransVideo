@@ -1608,6 +1608,7 @@ async def internal_smart_clone_register_billed(
         source_type=body.get("source_type"),
         source_ref=body.get("source_ref"),
         source_content_hash=body.get("source_content_hash"),
+        source_upload_md5=body.get("source_upload_md5"),
         source_video_title=body.get("source_video_title"),
         source_speaker_name=body.get("source_speaker_name"),
         source_speaker_name_key=body.get("source_speaker_name_key"),

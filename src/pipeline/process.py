@@ -1393,8 +1393,16 @@ def _register_smart_clone_in_user_voices(
     smart_clone_reservation_id: str | None = None,
     created_from: str | None = "smart_auto",
     notes: str | None = None,
+    reservation_id: str | None = None,
+    task_id: str | None = None,
 ) -> bool:
     """Mirror a smart-path clone into the Gateway UserVoice table.
+
+    P3e §5: when ``reservation_id`` (+ ``task_id``) is present (智能版预览
+    克隆，已预扣 600 reservation），POST 到 **register-billed** endpoint
+    （原子写 durable billing event + 入库，钱-正确性核心）而非 register-smart。
+    无 reservation（既有 full smart auto-clone / flag off）→ 仍走 register-smart
+    （只入库、不计费）。两端点字段 parity（rich source_* 全透传）。
 
     Returns ``True`` on success (HTTP 200, ok:true), ``False`` on
     any failure.
@@ -1472,14 +1480,21 @@ def _register_smart_clone_in_user_voices(
         payload["created_from"] = created_from
     if notes:
         payload["notes"] = notes
+    # P3e §5：reservation 在场 → register-billed（原子写 billing event + 入库，
+    # 钱-正确性核心，含 task_id + reservation_id 供 gateway 行锁校验 reservation
+    # status=reserved 且属本 task）；否则 register-smart（既有，只入库不计费）。
+    # rich source_* 字段两端点都透传（字段 parity）。
+    _reservation_id = (reservation_id or "").strip()
+    _task_id = (task_id or "").strip()
+    if _reservation_id and _task_id:
+        _endpoint = "http://127.0.0.1:8880/api/internal/smart-clone/register-billed"
+        payload["reservation_id"] = _reservation_id
+        payload["task_id"] = _task_id
+    else:
+        _endpoint = "http://127.0.0.1:8880/api/internal/user-voices/register-smart"
     try:
-        endpoint = (
-            "smart-clone/register-billed"
-            if reservation_id
-            else "user-voices/register-smart"
-        )
         resp = requests.post(
-            f"http://127.0.0.1:8880/api/internal/{endpoint}",
+            _endpoint,
             json=payload,
             headers={"X-Internal-Key": api_key},
             timeout=5.0,
@@ -4292,6 +4307,33 @@ class ProcessPipeline:
                         _sid for _sid in _smart_main_speaker_ids
                         if _sid not in _smart_existing_voice_matches
                     ]
+                    # P3e §5 limit-1：reservation 收紧（requires_reservation 且
+                    # 带 reservation_id）时，600 点只覆盖 **1 个**克隆 → 只为
+                    # 「按 vs_payload 稳定顺序的第 1 个待克隆 main speaker」新建
+                    # 克隆；其余待克隆 main speaker 经 evaluate_voice_review 的
+                    # ``clone_allowed_speaker_ids`` cap 退 PRESET（不克隆=不漏收、
+                    # 不 handoff=不打断自动化）。默认（flag off / 无 reservation）
+                    # → ``clone_allowed=None`` → 不限制（既有多说话人克隆行为
+                    # 字节级不变）。用 vs_payload 顺序选首个（**不**用 set 迭代
+                    # 序，CodeX：稳定可复现）。截断同时收窄样本抽取/quota gate。
+                    _smart_clone_allowed_speaker_ids: set[str] | None = None
+                    if _smart_requires_reservation and _smart_clone_reservation_id:
+                        _smart_requiring_set = set(
+                            _smart_speaker_ids_requiring_clone
+                        )
+                        _smart_ordered_requiring = [
+                            str(_sp.get("speaker_id") or "").strip()
+                            for _sp in (vs_payload.get("speakers") or [])
+                            if isinstance(_sp, dict)
+                            and str(_sp.get("speaker_id") or "").strip()
+                            in _smart_requiring_set
+                        ]
+                        _smart_speaker_ids_requiring_clone = (
+                            _smart_ordered_requiring[:1]
+                        )
+                        _smart_clone_allowed_speaker_ids = set(
+                            _smart_speaker_ids_requiring_clone
+                        )
                     _smart_needs_new_clone = bool(
                         _smart_consent_allows_clone
                         and _smart_effective_clone_enabled
@@ -4709,6 +4751,9 @@ class ProcessPipeline:
                         admin_pause_on_possible_match=_smart_admin_pause_on_possible,
                         admin_auto_reuse_on_possible_match=_smart_admin_auto_reuse_on_possible,
                         max_new_clones=_smart_max_new_clones_for_review,
+                        # P3e §5 limit-1：reservation 收紧时只允许首个待克隆
+                        # main speaker 新建克隆，其余退 PRESET。None=不限制（默认）。
+                        clone_allowed_speaker_ids=_smart_clone_allowed_speaker_ids,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
@@ -5070,6 +5115,17 @@ class ProcessPipeline:
                                     f"{_smart_job_id_for_mirror}"
                                     if _smart_job_id_for_mirror
                                     else "Smart auto-clone"
+                                ),
+                                # P3e §5：reservation 在场 → 改走 register-billed
+                                # （原子写 billing event）。limit-1 保证本 run 最多
+                                # 1 个 CLONED → 最多 1 次 bill；register-billed 以
+                                # reservation_id 唯一约束幂等，重试不双计费。无
+                                # reservation → 二者皆 None → 仍走 register-smart。
+                                reservation_id=_smart_clone_reservation_id,
+                                task_id=(
+                                    _smart_job_id_for_mirror
+                                    or str(_snap("job_id") or "")
+                                    or None
                                 ),
                             )
                             if not _mirror_ok:

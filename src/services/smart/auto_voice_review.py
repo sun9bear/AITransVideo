@@ -75,7 +75,7 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 from services.smart.contracts import CloneProvider, CloneResult
 
@@ -205,6 +205,7 @@ def evaluate_voice_review(
     admin_clone_enabled: bool = True,
     admin_pause_on_possible_match: bool = False,
     admin_auto_reuse_on_possible_match: bool = False,
+    clone_allowed_speaker_ids: Collection[str] | None = None,
 ) -> VoiceReviewResult:
     """Orchestrate the per-main-speaker auto voice decision.
 
@@ -244,8 +245,12 @@ def evaluate_voice_review(
         default ``smart_pause_on_possible_user_voice_match=False``).
         Strong-match REUSED decisions still run BEFORE this check —
         the pause only fires for speakers without a strong match.
+      clone_allowed_speaker_ids: P3e §5 limit-N. When not None, only
+        these speaker_ids may receive a NEW clone (reservation 600 仅覆盖
+        N 个 main speaker)。不在集合内的 no-match speaker 退 PRESET（不克隆、
+        不 handoff）。None=不限制（默认，既有行为不变）。强匹配 REUSED /
+        可复用候选 在本 cap 之前判定，不受影响。
 
-    Returns:
       VoiceReviewResult capturing top-level outcome + per-speaker
       decisions. The integration layer is responsible for:
         - Calling sidecar_emitter.emit_smart_decision for each decision
@@ -409,6 +414,29 @@ def evaluate_voice_review(
                     metrics=pause_metrics,
                 ))
                 continue
+
+        # Rule 0.9 (P3e §5 limit-N): reservation 收紧下，caller 传入
+        # ``clone_allowed_speaker_ids`` = "本任务只允许为这 N 个 main speaker
+        # 新建克隆"（reservation 600 只覆盖 N 个）。不在白名单内的 no-match
+        # speaker 退 PRESET——**不克隆**（不漏收）、**不 handoff**（不打断
+        # 自动化）。``None``=不限制（默认，既有行为字节级不变）。
+        #
+        # 放在 reuse / auto-reuse / pause-on-possible **之后**、新克隆 gate
+        # **之前**：强匹配 REUSED / 可复用候选仍优先（白名单只限"新克隆"配额，
+        # 绝不夺已有复用）。注意：此 cap 必须显式，不能靠"截断样本→Rule 2
+        # sample_seconds 失败"实现——被截断 speaker 的 sample_seconds 会
+        # fallback 到 vs_payload 全时长（常 ≥ 阈值）→ Rule 2 误通过 → 用整文件
+        # placeholder 音频克隆（漏收 + 错音频）。Provider NEVER 在本路径调用。
+        if (
+            clone_allowed_speaker_ids is not None
+            and speaker.speaker_id not in clone_allowed_speaker_ids
+        ):
+            decisions.append(_preset_decision(
+                speaker,
+                "clone_capped_by_reservation_limit",
+                smart_decision_id_factory(),
+            ))
+            continue
 
         # Rule 1 (Phase 3): new clone blocked by consent and/or admin.
         # No existing match means we'd need a new clone, which is what
