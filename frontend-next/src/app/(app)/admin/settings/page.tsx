@@ -1444,72 +1444,70 @@ export default function AdminSettingsPage() {
           />
         </label>
 
-        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
-          <input
-            type="checkbox"
-            checked={settings.smart_preview_clone_enabled}
-            onChange={(e) => setSettings((s) => ({ ...s, smart_preview_clone_enabled: e.target.checked }))}
-            className="h-4 w-4 rounded border-border"
-          />
-          <div>
-            <p className="text-sm font-medium text-foreground">
-              开启智能版 MiniMax 克隆预览
-              <span className="ml-2 inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-600">
-                MiniMax 付费 · 预扣 600 点 · 默认关闭
-              </span>
-            </p>
-            <p className="text-xs text-muted-foreground mt-1">
-              登录智能版预览：用户显式 consent + 预扣 600 点的 MiniMax 克隆（知情付费路径）。克隆成功
-              入个人音色库；失败/激活失败退点并清理音色。受下方全局每日/并发上限约束。
-            </p>
-          </div>
-        </label>
-
-        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
-          <div>
-            <p className="text-sm font-medium text-foreground">智能版克隆每日全局上限</p>
-            <p className="text-xs text-muted-foreground mt-1">
-              全局每日智能版预览克隆次数上限，fail-closed 控制 MiniMax 账户资源消耗。默认 200（范围 1–100000）。
-            </p>
-          </div>
-          <input
-            type="number"
-            min={1}
-            max={100000}
-            step={1}
-            value={settings.smart_preview_clone_daily_global_cap}
-            onChange={(e) => {
-              const v = parseInt(e.target.value, 10)
-              if (Number.isFinite(v) && v >= 1 && v <= 100000) {
-                setSettings((s) => ({ ...s, smart_preview_clone_daily_global_cap: v }))
-              }
-            }}
-            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
-          />
-        </label>
-
-        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
-          <div>
-            <p className="text-sm font-medium text-foreground">智能版克隆并发上限</p>
-            <p className="text-xs text-muted-foreground mt-1">
-              同时在途的智能版预览克隆数量上限，防并发把 MiniMax 配额打满。默认 5（范围 1–10000）。
-            </p>
-          </div>
-          <input
-            type="number"
-            min={1}
-            max={10000}
-            step={1}
-            value={settings.smart_preview_clone_inflight_cap}
-            onChange={(e) => {
-              const v = parseInt(e.target.value, 10)
-              if (Number.isFinite(v) && v >= 1 && v <= 10000) {
-                setSettings((s) => ({ ...s, smart_preview_clone_inflight_cap: v }))
-              }
-            }}
-            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
-          />
-        </label>
+        {/* plan 2026-06-14 §5（CodeX P2 诚实化）：smart_preview_clone_* 是
+            **预留占位**旋钮——对应"smart 3 分钟预览 lane"特性尚未接入，**当前不
+            控制任何运行时克隆路径**，也**不**控制既有 `smart_auto_clone_enabled`
+            （要停既有 smart 全量克隆请用「开启智能版」段的相关开关）。控件渲染为
+            disabled + 灰显，避免运营误判。字段仍随 full-body POST 持久化（同步守卫
+            test_anon_clone_enable_t1_admin_sync_guard 要求）。 */}
+        <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4 opacity-60 space-y-3">
+          <p className="text-sm font-medium text-foreground">
+            智能版 MiniMax 克隆预览
+            <span className="ml-2 inline-block rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              预留 · 暂不生效（P3 接入后开放）
+            </span>
+          </p>
+          <p className="text-xs text-muted-foreground">
+            规划中的「智能版 3 分钟预览 + 主说话人 600 点预扣克隆」开关与配额。<strong>当前为占位，开关与数值不影响任何运行时行为</strong>，
+            也不影响既有智能版全量任务的音色克隆（那由上方「开启智能版」相关策略控制）。待该特性接入后再开放编辑。
+          </p>
+          <label className="flex items-center gap-3">
+            <input
+              type="checkbox"
+              disabled
+              checked={settings.smart_preview_clone_enabled}
+              onChange={(e) => setSettings((s) => ({ ...s, smart_preview_clone_enabled: e.target.checked }))}
+              className="h-4 w-4 rounded border-border cursor-not-allowed"
+            />
+            <span className="text-sm text-muted-foreground">开启智能版 MiniMax 克隆预览（预留）</span>
+          </label>
+          <label className="flex items-center gap-3">
+            <span className="text-sm text-muted-foreground w-28">每日全局上限</span>
+            <input
+              type="number"
+              min={1}
+              max={100000}
+              step={1}
+              disabled
+              value={settings.smart_preview_clone_daily_global_cap}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10)
+                if (Number.isFinite(v) && v >= 1 && v <= 100000) {
+                  setSettings((s) => ({ ...s, smart_preview_clone_daily_global_cap: v }))
+                }
+              }}
+              className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm cursor-not-allowed"
+            />
+          </label>
+          <label className="flex items-center gap-3">
+            <span className="text-sm text-muted-foreground w-28">并发上限</span>
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              step={1}
+              disabled
+              value={settings.smart_preview_clone_inflight_cap}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10)
+                if (Number.isFinite(v) && v >= 1 && v <= 10000) {
+                  setSettings((s) => ({ ...s, smart_preview_clone_inflight_cap: v }))
+                }
+              }}
+              className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm cursor-not-allowed"
+            />
+          </label>
+        </div>
 
         {/* per-mode 三维度配额旋钮（2026-06-13）：在 legacy per-scope cap 之上，
             对每个 lane（free/express）各自再限 ip/device/source 每日次数。

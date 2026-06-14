@@ -219,7 +219,7 @@ src/pipeline/process.py::run()
 >
 > **⚠️ 运营提示（CodeX 强调，避免误判）**：本任务**未**关闭既有 smart 全量 auto-clone 的 MiniMax 克隆能力（`smart_auto_clone_enabled` 仍默认 True）。若项目主希望"在 smart 预览 lane 接好前，既有 smart 全量也不自动调 MiniMax"，需**单独**把 `smart_auto_clone_enabled` 置 False（本任务未改其默认，以免回归既有 smart 行为）。
 
-> **⚠️ 已知功能缺口（CodeX 最终复核 P2，安全上是关闭态、不触达 MiniMax）：匿名/快捷前端尚未发送 `express_consent`。** `frontend-next/src/lib/api/anonymousPreview.ts::createPreview` body 只带 `anonymous_consent`，两个调用点（`anonymous-trial-panel.tsx`）也没传 express 克隆 opt-in。**后果**：即使项目主开 `anonymous_express_cosyvoice_clone_enabled`，匿名 express 因 consent 缺失仍 **fail-closed 回 CosyVoice 预设**（安全，但克隆链路功能上未闭合）。**后端 + 安全已完整**（create 已准备接收并注入 `express_consent`，pipeline L4 consent gate 已就位）；**剩最后一公里前端 opt-in UI**（在 express 卡片加"允许克隆我的音色"勾选 + availability gating + `createPreview` body 带 `express_consent={auto_voice_clone}`，镜像 PR3 登录态 express consent 的 jobs.ts/TranslationForm.tsx 模式）。因默认 OFF + fail-closed-to-preset，可安全在专项前端 session 接线（项目主开灰度前补即可）。
+> **✅ 匿名/快捷前端 `express_consent` opt-in 已接入（F1，commit faaf021a；本段原"尚未发送"结论已过期，CodeX 复核更新）。** `frontend-next/src/lib/api/anonymousPreview.ts::createPreview` 现接受 `opts.autoVoiceClone`，仅显式 opt-in（strict true）时 body 带 `express_consent={auto_voice_clone:true}`；`anonymous-trial-panel.tsx` consent step 加"（可选）克隆我的原声音色"勾选——**仅 `active_lane==='express'` 渲染**、默认未勾、不 gate 生成按钮，两个调用点传 `autoVoiceClone`（free lane 恒 false）。**匿名/快捷 CosyVoice 克隆链路前→后端完整闭合**：前端 opt-in → create 注入 `express_consent`（仅 express lane）→ Job API snapshot → pipeline L4 consent gate → CosyVoice 克隆。是否真克隆仍由后端 admin 主开关（默认 OFF）+ 全局 cap + worker 决定。验证：真 tsc 零错误、前端 consent 守卫绿、CodeX 5 项全 PASS。前端绝不发送服务端权威时间戳。
 
 复用现有 credit ledger / shadow credits（gateway voice-clone 端点已有 shadow credits 机制）—— **以下为延后 smart-预览-lane 专项的设计目标**：
 
