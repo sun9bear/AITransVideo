@@ -86,6 +86,18 @@ _ANON_EXPRESS_CAP_BOUNDS = (1, 100000)
 # 高于此对单 IP/设备/视频已无防滥用意义，且 express 另有 50/日全局子闸兜底。
 _ANON_PER_MODE_CAP_BOUNDS = (1, 1000)
 
+# 匿名/快捷 CosyVoice + 智能版 MiniMax 克隆 cap 边界（plan 2026-06-14 §4.1）。
+# 同样不进 _APF_LIMIT_BOUNDS（保持那张表的 free 6 旋钮契约不破）。下界 ≥1：
+# 紧急关停走克隆主开关（anonymous_express_cosyvoice_clone_enabled /
+# smart_preview_clone_enabled），不靠 cap=0（等效误关停且难排查，与
+# anonymous_express_daily_global_cap 同哲学）。
+_CLONE_CAP_BOUNDS = {
+    "anonymous_clone_daily_global_cap": (1, 100000),
+    "anonymous_clone_active_cap": (1, 100000),
+    "smart_preview_clone_daily_global_cap": (1, 100000),
+    "smart_preview_clone_inflight_cap": (1, 10000),
+}
+
 # 分片上传旋钮边界（plan 2026-06-11 §3.7）：{field: (min, max)}。
 # chunk_mb 上界 80 是硬约束（CF 免费版单请求体 100MB，留余量）；
 # 其余下界 ≥1 防误设 0（等效误关停难排查——紧急关停用 chunked_upload_enabled
@@ -139,7 +151,7 @@ class AdminSettings(BaseModel):
     cosyvoice_offline_endpoint_mode: str = "mainland"       # CosyVoice offline: "international" or "mainland"
     translation_char_range_min_factor: float = 0.85         # min_chars = target_chars * this
     translation_char_range_max_factor: float = 1.15         # max_chars = target_chars * this
-    voice_clone_cost_credits: int = 500  # DEPRECATED: migrated to pricing_runtime. Kept for compat.
+    voice_clone_cost_credits: int = 600  # DEPRECATED: migrated to pricing_runtime. Kept for compat (plan 2026-06-14 §4.2: 500→600).
     # --- Phase 2 Task 1 — translation-duration-alignment ---
     # When enabled, MiniMax TTS calls receive a per-segment `speed` parameter
     # in voice_setting (instead of the hardcoded 1.0). The decision is made
@@ -471,6 +483,37 @@ class AdminSettings(BaseModel):
     language_pairs_user_allowlist_enabled: StrictBool = True
     language_pairs_allowlist: list[str] = []  # user_id 字符串数组（beta 灰度）
 
+    # --- 匿名/快捷版 CosyVoice 免费克隆 (plan 2026-06-14 §3.4/§4.1) ---
+    # 让免费/快捷预览走真实克隆流程：匿名 express 经 maybe_run_express_auto_clone
+    # 走 CosyVoice 国内 v3.5 临时克隆（注册零费用、合成是管线既有步骤），失败
+    # 回 CosyVoice 预设。**绝不** MiniMax（扣账户余额）。
+    #
+    # 授权层（plan §3.4，匿名版镜像 express_cosyvoice_auto_clone_* 三件套，
+    # 但 L3 不用 user allowlist——匿名无 user role——改用全局 fail-closed cap）：
+    #   L1' anonymous_express_cosyvoice_clone_enabled（本主开关，默认 False）
+    #   L2  worker env 就绪（is_worker_enabled_in_env，pipeline 判断）
+    #   L3' 全局 cap：anonymous_clone_daily_global_cap + anonymous_clone_active_cap
+    #   L4  consent auto_voice_clone is True（express_consent 经 create 注入）
+    #
+    # **类型用 StrictBool**（同 express_cosyvoice_auto_clone_enabled）：宽松 bool
+    # 下 "1"/"on"/"true" 会被解析为 True，admin UI bug 可能意外打开匿名真克隆。
+    anonymous_express_cosyvoice_clone_enabled: StrictBool = False
+    # 匿名克隆每日全局上限（fail-closed）：sentinel user 作全局 owner，故 cap 是
+    # 全局语义（非 per-anonymous）。计数存储不可用时拒绝克隆回预设。默认 100。
+    anonymous_clone_daily_global_cap: int = 100
+    # 匿名活跃临时克隆上限（当前 is_temporary=true AND expired_at IS NULL）。
+    # 防并发把临时音色表撑爆。sentinel 全局 owner → 全局语义。默认 20。
+    anonymous_clone_active_cap: int = 20
+
+    # --- 智能版 MiniMax 克隆预览 (plan 2026-06-14 §5) ---
+    # 登录智能版预览：用户显式 consent + 预扣 600 点（知情付费路径，符合
+    # CLAUDE.md「✅ 用户显式触发」例外）。克隆成功入个人音色库（source=
+    # smart_preview）；失败/激活失败退点 + 清理 voice_id。默认 OFF。
+    smart_preview_clone_enabled: StrictBool = False
+    # Smart 预览克隆每日全局上限 + 并发上限（fail-closed）。默认 200 / 5。
+    smart_preview_clone_daily_global_cap: int = 200
+    smart_preview_clone_inflight_cap: int = 5
+
     @field_validator(
         "anonymous_preview_max_upload_mb",
         "anonymous_preview_max_seconds",
@@ -506,6 +549,27 @@ class AdminSettings(BaseModel):
         if not (low <= int(v) <= high):
             raise ValueError(
                 f"anonymous_express_daily_global_cap 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator(
+        "anonymous_clone_daily_global_cap",
+        "anonymous_clone_active_cap",
+        "smart_preview_clone_daily_global_cap",
+        "smart_preview_clone_inflight_cap",
+    )
+    @classmethod
+    def validate_clone_cap_bounds(cls, v: int, info) -> int:
+        """克隆 cap 统一边界校验（plan 2026-06-14 §4.1）。
+
+        下界 ≥1 防误设 0（cap=0 等效误关停且难排查——紧急关停用克隆主开关
+        anonymous_express_cosyvoice_clone_enabled / smart_preview_clone_enabled）；
+        上界防天文数字（成本敞口失控）。各字段边界见 ``_CLONE_CAP_BOUNDS``。
+        """
+        low, high = _CLONE_CAP_BOUNDS[info.field_name]
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"{info.field_name} 必须在 [{low}, {high}]，收到 {v!r}"
             )
         return int(v)
 

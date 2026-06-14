@@ -8067,10 +8067,12 @@ class ProcessPipeline:
             ) / "pricing_runtime.json"
             if runtime_file.exists():
                 data = _json.loads(runtime_file.read_text(encoding="utf-8"))
-                return data.get("credits", {}).get("voice_clone_cost_credits", 500)
+                # plan 2026-06-14 §4.2：默认 fallback 500→600（生产恒读 runtime
+                # 实际值；此默认仅 missing-key/缺文件路径用，与新 canonical 一致）。
+                return data.get("credits", {}).get("voice_clone_cost_credits", 600)
         except Exception:
             pass
-        return 500
+        return 600
 
     def _build_translation_review_payload(
         self,

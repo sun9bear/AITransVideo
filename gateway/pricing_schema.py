@@ -35,7 +35,10 @@ class CreditsConfig(BaseModel):
     free_grant_credits: int = 500
     debit_rates: dict[str, int]  # "express.standard" -> 10
     bucket_priority: dict[str, list[str]]
-    voice_clone_cost_credits: int = 500
+    # plan 2026-06-14 §4.2：MiniMax/正式克隆 500→600。⚠️ 生产真源是
+    # /opt/.../config/pricing_runtime.json（缺失才回退此默认），且**不受
+    # default-OFF 保护**——发布走 admin/runtime snapshot，由项目主单独灰度。
+    voice_clone_cost_credits: int = 600
 
 
 class TopupPackage(BaseModel):
@@ -223,7 +226,7 @@ def build_default_pricing_payload() -> PricingPayload:
                 # paid Plus/Pro grants don't subsidize free quota usage.
                 "smart": ["trial", "subscription", "topup", "free"],
             },
-            voice_clone_cost_credits=500,
+            voice_clone_cost_credits=600,  # plan 2026-06-14 §4.2（默认 fallback）
         ),
         topup=TopupConfig(
             enabled=False,

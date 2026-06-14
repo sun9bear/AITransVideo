@@ -134,6 +134,15 @@ interface AdminSettings {
   // 互斥，后端保存校验 422（文案提示先切换 provider）。
   anonymous_express_enabled: boolean
   anonymous_express_daily_global_cap: number
+  // --- 匿名/快捷 CosyVoice 免费克隆 + 智能版 MiniMax 克隆（plan 2026-06-14）---
+  // 全默认 OFF，full-body POST 同步必需（否则保存别的设置会把这些字段静默打回
+  // 后端默认）。守卫：tests/test_anon_clone_enable_t1_admin_sync_guard.py。
+  anonymous_express_cosyvoice_clone_enabled: boolean
+  anonymous_clone_daily_global_cap: number
+  anonymous_clone_active_cap: number
+  smart_preview_clone_enabled: boolean
+  smart_preview_clone_daily_global_cap: number
+  smart_preview_clone_inflight_cap: number
   // per-mode 三维度配额旋钮（2026-06-13）：legacy per-scope cap 之上，对每个
   // lane 各自再限 ip/device/source 每日次数。per_ip_per_mode 是免费档"同 IP
   // 每日次数"的实际绑定闸。full-body POST 同步必需（否则保存别的设置会把
@@ -253,6 +262,15 @@ const DEFAULT_SETTINGS: AdminSettings = {
   //   anonymous_express_daily_global_cap = 50
   anonymous_express_enabled: false,
   anonymous_express_daily_global_cap: 50,
+  // --- 匿名/快捷 CosyVoice + 智能版 MiniMax 克隆默认值（plan 2026-06-14）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致；两个主开关
+  // 默认 false（休眠上线，项目主自行灰度真克隆/真钱）。
+  anonymous_express_cosyvoice_clone_enabled: false,
+  anonymous_clone_daily_global_cap: 100,
+  anonymous_clone_active_cap: 20,
+  smart_preview_clone_enabled: false,
+  smart_preview_clone_daily_global_cap: 200,
+  smart_preview_clone_inflight_cap: 5,
   // per-mode 三维度旋钮默认值必须与 gateway/admin_settings.py 严格一致（全 1）：
   anonymous_preview_cap_per_ip_per_mode: 1,
   anonymous_preview_cap_per_device_per_mode: 1,
@@ -1354,6 +1372,145 @@ export default function AdminSettingsPage() {
           />
         </label>
 
+        {/* 匿名/快捷 CosyVoice 免费克隆 + 智能版 MiniMax 克隆（plan 2026-06-14）。
+            全默认关闭，休眠上线，项目主自行灰度真克隆/真钱。匿名/快捷只走
+            CosyVoice 国内免费克隆（失败回预设，绝不 MiniMax）；智能版走用户
+            显式 consent + 预扣 600 点的 MiniMax 克隆。 */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.anonymous_express_cosyvoice_clone_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, anonymous_express_cosyvoice_clone_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              开启匿名/快捷 CosyVoice 自动克隆
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                CosyVoice 免费 · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后匿名/快捷预览在用户显式勾选克隆 consent 时，走 CosyVoice 国内 v3.5 临时克隆
+              （注册零费用、合成是管线既有步骤）。失败/未授权回 CosyVoice 预设音色，<strong>绝不</strong>调
+              MiniMax。受下方全局每日/活跃上限与 worker 可用性约束。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">匿名克隆每日全局上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              全局（非 per-用户）每日匿名克隆次数上限，fail-closed 控制成本敞口。默认 100（范围 1–100000）。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={100000}
+            step={1}
+            value={settings.anonymous_clone_daily_global_cap}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 100000) {
+                setSettings((s) => ({ ...s, anonymous_clone_daily_global_cap: v }))
+              }
+            }}
+            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">匿名活跃临时克隆上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              当前活跃（未过期）匿名临时音色数量上限，防并发把临时音色表撑爆。默认 20（范围 1–100000）。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={100000}
+            step={1}
+            value={settings.anonymous_clone_active_cap}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 100000) {
+                setSettings((s) => ({ ...s, anonymous_clone_active_cap: v }))
+              }
+            }}
+            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.smart_preview_clone_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, smart_preview_clone_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              开启智能版 MiniMax 克隆预览
+              <span className="ml-2 inline-block rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-600">
+                MiniMax 付费 · 预扣 600 点 · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              登录智能版预览：用户显式 consent + 预扣 600 点的 MiniMax 克隆（知情付费路径）。克隆成功
+              入个人音色库；失败/激活失败退点并清理音色。受下方全局每日/并发上限约束。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">智能版克隆每日全局上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              全局每日智能版预览克隆次数上限，fail-closed 控制 MiniMax 账户资源消耗。默认 200（范围 1–100000）。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={100000}
+            step={1}
+            value={settings.smart_preview_clone_daily_global_cap}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 100000) {
+                setSettings((s) => ({ ...s, smart_preview_clone_daily_global_cap: v }))
+              }
+            }}
+            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">智能版克隆并发上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              同时在途的智能版预览克隆数量上限，防并发把 MiniMax 配额打满。默认 5（范围 1–10000）。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={10000}
+            step={1}
+            value={settings.smart_preview_clone_inflight_cap}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 10000) {
+                setSettings((s) => ({ ...s, smart_preview_clone_inflight_cap: v }))
+              }
+            }}
+            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+
         {/* per-mode 三维度配额旋钮（2026-06-13）：在 legacy per-scope cap 之上，
             对每个 lane（free/express）各自再限 ip/device/source 每日次数。
             per_ip_per_mode 是免费档"同 IP 每日次数"的实际绑定闸——调高放宽
@@ -1629,6 +1786,20 @@ export default function AdminSettingsPage() {
               DEFAULT_SETTINGS.anonymous_express_enabled,
             anonymous_express_daily_global_cap:
               DEFAULT_SETTINGS.anonymous_express_daily_global_cap,
+            // --- 克隆旋钮 reset 规则（plan 2026-06-14）：可见控件显式回 DEFAULT
+            // （两个主开关回 false / fail-safe-off，4 个 cap 回出厂默认）---
+            anonymous_express_cosyvoice_clone_enabled:
+              DEFAULT_SETTINGS.anonymous_express_cosyvoice_clone_enabled,
+            anonymous_clone_daily_global_cap:
+              DEFAULT_SETTINGS.anonymous_clone_daily_global_cap,
+            anonymous_clone_active_cap:
+              DEFAULT_SETTINGS.anonymous_clone_active_cap,
+            smart_preview_clone_enabled:
+              DEFAULT_SETTINGS.smart_preview_clone_enabled,
+            smart_preview_clone_daily_global_cap:
+              DEFAULT_SETTINGS.smart_preview_clone_daily_global_cap,
+            smart_preview_clone_inflight_cap:
+              DEFAULT_SETTINGS.smart_preview_clone_inflight_cap,
             anonymous_preview_cap_per_ip_per_mode:
               DEFAULT_SETTINGS.anonymous_preview_cap_per_ip_per_mode,
             anonymous_preview_cap_per_device_per_mode:

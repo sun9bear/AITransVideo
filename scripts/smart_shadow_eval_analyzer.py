@@ -452,7 +452,7 @@ def _compute_cost_per_job(fact, pricing):
         retts_rmb = 0  # no retts data without metering
         quality = "low"
     clone_rmb = (um.get("clone_calls", 0)
-                 * creds.get("voice_clone_cost_credits", 500)
+                 * creds.get("voice_clone_cost_credits", 600)  # plan 2026-06-14 §4.2: 500→600
                  * cm.get("point_cost_rmb", 0.015))
     smart_total = baseline + retts_rmb + rewrite_rmb + clone_rmb
     revenue = 100 * src_min * cm.get("point_price_rmb", 0.03)
