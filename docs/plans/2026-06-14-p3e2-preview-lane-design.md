@@ -53,6 +53,9 @@
   4. outcome：`reserved` → stamp marker（PG + JSON store 回写）；`denied`(insufficient_credits/voice_library_full)/`user_not_found` → **不阻断**，走预设 + create 响应带 `clone_skipped_reason`（**需新增响应字段**，现 create 响应是 pass-through，R1 风险点）。
   5. 翻 `smart_clone_requires_reservation`=True（激活 P3e-1a gate）——**与本步同批**。
 - **P3e-3（预览 lane 交付）**：`smart_preview_mode` 驱动 3min teaser + 水印（扩 `effective_policy_mode` 或新分支）+ job_terminal_mirror **部分**结算跳过（跳分钟、保留克隆 600 结算）+ preview→正式 server 复用契约（前端只传 `preview_job_id`，server 校验同用户 + 有 captured billing event + voice 入库 → 取回 voice_id + 原视频引用）。
+  - ⚠️ **关键耦合（实施期发现，必读）**：「跳分钟点」**不能**脱离「3min teaser」单独做——若 create 端 skip 分钟 reserve 但 pipeline 仍跑**完整**视频（不限 3min），就是**免费完整任务**（漏收全部分钟点，远比克隆 600 严重）。所以 P3e-3 必须**作为一个整体切片**：`smart_preview_mode` marker + create 跳分钟 reserve + **pipeline 限 3min teaser** + 水印 四者同批，缺一不可。「跳分钟结算」自然达成=create 没 reserve 分钟 → settle_job_quota/credit_ledger 天然 no-op（无需改 settlement）。
+  - **P3e-2b 现状**：smart-consent job 现 reserve 600 **+ 分钟点都扣**（=完整 smart 任务 + 克隆计费），**还不是**「3min 预览只扣 600」。后者 = 本 P3e-3 整体切片。
+- **P3e-2b CodeX 终审补丁（93110c27）**：reservation 收紧闸两旗 OR 耦合——`smart_preview_clone_enabled`(create 侧 reserve 旗) 为真即自动强制 pipeline gate，消除「只开 create 旗、忘开 pipeline gate 旗 → 无 reservation smart job 走 legacy 漏收」的配置顺序风险。
 - **P3e-4（前端 + 反滥用）**：预扣弹窗（600 + 余额 `getMyCredits` + `clone_skipped_reason` 降级提示）+ consent 驱动（`jobs.ts` 现硬编 auto_voice_clone:true → 用户确认驱动）+ `smart_preview_clone` 旋钮去占位 + 反滥用 cap（`smart_preview_clone_daily_global_cap`/`inflight_cap` 真生效）。
 
 ---
