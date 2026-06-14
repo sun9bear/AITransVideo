@@ -1529,6 +1529,26 @@ def _check_smart_clone_reservation_active(
     return bool(data.get("ok") and data.get("active"))
 
 
+def _smart_reservation_gate_open(
+    requires_reservation: bool, reservation_id: object
+) -> bool:
+    """P3e §2 智能版克隆 reservation 收紧闸（纯函数，钱-critical，可单测）。
+
+    - ``requires_reservation=False``（admin 默认）→ **恒 open**：既有 smart
+      auto-clone 行为完全不变（不要求 reservation）。
+    - ``True`` → 仅当带**非空** ``reservation_id`` 才 open；否则闸关 →
+      pipeline 选 provider 时不接真 MiniMax（只 preset / reuse），封死现在
+      full smart 无 reservation 调付费 provider 的漏收（plan §2）。
+
+    注意：本函数只判 reservation_id **是否存在**；其「真有效（status=reserved
+    且属本 task）」由 gateway register-billed endpoint 写 billing event 时**原子
+    再校验**（pipeline 不碰钱）。
+    """
+    if not requires_reservation:
+        return True
+    return bool(str(reservation_id or "").strip())
+
+
 def _is_valid_speaker_id(value: object) -> bool:
     return isinstance(value, str) and _SPEAKER_ID_PATTERN.match(value.strip()) is not None
 
@@ -4113,6 +4133,30 @@ class ProcessPipeline:
                             "smart_reuse_user_voice_enabled", default=True
                         )
                     )
+                    # P3e (plan 2026-06-14 §2): reservation 收紧 rollout 闸。
+                    # False（默认）→ 既有 smart auto-clone 行为**完全不变**（不要
+                    # 求 reservation）。True → 选真 MiniMax provider **额外**要求
+                    # JobRecord 带有效 ``smart_clone_reservation_id``（create 预扣
+                    # 600 时 stamp）；无 reservation → 不接真 provider，只 preset/
+                    # reuse（封死现在 full smart 无 reservation 调付费的漏收）。
+                    # reservation 的「真有效（status=reserved 且属本 task）」由
+                    # gateway register-billed endpoint 在写 billing event 时**原子
+                    # 再校验**；pipeline 这里只看 snapshot 有没有 id（不碰钱）。
+                    _smart_requires_reservation = bool(
+                        read_admin_setting(
+                            "smart_clone_requires_reservation", default=False
+                        )
+                    )
+                    _smart_clone_reservation_id = (
+                        str(_snap("smart_clone_reservation_id") or "").strip()
+                        or None
+                    )
+                    _smart_reservation_gate_open_result = (
+                        _smart_reservation_gate_open(
+                            _smart_requires_reservation,
+                            _smart_clone_reservation_id,
+                        )
+                    )
                     # Phase 4 (plan 2026-05-17 §Smart 弱匹配暂停): admin
                     # toggle. Default False so existing users see no
                     # behavior change; admin must opt in to get pauses
@@ -4533,6 +4577,16 @@ class ProcessPipeline:
                     # is empty. The gate below mirrors all conditions.
                     _smart_quota_remaining = 0
                     _smart_clone_provider = _build_b2_not_wired_clone_provider()
+                    _smart_needs_new_clone = bool(
+                        _smart_consent_allows_clone
+                        and _smart_admin_clone_enabled
+                        and _smart_speaker_ids_requiring_clone
+                        # P3e §2: reservation 收紧闸（默认 open → 不改既有行为）。
+                        # 闸开=未启用收紧 或 已带 reservation_id。闸关 → 走下方
+                        # not-wired stub → evaluate_voice_review PRESET fall-through，
+                        # 镜像 admin_clone_enabled=False 路径（绝不接真 provider）。
+                        and _smart_reservation_gate_open_result
+                    )
                     if (
                         _smart_consent_allows_clone
                         and _smart_admin_clone_enabled
