@@ -426,3 +426,34 @@ def test_sweep_settles_stale_expired():
             rem, resv = await _bucket_remaining_reserved(db)
             assert rem == 2000 and resv == 0  # 退还
     _run(go())
+
+
+def test_settle_two_sequential_reservations_same_task_no_held_credit():
+    """🔥 CodeX 钱-loop 审核回归：同 task 顺序两个 reservation（第一个 captured
+    后第二个才能建），第二个必须 capture **自己的** 600——不能撞第一个的 capture
+    entry 导致 shadow_capture 跳过、第二个 600 永久挂 reserved（per-reservation
+    reason_code 修复）。两次真扣 → remaining 2000→800、reserved 0。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=2000)
+        async with sm() as db:
+            # 第一个 reservation：reserve → bill → capture
+            rid1 = await _reserve(db, "job_multi")
+            await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_multi", reservation_id=rid1,
+                voice_id="mm_m1", label="x", source_job_id="job_multi",
+            )
+            o1 = await svc.settle_smart_clone_reservation(db, reservation_id=rid1)
+            assert o1.status == "captured"
+            # 第二个 reservation（同 task，第一个已 captured → partial unique 放行）
+            rid2 = await _reserve(db, "job_multi")
+            assert rid2 != rid1
+            await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_multi", reservation_id=rid2,
+                voice_id="mm_m2", label="x", source_job_id="job_multi",
+            )
+            o2 = await svc.settle_smart_clone_reservation(db, reservation_id=rid2)
+            assert o2.status == "captured"  # 不是 already_settled / settlement_failed
+            rem, resv = await _bucket_remaining_reserved(db)
+            # 两个 600 都真扣：2000 - 600 - 600 = 800，无悬挂 reserved
+            assert rem == 800 and resv == 0
+    _run(go())

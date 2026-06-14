@@ -410,6 +410,12 @@ async def settle_smart_clone_reservation(
         return SettleOutcome(status="already_settled", reservation_id=str(res_pk))
 
     reserve_reason = credit_reserve_reason_code(res.id)
+    # **per-reservation** 结算 reason_code（CodeX 钱-loop 审核）：含 reservation_id，
+    # 让 _has_existing_settlement 按本 reservation 精确判定"本次结算真落 ledger"。
+    # 否则同 task 多 reservation 时第二个会撞第一个的 capture entry → shadow_capture
+    # 以为已结算跳过 → 第二个 600 永久挂 reserved（扣了不退）。
+    capture_reason = f"{_CAPTURE_REASON}_{res.id}"
+    release_reason = f"{_RELEASE_REASON}_{res.id}"
     event = (
         await db.execute(
             select(CloneBillingEvent).where(CloneBillingEvent.reservation_id == res_pk)
@@ -421,11 +427,11 @@ async def settle_smart_clone_reservation(
         await shadow_capture(
             db, user_id=res.user_id, job_id=res.task_id,
             actual_credits=int(res.amount_credits), service_mode=service_mode,
-            reason_code=_CAPTURE_REASON, reserve_reason_code=reserve_reason,
+            reason_code=capture_reason, reserve_reason_code=reserve_reason,
         )
         settled_ok = await _has_existing_settlement(
             db, user_id=res.user_id, job_id=res.task_id,
-            reason_code=_CAPTURE_REASON, reserve_reason_code=reserve_reason,
+            reason_code=capture_reason, reserve_reason_code=reserve_reason,
         )
         if not settled_ok:
             await db.rollback()
@@ -437,11 +443,11 @@ async def settle_smart_clone_reservation(
     else:
         await shadow_release(
             db, user_id=res.user_id, job_id=res.task_id,
-            reason_code=_RELEASE_REASON, reserve_reason_code=reserve_reason,
+            reason_code=release_reason, reserve_reason_code=reserve_reason,
         )
         settled_ok = await _has_existing_settlement(
             db, user_id=res.user_id, job_id=res.task_id,
-            reason_code=_RELEASE_REASON, reserve_reason_code=reserve_reason,
+            reason_code=release_reason, reserve_reason_code=reserve_reason,
         )
         if not settled_ok:
             await db.rollback()
