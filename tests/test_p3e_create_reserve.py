@@ -63,6 +63,14 @@ def test_reserve_stamps_smart_state_marker_into_request_data():
     assert '"smart_clone_credit_reserved": True' in flat
 
 
+def test_smart_preview_mode_stamped_from_preview_request_strict():
+    """P3e-3 producer：smart_state 含 smart_preview_mode，由前端 preview_mode
+    请求 strict is True 驱动（前端未送前 inert=False）→ pipeline 3min teaser+水印。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert '"smart_preview_mode": request_data.get("preview_mode") is True' in flat
+
+
 def test_reserve_amount_600_and_lib_cap():
     """预扣 600 + 库容门用 admin smart_user_voice_clone_cap。"""
     body = _create_src()

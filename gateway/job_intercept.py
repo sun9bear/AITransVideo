@@ -2162,6 +2162,14 @@ async def intercept_create_job(
                         request_data["smart_state"] = {
                             "smart_clone_reservation_id": _smart_resv.reservation_id,
                             "smart_clone_credit_reserved": True,
+                            # P3e-3 producer：smart 3min 预览标记（前端 preview_mode
+                            # 请求驱动，strict is True）→ pipeline 读
+                            # smart_state.smart_preview_mode → 3min teaser + 水印
+                            # （+ 后续 P3e-3b 跳分钟）。仅当请求显式 preview_mode
+                            # （前端预览入口）才 True；完整 smart 任务（缺 preview_
+                            # mode）→ False（仍完整任务 + 克隆计费）。前端未送
+                            # preview_mode 前恒 False（inert）。
+                            "smart_preview_mode": request_data.get("preview_mode") is True,
                         }
                     else:
                         # denied(insufficient_credits / voice_library_full) /
