@@ -106,13 +106,13 @@ class TestCloneCostFromRuntimePricing:
         assert isinstance(result, int)
 
     def test_get_clone_cost_credits_fallback_on_error(self) -> None:
-        """On import/runtime error, falls back to 500."""
+        """On import/runtime error, falls back to 600 (plan 2026-06-14 §4.2)."""
         from voice_selection_api import _get_clone_cost_credits
 
         with patch.dict("sys.modules", {"pricing_runtime": None}):
             # pricing_runtime is None -> import will fail
             result = _get_clone_cost_credits()
-        assert result == 500
+        assert result == 600
 
     def test_pricing_endpoint_does_not_read_admin_settings_for_clone_cost(self) -> None:
         """``get_voice_selection_pricing`` must use ``_get_clone_cost_credits``

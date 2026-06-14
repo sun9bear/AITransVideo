@@ -78,7 +78,7 @@ def _parse_args() -> argparse.Namespace:
         "--clone-credit-cost",
         type=int,
         default=0,
-        help="Credits charged per clone. Defaults to runtime pricing, fallback 500.",
+        help="Credits charged per clone. Defaults to runtime pricing, fallback 600.",
     )
     parser.add_argument(
         "--provider-cost-rmb",
@@ -121,7 +121,7 @@ def _clone_credit_cost(arg_value: int) -> int:
             return value
     except Exception:
         pass
-    return 500
+    return 600  # plan 2026-06-14 §4.2: 500→600（fallback 对齐新 canonical）
 
 
 def _job_ids(args: argparse.Namespace) -> list[str]:
