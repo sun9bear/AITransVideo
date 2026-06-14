@@ -194,10 +194,19 @@ CodeX 复审判定 v2「Not ready-to-implement」，6 点 P0/P1 全部闭环（*
 ## 11. 分步实现（批准后）
 
 - **P3a ✅ 完成 + CodeX 审过**（commit 0db7e781 数据模型 + 3019c600 reserve 服务，24 测试过）。CodeX Non-Findings 确认 reserve 原子性/幂等/不双扣成立。
-- **P3b** register+bill endpoint（pipeline 在 MiniMax 成功瞬间写 billing event）+ pipeline reservation-gate（无 reservation 禁真 provider）+ 限主说话人 1。
-- **P3c** 独立 finalizer（capture/release 对账）+ TTL sweeper（钱-正确性重点）。
+- **P3b（钱-核心部分 ✅ 完成 + CodeX 审过）** register+bill 服务 + 内部 endpoint：
+  - ✅ `register_smart_clone_with_billing` 单一事务（行锁 reservation + 写 chargeable billing event + `add_user_voice(commit=False)` 一起 commit；唯一约束幂等）—— commit caa2f815；`add_user_voice` 加 `commit` 参数。
+  - ✅ 内部 endpoint `/api/internal/smart-clone/register-billed`（pipeline 独立进程经此调 register+bill）—— commit b75c33ff，5 守卫测过。
+  - ⏳ **未做（重，需与 create 协同）**：pipeline reservation-gate（无 reservation 禁真 MiniMax provider，只 preset/reuse）+ 限主说话人 1 + MiniMax 成功调 register-billed。⚠️ **会改既有 smart 行为 + 破坏既有 smart 测试，必须与 create endpoint 同批做**。
+- **P3c ✅ 完成 + CodeX 审过（钱-正确性闭环的"结算触发"环节）**：
+  - ✅ 独立 finalizer `settle_smart_clone_reservation`（行锁 + chargeable→capture / 无→release + strict ledger 验证 + per-reservation reason_code）—— commit dc3e7c1a；per-reservation 修复 c3ee74ed。
+  - ✅ `settle_smart_clone_reservations_for_task` by-task 入口 + 接进 `job_terminal_mirror`（终态块 anon/normal 分支**之前**调，覆盖匿名标记跳过分钟结算的预览路径；marker-gated；独立 `async_session` 隔离 mirror 批量 caller-commit）—— commit 324866b。
+  - ✅ TTL sweeper `smart_clone_reservation_sweeper` + main.py lifespan 接线 + shutdown cancel（CodeX 复审 P1：补生产调用点封死漏退；P2 lifecycle：补 cancel）—— commit c3344b2 + 85ffe2a。
+  - **CodeX 两轮复审结论**：无 P0/P1 钱-bug；幂等/strict-verify/per-reservation reason_code/billing 唯一约束闭合；嵌套 session 池压力 P2 = marker-gate 限频 + sweeper 兜底，当前可接受。
 - **P3d** 前端预扣弹窗 + 余额 + consent 驱动 + 退款提示 + smart_preview_clone 旋钮去占位（tsc + 守卫）。
-- **P3e** smart 预览 lane 接线（intake/job/preview_mode/3min+水印/reservation-gate）+ preview→正式 server-side 复用契约 + 反滥用 cap + 全量 set-diff + 最终 CodeX。
+- **P3e** smart 预览 lane 接线（intake/job/preview_mode/3min+水印/reservation-gate）+ **create endpoint 调 reserve + stamp `smart_state` marker**（激活 finalizer gate）+ preview→正式 server-side 复用契约 + 反滥用 cap + 全量 set-diff + 最终 CodeX。
+
+> **当前进度小结（2026-06-14）**：P3 **钱-正确性核心已闭环**（reserve → register+bill → settle → settle-trigger(mirror finalizer) → settle-backstop(sweeper)），全程 CodeX 审过、独立可测、**对既有行为完全 inert**（marker 由 P3e create 未接线前不存在 → finalizer/gate 全 no-op）。剩 **P3 激活/集成层**（最重、互相依赖、动既有代码）：① create endpoint(reserve + marker) ② pipeline reservation-gate + 限1 + 调 register-billed ③ 前端 ④ 预览 lane + 复用契约 + 反滥用 cap。②必须与①同批（否则破坏既有 smart 测试）。
 
 ### ⚠️ CodeX P3a 审核 → P3b/P3c 钱-正确性硬要求（必须落地）
 
