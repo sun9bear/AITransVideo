@@ -149,8 +149,8 @@ src/pipeline/process.py::run()
 **纠正（CodeX P2-a）：** 只有 `raise_clone_provider_boundary()` 是测试专用；`evaluate_anonymous_preview_admission` **确在运行时路径**——经 [`anonymous_preview_policy.admit_for_free_preview`](../../gateway/anonymous_preview_policy.py) 在 create L1319 调用，但该 adapter **硬传 `mode="free"` + `anonymous_express_cosyvoice_clone_enabled=False`**，故现状恒 emit `PRESET_ONLY`。改写须分两层：
 
 - **运行时 adapter（`anonymous_preview_policy.py::admit_for_free_preview`）**：express lane 改传 `mode="express"` + 真实 `anonymous_express_cosyvoice_clone_enabled`（来自 admin settings），使 express+clone-on 时 emit `EXPRESS_TEMPORARY_CLONE_GATE`。**补运行时回归测试**（不只改契约测试）。
-- **契约 helper（`anonymous_preview_admission.py`）**：`raise_clone_provider_boundary()`（恒抛）拆为**仅拦 MiniMax / 付费持久克隆**的边界 helper（命名如 `raise_paid_clone_provider_boundary`，恒抛）+ CosyVoice 免费克隆 gate 放行。`EXPRESS_TEMPORARY_CLONE_GATE` 语义从"boundary marker，恒抛"升级为"CosyVoice 临时克隆已接线，下游只能走 `maybe_run_express_auto_clone`（CosyVoice-only）"。
-- 对应测试（`test_apf3a_anonymous_preview_contract.py` / `test_anonymous_preview_t6_policy.py`）：把"boundary 恒抛"断言改为"MiniMax 路径恒抛 + CosyVoice gate 放行"，并新增 adapter `mode="express"` 运行时断言。
+- **契约 helper（`anonymous_preview_admission.py`）—— ⚠️ 实现修正（P4 落地 commit 9418f160，CodeX 复核确认；本条覆盖上方 v2 的初版设想）**：经深读契约确认，`raise_clone_provider_boundary()` 守护的是"**本契约模块的调用图**永不变成 clone 执行器"，而**真克隆已在 pipeline `maybe_run_express_auto_clone` 接线**（完全不经此契约模块）。因此 **boundary helper 保留恒抛 `NotImplementedError`——不拆分、不改行为**（~10 个 PR#23 r7 安全硬化测试保持绿），只更新 docstring 说明"CosyVoice 临时克隆已在 pipeline 接线、本模块仍是纯决策 shell、MiniMax 绝不经匿名/快捷路径"。**不**引入 `raise_paid_clone_provider_boundary`，**不**让 `EXPRESS_TEMPORARY_CLONE_GATE` 停止恒抛（它本就不抛——它是 `voice_strategy` 枚举值，恒抛的是 boundary helper）。`EXPRESS_TEMPORARY_CLONE_GATE` 仍是契约信号，**不被 create 消费**（payload voice_strategy 恒 `preset_mapping`）；adapter mode-aware 让该信号诚实反映 admin 旋钮，但**不改运行时克隆**（克隆由 pipeline 独立 gating）。
+- 对应测试（`test_apf3a_anonymous_preview_contract.py` / `test_anonymous_preview_t6_policy.py` / 新增 `test_anon_clone_enable_t4_admission.py`）：boundary helper **仍断言恒抛**（不改）；新增 adapter `mode="express"`+flag → `EXPRESS_TEMPORARY_CLONE_GATE` 运行时断言 + "consumed 字段（decision/duration/artifact_policy）free vs express 一致"零回归断言。
 
 ### 3.4 匿名 gate 缺口 —— 让 `maybe_run_express_auto_clone` 支持匿名（无 user_id/allowlist）
 
@@ -224,7 +224,7 @@ src/pipeline/process.py::run()
 
 | 测试 | 断言 |
 |---|---|
-| 防线① 契约 | MiniMax/付费持久克隆 boundary 恒抛；CosyVoice express gate 放行；`EXPRESS_TEMPORARY_CLONE_GATE` 不再恒抛 |
+| 防线① 契约（P4 实现修正） | `raise_clone_provider_boundary` **仍恒抛**（守护契约模块不变 clone 执行器，不拆分）；adapter `mode="express"`+admin flag → `EXPRESS_TEMPORARY_CLONE_GATE`（契约信号，不被 create 消费）；consumed 字段 free vs express 一致（零回归）；真克隆只在 pipeline，MiniMax 绝不经匿名/快捷 |
 | 防线② pipeline | 匿名 express+clone 开 → 允许 CosyVoice 克隆路由；匿名任意 mode 注入 minimax/voiceclone strategy → 仍强制回 preset |
 | 防线③ payload | `express_consent` 在白名单；`voice_clone`/`voiceclone_reference_path`/`voice_a`/`voice_b`/`free_consent` 仍在禁列；gateway 模块仍不 import 任何克隆模块；rate-limit 模块仍不 import `src.services.voice_clone` |
 

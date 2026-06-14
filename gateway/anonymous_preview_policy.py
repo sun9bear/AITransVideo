@@ -113,8 +113,11 @@ def admit_for_free_preview(
         max_preview_duration_seconds=settings.anonymous_preview_max_seconds,
         # 只有 express 档才把 admin 主开关传进契约；其它档（free 等）强制 False，
         # 契约据此 emit EXPRESS_TEMPORARY_CLONE_GATE 或 PRESET_ONLY（仅契约信号）。
+        # strict ``is True``（CodeX P4 复核）：只有 Python True 才开 gate，
+        # 与 pipeline 侧 master 开关 + create 调用点的 strict 语义一致；truthy
+        # 非 bool（"false" / 1）一律视为关。
         anonymous_express_cosyvoice_clone_enabled=(
-            bool(express_clone_enabled) if str(mode) == "express" else False
+            (express_clone_enabled is True) if str(mode) == "express" else False
         ),
     )
 
