@@ -114,9 +114,10 @@ def test_pg_job_smart_state_set_from_reservation():
     """
     body = _create_src()
     flat = " ".join(body.split())
-    assert "smart_state=(" in flat
+    assert "_smart_state_for_pg = (" in flat
     assert 'job_data.get("smart_state")' in flat
     assert 'request_data.get("smart_state")' in flat
+    assert "smart_state=_smart_state_for_pg" in flat
 
 
 # ---------------------------------------------------------------------------

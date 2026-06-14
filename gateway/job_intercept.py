@@ -2246,6 +2246,25 @@ async def intercept_create_job(
                     db, _smart_clone_reservation_id
                 )
                 _smart_clone_reservation_id = None
+            _smart_state_for_pg = (
+                job_data.get("smart_state")
+                if isinstance(job_data.get("smart_state"), dict)
+                else request_data.get("smart_state")
+                if isinstance(request_data.get("smart_state"), dict)
+                else None
+            )
+            if _smart_clone_reservation_id:
+                _smart_state_for_pg = dict(_smart_state_for_pg or {})
+                _smart_state_for_pg.setdefault(
+                    "smart_clone_reservation_id", _smart_clone_reservation_id
+                )
+                _smart_state_for_pg.setdefault("smart_clone_credit_reserved", True)
+                # P3e-3d: gateway stream-only gates read PG Job.smart_state before
+                # mirror can copy JobRecord.smart_state, so create must persist the
+                # preview marker immediately when the reservation path is active.
+                _smart_state_for_pg["smart_preview_mode"] = (
+                    request_data.get("preview_mode") is True
+                )
             if job_id:
                 existing = await db.execute(select(Job).where(Job.job_id == job_id))
                 if existing.scalar_one_or_none() is None:
@@ -2292,13 +2311,7 @@ async def intercept_create_job(
                         # Job API ever normalises the value.
                         display_name=job_data.get("display_name") or generated_display_name,
                         expires_at=job_expires_at,
-                        smart_state=(
-                            job_data.get("smart_state")
-                            if isinstance(job_data.get("smart_state"), dict)
-                            else request_data.get("smart_state")
-                            if isinstance(request_data.get("smart_state"), dict)
-                            else None
-                        ),
+                        smart_state=_smart_state_for_pg,
                     )
                     db.add(job)
                     # Reserve quota in the same transaction.
@@ -2776,6 +2789,7 @@ async def _resolve_r2_redirect(
             download_keys_for,
             effective_policy_mode,
         )
+        from preview_policy import extract_smart_preview_flag
     except Exception as exc:  # pragma: no cover - boto3/storage missing
         logger.warning(
             "storage package import failed (%s); falling back to local", exc,
@@ -2807,7 +2821,10 @@ async def _resolve_r2_redirect(
     # （含匿名 express，service_mode=="express"）零下载 key，不进 R2 302。
     if artifact_key not in download_keys_for(
         effective_policy_mode(
-            job.service_mode, bool(getattr(job, "is_anonymous_preview", False))
+            job.service_mode,
+            bool(getattr(job, "is_anonymous_preview", False)),
+            # P3e-3d：智能版预览也走零下载档（读 smart_state.smart_preview_mode）。
+            smart_preview=extract_smart_preview_flag(getattr(job, "smart_state", None)),
         )
     ):
         return None, ""
@@ -2960,6 +2977,7 @@ async def _resolve_r2_stream_redirect(
             effective_policy_mode,
             stream_kinds_for,
         )
+        from preview_policy import extract_smart_preview_flag
     except Exception as exc:  # pragma: no cover - boto3/storage missing
         logger.warning(
             "stream r2 redirect: storage package import failed (%s); falling back",
@@ -3000,7 +3018,10 @@ async def _resolve_r2_stream_redirect(
     # 本身在集合内，必须显式短路否则仍会 302；anonymous_preview 档
     # eager-push 集为空、本来不该有 registry 条目，这里是双保险。
     _policy_mode = effective_policy_mode(
-        job.service_mode, bool(getattr(job, "is_anonymous_preview", False))
+        job.service_mode,
+        bool(getattr(job, "is_anonymous_preview", False)),
+        # P3e-3d：智能版预览的 video stream 也本地直通、不进 R2 redirect。
+        smart_preview=extract_smart_preview_flag(getattr(job, "smart_state", None)),
     )
     if _policy_mode == "anonymous_preview":
         return None, ""

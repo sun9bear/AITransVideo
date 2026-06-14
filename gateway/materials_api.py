@@ -34,6 +34,7 @@ from materials_pack_common import (
     load_artifact_index,
 )
 from models import Job, User
+from preview_policy import job_is_stream_only_preview
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,11 @@ async def materials_pack_endpoint(
         raise HTTPException(status_code=404, detail="任务不存在")
     if job.user_id != user.id and getattr(user, "role", "user") != "admin":
         raise HTTPException(status_code=403, detail="无权访问")
+
+    # P3e-3d：智能版/匿名预览是 stream-only——不允许打包下载干净素材（源视频/
+    # 配音音频/字幕）。匿名登出本被 auth 挡，本门主要拦**登录** smart 预览的白嫖。
+    if job_is_stream_only_preview(job):
+        raise HTTPException(status_code=403, detail="预览任务不支持素材打包下载")
 
     project_dir_str = job.project_dir
     if not project_dir_str:

@@ -87,15 +87,25 @@ def _is_express_job(record) -> bool:
 
 
 def _policy_mode_for(record) -> str | None:
-    """JobRecord → 策略档（plan 2026-06-12 §C）。
+    """JobRecord → 策略档（plan 2026-06-12 §C + P3e-3d）。
 
     匿名预览任务（record.anonymous_preview 真值）恒为 "anonymous_preview"
     最严档——匿名 express 任务的 service_mode=="express" 不得直接拿去查
     策略表（会放行下载/poster stream）。
+
+    P3e-3d：智能版 3min 预览任务（record.smart_state.smart_preview_mode 为真）
+    **复用同一最严档**——预览只看不交付，否则干净配音音频/字幕/素材会被白嫖。
+    smart_state 缺失 / 非 dict / 缺键 → False（inert，普通任务零变化）。
     """
+    smart_state = getattr(record, "smart_state", None)
+    smart_preview = (
+        isinstance(smart_state, dict)
+        and smart_state.get("smart_preview_mode") is True
+    )
     return effective_policy_mode(
         getattr(record, "service_mode", None),
         getattr(record, "anonymous_preview", False),
+        smart_preview=smart_preview,
     )
 
 
@@ -247,10 +257,10 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     # plan 2026-06-12 §C ⑦：匿名预览任务按零下载档过滤——
                     # artifacts 列表不暴露任何 key（stream-only，AD-6/R3）。
                     record = service.require_job(path_parts[1])
-                    if effective_policy_mode(
-                        getattr(record, "service_mode", None),
-                        getattr(record, "anonymous_preview", False),
-                    ) == "anonymous_preview":
+                    # P3e-3d：artifacts 门改走中心 _policy_mode_for（含
+                    # smart_preview）——原内联 effective_policy_mode 漏读
+                    # smart_state.smart_preview_mode，智能版预览会暴露 artifacts。
+                    if _policy_mode_for(record) == "anonymous_preview":
                         artifacts_payload = {
                             **artifacts_payload,
                             "artifacts": [],
@@ -343,6 +353,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         )
                         return
                     record = service.require_job(job_id)
+                    # P3e-3d：智能版/匿名预览 stream-only——草稿配音（干净 TTS 输出）
+                    # 不放（仅编辑态可达、预览本不可编辑，本门为深度防御）。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "预览任务不提供草稿音频"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     # Drafts only exist while the job is in editing state;
                     # refuse uniformly with 404 (so frontend treats it the
@@ -1836,6 +1854,16 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 ):
                     job_id = path_parts[1]
                     record = service.require_job(job_id)
+                    # P3e-3d：智能版/匿名预览 stream-only——禁止按需重渲成片。
+                    # generate-video 用 watermark_text=None 出**无水印**干净片，会覆盖
+                    # 水印版供 stream/video 取。fast-path 已挡"水印版在场时重渲"，本门
+                    # 再兜"成片缺失"边界 = 绝不为预览任务产出无水印成片。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "预览任务不支持重新生成视频"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     from services.manifest_reader import (
                         load_manifest_artifact_index,
