@@ -1327,8 +1327,25 @@ async def anonymous_preview_create(
     if not probe.get("ok") or not probe.get("duration_seconds"):
         return JSONResponse(status_code=409, content={"error": "teaser_unprobeable"})
     try:
-        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）
-        admission = admit_for_free_preview(float(probe["duration_seconds"]), resolve_apf_limits())
+        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）。
+        # plan 2026-06-14 §3.3：express lane 把真实 mode + admin 克隆主开关传给
+        # admission，使其 voice_strategy 诚实反映 express 克隆 gate（契约信号；
+        # 真克隆触发在 pipeline maybe_run_express_auto_clone，见 §3.4，不受此影响）。
+        _express_clone_enabled = False
+        if record_mode == "express":
+            try:
+                from admin_settings import load_settings as _load_admin_for_clone
+                _express_clone_enabled = (
+                    _load_admin_for_clone().anonymous_express_cosyvoice_clone_enabled is True
+                )
+            except Exception:
+                _express_clone_enabled = False  # fail-safe：读不到当作关
+        admission = admit_for_free_preview(
+            float(probe["duration_seconds"]),
+            resolve_apf_limits(),
+            mode=record_mode,
+            express_clone_enabled=_express_clone_enabled,
+        )
         decision = admission.decision
         decision_str = decision.value if hasattr(decision, "value") else str(decision)
         if decision_str != "admitted":
