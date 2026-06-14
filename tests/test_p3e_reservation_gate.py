@@ -118,6 +118,18 @@ def test_reservation_id_read_from_snapshot():
     assert '_snap("smart_clone_reservation_id")' in src
 
 
+def test_requires_reservation_couples_preview_enabled_flag():
+    """🔥 CodeX P3e-2b 终审：reservation 收紧闸在 preview 激活时**自动强制**
+    （smart_clone_requires_reservation OR smart_preview_clone_enabled）——消除
+    "只开 create 侧 preview 旗、忘开 pipeline gate 旗"的配置顺序漏收风险。"""
+    src = _process_src()
+    flat = " ".join(src.split())
+    assert '"smart_clone_requires_reservation", default=False' in flat
+    assert '"smart_preview_clone_enabled", default=False' in flat
+    # 两旗 OR（任一为真即收紧）
+    assert ") or (" in flat
+
+
 def test_reservation_id_read_from_smart_state_dict():
     """P3e §2：reservation marker 主读位置=smart_state 字典（与 finalizer
     marker-gate 一致；create/Option C 经 submit_job 写进 JobRecord.smart_state）。"""

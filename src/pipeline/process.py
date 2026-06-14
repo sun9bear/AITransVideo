@@ -4193,9 +4193,21 @@ class ProcessPipeline:
                     # bool("false")=True 会误开收紧。钱核心 flag 必须 ``is True``
                     # 严格判定（StrictBool 只护 gateway 存盘路径，不护 pipeline
                     # 直读 JSON）。见 memory feedback_tls_internal_trap 同类 strict-bool。
+                    # CodeX P3e-2b 终审：reservation 收紧闸在 **preview 激活时
+                    # 自动强制**（两旗 OR），消除"配置顺序"漏收风险——若只开
+                    # create 侧 smart_preview_clone_enabled（开始 reserve 600）但
+                    # 忘开 pipeline 侧 smart_clone_requires_reservation，无 reservation
+                    # 的 smart job 仍会走 legacy MiniMax 克隆（漏收 600）。改为
+                    # 任一为真即收紧 → 开 preview 即原子封死 legacy 无 reservation
+                    # 克隆。两旗都 strict ``is True``（read_admin_setting 不转型）。
                     _smart_requires_reservation = (
                         read_admin_setting(
                             "smart_clone_requires_reservation", default=False
+                        )
+                        is True
+                    ) or (
+                        read_admin_setting(
+                            "smart_preview_clone_enabled", default=False
                         )
                         is True
                     )
