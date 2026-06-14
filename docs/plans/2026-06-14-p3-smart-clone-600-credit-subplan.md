@@ -1,9 +1,29 @@
 # P3 子方案：智能版自动克隆主音色 + 600 点预扣 / 退还
 
-**状态：** PROPOSED / **待项目主 + CodeX 审架构后再写动钱代码**
+**状态：** PROPOSED v2 / **待项目主 + CodeX 审新架构后再写动钱代码**
 **日期：** 2026-06-14
 **父方案：** [`2026-06-14-anonymous-express-cosyvoice-clone-enable-plan.md`](2026-06-14-anonymous-express-cosyvoice-clone-enable-plan.md) §5
 **架构决策（项目主已拍板）：** 600 点信用**在 gateway 建任务时预扣**（不在 pipeline）。
+
+---
+
+## v2 修订（2026-06-14，项目主澄清 + CodeX 架构审核）
+
+**项目主澄清（4 问的答复）：**
+1. **形态=smart 3 分钟预览**：预览**只扣克隆点 600、不扣分钟点**（预览不交付、带水印）。用户预览满意 → 转**完整正式流程**；正式流程**复用**：上传的原始视频 + 已克隆音色；**其它预览中间产物不复用**，正式流程从头跑。→ ⚠️ 这把范围从"完整 smart 任务克隆计费"**改为 smart 预览 lane（原始方案 §12.3）**，是更大的特性。
+2. capture 时机：按建议（终态结算）——但见下方 CodeX 修正（改 durable billing event）。
+3. 库容门：本期一起做（解释见正文 §6）。
+4. **`smart_preview_clone_enabled` 旋钮正式接入**（作为 smart 预览克隆的 gate，不再是占位）。
+
+**CodeX 架构审核（钱-正确性 P0/P1，必须纳入）：**
+- **P0-1 manifest 不可当账本**：MiniMax 成功后 pipeline 可能崩溃/丢产物 → "已花钱却 release"或"reservation 挂死"。**修正**：pipeline 在 MiniMax 返回 voice_id 瞬间写**持久化 `clone_billing_event`**（`task_id+reservation_id+provider=minimax+voice_id+chargeable=true`）；结算只看 DB reservation + 该事件，manifest 仅辅助校验。
+- **P0-2 reservation 状态机 + 幂等键**：唯一约束 `task_id + purpose=smart_clone_minimax_600`；状态单向 `reserved→captured` 或 `reserved→released`；capture/release 同事务行锁 + ledger idempotency key 防重复扣/退。
+- **P1-3 terminal finalizer/watchdog**：覆盖**所有**"克隆没触发"终态（未入队/worker 没起/前置失败/决策跳过/库满拒/provider 前失败/取消/超时/崩溃），任务进终态时无 chargeable clone event → release；有 → capture。
+- **P1-4 capture 条件 = `chargeable_clone_created_for_this_task=true`**，不是"用了某 voice_id"（复用历史/缓存/手工/fallback voice 都不收费）。
+
+**结论**：CodeX 暂不建议直接接真钱——gateway-create-time 预扣**可成立**，但前提是它是"可对账、可幂等流转的 reservation + durable billing event"，不能靠 manifest 当主信号。本 v2 架构（§3）已纳入。
+
+---
 
 > ⚠️ **本子方案动真钱（MiniMax 克隆 600 点预扣）。** 钱算错（双扣 / 扣了不退 / 退了不扣）是严重 bug。这是**用户显式 consent 的知情付费路径**（CLAUDE.md「✅ 用户显式触发」例外，不违反硬约束），但必须**计费正确**。批准前不写动钱代码。
 
@@ -30,32 +50,41 @@
 
 ---
 
-## 3. 架构：gateway 建任务时预扣（项目主拍板）
+## 3. 架构 v2：smart 预览 lane + gateway 预扣 + durable billing event
 
+**预览阶段（只扣克隆 600，不扣分钟点；预览带水印、不交付）：**
 ```
-前端 smart submit（auto_voice_clone）
-  → [新] 预扣弹窗"克隆主音色 -600 点，余额 X"→ 用户 confirm
-  → gateway intercept_create_job（smart 分支）
-       1. 既有：reserve 分钟点数（estimated minutes）
-       2. [新] 若 smart_consent.auto_voice_clone=true + admin smart_auto_clone_enabled
-              + 分钟预扣后剩余 ≥ 600 + 库未满
-          → reserve 额外 600（独立 reason_code=smart_voice_clone_reserve_<jobid>，
-            service_mode="smart"，shadow）
-          → JobRecord 落 `smart_clone_credit_reserved=true` + `smart_clone_reserve_reason_code`
-       3. 否则（无 consent / <600 / 库满）→ 不 reserve 克隆点；JobRecord
-            `smart_clone_credit_reserved=false`（pipeline 据此**不克隆 → 预设**，plan §12.3
-            "点数不足 600 继续用预设"）
-  → pipeline 读 JobRecord snapshot：
-       - smart_clone_credit_reserved=false → **不调 MiniMax 克隆**（强制 stub→preset）
-       - =true → 克隆**仅主说话人 1 个**（real MiniMax）；结果(cloned voice_id / 失败原因)
-         写进 job 产物 manifest（settlement 据此对账）
-  → 结算 capture_full（gateway，既有终态结算）：
-       - 读 pipeline 产物：克隆是否真成功产出 voice_id
-       - 成功 → **capture 600**（reserve 转实扣）
-       - 失败/未触发/preset 回落 → **release 600**（全额退还）
+前端 smart 预览提交（含克隆 opt-in）
+  → [新] 弹窗"克隆主音色 -600 点（余额 X）；预览不扣分钟点；失败自动退还"→ confirm
+  → gateway 建 smart 预览任务（preview_mode）：
+       - 库容门：count_active_voices_for_user（跨 provider）≥ 套餐上限 → 不 reserve、走预设、提示库满
+       - smart_preview_clone_enabled=False / 无 consent / 余额<600 → 不 reserve、走预设（不阻断预览）
+       - 否则 → 创建 reservation 行：purpose=`smart_clone_minimax_600`，**唯一约束 (task_id,purpose)**，
+         状态=`reserved`，幂等键；**不 reserve 分钟点**（预览不交付）
+  → pipeline（预览：3 分钟 teaser + 水印）：
+       - 无 reservation → 不调 MiniMax → 预设音色
+       - 有 reservation → 克隆**仅主说话人 1 个**（real MiniMax）；**MiniMax 返回 voice_id 瞬间
+         写 durable `clone_billing_event`(task_id+reservation_id+provider=minimax+voice_id+
+         chargeable=true)**；克隆音色存个人音色库(source=`smart_preview`)
+  → terminal finalizer（任务进任意终态时跑，幂等）：
+       - 有 chargeable clone_billing_event → **capture 600**（同事务行锁 reservation + ledger 幂等键）
+       - 无 → **release 600**（覆盖所有"克隆没触发"终态：未入队/worker 没起/前置失败/决策跳过/
+         库满拒/provider 前失败/取消/超时/崩溃）
+       - manifest 仅辅助产物校验，**不当账本**
+
+完整正式流程（用户预览满意后选择继续）：
+  → **复用**：上传的原始视频 + 已克隆 voice_id（个人音色库）；**其它预览中间产物不复用**，正式管线从头跑
+  → 正式任务按分钟计费；**不重复克隆、不重复扣 600**（voice 已在库、preview 阶段已 capture）
 ```
 
-**为何安全**：reserve 在动 MiniMax **之前**（建任务时）；pipeline 只在已 reserve 时才克隆；结算按"是否真产出 clone voice"决定 capture 还是 release。**任何"reserved 但没成功克隆"都 release**（不漏退）。**任何"没 reserve"都不克隆**（不漏扣后克隆=白克隆）。
+**钱-正确性不变量（CodeX 必守）：**
+1. 钱的事实**只依赖 DB reservation + durable billing event**，绝不依赖文件产物（manifest）。
+2. reservation 状态**单向** `reserved → captured | released`；唯一约束 `(task_id, purpose)` + capture/release 同事务行锁 + ledger 幂等键 → 防 double-charge / capture-release 竞态。
+3. 任意终态若无 chargeable clone event → **必 release**（不漏退）；无 reservation → **绝不克隆**（不白克隆）。
+4. capture 条件 = `chargeable_clone_created_for_this_task=true`（本任务真新建付费克隆），**不是**"用了某 voice_id"（复用历史/缓存/手工/fallback voice 都不收费）。
+5. ops-level kill switch（关预扣 / 关 capture / 禁无 reservation 触发付费 clone），非改账务语义的普通用户开关。
+
+> ⚠️ **架构含义（CodeX 强调）**：这要求一个**真正的 reservation 状态机 + durable billing event 表 + terminal finalizer/watchdog**，比"简单 reserve/release"重得多——很可能需要 **gateway DB 加表/列（reservations + billing_events）→ alembic migration**，不再是"无需 migration"。这是本子方案最重的一块，必须先把数据模型 + 状态机审清再写代码。
 
 ---
 
