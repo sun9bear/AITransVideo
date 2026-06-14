@@ -256,6 +256,12 @@ async def _settle_smart_clone_reservations_post_terminal(db_job: "Job") -> None:
     rollback，绝不能跑在 ``mirror_job_terminal_state`` 那个批量 caller-commit 的
     session 上（其 already_settled 分支 rollback 会丢同批其他 job 的 mirror）。
     幂等；失败只 WARNING，绝不阻断状态镜像（feedback_terminal_state_single_entry）。
+
+    连接池压力（CodeX P3c 审核 P2）：嵌套 session 开在外层未提交时，理论上高并发
+    下有 pool 饥饿风险。但 marker-gate 把它限制在**罕见的预览克隆 job**（绝大多数
+    终态 job 无 marker、直接短路返回，不开 session），且内层 session 极短命
+    （结算一条 reservation 即 commit close）；真正的"必然结算"保证由
+    ``smart_clone_reservation_sweeper`` 兜底，本路径只负责 timely。
     """
     if not _smart_clone_settle_needed(db_job):
         return
