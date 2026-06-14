@@ -1543,6 +1543,67 @@ async def internal_express_reservation_reserve(
     })
 
 
+@internal_router.post("/smart-clone/register-billed")
+async def internal_smart_clone_register_billed(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """P3b — pipeline 在 MiniMax 智能版克隆成功后调本 endpoint：**单一事务**写
+    durable clone_billing_event + 入 user_voices（钱-正确性 #2）。是
+    ``register_smart_clone_with_billing`` 的薄 endpoint（auth + 校验 + dispatch）。
+
+    body：``{user_id, task_id, reservation_id, voice_id, label?, source_speaker_id?,
+    target_model?}``。无有效 reservation → 409（pipeline 本不该在无 reservation
+    下克隆；caller 应 best-effort 删 MiniMax voice）。
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    user_id = body.get("user_id")
+    task_id = str(body.get("task_id", "")).strip()
+    reservation_id = body.get("reservation_id")
+    voice_id = str(body.get("voice_id", "")).strip()
+    label = str(body.get("label") or "smart-clone")
+
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (ValueError, AttributeError, TypeError):
+        return _json(400, {"ok": False, "error": "invalid_user_id"})
+    try:
+        reservation_uuid = uuid.UUID(str(reservation_id))
+    except (ValueError, AttributeError, TypeError):
+        return _json(400, {"ok": False, "error": "invalid_reservation_id"})
+    if not _RESERVATION_JOB_ID_PATTERN.match(task_id):
+        return _json(400, {"ok": False, "error": "invalid_task_id"})
+    if not voice_id or len(voice_id) > 200:
+        return _json(400, {"ok": False, "error": "invalid_voice_id"})
+
+    from smart_clone_reservation_service import register_smart_clone_with_billing
+
+    outcome = await register_smart_clone_with_billing(
+        db,
+        user_id=user_uuid,
+        task_id=task_id,
+        reservation_id=reservation_uuid,
+        voice_id=voice_id,
+        label=label,
+        source_speaker_id=(
+            str(body.get("source_speaker_id")) if body.get("source_speaker_id") else None
+        ),
+        source_job_id=task_id,
+        target_model=(str(body.get("target_model")) if body.get("target_model") else None),
+    )
+    if outcome.status == "no_active_reservation":
+        return _json(409, {"ok": False, "error": "no_active_reservation"})
+    return _json(200, {
+        "ok": True,
+        "status": outcome.status,  # "billed" | "idempotent"
+        "reservation_id": outcome.reservation_id,
+    })
+
+
 @internal_router.post("/express-auto-clone-reservations/{reservation_id}/consume")
 async def internal_express_reservation_consume(
     reservation_id: str,
