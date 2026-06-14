@@ -149,21 +149,35 @@ export async function uploadPreviewVideo(
   })
 }
 
-/** Confirm consent and start processing the preview. */
+/** Confirm consent and start processing the preview.
+ *
+ *  plan 2026-06-14 §3.1：express lane 的"克隆我的音色"opt-in 经 ``express_consent``
+ *  独立发送（与内容权利 ``anonymous_consent`` 分离）。仅当用户在 express 卡片显式
+ *  勾选时传 ``autoVoiceClone:true`` → body 带 ``express_consent.auto_voice_clone``；
+ *  未勾选/free lane 不带 → 后端 SOFT gate 走 CosyVoice 预设音色（绝不 MiniMax）。
+ *  权威确认时间戳由服务端单一来源生成，前端**绝不**构造或发送它。
+ */
 export async function createPreview(
   previewId: string,
   clientConfirmedAt: string,
+  opts?: { autoVoiceClone?: boolean },
 ): Promise<CreateResponse> {
+  const consentBody: Record<string, unknown> = {
+    anonymous_consent: {
+      voice_rights_confirmed: true,
+      client_confirmed_at: clientConfirmedAt,
+    },
+  }
+  // 仅在显式 opt-in 时附带 express_consent（克隆授权）。strict true；不含任何
+  // 服务端权威时间戳字段（后端单一来源生成）。
+  if (opts?.autoVoiceClone === true) {
+    consentBody.express_consent = { auto_voice_clone: true }
+  }
   const resp = await fetch(`/gateway/anonymous-preview/${previewId}/create`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      anonymous_consent: {
-        voice_rights_confirmed: true,
-        client_confirmed_at: clientConfirmedAt,
-      },
-    }),
+    body: JSON.stringify(consentBody),
   })
 
   const text = await resp.text()
