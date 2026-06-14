@@ -203,8 +203,20 @@ CodeX 复审判定 v2「Not ready-to-implement」，6 点 P0/P1 全部闭环（*
   - ✅ `settle_smart_clone_reservations_for_task` by-task 入口 + 接进 `job_terminal_mirror`（终态块 anon/normal 分支**之前**调，覆盖匿名标记跳过分钟结算的预览路径；marker-gated；独立 `async_session` 隔离 mirror 批量 caller-commit）—— commit 324866b。
   - ✅ TTL sweeper `smart_clone_reservation_sweeper` + main.py lifespan 接线 + shutdown cancel（CodeX 复审 P1：补生产调用点封死漏退；P2 lifecycle：补 cancel）—— commit c3344b2 + 85ffe2a。
   - **CodeX 两轮复审结论**：无 P0/P1 钱-bug；幂等/strict-verify/per-reservation reason_code/billing 唯一约束闭合；嵌套 session 池压力 P2 = marker-gate 限频 + sweeper 兜底，当前可接受。
-- **P3d** 前端预扣弹窗 + 余额 + consent 驱动 + 退款提示 + smart_preview_clone 旋钮去占位（tsc + 守卫）。
-- **P3e** smart 预览 lane 接线（intake/job/preview_mode/3min+水印/reservation-gate）+ **create endpoint 调 reserve + stamp `smart_state` marker**（激活 finalizer gate）+ preview→正式 server-side 复用契约 + 反滥用 cap + 全量 set-diff + 最终 CodeX。
+- **P3e-1a ✅ pipeline reservation gate 完成 + CodeX LGTM**（commit 7e49750 gate + 9b61bc3 CodeX P1/P2 修）：
+  - admin flag `smart_clone_requires_reservation`(StrictBool, 默认 False, **pipeline 侧** rollout 闸)；纯函数 `_smart_reservation_gate_open(requires, id)`。
+  - **关键设计**：闸折进 `_smart_effective_clone_enabled = admin_clone_enabled AND gate`，替换**所有** clone 决策点（样本抽取 / `_smart_needs_new_clone` / 外层 if / `evaluate_voice_review(admin_clone_enabled=)`）→ 闸关字节级等同 admin 关克隆 = PRESET fall-through。
+  - CodeX 修：**P1** 必须折进 effective（只塞 `_smart_needs_new_clone` 会让闸关时 admin_clone_enabled=True → PAUSED 水线 / 样本抽取 handoff，非 PRESET）；**P2** flag 读 `is True`（`read_admin_setting` 不转型，`bool("false")=True`）。
+  - 默认 flag False → effective=admin → 零回归（168 smart + 633 广测绿；唯一失败=PR3-scoped landmine 合并自愈）。`reservation_id` 从 `_snap("smart_clone_reservation_id")` 读（create 未 stamp 前恒 None → 即便翻 flag 也只退预设，fail-safe）。
+- **P3e-1b ⏳ 待做（CodeX 指明须同批，最敏感计费聚合循环）**：
+  - **register-billed 接线**：克隆成功点（`process.py` 现调 register-smart）当 `reservation_id` present 改调 register-billed endpoint（原子写 billing event + 入库）。
+  - **先扩 register-billed endpoint + `register_smart_clone_with_billing` service 字段 parity**（现缺 `source_content_hash` 等 → 影响后续强匹配/复用质量）。
+  - **限主说话人 1**（600=1 clone）。⚠️ **难点（须吃透 evaluate_voice_review per-speaker 路由）**：不能简单截断 `_smart_speaker_ids_requiring_clone`——speaker 2+ 丢样本会 **handoff** 而非 PRESET；要让 2+ 干净退 PRESET（不 handoff、不克隆=不漏收）。截断须在 provider 调用前 + vs_payload 稳定顺序（非 set 迭代序）。
+- **P3e-2** create endpoint 调 reserve + stamp JobRecord `smart_state` marker（激活 gate + finalizer）+ 降级不阻断 + `clone_skipped_reason` 回前端。
+- **P3e-3** smart 预览 lane（intake/preview_mode/3min+水印，大 vertical slice）+ preview→正式 server-side 复用契约（只信 `preview_job_id`）。
+- **P3e-4（旧 P3d）** 前端预扣弹窗 + 余额 + consent 驱动 + 退款提示 + `smart_preview_clone` 旋钮去占位 + 反滥用 cap（daily_global/inflight 真生效）。
+- **P3e-5** 全量 set-diff 回归（既有 smart 测试更新到 gated 行为）+ 前端 tsc + 最终 CodeX。
+- ⚠️ **激活顺序**：P3e-2 create（reserve + stamp marker）+ P3e-1b（register-billed + limit-1）落地后，才可由项目主翻 `smart_clone_requires_reservation`=True；否则既有 smart 用户 auto-clone 全退预设。
 
 > **当前进度小结（2026-06-14）**：P3 **钱-正确性核心已闭环**（reserve → register+bill → settle → settle-trigger(mirror finalizer) → settle-backstop(sweeper)），全程 CodeX 审过、独立可测、**对既有行为完全 inert**（marker 由 P3e create 未接线前不存在 → finalizer/gate 全 no-op）。剩 **P3 激活/集成层**（最重、互相依赖、动既有代码）：① create endpoint(reserve + marker) ② pipeline reservation-gate + 限1 + 调 register-billed ③ 前端 ④ 预览 lane + 复用契约 + 反滥用 cap。②必须与①同批（否则破坏既有 smart 测试）。
 
