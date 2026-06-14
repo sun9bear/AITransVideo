@@ -232,11 +232,132 @@ async def reserve_smart_clone_credit(
     return SmartReserveOutcome(status="reserved", reservation_id=str(reservation_id))
 
 
+@dataclass(frozen=True)
+class RegisterBillOutcome:
+    """``register_smart_clone_with_billing`` 结果。
+
+    - ``"billed"`` → 首次写入 chargeable billing event + 入库（同一事务）。
+    - ``"idempotent"`` → 该 reservation 已有 billing event（pipeline 重试）→ no-op。
+    - ``"no_active_reservation"`` → reservation 不存在 / 非 reserved / 不属本
+      task+user → **不 bill、不入库**（pipeline 本不该在无 reservation 下克隆；
+      caller 应视为异常并 best-effort 删 MiniMax voice）。
+    """
+
+    status: str
+    reservation_id: str | None = None
+
+
+async def register_smart_clone_with_billing(
+    db: AsyncSession,
+    *,
+    user_id: object,
+    task_id: str,
+    reservation_id: object,
+    voice_id: str,
+    label: str,
+    provider: str = "minimax_voice_clone",
+    tts_provider: str | None = "minimax_tts",
+    platform: str | None = "minimax_domestic",
+    source_speaker_id: str | None = None,
+    source_job_id: str | None = None,
+    target_model: str | None = None,
+) -> RegisterBillOutcome:
+    """P3b — MiniMax 克隆成功后**单一事务**写 durable billing event + 入库
+    （CodeX 钱-正确性 #2）。
+
+    同一 transaction：① 行锁 reservation（FOR UPDATE）校验 status=reserved 且
+    属本 (task_id, user_id) ② 幂等查 chargeable billing event ③ 写 billing
+    event(chargeable=true) ④ ``add_user_voice(commit=False)`` 入库 ⑤ 一起 commit。
+    任一失败整体回滚。**钱的事实(billing event)与音色入库原子**；信用 capture
+    由独立 finalizer 凭本 event 做（本函数不动信用）。
+
+    ``uq_clone_billing_event_reservation`` 唯一约束 = 幂等第二道防线（pipeline
+    重试 / 并发双写 → 第二个抛 IntegrityError → 回滚返回 idempotent）。
+    """
+    from user_voice_service import add_user_voice
+
+    # reservation_id 可能是 str（reserve outcome 返回 str(id)）→ 强制转 UUID，
+    # 否则 UUID 列 bind processor 调 str.hex 抛 AttributeError。非法 → 当无 reservation。
+    try:
+        res_pk = reservation_id if isinstance(reservation_id, uuid.UUID) else uuid.UUID(str(reservation_id))
+    except (ValueError, AttributeError, TypeError):
+        await db.rollback()
+        return RegisterBillOutcome(status="no_active_reservation")
+
+    # 1. 行锁 reservation + 校验（无有效 active reservation → 不 bill 不入库）
+    res = (
+        await db.execute(
+            select(SmartCloneReservation)
+            .where(SmartCloneReservation.id == res_pk)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if (
+        res is None
+        or res.status != RESERVED
+        or str(res.task_id) != str(task_id)
+        or str(res.user_id) != str(user_id)
+    ):
+        await db.rollback()
+        return RegisterBillOutcome(status="no_active_reservation")
+
+    # 2. 幂等：该 reservation 已有 billing event → no-op（pipeline 重试）
+    from models import CloneBillingEvent
+
+    existing = (
+        await db.execute(
+            select(CloneBillingEvent).where(
+                CloneBillingEvent.reservation_id == res_pk
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        await db.rollback()
+        return RegisterBillOutcome(status="idempotent", reservation_id=str(res_pk))
+
+    # 3. 写 durable billing event（chargeable=true）= 唯一权威计费信号
+    db.add(
+        CloneBillingEvent(
+            id=uuid.uuid4(),
+            task_id=task_id,
+            reservation_id=res_pk,
+            provider="minimax",
+            voice_id=voice_id,
+            chargeable=True,
+        )
+    )
+    # 4. 入库（commit=False，同一事务）
+    await add_user_voice(
+        db,
+        user_id=user_id,
+        voice_id=voice_id,
+        label=label,
+        provider=provider,
+        tts_provider=tts_provider,
+        platform=platform,
+        source_speaker_id=source_speaker_id,
+        source_job_id=source_job_id,
+        target_model=target_model,
+        created_from="smart_preview",
+        commit=False,
+    )
+    # 5. 一起 commit（billing event + user_voice 原子）
+    try:
+        await db.commit()
+    except IntegrityError:
+        # uq_clone_billing_event_reservation 竞态 → 另一并发写已成 → 幂等
+        await db.rollback()
+        return RegisterBillOutcome(status="idempotent", reservation_id=str(res_pk))
+    return RegisterBillOutcome(status="billed", reservation_id=str(res_pk))
+
+
 __all__ = [
     "RESERVED", "CAPTURED", "RELEASED", "EXPIRED", "PURPOSE",
     "SmartReserveOutcome",
+    "RegisterBillOutcome",
     "credit_reserve_reason_code",
     "count_active_smart_reservations",
     "count_active_library_voices",
     "reserve_smart_clone_credit",
+    "register_smart_clone_with_billing",
 ]

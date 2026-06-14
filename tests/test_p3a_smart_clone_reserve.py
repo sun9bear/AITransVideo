@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import types
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
 
 from sqlalchemy import Column, MetaData, Table, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -21,7 +19,9 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 _gateway = str(__import__("pathlib").Path(__file__).resolve().parent.parent / "gateway")
 if _gateway not in sys.path:
     sys.path.insert(0, _gateway)
-sys.modules.setdefault("database", types.ModuleType("database")).get_db = MagicMock()
+# 注意：本测试**不** stub sys.modules["database"]——服务无 module-level database
+# import（实测 import OK）。stub 会 mutate 真实 database 模块、污染其它 gateway
+# 测试（cosyvoice_clone_api 等），见 memory feedback_test_database_stub_convention。
 
 
 @compiles(JSONB, "sqlite")
@@ -34,7 +34,9 @@ def _uuid_sqlite(element, compiler, **kw):  # noqa: ARG001
     return "CHAR(36)"
 
 
-from models import CreditsBucket, CreditsLedger, SmartCloneReservation, UserVoice  # noqa: E402
+from models import (  # noqa: E402
+    CloneBillingEvent, CreditsBucket, CreditsLedger, SmartCloneReservation, UserVoice,
+)
 import smart_clone_reservation_service as svc  # noqa: E402
 
 
@@ -61,6 +63,7 @@ async def _make_sessionmaker(*, bucket_remaining: int = 800) -> async_sessionmak
         await conn.run_sync(lambda s: _users_stub.create(s))
         await conn.run_sync(lambda s: UserVoice.__table__.create(s))
         await conn.run_sync(lambda s: SmartCloneReservation.__table__.create(s))
+        await conn.run_sync(lambda s: CloneBillingEvent.__table__.create(s))
         await conn.run_sync(lambda s: CreditsBucket.__table__.create(s))
         await conn.run_sync(lambda s: CreditsLedger.__table__.create(s))
     sm = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -236,3 +239,87 @@ def test_reserve_inline_expires_stale_reserved():
 def test_credit_reason_code_deterministic():
     rid = "11111111-1111-1111-1111-111111111111"
     assert svc.credit_reserve_reason_code(rid) == "smart_clone_reserve_" + rid
+
+
+# ---------------------------------------------------------------------------
+# P3b register+bill 单一事务（CodeX #2）
+# ---------------------------------------------------------------------------
+
+
+async def _reserve(db, task_id="job_r"):
+    o = await svc.reserve_smart_clone_credit(
+        db, user_id=_USER, task_id=task_id, amount_credits=600,
+        ttl_minutes=30, library_cap=10,
+    )
+    assert o.status == "reserved"
+    return o.reservation_id
+
+
+def test_register_bill_happy_atomic_event_and_voice():
+    """🔥 billed：同一事务写 chargeable billing event + 入 user_voices。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_r")
+            out = await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_r", reservation_id=rid,
+                voice_id="mm_voice_1", label="主说话人", source_job_id="job_r",
+            )
+            assert out.status == "billed"
+            ev = (await db.execute(select(CloneBillingEvent))).scalar_one()
+            assert ev.chargeable is True and ev.provider == "minimax" and ev.voice_id == "mm_voice_1"
+            uv = (await db.execute(select(UserVoice).where(UserVoice.voice_id == "mm_voice_1"))).scalar_one()
+            assert uv.created_from == "smart_preview"
+    _run(go())
+
+
+def test_register_bill_idempotent_no_double():
+    """🔥 幂等：同 reservation 第二次 register+bill → idempotent，不双写。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_r2")
+            kw = dict(user_id=_USER, task_id="job_r2", reservation_id=rid,
+                      voice_id="mm_v2", label="x", source_job_id="job_r2")
+            o1 = await svc.register_smart_clone_with_billing(db, **kw)
+            o2 = await svc.register_smart_clone_with_billing(db, **kw)
+            assert o1.status == "billed" and o2.status == "idempotent"
+            assert len((await db.execute(select(CloneBillingEvent))).scalars().all()) == 1
+            assert len((await db.execute(select(UserVoice).where(UserVoice.voice_id == "mm_v2"))).scalars().all()) == 1
+    _run(go())
+
+
+def test_register_bill_no_active_reservation_does_not_bill():
+    """无有效 active reservation（不存在/非 reserved/不属本 task）→ 不 bill 不入库。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_r3")
+            # 用错 task_id（reservation 属 job_r3，却声称 job_WRONG）
+            out = await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_WRONG", reservation_id=rid,
+                voice_id="mm_v3", label="x", source_job_id="job_WRONG",
+            )
+            assert out.status == "no_active_reservation"
+            assert (await db.execute(select(CloneBillingEvent))).scalar_one_or_none() is None
+            assert (await db.execute(select(UserVoice).where(UserVoice.voice_id == "mm_v3"))).scalar_one_or_none() is None
+    _run(go())
+
+
+def test_register_bill_released_reservation_does_not_bill():
+    """reservation 已 released（非 reserved）→ 不 bill（防对已退款的 task 再扣）。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_r4")
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            row.status = "released"
+            await db.commit()
+            out = await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_r4", reservation_id=rid,
+                voice_id="mm_v4", label="x", source_job_id="job_r4",
+            )
+            assert out.status == "no_active_reservation"
+            assert (await db.execute(select(CloneBillingEvent))).scalar_one_or_none() is None
+    _run(go())

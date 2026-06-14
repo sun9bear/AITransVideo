@@ -850,6 +850,10 @@ async def add_user_voice(
     # ---- Phase 4.3a (migration 031): 临时音色生命周期（spec §6.3.1） ----
     is_temporary: bool = False,
     temporary_expires_at: datetime | None = None,
+    # ---- P3b (CodeX 钱-正确性 #2): commit=False 让调用方控制完整事务 ----
+    # smart 预览克隆的 register+bill 须在**单一事务**内同时写 billing event +
+    # 入 user_voices（钱的事实与音色入库原子）。默认 True 保持既有调用方不变。
+    commit: bool = True,
 ) -> UserVoice:
     if source_speaker_name_key is None:
         source_speaker_name_key = normalize_speaker_name_key(source_speaker_name)
@@ -915,7 +919,10 @@ async def add_user_voice(
         # revive 时必须能 long-term↔temporary 双向切换；非 temp 强制清 ts 防 stale。
         existing.is_temporary = is_temporary
         existing.temporary_expires_at = effective_temporary_expires_at
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()  # 让变更可见但由调用方控制事务
         return existing
 
     voice = UserVoice(
@@ -957,8 +964,11 @@ async def add_user_voice(
         temporary_expires_at=effective_temporary_expires_at,
     )
     db.add(voice)
-    await db.commit()
-    await db.refresh(voice)
+    if commit:
+        await db.commit()
+        await db.refresh(voice)
+    else:
+        await db.flush()  # 拿到 DB 默认值/PK，但事务由调用方 commit
     return voice
 
 
