@@ -1221,6 +1221,7 @@ async def anonymous_preview_create(
     from sqlalchemy import func, update as _sa_update
 
     from anonymous_consent import validate_anonymous_consent
+    from anonymous_express_clone_consent import validate_anonymous_express_clone_consent
     from anonymous_preview_payload_spec import validate_create_payload
     from anonymous_preview_probe import probe_source
     from models import Job, User
@@ -1281,6 +1282,17 @@ async def anonymous_preview_create(
             content={"error": "consent_required", "reason": consent_reason},
         )
     consent_payload["server_confirmed_at"] = datetime.now(_tz.utc).isoformat()
+
+    # plan 2026-06-14 §3.1：匿名 Express CosyVoice 克隆 opt-in（SOFT gate，与
+    # 上面内容权利 HARD 403 gate **分离**）。用户在 express 卡片显式勾选"允许克隆
+    # 我的音色"才注入 express_consent；未勾选/缺失/strict-bool coercion → None →
+    # 不注入 → express 走 CosyVoice 预设音色（**不报错**，非 403）。仅 express lane
+    # 注入（下方）。这是 CosyVoice 免费克隆授权，不是 MiniMax 付费 clone。
+    _express_clone_consent, _ = validate_anonymous_express_clone_consent(
+        (body or {}).get("express_consent") if isinstance(body, dict) else None
+    )
+    if _express_clone_consent is not None:
+        _express_clone_consent["server_confirmed_at"] = datetime.now(_tz.utc).isoformat()
 
     # 开关门按 record.mode 分流（plan 2026-06-12 §A/D2）：free 保持既有
     # 双门（enable_free_tier env + free admin flag）逐字节不变；express 查
@@ -1418,6 +1430,13 @@ async def anonymous_preview_create(
         "source_content_hash": record.source_hash,
         "anonymous_preview": True,
     }
+    # plan 2026-06-14 §3.1：仅 express lane + 用户克隆 opt-in 时注入 express_consent。
+    # free lane 永不带（保持纯预设）。voice_strategy 仍恒 preset_mapping（防线② 不动）
+    # ——CosyVoice 克隆经 pipeline 内 maybe_run_express_auto_clone + worker routing
+    # 旁路注入（方案 A），不靠 voice_strategy 字段；克隆是否真跑由 pipeline 侧
+    # anonymous_express_cosyvoice_clone_enabled 主开关 + 全局 cap + worker 决定。
+    if record_mode == "express" and _express_clone_consent is not None:
+        payload["express_consent"] = _express_clone_consent
     violations = validate_create_payload(payload)
     if violations:
         logger.error("anon_create: payload spec violations: %s", violations)

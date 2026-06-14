@@ -1433,6 +1433,28 @@ def _load_express_reservation_caps() -> tuple[int, int, int] | None:
         return None
 
 
+def _load_anonymous_clone_reservation_caps() -> tuple[int, int, int] | None:
+    """plan 2026-06-14 §3.4：匿名/快捷 CosyVoice 克隆**全局** cap。
+
+    owner=sentinel user（anonymous-preview@system），所有匿名克隆共享同一 owner，
+    故 express_reservation_service 的 per-user cap 作用在 sentinel 上 = 天然全局
+    cap。读 ``anonymous_clone_daily_global_cap`` / ``anonymous_clone_active_cap``；
+    reservation_ttl 复用 express 的（同一克隆生命周期，无需独立旋钮）。
+    读不到 → ``None``（fail-closed：caller 返 503，不进 reserve）。
+    """
+    try:
+        from admin_settings import load_settings
+        admin = load_settings()
+        return (
+            int(getattr(admin, "anonymous_clone_daily_global_cap", 100)),
+            int(getattr(admin, "anonymous_clone_active_cap", 20)),
+            int(getattr(admin, "express_cosyvoice_auto_clone_reservation_ttl_minutes", 30)),
+        )
+    except Exception as exc:
+        logger.warning("anonymous clone reservation: admin_settings load failed: %s", exc)
+        return None
+
+
 @internal_router.post("/express-auto-clone-reservations/reserve")
 async def internal_express_reservation_reserve(
     request: Request,
@@ -1452,6 +1474,9 @@ async def internal_express_reservation_reserve(
     job_id = str(body.get("job_id", "")).strip()
     speaker_id = str(body.get("speaker_id", "")).strip()
     target_model = str(body.get("target_model", "")).strip()
+    # plan 2026-06-14 §3.4：匿名/快捷 CosyVoice 克隆走全局 cap（strict is True，
+    # 不被 "1"/"true" 等夹带值打开）。默认 False = 登录态 express auto-clone。
+    is_anonymous = body.get("is_anonymous") is True
 
     try:
         user_uuid = uuid.UUID(str(user_id))
@@ -1464,7 +1489,12 @@ async def internal_express_reservation_reserve(
     if target_model not in _RESERVATION_TARGET_MODELS:
         return _json(400, {"ok": False, "error": "invalid_target_model"})
 
-    caps = _load_express_reservation_caps()
+    # 匿名走全局 cap（anonymous_clone_*），登录态走 per-user express cap。
+    caps = (
+        _load_anonymous_clone_reservation_caps()
+        if is_anonymous
+        else _load_express_reservation_caps()
+    )
     if caps is None:
         # fail-closed：admin_settings 读不到不允许 reserve
         return _json(503, {"ok": False, "error": "admin_settings_unavailable"})

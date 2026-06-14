@@ -3602,6 +3602,9 @@ class ProcessPipeline:
                         speaker_voices=_speaker_voices,
                         speaker_routing=_speaker_voice_routing,
                         express_consent=_snap("express_consent", None),
+                        # plan 2026-06-14 §3.4：匿名 express 走匿名主开关 + 全局 cap
+                        # 分支（L1'/L3'）；登录态 express 不变。
+                        anonymous_preview=job_anonymous_preview,
                     )
                     # Mirror any injected clone voice into the a/b vars the
                     # translation/display path reads (matches the Studio

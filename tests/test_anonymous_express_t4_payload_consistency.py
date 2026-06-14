@@ -467,9 +467,20 @@ class TestNoCloneGuards:
         assert found >= 2, "payload 与 PG 行两处 voice_strategy 都应存在"
 
     def test_api_has_no_clone_imports(self):
-        """import 黑名单（防 clone 第三道防线的 gateway 侧）：匿名预览
-        模块不得 import 任何 clone provider / user voice 模块。"""
+        """import 黑名单（防线③ gateway 侧）：匿名预览模块不得 import 任何
+        clone **provider** / user voice 服务模块（真正执行付费/克隆动作的代码）。
+
+        plan 2026-06-14 §3.1 边界改写：banned 宽 net 保留（拦 voice_clone /
+        minimax / user_voice / 任意含 'clone' 的 provider 模块），但**显式豁免**
+        纯 consent 验证器 ``anonymous_express_clone_consent``——它只 ``import
+        typing``、零 provider 调用，是 CosyVoice 免费克隆的 opt-in 校验，**不是**
+        clone provider；真正的克隆仍只在 pipeline worker 发生，gateway 永不执行
+        克隆。守卫断言的是"gateway 不 import 克隆**执行**模块"这条不变量。
+        """
         banned = ("voice_clone", "user_voice", "minimax", "clone")
+        # provider-free 的 consent 验证器豁免（断言其确实无 provider 依赖见
+        # test_consent_validator_module_is_provider_free 下方）。
+        allowed_exact = {"anonymous_express_clone_consent"}
         for fname in ("anonymous_preview_api.py", "anonymous_preview_chunked_api.py"):
             tree = ast.parse(
                 (Path(_GATEWAY) / fname).read_text(encoding="utf-8")
@@ -481,9 +492,36 @@ class TestNoCloneGuards:
                 elif isinstance(node, ast.ImportFrom):
                     mods = [node.module or ""]
                 for m in mods:
+                    if m in allowed_exact:
+                        continue
                     assert not any(b in m.lower() for b in banned), (
                         f"{fname} 不得 import clone 相关模块: {m}"
                     )
+
+    def test_consent_validator_module_is_provider_free(self):
+        """边界守卫（plan 2026-06-14 §3.1）：被豁免的 consent 验证器
+        ``anonymous_express_clone_consent`` 必须**零** clone provider / TTS
+        provider / user_voice / requests / urllib import——确保豁免它不会成为
+        绕过防线③ 的后门。任何人给它加 provider 依赖即在此 red。"""
+        tree = ast.parse(
+            (Path(_GATEWAY) / "anonymous_express_clone_consent.py").read_text(
+                encoding="utf-8"
+            )
+        )
+        provider_banned = (
+            "voice_clone", "minimax", "cosyvoice", "user_voice", "tts",
+            "requests", "urllib", "httpx", "worker", "reservation",
+        )
+        for node in ast.walk(tree):
+            mods: list[str] = []
+            if isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                mods = [node.module or ""]
+            for m in mods:
+                assert not any(b in m.lower() for b in provider_banned), (
+                    f"consent 验证器不得 import provider/网络模块: {m}"
+                )
 
     def test_pipeline_third_defense_pinned(self):
         """process.py 防 clone 第三道防线：匿名任务 voice_strategy 强制
