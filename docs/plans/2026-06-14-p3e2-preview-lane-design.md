@@ -125,6 +125,6 @@
 
 **钱/安全不变量（4-lens 对抗性 + CodeX 两轮过）**：默认 inert；fail-closed；免费用户**只能**拿受限 600-preview（auto_voice_clone=False 蒙混、preview_mode 非真值、600 预留失败、reuse 路径、enter-edit/剪映 导出一律封死）；entitled 用户行为不变；通用 smart 紧急停同时停预览（含 gate→reserve TOCTOU 重核）。
 
-**⚠️ 已知遗留（CodeX 第二轮标，归下一步 P3e-4a-2，flag-flip 前必关）**：smart 预览任务的**其它只读检视面**仍未被 stream-only 闸覆盖——`GET /jobs/{id}/review-state`（暴露 transcript/translation items 的 `source_text`/`cn_text`=译文）、`GET /jobs/{id}/speaker-audio/{speaker}[/{seg}.wav]`（源文+源音字节）、report 流（`subtitle_width_report.json` cue 文本）。均为 **P3e-3d 既有遗留**（非本切片引入，CodeX 评 P2），但本切片放免费用户进来后变为该用户类可达。下一步用同一 `_policy_mode_for == "anonymous_preview"` 闸覆盖（需先核实 smart 自动审批是否真填 review-state）。
+**P3e-4a-2 ✅ 预览只读检视面闸（CodeX 第二轮标的遗留已关）**：smart 预览任务的只读检视面（`GET /jobs/{id}/review-state` 暴露 transcript/translation items 的 `source_text`/`cn_text`=译文；`GET /jobs/{id}/speaker-audio/{speaker}[/{seg}.wav]` 源文+源音字节；`GET /jobs/{id}/reports/{name}` 文件流如 `subtitle_width_report.json` cue 文本）现都加同一 `_policy_mode_for(record) == "anonymous_preview"` → 403 闸（与 P3e-3d 同档，strict is True）。覆盖 CodeX 标的全部**价值泄漏面**（译文/配音/字幕）。**未 gate（已评估安全）**：reports 目录 catalog（仅报告名非内容）、`segments/{id}/preview-source-audio`（编辑态缓存,预览不可进编辑→404,且是用户自有源音非产品价值）、segments mutation（POST,enter-edit 已封）。默认 inert（非预览 `_policy_mode_for != anonymous_preview` → 字节级不变）。
 
 **非钱依赖（归后续）**：免费用户**转完整**（reuse→full）仍过既有 smart entitlement kill-switch；预览**前端入口** + 预扣弹窗 + consent 驱动 + 反滥用 cap 真生效（`smart_preview_clone_daily_global_cap`/`inflight_cap` 现仍 inert）= P3e-4c。

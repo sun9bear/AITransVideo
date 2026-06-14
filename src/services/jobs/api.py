@@ -522,6 +522,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     job_id = path_parts[1]
                     report_name = path_parts[3]
                     record = service.require_job(job_id)
+                    # P3e-4a-2：智能版/匿名预览 stream-only——report 文件（如
+                    # subtitle_width_report 含字幕 cue 文本）不放给预览任务。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "预览任务不提供报告下载"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     resolved = _resolve_job_report_path(
                         project_dir=project_dir,
@@ -558,6 +566,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
                     job_id = path_parts[1]
                     record = service.require_job(job_id)
+                    # P3e-4a-2：智能版/匿名预览 stream-only——审校快照含 source_text/
+                    # cn_text(译文)，预览任务不放（防免费白嫖译文、损害转完整转化）。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "预览任务不提供审校检视"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     self._write_json(
                         HTTPStatus.OK,
@@ -817,6 +833,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     job_id = path_parts[1]
                     speaker_id = path_parts[3]
                     record = service.require_job(job_id)
+                    # P3e-4a-2：智能版/匿名预览 stream-only——说话人音频列表含 source_text
+                    # + 源音 URL，预览任务不放。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "预览任务不提供说话人音频"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     from services.jobs.review_actions import get_speaker_audio_segments
                     result = get_speaker_audio_segments(
@@ -842,6 +866,13 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         return
                     segment_id = int(seg_match.group(1))
                     record = service.require_job(job_id)
+                    # P3e-4a-2：智能版/匿名预览 stream-only——源音字节不放给预览任务。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "预览任务不提供说话人音频"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     from services.jobs.review_actions import extract_speaker_audio_segment
                     wav_bytes = extract_speaker_audio_segment(
