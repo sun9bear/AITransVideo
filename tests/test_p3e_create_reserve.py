@@ -100,9 +100,22 @@ def test_degrade_does_not_block_failsafe():
     assert '_smart_clone_skipped_reason = "reserve_error"' in flat
     # reserve 故障是 except 吞掉（不阻断），不是 return error
     assert "except Exception" in body
-    # skip 分支不得 return/raise（降级继续建任务）
+    # skip 分支不得 return/raise（entitled 用户降级继续建任务）。
+    # P3e-4a 起契约细化：降级仍不阻断 **entitled** 用户；唯一允许的 error return 是免费
+    # exemption 兜底——由 _smart_preview_via_exemption 守卫，只拒绝**未获 smart** 的免费
+    # 预览用户 600 预留失败（防免费白嫖完整任务），entitled 用户 via_exemption=False 仍降级。
     reserve_block = body[body.index("_smart_clone_skipped_reason: str | None = None"):body.index("upstream_response = await proxy_request(")]
-    assert "return _error_response" not in reserve_block, "降级不得阻断建任务"
+    assert reserve_block.count("return _error_response") <= 1, (
+        "reserve 降级区出现非预期阻断 return（entitled 用户降级不得被阻断）"
+    )
+    if "return _error_response" in reserve_block:
+        _ri = reserve_block.index("return _error_response")
+        _guard = reserve_block[max(0, _ri - 220):_ri]
+        assert "_smart_preview_via_exemption" in _guard, (
+            "reserve 区唯一的 error return 必须由 _smart_preview_via_exemption 守卫"
+            "（免费 exemption 兜底），不得无条件阻断 entitled 用户降级"
+        )
+        assert '"smart_preview_reserve_failed"' in reserve_block
 
 
 def test_pg_job_smart_state_set_from_reservation():

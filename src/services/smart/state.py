@@ -172,4 +172,10 @@ def is_editable_smart_state(smart_state: Any) -> bool:
     """
     if not isinstance(smart_state, Mapping):
         return False
+    # P3e-4a：smart 预览任务（smart_preview_mode=True）只产 3min 水印 teaser、stream-only
+    # （P3e-3b/3d）——绝不可进入任何"可编辑 / 可导出"路径（Studio post-edit / 剪映 draft），
+    # 否则经 segments / copy_as_new / 剪映 zip 暴露完整段落文本与音频。在共享判定单点
+    # fail-closed，统一覆盖 enter_editing / 剪映 draft gate / JianyingDraftRunner 三处消费者。
+    if smart_state.get("smart_preview_mode") is True:
+        return False
     return smart_state.get("status") in _SMART_STATE_EDITABLE_STATUSES

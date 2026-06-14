@@ -108,3 +108,23 @@
 **voice 实际复用（非钱-关键，best-effort）**：完整任务复用**同源视频** → `source_content_hash` 同 → smart auto-reuse-by-hash（默认开）自然命中 `created_from='smart_preview'` 的克隆音色；显式 `voice_a` 加固。钱-安全由 `auto_voice_clone=False`（无法克隆）兜底——即便 voice 复用退化为 PRESET 也只是音质降级，绝不重克隆/重扣。
 
 **copy_as_new 缺口（CodeX 标，归 P3e-4）**：本契约是**新建完整任务**（不走 editing copy_as_new），故无 `preview_teaser.wav` 复制问题。但 P3e-4 的 enter-edit gate 须挡 smart 预览进 editing（否则 copy_as_new 复制清单缺 teaser → resume 满长出片）。
+
+## §8 — P3e-4a：免费用户 smart 预览 entitlement 放行 + edit/export 泄漏闸（默认 inert）
+
+**目标**：让免费 / 未获 smart entitlement 的登录用户能进入**受限**智能版预览 lane（3min
+水印 teaser、只扣 600 克隆、跳分钟、stream-only），并把"smart 预览不可进入任何可编辑 /
+可导出路径"这条 stream-only 契约在服务端封死。默认 inert（admin `smart_preview_clone_enabled`
+默认 False → 字节级不变）。
+
+**改动**：
+- **新 `gateway/smart_preview_gate.py::smart_preview_lane_exempt(request_data, user)`**：放行判定纯函数。放行 = 登录 + `preview_mode is True` + `smart_consent.auto_voice_clone is True` + 通用 smart kill switch 双层（env `enable_smart_mode` AND admin `smart_mode_enabled`）+ 本 lane 旗 `smart_preview_clone_enabled`。
+- **`intercept_create_job` 两道 entitlement gate**（Gate A smart_disabled / Gate B service_mode_not_allowed）：单次计算 `_smart_preview_exempt`（限 `service_mode=="smart"`）→ 未获 smart 但放行的免费预览过闸；`_smart_preview_via_exemption`（未获 smart + 经 exemption 进来）标记供 600 预留失败兜底。
+- **600 预留失败兜底**：`_smart_preview_via_exemption and not reservation_id` → 402 `smart_preview_reserve_failed`（不落按分钟计费的完整任务）。entitled 用户 reserve 失败仍按既有降级语义。
+- **enter-edit 闸**：`enter_editing` 在 `smart_preview_mode is True` 时无条件拒绝；gateway `_enforce_post_edit_access` 同档 403（置于 plan-limits 前）。
+- **共享判定 preview-aware**：`services.smart.state.is_editable_smart_state` 对 `smart_preview_mode=True` 返回 False —— 单点封死 `enter_editing` / 剪映 draft gate（`api.py`）/ `JianyingDraftRunner` 三处消费者。
+
+**钱/安全不变量（4-lens 对抗性 + CodeX 两轮过）**：默认 inert；fail-closed；免费用户**只能**拿受限 600-preview（auto_voice_clone=False 蒙混、preview_mode 非真值、600 预留失败、reuse 路径、enter-edit/剪映 导出一律封死）；entitled 用户行为不变；通用 smart 紧急停同时停预览（含 gate→reserve TOCTOU 重核）。
+
+**⚠️ 已知遗留（CodeX 第二轮标，归下一步 P3e-4a-2，flag-flip 前必关）**：smart 预览任务的**其它只读检视面**仍未被 stream-only 闸覆盖——`GET /jobs/{id}/review-state`（暴露 transcript/translation items 的 `source_text`/`cn_text`=译文）、`GET /jobs/{id}/speaker-audio/{speaker}[/{seg}.wav]`（源文+源音字节）、report 流（`subtitle_width_report.json` cue 文本）。均为 **P3e-3d 既有遗留**（非本切片引入，CodeX 评 P2），但本切片放免费用户进来后变为该用户类可达。下一步用同一 `_policy_mode_for == "anonymous_preview"` 闸覆盖（需先核实 smart 自动审批是否真填 review-state）。
+
+**非钱依赖（归后续）**：免费用户**转完整**（reuse→full）仍过既有 smart entitlement kill-switch；预览**前端入口** + 预扣弹窗 + consent 驱动 + 反滥用 cap 真生效（`smart_preview_clone_daily_global_cap`/`inflight_cap` 现仍 inert）= P3e-4c。

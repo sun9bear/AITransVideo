@@ -1449,15 +1449,33 @@ async def intercept_create_job(
     #   - Apply to all users including admin (concurrency/quota/duration
     #     admin bypass is preserved below; kill switch is a safety
     #     boundary that must NOT be bypassable)
+    # P3e-4a：免费 / 未获 smart entitlement 的登录用户能否进入**受限**智能版预览 lane，
+    # 一次性判定（避免下方两道 entitlement gate 重复读 admin_settings；并供 600-reserve
+    # 失败兜底拒绝用）。放行条件见 smart_preview_gate.smart_preview_lane_exempt：登录 +
+    # preview_mode is True + auto_voice_clone is True + 通用 smart 停开启 + 本 lane canary
+    # 旗开。放行后只能跑受限预览（3min 水印 teaser / 只扣 600 / 跳分钟 / stream-only，全由
+    # 下游 smart_preview_mode 服务端强制）。默认 inert（本旗默认 False → 恒 False → 走原 403）。
+    from smart_preview_gate import smart_preview_lane_exempt
+    _smart_preview_exempt = bool(
+        service_mode == "smart" and smart_preview_lane_exempt(request_data, user)
+    )
+    # 该用户是否**靠 exemption 才进来**（本身未获 smart entitlement）。仅这种情况下 600
+    # 预留失败才需严格拒绝（防免费白嫖完整任务）；entitled 用户做预览 reserve 失败仍按既有
+    # "降级预设、不阻断"语义。由 Gate A 在确认 "smart" not in effective_modes 后置 True。
+    _smart_preview_via_exemption = False
+
     if service_mode == "smart" and user is not None:
         from entitlements import get_effective_allowed_service_modes
         effective_modes = get_effective_allowed_service_modes(user)
         if "smart" not in effective_modes:
-            return _error_response(
-                403, "smart_disabled",
-                "智能版当前未启用。请联系管理员开启 Smart 模式后再试。",
-                {"requested_mode": "smart"},
-            )
+            if not _smart_preview_exempt:
+                return _error_response(
+                    403, "smart_disabled",
+                    "智能版当前未启用。请联系管理员开启 Smart 模式后再试。",
+                    {"requested_mode": "smart"},
+                )
+            # 未获 smart、靠预览 exemption 放行 → 标记，供 600 预留失败兜底拒绝。
+            _smart_preview_via_exemption = True
 
     # --- smart_consent validation (PR#3C-b3g, hardened Codex 第四十轮 P1.1) ---
     # Smart pipeline reads `_snap("smart_consent")` to gate auto-clone
@@ -1683,7 +1701,9 @@ async def intercept_create_job(
     if user and not is_admin:
         from entitlements import get_effective_allowed_service_modes
         effective_modes = get_effective_allowed_service_modes(user)
-        if service_mode not in effective_modes:
+        # P3e-4a：_smart_preview_exempt 已含 service_mode == "smart" 约束，故仅放行 smart
+        # 预览、不放行其它未授权 mode（如 studio）。
+        if service_mode not in effective_modes and not _smart_preview_exempt:
             return _error_response(
                 403, "service_mode_not_allowed",
                 f"当前套餐（{user_plan}）不支持{service_mode}模式，请升级套餐。",
@@ -2198,6 +2218,15 @@ async def intercept_create_job(
         _admin_for_clone = _load_admin_for_clone()
         if getattr(_admin_for_clone, "smart_preview_clone_enabled", False) is not True:
             _smart_clone_skipped_reason = "clone_disabled"
+        elif _smart_preview_via_exemption and not (
+            bool(getattr(settings, "enable_smart_mode", False))
+            and bool(getattr(_admin_for_clone, "smart_mode_enabled", False))
+        ):
+            # P3e-4a TOCTOU 兜底（CodeX P2）：免费 exemption 用户在 gate→reserve 之间通用
+            # smart 停被翻关（env / admin）→ 用 reserve 时的 fresh admin + env 重核，不再
+            # reserve → 下游 402 拒绝，不留单漏网 preview。entitled 用户不入此分支
+            # （via_exemption=False，其通用停状态在 entitlement gate 已保证）。
+            _smart_clone_skipped_reason = "clone_disabled"
         else:
             try:
                 from smart_clone_reservation_service import (
@@ -2277,6 +2306,20 @@ async def intercept_create_job(
                 "smart clone preview reserve skipped user=%s reason=%s",
                 user.id, _smart_clone_skipped_reason,
             )
+
+    # P3e-4a（对抗性 P1 兜底）：免费用户**只能**经预览 exemption 进 smart create 路径，
+    # 且该 lane 要求 600 克隆预留成功才成为"受限预览"。若预留未成功（余额不足 / 库满 /
+    # denied / reserve_error / 重放 duplicate_create），**不得**继续 forward 落成一个按
+    # 分钟计费的完整 smart 任务——那会把不受限完整成片白送给未获 smart 的免费用户。显式
+    # 拒绝（402），让用户充够 600 再试；原任务（若重放）仍可在列表查看。
+    # 仅作用于 exemption 放行的免费请求：正常 entitled smart 用户 reserve 失败仍按既有
+    # "降级预设、不阻断"语义继续（CLAUDE.md 免费触点不静默降级只约束付费克隆本身）。
+    if _smart_preview_via_exemption and not _smart_clone_reservation_id:
+        return _error_response(
+            402, "smart_preview_reserve_failed",
+            "智能版预览需要预扣 600 点克隆额度，本次预扣未成功，请确认余额充足后重试。",
+            {"skipped_reason": _smart_clone_skipped_reason},
+        )
 
     # Forward to upstream with modified body
     # CodeX 复审 P2：proxy_request 抛异常（httpx timeout / client 故障）会绕过
@@ -4683,6 +4726,18 @@ async def _enforce_post_edit_access(
     subpath: str,
     now_utc: datetime,
 ) -> tuple[Job, dict[str, int | None]]:
+    # P3e-4a 防御层（置于一切检查之前，对抗性 P2-C）：smart 预览任务 stream-only
+    # （P3e-3d），进入 editing / commit 会经 copy_as_new / draft 暴露完整产物。enter-edit
+    # 与 editing/commit 都经本函数，故在 gateway FOR-UPDATE 层同档拒绝（权威拒绝在
+    # services.jobs.editing.enter_editing；这里镜像一层确保 post-edit DB sync 对预览任务
+    # 永不触发）。放在 plan-limits 检查**之前**：免费用户当前虽已被 limits=None 挡下，但若
+    # 将来定价给免费档开放 post-edit，预览闸不能因排在 limits 之后而失效。
+    from preview_policy import extract_smart_preview_flag
+    if extract_smart_preview_flag(getattr(job, "smart_state", None)):
+        raise HTTPException(
+            status_code=403,
+            detail="预览任务不支持进入修改模式。",
+        )
     limits = _post_edit_limits_for_user(user)
     if limits is None:
         raise HTTPException(
