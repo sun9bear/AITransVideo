@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -19,6 +20,59 @@ from services.tts.tts_generator import TTSConfig, TTSResult
 from services.voice.auto_clone import AutoCloneError
 from services.voice.voice_lookup import VoiceLookupError
 import pipeline.process as process_module
+
+
+# ===================================================================
+# Shared fake compatibility mixins
+# ===================================================================
+#
+# The pipeline grew code paths that call extra methods on the objects patched
+# in for ``GeminiTranslator`` / ``TTSGenerator``. These mixins keep the fakes
+# in sync with production so adding a method to production only needs a single
+# update here instead of touching every nested fake class.
+
+
+class _FakeTranslatorRewriteCompat:
+    """LLM-call seams the real pre-TTS ``GeminiRewriter`` and the S2 content
+    compliance layer invoke on whatever object is patched in as
+    ``GeminiTranslator``.
+
+    - ``_call_task_with_fallback`` is reached via ``GeminiRewriter`` →
+      ``_call_task_with_usage_phase`` during the pre-TTS overshoot rewrite.
+      Returning ``""`` makes the rewriter keep the original ``cn_text``
+      (an inert no-op compression) so segment text is unchanged.
+    - ``_call_by_model`` is reached by ``_call_content_compliance_llm_with_retry``
+      with ``json_mode=True``. Returning a ``pass`` decision lets the LLM
+      compliance layer approve, matching the local-rule outcome for benign
+      test transcripts.
+    """
+
+    def _call_task_with_fallback(self, task, prompt, *, json_mode=False, validator=None):
+        del task, prompt, validator
+        return '{"decision": "pass"}' if json_mode else ""
+
+    def _call_by_model(self, model_name, prompt, *, json_mode=False):
+        del model_name, prompt
+        return '{"decision": "pass"}' if json_mode else ""
+
+
+class _FakeTTSGeneratorCompat:
+    """Per-speaker cps + voice_strategy seams the pipeline injects right before
+    ``generate_all`` (process.py S4).
+
+    ``set_voice_strategy`` must exist even when unused: process.py wraps it in
+    the same ``try`` block as the free-voiceclone reference stamping, so a
+    missing method silently skips stamping. Both setters just record state,
+    mirroring ``TTSGenerator`` so calibration / voiceclone assertions see the
+    same effect as production.
+    """
+
+    def set_speaker_chars_per_second(self, per_speaker, *, global_cps=None):
+        self._chars_per_second_by_speaker = dict(per_speaker or {})
+        self._global_chars_per_second = global_cps
+
+    def set_voice_strategy(self, voice_strategy):
+        self._voice_strategy = (voice_strategy or "").strip()
 
 
 # ===================================================================
@@ -690,8 +744,30 @@ def _export_silent_wav(path: Path, *, duration_ms: int) -> Path:
 
 
 def _write_video(path: Path) -> Path:
+    # The pipeline's publish stage always muxes the final video (原视频画面 + 配音
+    # + 背景音) via ffmpeg ``-c:v copy`` over this file (process.py
+    # ``_dispatch_process_output_bundle`` → OutputTarget.PUBLISH), so a byte stub
+    # can't be demuxed. Emit a tiny but real H.264 mp4 instead.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"video")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=1:r=2",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
     return path
 
 
@@ -1139,7 +1215,7 @@ def _install_single_speaker_pipeline_mocks(
                 structured_transcript_path=str(Path(output_dir) / "transcript.json"),
             )
 
-    class FakeGeminiTranslator:
+    class FakeGeminiTranslator(_FakeTranslatorRewriteCompat):
         def __init__(
             self,
             api_key: str,
@@ -1205,7 +1281,7 @@ def _install_single_speaker_pipeline_mocks(
                 output_path=str(Path(output_dir) / "segments.json"),
             )
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def __init__(self, config, job_record=None):
             assert config.api_key == "tts-key"
             del job_record
@@ -1336,7 +1412,7 @@ def _install_dual_speaker_pipeline_mocks(
                 structured_transcript_path=str(Path(output_dir) / "transcript.json"),
             )
 
-    class FakeGeminiTranslator:
+    class FakeGeminiTranslator(_FakeTranslatorRewriteCompat):
         def __init__(
             self,
             api_key: str,
@@ -1405,7 +1481,7 @@ def _install_dual_speaker_pipeline_mocks(
                 output_path=str(Path(output_dir) / "segments.json"),
             )
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def __init__(self, config, job_record=None):
             assert config.api_key == "tts-key"
             del job_record
@@ -1453,6 +1529,12 @@ def test_process_pipeline_runs_end_to_end_with_mocked_stages(
 ) -> None:
     project_dir = tmp_path / "project"
     _install_single_speaker_pipeline_mocks(monkeypatch)
+    # Keep the two fixture segments distinct end-to-end; the short-segment merge
+    # (covered by its own test) would otherwise collapse the 1s adjacent
+    # same-speaker fixtures into one and skew the segment-count assertions below.
+    monkeypatch.setattr(
+        ProcessPipeline, "_apply_short_segment_merges_before_tts", lambda self, tr: {}
+    )
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -1474,7 +1556,10 @@ def test_process_pipeline_runs_end_to_end_with_mocked_stages(
     manifest_path = Path(result.project_dir) / "manifest.json"
     assert manifest_path.exists()
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest_payload["requested_targets"] == ["editor"]
+    # Pipeline now always dispatches the PUBLISH target (which internally also
+    # runs EDITOR) — see process.py _dispatch_process_output_bundle. The manifest
+    # records expanded_targets(), which is [publish].
+    assert manifest_payload["requested_targets"] == ["publish"]
     assert manifest_payload["primary_outputs"]["editor"]["subtitles_path"] == result.subtitles_path
     assert manifest_payload["artifact_index"]["editor.dubbed_audio_complete"] == result.dubbed_audio_path
     assert manifest_payload["artifact_index"]["source.original_audio"].endswith("audio\\original.wav")
@@ -1564,7 +1649,7 @@ def test_process_pipeline_uses_output_bundle_as_legacy_output_truth_source(
 
     assert result.dubbed_audio_path.endswith("dubbed_audio_complete.wav")
     assert legacy_output_payload["manifest_path"] == str(custom_manifest_path)
-    assert captured["requested_targets"] == ["editor"]
+    assert captured["requested_targets"] == ["publish"]
     stage_snapshot = captured["stage_snapshot"]
     assert isinstance(stage_snapshot, dict)
     assert "ingestion" in stage_snapshot
@@ -2102,7 +2187,7 @@ def test_process_pipeline_skips_translation_when_segments_cache_exists(
     _write_segments_cache(project_dir, _make_single_speaker_segments())
     observed = {"translate_called": 0}
 
-    class FailTranslator:
+    class FailTranslator(_FakeTranslatorRewriteCompat):
         def __init__(self, *args, **kwargs):
             del args, kwargs
 
@@ -2334,7 +2419,11 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    import src.services.transcript_reviewer as transcript_reviewer_module
+    # NOTE: patch the SAME module object production imports. process.py does
+    # `from services.transcript_reviewer import review_transcript`, and
+    # `services.transcript_reviewer` is a DIFFERENT module object than
+    # `src.services.transcript_reviewer`, so patching the latter would miss.
+    import services.transcript_reviewer as transcript_reviewer_module
 
     def _fake_review_transcript(lines, **kwargs):
         del kwargs
@@ -2357,7 +2446,7 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
     monkeypatch.setattr(transcript_reviewer_module, "review_transcript", _fake_review_transcript)
     project_dir = tmp_path / "project_translation_review_voice_metadata"
 
-    class CacheSnapshotTranslator:
+    class CacheSnapshotTranslator(_FakeTranslatorRewriteCompat):
         def __init__(
             self,
             api_key: str,
@@ -2416,12 +2505,18 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
         _fake_get_approved_review_payload,
     )
 
+    # Run to completion (no wait_for_review pause). The reviewed voice metadata
+    # is applied onto the segments during translation
+    # (process.py:5516 _apply_review_speaker_styles_to_segments → segments
+    # snapshot), which now happens AFTER the voice_selection_review pause — so
+    # the only way to observe it persisted on segments.json is to let the
+    # pipeline finish. (translation_config_review pause was retired: process.py
+    # :3340.)
     result = ProcessPipeline().run(
         ProcessConfig(
             youtube_url="https://youtube.example/watch?v=translation-review-voice-metadata",
             voice_a="voice_demo_001",
             project_dir=str(project_dir),
-            wait_for_review=True,
             job_record={
                 "service_mode": "studio",
                 "tts_provider": "cosyvoice",
@@ -2431,7 +2526,7 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
         )
     )
 
-    assert result.status == "waiting_for_review"
+    assert result.status == "completed"
     cached_result = ProcessPipeline()._load_translation_result(project_dir / "translation" / "segments.json")
     cached_segment = cached_result.segments[0]
     assert cached_segment.voice_description == "沉稳低沉的中年男性主持声线"
@@ -2446,7 +2541,11 @@ def test_process_pipeline_passes_transcript_dir_to_review_debug_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    import src.services.transcript_reviewer as transcript_reviewer_module
+    # NOTE: patch the SAME module object production imports. process.py does
+    # `from services.transcript_reviewer import review_transcript`, and
+    # `services.transcript_reviewer` is a DIFFERENT module object than
+    # `src.services.transcript_reviewer`, so patching the latter would miss.
+    import services.transcript_reviewer as transcript_reviewer_module
 
     observed: dict[str, str] = {}
 
@@ -2459,7 +2558,7 @@ def test_process_pipeline_passes_transcript_dir_to_review_debug_output(
             lines=lines,
         )
 
-    class _StopAfterReviewTranslator:
+    class _StopAfterReviewTranslator(_FakeTranslatorRewriteCompat):
         def __init__(
             self,
             api_key: str,
@@ -2496,6 +2595,8 @@ def test_process_pipeline_passes_transcript_dir_to_review_debug_output(
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
             speaker_voices: dict[str, str] | None = None,
+            chars_per_second: float | None = None,
+            chars_per_second_by_speaker: dict[str, float] | None = None,
         ):
             del (
                 lines,
@@ -2509,6 +2610,8 @@ def test_process_pipeline_passes_transcript_dir_to_review_debug_output(
                 youtube_url,
                 glossary,
                 speaker_voices,
+                chars_per_second,
+                chars_per_second_by_speaker,
             )
             raise RuntimeError("stop after review")
 
@@ -2534,7 +2637,8 @@ def test_process_pipeline_reused_project_requires_fresh_translation_config_revie
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reused project with cached transcript but no cached translation
-    should pause at translation_config_review."""
+    should pause for review before translation. (translation_config_review was
+    retired; voice_selection_review is now the first pause — process.py:3340.)"""
     _install_single_speaker_pipeline_mocks(monkeypatch)
     project_dir = tmp_path / "project_fresh_config_review"
     video_path = _write_video(project_dir / "video" / "original.mp4")
@@ -2562,10 +2666,13 @@ def test_process_pipeline_reused_project_requires_fresh_translation_config_revie
     )
 
     assert result.status == "waiting_for_review"
-    assert result.paused_review_stage == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
+    # translation_config_review pause was removed (process.py:3340-3345 — the
+    # frontend always auto-approved it, so it only caused wasteful S0→S2 reruns).
+    # voice_selection_review is now the first human-facing pause for studio jobs.
+    assert result.paused_review_stage == process_module.VOICE_SELECTION_REVIEW_STAGE
     review_state = json.loads((project_dir / "review_state.json").read_text(encoding="utf-8"))
-    assert review_state["active_stage"] == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
-    assert review_state["stages"]["translation_config_review"]["status"] == "pending"
+    assert review_state["active_stage"] == process_module.VOICE_SELECTION_REVIEW_STAGE
+    assert review_state["stages"]["voice_selection_review"]["status"] == "pending"
 
 
 def test_process_pipeline_recovers_missing_voice_metadata_from_cached_translation(
@@ -2573,7 +2680,11 @@ def test_process_pipeline_recovers_missing_voice_metadata_from_cached_translatio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    import src.services.transcript_reviewer as transcript_reviewer_module
+    # NOTE: patch the SAME module object production imports. process.py does
+    # `from services.transcript_reviewer import review_transcript`, and
+    # `services.transcript_reviewer` is a DIFFERENT module object than
+    # `src.services.transcript_reviewer`, so patching the latter would miss.
+    import services.transcript_reviewer as transcript_reviewer_module
 
     project_dir = tmp_path / "project_cached_translation_voice_metadata"
     video_path = _write_video(project_dir / "video" / "original.mp4")
@@ -2588,20 +2699,32 @@ def test_process_pipeline_recovers_missing_voice_metadata_from_cached_translatio
     )
     _write_transcript_cache(project_dir, _make_single_speaker_lines(), total_duration_ms=2_000)
     _write_segments_cache(project_dir, _make_single_speaker_segments())
+    # Translation-cache hit skips the unified review entirely, so reviewed voice
+    # metadata is now recovered from the persisted s2_review_result.json (the
+    # LLM-free recovery path: process.py _recover_review_speaker_styles) rather
+    # than by re-calling review_transcript. A real reused project carries this
+    # file from its first run; seed it so recovery can restore the metadata.
+    _reviewed_speakers = {
+        "speaker_a": {
+            "name": "Conan O'Brien",
+            "gender": "male",
+            "age_group": "middle",
+            "voice_description": "沉稳低沉的中年男性主持声线",
+            "persona_style": "serious",
+            "energy_level": "low",
+        }
+    }
+    transcript_dir = project_dir / "transcript"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    (transcript_dir / "s2_review_result.json").write_text(
+        json.dumps({"speakers": _reviewed_speakers}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     def _fake_review_transcript(lines, **kwargs):
         del kwargs
         return transcript_reviewer_module.ReviewResult(
-            speakers={
-                "speaker_a": {
-                    "name": "Conan O'Brien",
-                    "gender": "male",
-                    "age_group": "middle",
-                    "voice_description": "沉稳低沉的中年男性主持声线",
-                    "persona_style": "serious",
-                    "energy_level": "low",
-                }
-            },
+            speakers=_reviewed_speakers,
             glossary={},
             corrections_applied=0,
             lines=lines,
@@ -2610,7 +2733,7 @@ def test_process_pipeline_recovers_missing_voice_metadata_from_cached_translatio
     monkeypatch.setattr(transcript_reviewer_module, "review_transcript", _fake_review_transcript)
     observed: dict[str, str] = {}
 
-    class CaptureMetadataTTSGenerator:
+    class CaptureMetadataTTSGenerator(_FakeTTSGeneratorCompat):
         def __init__(self, config, job_record=None):
             del job_record
             assert config.api_key == "tts-key"
@@ -2675,8 +2798,9 @@ def test_process_pipeline_wait_for_review_writes_state_files_to_final_project_di
     assert project_state_path.exists()
     assert list((tmp_path / "projects").rglob("review_state.json")) == [review_state_path]
     review_state = json.loads(review_state_path.read_text(encoding="utf-8"))
-    # Speaker review is auto-skipped; first pause is translation_config_review
-    assert review_state["active_stage"] == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
+    # translation_config_review pause was removed; first pause is now
+    # voice_selection_review (process.py:3340-3345).
+    assert review_state["active_stage"] == process_module.VOICE_SELECTION_REVIEW_STAGE
     project_state = json.loads(project_state_path.read_text(encoding="utf-8"))
     # media_understanding is "running" because pipeline pauses mid-stage at config review
     assert project_state["stages"]["media_understanding"]["status"] in ("done", "running")
@@ -2779,7 +2903,7 @@ def test_process_pipeline_does_not_treat_translation_checkpoint_as_complete_cach
     )
     observed = {"translate_called": 0}
 
-    class ResumeTranslator:
+    class ResumeTranslator(_FakeTranslatorRewriteCompat):
         def __init__(self, *args, **kwargs):
             del args, kwargs
 
@@ -2884,11 +3008,11 @@ def test_process_pipeline_overrides_cached_voice_ids_for_translation_cache(
             del args, kwargs
             raise AssertionError("transcribe should not be called")
 
-    class CacheAwareTranslator:
+    class CacheAwareTranslator(_FakeTranslatorRewriteCompat):
         def __init__(self, *args, **kwargs):
             del args, kwargs
 
-    class CaptureTTSGenerator:
+    class CaptureTTSGenerator(_FakeTTSGeneratorCompat):
         def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
@@ -3270,9 +3394,11 @@ def test_process_pipeline_wait_for_review_pauses_for_voice_review_when_sample_is
 
     assert result.status == "waiting_for_review"
     review_state = json.loads((project_dir / "review_state.json").read_text(encoding="utf-8"))
-    assert review_state["active_stage"] == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
-    translation_config_review = review_state["stages"]["translation_config_review"]
-    assert translation_config_review["status"] == "pending"
+    # translation_config_review pause removed (process.py:3340-3345); the
+    # too-short voice sample now surfaces at voice_selection_review.
+    assert review_state["active_stage"] == process_module.VOICE_SELECTION_REVIEW_STAGE
+    voice_selection_review = review_state["stages"]["voice_selection_review"]
+    assert voice_selection_review["status"] == "pending"
 
 
 def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
@@ -3318,11 +3444,11 @@ def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
             del args, kwargs
             raise AssertionError("transcribe should not be called")
 
-    class CacheAwareTranslator:
+    class CacheAwareTranslator(_FakeTranslatorRewriteCompat):
         def __init__(self, *args, **kwargs):
             del args, kwargs
 
-    class PartialCacheTTSGenerator:
+    class PartialCacheTTSGenerator(_FakeTTSGeneratorCompat):
         def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
@@ -3358,6 +3484,11 @@ def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
     monkeypatch.setattr(process_module, "AssemblyAITranscriber", FailTranscriber)
     monkeypatch.setattr(process_module, "GeminiTranslator", CacheAwareTranslator)
     monkeypatch.setattr(process_module, "TTSGenerator", PartialCacheTTSGenerator)
+    # Partial-cache reuse is keyed per segment_id across 9 segments; the
+    # short-segment merge would collapse the 1s fixtures and break that premise.
+    monkeypatch.setattr(
+        ProcessPipeline, "_apply_short_segment_merges_before_tts", lambda self, tr: {}
+    )
     monkeypatch.setattr(process_module, "SegmentAligner", FakeAligner)
 
     ProcessPipeline().run(
@@ -3470,8 +3601,8 @@ def test_process_pipeline_uses_persisted_probe_cps_for_pre_tts_on_translation_ca
         capture_pre_tts,
     )
 
-    def fake_dispatch_output_bundle(self, *, project_dir, build_result):
-        del self, build_result
+    def fake_dispatch_output_bundle(self, *, project_dir, build_result, watermark_text=None):
+        del self, build_result, watermark_text
         output_dir = Path(project_dir) / "fake_output"
         segments_dir = output_dir / "segments"
         segments_dir.mkdir(parents=True, exist_ok=True)
@@ -3570,7 +3701,7 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
             del args, kwargs
             raise AssertionError("transcribe should not be called")
 
-    class FreshTranslator:
+    class FreshTranslator(_FakeTranslatorRewriteCompat):
         def __init__(self, *args, **kwargs):
             del args, kwargs
 
@@ -3603,7 +3734,7 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
                 output_path=str(Path(output_dir) / "segments.json"),
             )
 
-    class FreshTTSGenerator:
+    class FreshTTSGenerator(_FakeTTSGeneratorCompat):
         def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
@@ -3639,6 +3770,11 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
     monkeypatch.setattr(process_module, "AssemblyAITranscriber", FailTranscriber)
     monkeypatch.setattr(process_module, "GeminiTranslator", FreshTranslator)
     monkeypatch.setattr(process_module, "TTSGenerator", FreshTTSGenerator)
+    # Asserts both fixture segments are (re)generated; the short-segment merge
+    # would collapse them into one. Merge has dedicated coverage elsewhere.
+    monkeypatch.setattr(
+        ProcessPipeline, "_apply_short_segment_merges_before_tts", lambda self, tr: {}
+    )
     monkeypatch.setattr(process_module, "SegmentAligner", FakeAligner)
 
     ProcessPipeline().run(
@@ -3752,14 +3888,25 @@ def test_process_pipeline_calibrates_tts_duration_and_writes_rewrite_snapshot(
             self.chars_per_second = 5.25
             return self.chars_per_second
 
+        def estimate_duration_ms(self, text):
+            # Pre-TTS overshoot rewrite calls this; returning 0 makes that loop
+            # skip every segment (estimated <= 0 → continue), so the minimal
+            # FakeRewriter (no rewrite methods) is never invoked. This test only
+            # exercises the alignment-stage rewrite via FakeAligner.
+            del text
+            return 0
+
     class FakeRewriter:
         def __init__(
             self,
             translator,
             chars_per_second: float = 4.5,
             chars_per_second_by_speaker: dict[str, float] | None = None,
+            *,
+            usage_phase: str = "",
+            **kwargs,
         ):
-            del translator
+            del translator, usage_phase, kwargs
             self.chars_per_second = chars_per_second
             self.chars_per_second_by_speaker = chars_per_second_by_speaker or {}
             capture["rewriter_chars_per_second"] = chars_per_second
@@ -3817,6 +3964,12 @@ def test_process_pipeline_calibrates_tts_duration_and_writes_rewrite_snapshot(
     monkeypatch.setattr(process_module, "TTSDurationEstimator", FakeEstimator)
     monkeypatch.setattr(process_module, "GeminiRewriter", FakeRewriter)
     monkeypatch.setattr(process_module, "SegmentAligner", FakeAligner)
+    # This test asserts per-segment calibration on the two fixture segments; the
+    # short-segment merge (its own coverage lives elsewhere) would collapse the
+    # 1s adjacent same-speaker fixtures into one, so disable it here.
+    monkeypatch.setattr(
+        ProcessPipeline, "_apply_short_segment_merges_before_tts", lambda self, tr: {}
+    )
 
     project_dir = tmp_path / "project_rewrite_snapshot"
     ProcessPipeline().run(
@@ -4537,7 +4690,7 @@ def test_process_pipeline_attempts_semantic_split_repair_for_failed_long_segment
     )
     observed: dict[str, object] = {}
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             observed["tts_texts"] = [segment.cn_text for segment in segments]
             results: list[TTSResult] = []
@@ -4678,7 +4831,7 @@ def test_process_pipeline_keeps_semantic_split_when_one_child_still_requires_for
         "rewrite_texts": [],
     }
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             observed["tts_calls"].append([(segment.segment_id, segment.cn_text) for segment in segments])
             results: list[TTSResult] = []
@@ -4824,7 +4977,7 @@ def test_retry_failed_semantic_child_forces_resynthesis_after_rewrite(
         "generated": False,
     }
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             del segments, output_dir
             raise AssertionError("retry rewrite must not use cache-skipping generate_all")
@@ -4941,7 +5094,7 @@ def test_process_pipeline_presplits_long_overshoot_segment_before_alignment(
     )
     observed: dict[str, object] = {"tts_calls": []}
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             observed["tts_calls"].append([(segment.segment_id, segment.cn_text) for segment in segments])
             results: list[TTSResult] = []
@@ -5002,7 +5155,7 @@ def test_process_pipeline_does_not_presplit_long_segment_below_overshoot_thresho
         output_path=str((tmp_path / "translation" / "segments.json").resolve(strict=False)),
     )
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             del segments, output_dir
             raise AssertionError("generate_all should not be called below the presplit threshold")
@@ -5045,7 +5198,7 @@ def test_process_pipeline_presplits_severely_overshot_medium_long_segment_before
     )
     observed: dict[str, object] = {"tts_calls": []}
 
-    class FakeTTSGenerator:
+    class FakeTTSGenerator(_FakeTTSGeneratorCompat):
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             observed["tts_calls"].append([(segment.segment_id, segment.cn_text) for segment in segments])
             results: list[TTSResult] = []
