@@ -2356,7 +2356,18 @@ async def intercept_create_job(
                         # by cost_management.py window rollup (PR-A part 2 §6).
                         "language_pair": job.language_pair,
                     }
-                    if shadow_credits > 0:
+                    # P3e-3c-1 钱-关键：智能版 3min 预览只扣 600 克隆点、**不扣分钟/
+                    # 时长点**（teaser P3e-3b 已把 pipeline 工作/产物有界 3min，跳分钟
+                    # 安全=非免费完整任务）。预览判定 = reservation 成功（600 已预留）
+                    # **且**请求 preview_mode（与写入 smart_state.smart_preview_mode 的
+                    # 同条件；普通完整 smart 克隆缺 preview_mode → 不跳、照常扣分钟）。
+                    # settle 是 capture-of-reserve（无 reserve→shadow_capture 查不到→
+                    # no-op），故跳 reserve 自然不收分钟，无需改 settlement。600 克隆
+                    # reserve（上方独立 codepath）+ P3e-2b 失败/释放/补偿路径不受影响。
+                    _is_smart_preview = bool(_smart_clone_reservation_id) and (
+                        request_data.get("preview_mode") is True
+                    )
+                    if shadow_credits > 0 and not _is_smart_preview:
                         try:
                             await ensure_credit_buckets_for_user(db, user=user)
                             await reserve_credits_or_raise(
@@ -5825,7 +5836,15 @@ async def update_source_metadata(
                         late_credits = estimate_credits(
                             dur_float / 60.0, service_mode=_svc_mode, quality_tier=_quality_tier,
                         )
-                        if late_credits > 0:
+                        # P3e-3c-1 钱-关键：智能版预览跳分钟——create 端已跳，late 端
+                        # （duration 报告后补扣）必须同跳，否则 create 跳了 late 又补回 =
+                        # 还是扣了分钟。读 PG Job.smart_state（create 已落 smart_preview_
+                        # mode；普通任务无此键 → 照常补扣，inert）。
+                        from preview_policy import extract_smart_preview_flag
+                        _late_is_smart_preview = extract_smart_preview_flag(
+                            getattr(job, "smart_state", None)
+                        )
+                        if late_credits > 0 and not _late_is_smart_preview:
                             snap["credits_estimated"] = late_credits
                             job.metering_snapshot = dict(snap)
                             await ensure_credit_buckets_for_user(

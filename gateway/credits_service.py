@@ -424,6 +424,12 @@ def _settlement_reason_codes(reason_code: str, reserve_reason_code: str | None) 
         "capture_additional",
         "capture_overdraft",
         "capture_excess_release",
+        # P3e-3c-1（CodeX 复核 P2）：智能版预览跳分钟 settle 走 shadow_release(
+        # reason_code="smart_preview_minute_release") 释放 job_reserve（理论无
+        # job_reserve → no-op）。归入同一 job_reserve 幂等族，否则重复 terminal
+        # settle（list-jobs/detail/sweeper 多次观察终态）在 fail-safe 释放路径上会
+        # 重复写 release ledger（不扣钱、不留 reserved，但非幂等）。
+        "smart_preview_minute_release",
     }
     # Smart MVP P2 (plan §5.2 末段) — F4 dispatcher reason_codes. Three
     # credits_policy paths × the three-step partial-capture flow add up to
@@ -1028,6 +1034,26 @@ async def settle_job_credit_ledger(
         job = locked_job
 
     snapshot = dict(getattr(job, "metering_snapshot", None) or {})
+
+    # P3e-3c-1 钱-关键（对抗性/CodeX P0）：智能版 3min 预览只扣 600 克隆点（独立
+    # reason_code smart_clone_capture_* 经 settle_smart_clone_reservation 照常 capture）、
+    # **不扣分钟/job 点**。create/late 已跳 minute reserve（reason_code job_reserve）；
+    # 但下方 succeeded 分支会按 actual_minutes/source_duration 重算 actual_credits 调
+    # shadow_capture，而 shadow_capture 在 total_reserved=0 时进 actual>reserved 分支
+    # **从余额额外 debit**（capture_additional / capture_overdraft，**非**纯
+    # capture-of-reserve）→ 即便无分钟 reserve 也会扣分钟。故对预览显式走 release：
+    # 无 job_reserve → no-op；万一有（skip 失守）→ 释放退回，**绝不** capture 分钟
+    # （fail-safe，方向只会是 release/no-op）。在 has_credit_intent / credits_policy
+    # 分发**之前**短路，credits_estimated 是否非零都不影响。
+    if (dict(getattr(job, "smart_state", None) or {})).get("smart_preview_mode") is True:
+        return await shadow_release(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code="smart_preview_minute_release",
+            reserve_reason_code="job_reserve",
+        )
+
     has_credit_intent = (
         _snapshot_int(snapshot, "credits_estimated") > 0
         or await _has_job_credit_reserve(db, user_id=user_id, job_id=job_id)
