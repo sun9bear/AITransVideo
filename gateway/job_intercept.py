@@ -1034,6 +1034,30 @@ async def _compensate_upstream_job(job_id: str) -> None:
         logger.error("Failed to compensate upstream job %s: %s", job_id, exc)
 
 
+async def _release_smart_clone_reservation_on_create_failure(
+    db: "AsyncSession", reservation_id: str | None
+) -> None:
+    """P3e-2b 对抗性复核 P1-B/C：create 失败路径（forward 非 2xx / minute reserve
+    失败回滚 / job_id 不一致）**及时**释放已预留的 smart clone 600——避免挂满
+    60min TTL 才被 sweeper 回收（``smart_clone_reservation_sweeper`` 仍是兜底）。
+
+    无 chargeable billing event → ``settle_smart_clone_reservation`` 走 release
+    （退还 600）。绝不抛（释放失败靠 sweeper TTL 兜底）。设计上 settle 自带独立
+    事务（行锁 + 自 commit），在 create 失败/回滚后的 session 上调用安全。
+    """
+    if not reservation_id:
+        return
+    try:
+        from smart_clone_reservation_service import settle_smart_clone_reservation
+        await settle_smart_clone_reservation(db, reservation_id=reservation_id)
+    except Exception as exc:  # noqa: BLE001 — 释放失败靠 sweeper 兜底，绝不阻断
+        logger.warning(
+            "smart clone reservation release on create failure failed "
+            "(reservation=%s; sweeper will reclaim within TTL): %s",
+            reservation_id, exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Language facts endpoint (PR-A part 2 §5 / D5)
 # ---------------------------------------------------------------------------
@@ -2070,6 +2094,7 @@ async def intercept_create_job(
     # endpoint 写 billing event 时原子再校验（gateway 不在此扣费，只预留）。
     _smart_clone_skipped_reason: str | None = None
     _smart_clone_reservation_id: str | None = None
+    _smart_pre_job_id: str | None = None  # 对抗性复核 P1-C：forward 后校验一致性
     if (
         service_mode == "smart"
         and user is not None
@@ -2085,7 +2110,15 @@ async def intercept_create_job(
                 from smart_clone_reservation_service import (
                     reserve_smart_clone_credit as _reserve_smart_clone,
                 )
-                _pre_job_id = f"job_{_uuid.uuid4().hex}"
+                # 对抗性复核 P1-A：pre_job_id **决定性派生自 idempotency_key**
+                # （非每次 uuid4 新生成）→ 同 idempotency_key 的 create 重试复用
+                # 同一 task_id → reserve_smart_clone_credit 幂等（(task_id,purpose)
+                # 唯一），**根治双预留**（否则重试每次新 job_id → 新 reservation →
+                # 双扣 600）。sha256 取 32 hex 小写 → 匹配 submit_job 的
+                # _SUPPLIED_JOB_ID_PATTERN ^job_[0-9a-f]{32}$。
+                _pre_job_id = "job_" + hashlib.sha256(
+                    str(idempotency_key).encode("utf-8")
+                ).hexdigest()[:32]
                 await ensure_credit_buckets_for_user(db, user=user)
                 _smart_lib_cap = int(
                     getattr(_admin_for_clone, "smart_user_voice_clone_cap", 30) or 30
@@ -2100,6 +2133,7 @@ async def intercept_create_job(
                 )
                 if _smart_resv.status == "reserved":
                     _smart_clone_reservation_id = _smart_resv.reservation_id
+                    _smart_pre_job_id = _pre_job_id
                     # Option C：把预生成 job_id + reservation marker 一并 forward。
                     request_data["job_id"] = _pre_job_id
                     request_data["smart_state"] = {
@@ -2142,12 +2176,37 @@ async def intercept_create_job(
                 upstream_response.status_code, user.id if user else None)
     if upstream_response.status_code not in (200, 201, 202):
         await _release_smart_clone_create_reservation("upstream_rejected")
+        if _smart_clone_reservation_id:
+            await _release_smart_clone_reservation_on_create_failure(
+                db, _smart_clone_reservation_id
+            )
+            _smart_clone_reservation_id = None
     if upstream_response.status_code in (200, 201, 202) and user is not None:
         try:
             raw_body = upstream_response.body
             data = json.loads(raw_body)
             job_data = data.get("job") or data
             job_id = job_data.get("job_id")
+            # P3e-2b 对抗性复核 P1-C：Job API 实际用的 job_id 必须 == 预生成的
+            # _smart_pre_job_id（reservation.task_id），否则 reservation 关联断裂
+            # （register-billed 按 job_id 查 reservation 查不到 → 漏结算 + 孤儿
+            # voice）。极低概率（uuid hex 恒匹配 submit_job pattern）；防 proxy/
+            # response 异常。不一致 → 释放 + loud error（fail-safe：用户不被扣）。
+            if (
+                _smart_clone_reservation_id
+                and _smart_pre_job_id
+                and job_id
+                and str(job_id) != str(_smart_pre_job_id)
+            ):
+                logger.error(
+                    "smart clone job_id MISMATCH pre=%s actual=%s — releasing "
+                    "reservation %s (linkage broken; user not charged)",
+                    _smart_pre_job_id, job_id, _smart_clone_reservation_id,
+                )
+                await _release_smart_clone_reservation_on_create_failure(
+                    db, _smart_clone_reservation_id
+                )
+                _smart_clone_reservation_id = None
             if job_id:
                 existing = await db.execute(select(Job).where(Job.job_id == job_id))
                 if existing.scalar_one_or_none() is None:
@@ -2212,6 +2271,10 @@ async def intercept_create_job(
                     if not reserved and user_plan == "free":
                         # Quota reservation failed — rollback local record
                         await db.rollback()
+                        # P3e-2b P1-B：任务没建 → 释放已预留的 smart clone 600。
+                        await _release_smart_clone_reservation_on_create_failure(
+                            db, _smart_clone_reservation_id
+                        )
                         # Compensate: cancel upstream job to prevent orphan
                         await _compensate_upstream_job(job_id)
                         await _release_smart_clone_create_reservation("quota_failed")
@@ -2253,12 +2316,20 @@ async def intercept_create_job(
                             )
                         except InsufficientCreditsError as exc:
                             await db.rollback()
+                            # P3e-2b P1-B：分钟点不足任务没建 → 释放 smart clone
+                            # 600（最现实的孤儿场景：够克隆 600 但不够分钟点）。
+                            await _release_smart_clone_reservation_on_create_failure(
+                                db, _smart_clone_reservation_id
+                            )
                             await _compensate_upstream_job(job_id)
                             await _release_smart_clone_create_reservation("base_credit_insufficient")
                             return _insufficient_credits_response(exc)
                         except Exception as exc:
                             logger.exception("credit reserve failed for job %s: %s", job_id, exc)
                             await db.rollback()
+                            await _release_smart_clone_reservation_on_create_failure(
+                                db, _smart_clone_reservation_id
+                            )
                             await _compensate_upstream_job(job_id)
                             await _release_smart_clone_create_reservation("base_credit_reserve_failed")
                             return _error_response(

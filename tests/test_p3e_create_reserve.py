@@ -45,10 +45,10 @@ def test_reserve_gated_on_smart_consent_and_flag():
 
 def test_reserve_uses_pregenerated_job_id_option_c():
     """Option C：forward 前预生成 job_id（task_id=job_id）调 reserve，
-    并把 job_id 塞 request_data 让 Job API 用它。"""
+    并把 job_id 塞 request_data 让 Job API 用它（决定性派生见 P1-A 测试）。"""
     body = _create_src()
     flat = " ".join(body.split())
-    assert '_pre_job_id = f"job_{_uuid.uuid4().hex}"' in flat
+    assert '_pre_job_id = "job_" + hashlib.sha256(' in flat
     assert "task_id=_pre_job_id" in flat
     assert 'request_data["job_id"] = _pre_job_id' in flat
 
@@ -109,3 +109,59 @@ def test_pg_job_smart_state_set_from_reservation():
     assert "smart_state=(" in flat
     assert 'job_data.get("smart_state")' in flat
     assert 'request_data.get("smart_state")' in flat
+
+
+# ---------------------------------------------------------------------------
+# 对抗性复核加固（P1-A 双预留 / P1-B 孤儿 / P1-C job_id 一致性）
+# ---------------------------------------------------------------------------
+
+
+def test_pre_job_id_derived_from_idempotency_key():
+    """🔥 P1-A：pre_job_id 决定性派生自 idempotency_key（非每次 uuid4）→ 同
+    idempotency_key 重试复用同 task_id → reserve 幂等 → 根治双预留。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert "hashlib.sha256(" in flat
+    assert "str(idempotency_key).encode(" in flat
+    # P3e preview pre_job_id 不再用 uuid4 生成（否则重试双预留）。
+    # The non-preview Smart create path may still mint a regular job_id via
+    # uuid4, so scope this assertion to the preview-reserve block.
+    reserve_block = body[
+        body.index("_smart_pre_job_id: str | None = None"):
+        body.index("upstream_response = await proxy_request(")
+    ]
+    assert 'f"job_{_uuid.uuid4().hex}"' not in reserve_block
+
+
+def test_release_helper_defined():
+    """P1-B：create 失败路径释放 helper 定义（settle→release，绝不抛）。"""
+    src = _JI.read_text(encoding="utf-8")
+    assert "async def _release_smart_clone_reservation_on_create_failure(" in src
+    helper = _func_src("_release_smart_clone_reservation_on_create_failure")
+    assert "settle_smart_clone_reservation" in helper
+
+
+def test_release_called_on_forward_failure():
+    """P1-B：forward 非 2xx 但已预留 → 释放（避免挂 60min TTL）。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert "upstream_response.status_code not in (200, 201, 202)" in flat
+    assert "_release_smart_clone_reservation_on_create_failure(" in flat
+
+
+def test_release_called_on_minute_reserve_failure():
+    """P1-B：分钟点 reserve 失败（InsufficientCreditsError 等）→ 释放 smart
+    clone 600（够克隆但不够分钟的孤儿场景）。"""
+    body = _create_src()
+    # 三处 compensate 路径都伴随 release（quota / insufficient / credit_error）
+    assert body.count("_release_smart_clone_reservation_on_create_failure(") >= 4
+
+
+def test_job_id_consistency_check():
+    """🔥 P1-C：Job API 实际 job_id 与预生成 _smart_pre_job_id 不一致 → 释放 +
+    loud error（关联断裂防护，fail-safe 用户不被扣）。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert "_smart_pre_job_id" in flat
+    assert "str(job_id) != str(_smart_pre_job_id)" in flat
+    assert "MISMATCH" in body
