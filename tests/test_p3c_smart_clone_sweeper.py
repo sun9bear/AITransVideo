@@ -255,3 +255,18 @@ def test_main_starts_smart_clone_sweeper():
                 wired_in_try = True
                 break
     assert wired_in_try, "sweeper 启动必须包 try/except（fail-safe，不阻断 gateway 启动）"
+
+
+def test_main_cancels_smart_clone_sweeper_on_shutdown():
+    """CodeX P3c 复审 P2-lifecycle：startup 起的 task 必须在 shutdown cancel
+    清单里，否则 shutdown 会卡在 sweeper 的 asyncio.sleep()。"""
+    src = (_GATEWAY / "main.py").read_text(encoding="utf-8")
+    # startup 把 task 存到 app.state.smart_clone_reservation_sweeper_task
+    assert "app.state.smart_clone_reservation_sweeper_task" in src
+    # shutdown cancel 清单（lifespan yield 之后）必须含同名 attr 字符串
+    assert '"smart_clone_reservation_sweeper_task"' in src
+    after_yield = src.split("\n    yield\n", 1)
+    assert len(after_yield) == 2, "未找到 lifespan yield 边界"
+    assert '"smart_clone_reservation_sweeper_task"' in after_yield[1], (
+        "smart_clone_reservation_sweeper_task 必须出现在 shutdown cancel 清单"
+    )

@@ -509,6 +509,10 @@ async def lifespan(app: FastAPI):
         # Phase 4.3a PR2-D: cancel the reservation TTL sweeper cleanly so
         # shutdown doesn't hang on its asyncio.sleep().
         "express_reservation_sweeper_task",
+        # P3c (plan 2026-06-14 §4): cancel the smart-clone reservation settle
+        # sweeper cleanly (CodeX P3c 复审：startup 起了 task 但 shutdown 漏 cancel
+        # → 会卡在它的 asyncio.sleep()).
+        "smart_clone_reservation_sweeper_task",
         # Phase 4.3b-C: cancel the temporary-voice cleanup sweeper on shutdown.
         "express_voice_cleanup_sweeper_task",
         # Phase 8 §T8.4 pan schedulers (CodeX P2-5: previously omitted,
