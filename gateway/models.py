@@ -947,6 +947,124 @@ class ExpressCloneReservation(Base):
     )
 
 
+class SmartCloneReservation(Base):
+    """P3a — 智能版预览克隆 600 点预扣 reservation（migration 037）.
+
+    plan 2026-06-14-p3-smart-clone-600-credit-subplan v3。智能版 3 分钟预览
+    MiniMax 主说话人克隆的**钱-正确性账本**。状态机
+    ``reserved → captured | released | expired``。gateway 建预览任务时创建；
+    terminal finalizer 按 ``clone_billing_events`` 幂等 capture/release。
+
+    并发原子性靠 reserve service 在 transaction 内锁 ``users`` row 串行化；
+    ``uq_smart_clone_reservation_active`` partial unique 是幂等第二道防线。
+    镜像 ``ExpressCloneReservation``（migration 032）的并发/TTL 模式。
+    """
+
+    __tablename__ = "smart_clone_reservations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    purpose: Mapped[str] = mapped_column(
+        String(40), nullable=False,
+        server_default=text("'smart_clone_minimax_600'"),
+    )
+    amount_credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reserved'")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    captured_voice_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        # 幂等第二道防线：同 (task_id, purpose) 最多一个 active(reserved)。
+        # partial unique（PG + sqlite 双声明，同 ExpressCloneReservation 理由）。
+        Index(
+            "uq_smart_clone_reservation_active",
+            "task_id",
+            "purpose",
+            unique=True,
+            postgresql_where=text("status = 'reserved'"),
+            sqlite_where=text("status = 'reserved'"),
+        ),
+        # 库容/budget count 查询
+        Index(
+            "idx_smart_clone_reservation_user_status",
+            "user_id",
+            "status",
+            "created_at",
+        ),
+        # TTL sweeper + reserve 内 inline expire 选行
+        Index(
+            "idx_smart_clone_reservation_ttl_pending",
+            "expires_at",
+            postgresql_where=text("status = 'reserved'"),
+            sqlite_where=text("status = 'reserved'"),
+        ),
+    )
+
+
+class CloneBillingEvent(Base):
+    """P3a — 克隆计费事件（migration 037）= **唯一权威计费信号**（CodeX P0-1）.
+
+    pipeline 在 MiniMax 返回 voice_id 瞬间，经 register-smart endpoint 在
+    **同一 DB 事务**内写入（校验 reservation + 写本表 + 入 user_voices）。
+    terminal finalizer 凭"有无 chargeable event"决定 capture/release——
+    **钱的事实只认本表，不认文件产物 manifest**。
+
+    ``uq_clone_billing_event_reservation``（reservation_id 唯一）= 幂等：
+    一个 reservation 最多一条 event，防重复写 → 防重复 capture。
+    """
+
+    __tablename__ = "clone_billing_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    reservation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("smart_clone_reservations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    voice_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    chargeable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("reservation_id", name="uq_clone_billing_event_reservation"),
+        Index("idx_clone_billing_event_task", "task_id"),
+    )
+
+
 class FreeServiceDailyUsage(Base):
     """Phase 2a free tier — per-job daily ledger for the 1/day free-service cap
     (migration 034). **Independent** of ``users.free_jobs_quota_*`` (that's the
