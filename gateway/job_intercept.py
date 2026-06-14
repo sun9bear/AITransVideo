@@ -1325,6 +1325,10 @@ async def intercept_create_job(
     # 跳过登录态 allowlist）实现提权 / 绕 cap。剥离后该标记对公共路径永远为假。
     if isinstance(request_data, dict):
         request_data.pop("anonymous_preview", None)
+        # P3e-2b CodeX 终审 P1 #1：``job_id`` / ``smart_state`` 同为 **server-only
+        # 信任标记**——只有 gateway 在 forward 前 reserve 成功后才设（Option C）。
+        # 公共认证 create 路径无条件剥离客户端夹带值；同样剥离顶层 smart-clone
+        # marker，避免客户端伪造 reservation 状态打开 paid-provider gate。
         request_data.pop("job_id", None)
         request_data.pop("smart_state", None)
         request_data.pop("smart_clone_reservation_id", None)
@@ -2110,42 +2114,54 @@ async def intercept_create_job(
                 from smart_clone_reservation_service import (
                     reserve_smart_clone_credit as _reserve_smart_clone,
                 )
-                # 对抗性复核 P1-A：pre_job_id **决定性派生自 idempotency_key**
-                # （非每次 uuid4 新生成）→ 同 idempotency_key 的 create 重试复用
-                # 同一 task_id → reserve_smart_clone_credit 幂等（(task_id,purpose)
-                # 唯一），**根治双预留**（否则重试每次新 job_id → 新 reservation →
-                # 双扣 600）。sha256 取 32 hex 小写 → 匹配 submit_job 的
-                # _SUPPLIED_JOB_ID_PATTERN ^job_[0-9a-f]{32}$。
+                # P1-A + CodeX 终审 P1#2：pre_job_id 决定性派生自
+                # **(user.id, idempotency_key)** → 同用户同 key 重试复用同
+                # task_id（reserve 幂等，根治双预留）；**含 user.id namespace**
+                # 防两用户夹带同 idempotency_key 撞同一 reservation（reservation
+                # 幂等查只看 (task_id,purpose)）。sha256 取 32 hex 小写 → 匹配
+                # submit_job ^job_[0-9a-f]{32}$。
                 _pre_job_id = "job_" + hashlib.sha256(
-                    str(idempotency_key).encode("utf-8")
+                    f"{user.id}:{idempotency_key}".encode("utf-8")
                 ).hexdigest()[:32]
-                await ensure_credit_buckets_for_user(db, user=user)
-                _smart_lib_cap = int(
-                    getattr(_admin_for_clone, "smart_user_voice_clone_cap", 30) or 30
-                )
-                _smart_resv = await _reserve_smart_clone(
-                    db,
-                    user_id=user.id,
-                    task_id=_pre_job_id,
-                    amount_credits=600,
-                    ttl_minutes=60,
-                    library_cap=_smart_lib_cap,
-                )
-                if _smart_resv.status == "reserved":
-                    _smart_clone_reservation_id = _smart_resv.reservation_id
-                    _smart_pre_job_id = _pre_job_id
-                    # Option C：把预生成 job_id + reservation marker 一并 forward。
+                # CodeX 终审 P1#3：终态重放幂等——同 (user, key) 派生同
+                # _pre_job_id；reserve 前查已有 PG job，存在说明是重放 → **不再
+                # reserve**（防 reservation 终态 captured/released 后重放再扣 600；
+                # 幂等查只挡 active reserved，挡不住终态后重放）。仍把 deterministic
+                # job_id forward 让 Job API existing-check 去重（不建重复 job）。
+                _smart_existing_job = (
+                    await db.execute(select(Job).where(Job.job_id == _pre_job_id))
+                ).scalar_one_or_none()
+                if _smart_existing_job is not None:
+                    _smart_clone_skipped_reason = "duplicate_create"
                     request_data["job_id"] = _pre_job_id
-                    request_data["smart_state"] = {
-                        "smart_clone_reservation_id": _smart_resv.reservation_id,
-                        "smart_clone_credit_reserved": True,
-                    }
                 else:
-                    # denied(insufficient_credits / voice_library_full) /
-                    # user_not_found → 不阻断、走预设。
-                    _smart_clone_skipped_reason = (
-                        _smart_resv.deny_reason or "user_not_found"
+                    await ensure_credit_buckets_for_user(db, user=user)
+                    _smart_lib_cap = int(
+                        getattr(_admin_for_clone, "smart_user_voice_clone_cap", 30) or 30
                     )
+                    _smart_resv = await _reserve_smart_clone(
+                        db,
+                        user_id=user.id,
+                        task_id=_pre_job_id,
+                        amount_credits=600,
+                        ttl_minutes=60,
+                        library_cap=_smart_lib_cap,
+                    )
+                    if _smart_resv.status == "reserved":
+                        _smart_clone_reservation_id = _smart_resv.reservation_id
+                        _smart_pre_job_id = _pre_job_id
+                        # Option C：预生成 job_id + reservation marker 一并 forward。
+                        request_data["job_id"] = _pre_job_id
+                        request_data["smart_state"] = {
+                            "smart_clone_reservation_id": _smart_resv.reservation_id,
+                            "smart_clone_credit_reserved": True,
+                        }
+                    else:
+                        # denied(insufficient_credits / voice_library_full) /
+                        # user_not_found → 不阻断、走预设。
+                        _smart_clone_skipped_reason = (
+                            _smart_resv.deny_reason or "user_not_found"
+                        )
             except Exception as _smart_resv_exc:  # noqa: BLE001 — reserve 故障不阻断
                 logger.warning(
                     "smart clone preview reserve failed user=%s: %s",
@@ -2347,6 +2363,13 @@ async def intercept_create_job(
             else:
                 logger.warning("No job_id in upstream response")
                 await _release_smart_clone_create_reservation("missing_job_id")
+                # P3e-2b P2#4：2xx 但无 job_id（异常）→ reservation 关联不上真
+                # job → 释放（sweeper 兜底）。
+                if _smart_clone_reservation_id:
+                    await _release_smart_clone_reservation_on_create_failure(
+                        db, _smart_clone_reservation_id
+                    )
+                    _smart_clone_reservation_id = None
         except Exception as exc:
             logger.exception("Failed to record job %s in DB: %s", job_id, exc)
             try:
@@ -2354,6 +2377,13 @@ async def intercept_create_job(
             except Exception:
                 pass
             await _release_smart_clone_create_reservation("pg_record_failed")
+            # P3e-2b P2#4：2xx 后本地解析/PG 记录失败 → 任务未正确入库 → 释放
+            # smart clone reservation（避免挂满 60min TTL；sweeper 仍兜底）。
+            if _smart_clone_reservation_id:
+                await _release_smart_clone_reservation_on_create_failure(
+                    db, _smart_clone_reservation_id
+                )
+                _smart_clone_reservation_id = None
 
     # Phase 2a free tier — settle the daily reservation: consume on upstream
     # accept, release on reject. TTL + inline-expire is the safety net for

@@ -116,13 +116,14 @@ def test_pg_job_smart_state_set_from_reservation():
 # ---------------------------------------------------------------------------
 
 
-def test_pre_job_id_derived_from_idempotency_key():
-    """🔥 P1-A：pre_job_id 决定性派生自 idempotency_key（非每次 uuid4）→ 同
-    idempotency_key 重试复用同 task_id → reserve 幂等 → 根治双预留。"""
+def test_pre_job_id_derived_from_user_and_idempotency_key():
+    """🔥 P1-A + CodeX 终审 P1#2：pre_job_id 决定性派生自 (user.id, idempotency_
+    key)（非每次 uuid4）→ 同用户同 key 重试复用同 task_id → reserve 幂等（根治
+    双预留）；**含 user.id namespace** 防跨用户撞同 reservation。"""
     body = _create_src()
     flat = " ".join(body.split())
     assert "hashlib.sha256(" in flat
-    assert "str(idempotency_key).encode(" in flat
+    assert 'f"{user.id}:{idempotency_key}".encode(' in flat
     # P3e preview pre_job_id 不再用 uuid4 生成（否则重试双预留）。
     # The non-preview Smart create path may still mint a regular job_id via
     # uuid4, so scope this assertion to the preview-reserve block.
@@ -131,6 +132,25 @@ def test_pre_job_id_derived_from_idempotency_key():
         body.index("upstream_response = await proxy_request(")
     ]
     assert 'f"job_{_uuid.uuid4().hex}"' not in reserve_block
+
+
+def test_client_supplied_job_id_and_smart_state_stripped():
+    """🔥 CodeX 终审 P1#1：公共 create 路径无条件剥离客户端夹带的 job_id /
+    smart_state（server-only 信任标记）——否则客户端可伪造
+    smart_state.smart_clone_reservation_id 让 pipeline 误开 gate 克隆（业务白付）。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert 'request_data.pop("job_id", None)' in flat
+    assert 'request_data.pop("smart_state", None)' in flat
+
+
+def test_terminal_replay_idempotency_check():
+    """🔥 CodeX 终审 P1#3：reserve 前查已有 PG job（同 deterministic id=重放）→
+    存在则不再 reserve（防终态后重放再扣 600），仍 forward deterministic id 去重。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert "select(Job).where(Job.job_id == _pre_job_id)" in flat
+    assert '"duplicate_create"' in flat
 
 
 def test_release_helper_defined():
