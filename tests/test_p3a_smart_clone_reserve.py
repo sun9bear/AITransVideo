@@ -83,6 +83,11 @@ async def _bucket_available(db) -> int:
     return 0 if b is None else (b.remaining - b.reserved)
 
 
+async def _bucket_remaining_reserved(db) -> tuple[int, int]:
+    b = (await db.execute(select(CreditsBucket).where(CreditsBucket.user_id == _USER))).scalar_one_or_none()
+    return (0, 0) if b is None else (b.remaining, b.reserved)
+
+
 # ---------------------------------------------------------------------------
 # happy path
 # ---------------------------------------------------------------------------
@@ -322,4 +327,102 @@ def test_register_bill_released_reservation_does_not_bill():
             )
             assert out.status == "no_active_reservation"
             assert (await db.execute(select(CloneBillingEvent))).scalar_one_or_none() is None
+    _run(go())
+
+
+# ---------------------------------------------------------------------------
+# P3c finalizer：capture / release 对账（钱-正确性核心）
+# ---------------------------------------------------------------------------
+
+
+def test_settle_captures_when_billed():
+    """🔥 有 chargeable event → capture 600：remaining 真扣到 200、reserved 清 0。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_s1")  # available 800→200, reserved 600
+            await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_s1", reservation_id=rid,
+                voice_id="mm_s1", label="x", source_job_id="job_s1",
+            )
+            out = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+            assert out.status == "captured"
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 200 and resv == 0  # 600 真扣（remaining 800→200），无悬挂 reserved
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            assert row.status == "captured" and row.captured_voice_id == "mm_s1" and row.settled_at is not None
+    _run(go())
+
+
+def test_settle_releases_when_no_billing_event():
+    """🔥 无 chargeable event（克隆没触发）→ release 600：available 复原 800。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_s2")  # available 800→200
+            out = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+            assert out.status == "released"
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 800 and resv == 0  # 600 全退（remaining 仍 800），无悬挂 reserved
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            assert row.status == "released" and row.settled_at is not None
+    _run(go())
+
+
+def test_settle_idempotent_no_double_capture():
+    """🔥 幂等：settle 两次 → 第二次 already_settled，不双扣。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_s3")
+            await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_s3", reservation_id=rid,
+                voice_id="mm_s3", label="x", source_job_id="job_s3",
+            )
+            o1 = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+            o2 = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+            assert o1.status == "captured" and o2.status == "already_settled"
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 200 and resv == 0  # 仍只扣一次 600，没二次扣到 -400
+    _run(go())
+
+
+def test_settle_expired_reservation_releases():
+    """🔥 CodeX #1：expired 未结算 → finalizer release（不让 600 永久挂 reserved）。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=2000)
+        now = datetime.now(timezone.utc)
+        async with sm() as db:
+            rid = await _reserve(db, "job_s4")  # reserved 600
+            # 手动把它标 expired（模拟 TTL 过期 / inline-expire）
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            row.status = "expired"
+            row.expires_at = now - timedelta(hours=1)
+            await db.commit()
+            out = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+            assert out.status == "released"
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 2000 and resv == 0  # expired 的 600 退还、reserved 不悬挂
+    _run(go())
+
+
+def test_sweep_settles_stale_expired():
+    """TTL sweeper 兜底：扫 reserved+过期 / expired → 逐个 settle(release)。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=2000)
+        now = datetime.now(timezone.utc)
+        async with sm() as db:
+            rid = await _reserve(db, "job_s5")
+            # 标成 reserved 但已过期（卡死非终态场景）
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            row.expires_at = now - timedelta(hours=1)
+            await db.commit()
+            stats = await svc.sweep_settle_stale_reservations(db)
+            assert stats["released"] == 1
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 2000 and resv == 0  # 退还
     _run(go())

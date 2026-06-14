@@ -351,13 +351,145 @@ async def register_smart_clone_with_billing(
     return RegisterBillOutcome(status="billed", reservation_id=str(res_pk))
 
 
+_CAPTURE_REASON = "smart_clone_capture"
+_RELEASE_REASON = "smart_clone_release"
+
+
+@dataclass(frozen=True)
+class SettleOutcome:
+    """``settle_smart_clone_reservation`` 结果。
+
+    - ``"captured"`` → 有 chargeable billing event → 实扣 600。
+    - ``"released"`` → 无 chargeable event（克隆没触发/失败/expired）→ 退还 600。
+    - ``"already_settled"`` → reservation 已 captured/released（幂等 no-op）。
+    - ``"not_found"`` → reservation 不存在。
+    - ``"settlement_failed"`` → 信用结算未落 ledger（strict 验证不过）→ **不**改
+      reservation 状态，caller 应重试（防"状态说已结算但信用没动"错账）。
+    """
+
+    status: str
+    reservation_id: str | None = None
+
+
+async def settle_smart_clone_reservation(
+    db: AsyncSession,
+    *,
+    reservation_id: object,
+    service_mode: str = "smart",
+) -> SettleOutcome:
+    """P3c — 智能版克隆 reservation 终态结算（finalizer，钱-正确性核心）.
+
+    单 transaction 幂等结算：行锁 reservation → 已结算则 no-op → 有 chargeable
+    billing event 则 **capture 600**、否则 **release 600** → **strict 验证信用
+    结算 ledger 真写入**（CodeX #3：不把 shadow_capture/release 的 [] 当成功）→
+    置 status=captured|released + settled_at → commit。
+
+    ``status IN (reserved, expired)`` 都可结算：expired 也走本函数 release
+    （CodeX #1：expired+未结算必退，防 600 永久挂 reserved）。
+    """
+    from credits_service import _has_existing_settlement, shadow_capture, shadow_release
+    from models import CloneBillingEvent
+
+    try:
+        res_pk = reservation_id if isinstance(reservation_id, uuid.UUID) else uuid.UUID(str(reservation_id))
+    except (ValueError, AttributeError, TypeError):
+        return SettleOutcome(status="not_found")
+
+    now = _now()
+    res = (
+        await db.execute(
+            select(SmartCloneReservation)
+            .where(SmartCloneReservation.id == res_pk)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if res is None:
+        return SettleOutcome(status="not_found")
+    if res.status in (CAPTURED, RELEASED):
+        await db.rollback()
+        return SettleOutcome(status="already_settled", reservation_id=str(res_pk))
+
+    reserve_reason = credit_reserve_reason_code(res.id)
+    event = (
+        await db.execute(
+            select(CloneBillingEvent).where(CloneBillingEvent.reservation_id == res_pk)
+        )
+    ).scalar_one_or_none()
+    chargeable = event is not None and bool(event.chargeable)
+
+    if chargeable:
+        await shadow_capture(
+            db, user_id=res.user_id, job_id=res.task_id,
+            actual_credits=int(res.amount_credits), service_mode=service_mode,
+            reason_code=_CAPTURE_REASON, reserve_reason_code=reserve_reason,
+        )
+        settled_ok = await _has_existing_settlement(
+            db, user_id=res.user_id, job_id=res.task_id,
+            reason_code=_CAPTURE_REASON, reserve_reason_code=reserve_reason,
+        )
+        if not settled_ok:
+            await db.rollback()
+            return SettleOutcome(status="settlement_failed", reservation_id=str(res_pk))
+        res.status = CAPTURED
+        res.captured_voice_id = event.voice_id
+        res.reason_code = "captured"
+        final = "captured"
+    else:
+        await shadow_release(
+            db, user_id=res.user_id, job_id=res.task_id,
+            reason_code=_RELEASE_REASON, reserve_reason_code=reserve_reason,
+        )
+        settled_ok = await _has_existing_settlement(
+            db, user_id=res.user_id, job_id=res.task_id,
+            reason_code=_RELEASE_REASON, reserve_reason_code=reserve_reason,
+        )
+        if not settled_ok:
+            await db.rollback()
+            return SettleOutcome(status="settlement_failed", reservation_id=str(res_pk))
+        res.status = RELEASED
+        res.reason_code = res.reason_code if res.status == EXPIRED else (res.reason_code or "released_no_clone")
+        final = "released"
+
+    res.settled_at = now
+    res.updated_at = now
+    await db.commit()
+    return SettleOutcome(status=final, reservation_id=str(res_pk))
+
+
+async def sweep_settle_stale_reservations(db: AsyncSession, *, limit: int = 200) -> dict:
+    """P3c TTL sweeper — 结算所有过期未结算 reservation（CodeX #1）.
+
+    扫 ``status=reserved 且 expires_at < now`` + ``status=expired`` 的（这些任务
+    可能卡死非终态、job 永不 reach terminal、finalizer 永不被触发）→ 逐个调
+    ``settle_smart_clone_reservation``（无 chargeable event → release，退还 600）。
+    幂等；返回结算统计。独立于 job terminal mirror（CodeX：单一结算入口 + 兜底）。
+    """
+    now = _now()
+    rows = (
+        await db.execute(
+            select(SmartCloneReservation.id).where(
+                SmartCloneReservation.status.in_([RESERVED, EXPIRED]),
+                SmartCloneReservation.expires_at < now,
+            ).limit(int(limit))
+        )
+    ).scalars().all()
+    stats = {"captured": 0, "released": 0, "settlement_failed": 0, "other": 0}
+    for rid in rows:
+        out = await settle_smart_clone_reservation(db, reservation_id=rid)
+        stats[out.status if out.status in stats else "other"] += 1
+    return stats
+
+
 __all__ = [
     "RESERVED", "CAPTURED", "RELEASED", "EXPIRED", "PURPOSE",
     "SmartReserveOutcome",
     "RegisterBillOutcome",
+    "SettleOutcome",
     "credit_reserve_reason_code",
     "count_active_smart_reservations",
     "count_active_library_voices",
     "reserve_smart_clone_credit",
     "register_smart_clone_with_billing",
+    "settle_smart_clone_reservation",
+    "sweep_settle_stale_reservations",
 ]
