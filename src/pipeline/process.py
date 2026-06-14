@@ -3040,6 +3040,52 @@ class ProcessPipeline:
                 video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
                 source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
 
+            # --- P3e-3b：智能版 3min 预览 teaser 裁剪（consumer 侧 / 钱-关键耦合）---
+            # smart 预览（job_smart_preview）把源**音频**在 separation/ASR/clone/TTS
+            # 等付费阶段**之前**裁到 ~180s teaser。音频 teaser 同时有界两条边界：
+            # ① 付费 AI 阶段全读 teaser 派生音频（分离→ASR→克隆→TTS 限 3 分钟）；
+            # ② 下方 actual_duration_ms = _ffprobe_duration_ms(source_audio_path) →
+            #    EditorPackageWriter 据此造 base silence（成片音轨长度）+ render
+            #    -shortest → 成片收口到 ~3 分钟。**视频不裁**：原 original.mp4 保留 +
+            #    render 经 -shortest 收口（artifact index source.original_video 仍指真
+            #    原视频，供 P3e-3c-2 转完整复用，不被 teaser 污染）。
+            # 使后续 P3e-3c 跳分钟安全（否则 pipeline 跑完整视频却不收分钟 = 免费完整
+            # 任务，漏收全部分钟点 ≫ 克隆 600）。本步**仍扣分钟**（create reserve 不变 →
+            # settle 照常 = 无漏收）。默认 inert：create 未 stamp smart_preview_mode 前
+            # job_smart_preview=False → 不触发。
+            if job_smart_preview:
+                from utils.smart_preview_teaser import (
+                    SmartPreviewTeaserError,
+                    apply_smart_preview_teaser,
+                    smart_preview_gemini_url_unbounded,
+                )
+
+                # 防御：gemini-on-URL 转录读 normalized_url（原始 URL）做多模态转录，
+                # 本地 teaser 无法有界它 → fail-closed（绝不对未有界的完整源跑付费转录/
+                # TTS）。smart 预览默认 assemblyai + 本地上传（normalized_url 空 → 走本地
+                # speech_audio_path，已被 teaser 有界），本守卫只在误配 gemini+URL 时触发。
+                if smart_preview_gemini_url_unbounded(
+                    getattr(config, "transcription_method", None), normalized_url
+                ):
+                    raise SmartPreviewTeaserError(
+                        "smart 预览不支持 gemini-on-URL 转录（本地 teaser 无法有界源），"
+                        "fail-closed"
+                    )
+
+                # 只裁音频并 repoint source_audio_path：下游付费阶段（分离/ASR/克隆/
+                # TTS）+ actual_duration_ms 改读 3min teaser；video_path **保持原值**。
+                # fail-closed 异常向外层 try 传播 → 任务 terminal failed（绝不退回处理
+                # 完整源）。
+                source_audio_path = apply_smart_preview_teaser(
+                    source_audio_path=source_audio_path,
+                    project_dir=final_project_dir,
+                )
+                print(
+                    "[S0.5] 智能版预览：源音频已裁剪至 3min teaser"
+                    "（原视频/音频保留供转完整复用，成片经 -shortest + 3min 基线静音有界）",
+                    flush=True,
+                )
+
             review_state_manager = ReviewStateManager(final_project_dir / "review_state.json")
             state_manager = StateManager(str(final_project_dir / "project_state.json"))
             state_manager.set_project(final_project_dir.name)
@@ -7453,6 +7499,18 @@ class ProcessPipeline:
         ambient_path = (final_project_dir / "audio" / "ambient.wav").resolve(strict=False)
         source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
         video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
+        # P3e-3b 钱-关键耦合（CodeX/对抗性 P1）：smart 预览 teaser 音频若在盘上，
+        # resume/publish 必须用**它的时长**（而非完整 original.wav）造 base silence。
+        # 否则 Studio 编辑-提交一个预览任务会走本路径，用完整时长造满长 base silence
+        # （EditorPackageWriter）+ 完整视频出片，-shortest 因满长静音不收口 = 完整
+        # 任务（漏收分钟点，P3e-3c 跳分钟后尤甚）。preview_teaser.wav 存在 = 该任务是
+        # 预览（仅 smart 预览 teaser 创建），优先复用之。视频仍用 original.mp4 —
+        # 经 3min base silence + -shortest 收口成 3 分钟，不漏完整片。
+        _preview_teaser_audio = (
+            final_project_dir / "audio" / "preview_teaser.wav"
+        ).resolve(strict=False)
+        if _preview_teaser_audio.is_file():
+            source_audio_path = _preview_teaser_audio
         for missing_rel, p in (
             ("audio/speech_for_asr.wav", speech_path),
             ("audio/ambient.wav", ambient_path),
