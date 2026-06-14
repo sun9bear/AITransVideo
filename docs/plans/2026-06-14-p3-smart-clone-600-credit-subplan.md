@@ -57,10 +57,16 @@
 前端 smart 预览提交（含克隆 opt-in）
   → [新] 弹窗"克隆主音色 -600 点（余额 X）；预览不扣分钟点；失败自动退还"→ confirm
   → gateway 建 smart 预览任务（preview_mode）：
-       - 库容门：count_active_voices_for_user（跨 provider）≥ 套餐上限 → 不 reserve、走预设、提示库满
-       - smart_preview_clone_enabled=False / 无 consent / 余额<600 → 不 reserve、走预设（不阻断预览）
-       - 否则 → 创建 reservation 行：purpose=`smart_clone_minimax_600`，**唯一约束 (task_id,purpose)**，
-         状态=`reserved`，幂等键；**不 reserve 分钟点**（预览不交付）
+       - **降级到预设的所有情况都不阻断预览，但必须把"降级原因 + 本次用预设音色"回给前端提示用户**
+         （知情，不静默降级）。create 响应带 `clone_skipped_reason`（枚举），前端据此弹提示：
+           · 余额 <600 → `insufficient_credits`：提示"点数不足 600，本次用预设音色（可充值/升级后再克隆）"
+           · 库满 → `voice_library_full`：提示"音色库已满，本次用预设音色（可删旧音色/升级）"
+           · smart_preview_clone_enabled=False（admin 关）→ `clone_disabled`：提示"音色克隆暂未开放，本次用预设"
+           · 无 consent（用户没勾选克隆）→ 正常预设，无需特别提示
+       - 上述任一 → **不创建 reservation、不克隆**；正常出 3 分钟预设音色预览。
+       - 否则（consent + 旋钮开 + 余额≥600 + 库未满）→ 创建 reservation 行：
+         purpose=`smart_clone_minimax_600`，**唯一约束 (task_id,purpose)**，状态=`reserved`，幂等键；
+         **不 reserve 分钟点**（预览不交付）
   → pipeline（预览：3 分钟 teaser + 水印）：
        - 无 reservation → 不调 MiniMax → 预设音色
        - 有 reservation → 克隆**仅主说话人 1 个**（real MiniMax）；**MiniMax 返回 voice_id 瞬间
@@ -115,13 +121,18 @@
 
 ---
 
-## 7. JobRecord 新字段（Job API JSON store，无需 DB migration）
+## 7. 数据模型（v2 校正：钱-账本需 gateway DB 表 + migration）
 
-- `smart_clone_credit_reserved: bool`（建任务时定，pipeline + settlement 读）。
-- `smart_clone_reserve_reason_code: str`（release/capture 对账用）。
-- pipeline 产物 manifest 加 `smart_clone_outcome: {cloned: bool, voice_id, reason_code}`（settlement 读）。
+**钱-账本（gateway DB，需 alembic migration——v2 推翻了 v1"无需 migration"）：**
+- `smart_clone_reservations` 表（或复用既有 reservation 表加 purpose）：`task_id`(唯一约束 + purpose) / `user_id` / `purpose='smart_clone_minimax_600'` / `amount=600` / `status∈{reserved,captured,released}` / `created_at` / `settled_at` / ledger 幂等键。
+- `clone_billing_events` 表：pipeline 在 MiniMax 成功瞬间写 `task_id` / `reservation_id` / `provider='minimax'` / `voice_id` / `chargeable=true` / `created_at`。**这是唯一权威计费信号**。
+- 二者是 §3 不变量 1/2 的落地；terminal finalizer 读它们做幂等 capture/release。
 
-> Job API snapshot 已支持任意字段（`from_payload`）；mirror 侧不读（settlement 在 gateway，读 Job API + 产物）。
+**JobRecord 字段（Job API JSON store，无需 migration）——仅状态传递，不当账本：**
+- `smart_clone_credit_reserved: bool` / `smart_clone_reservation_id: str`（pipeline 读，决定是否克隆）。
+- `preview_mode: bool`（预览 lane 标记，驱动 3 分钟+水印+不扣分钟点）。
+
+> **manifest 仅辅助产物校验，不当账本**（CodeX P0-1）：钱只认上面两张 DB 表。settlement/finalizer 在 gateway，读 reservation + billing_event；pipeline 不碰钱（只写 billing_event 这条 durable 信号）。
 
 ---
 
