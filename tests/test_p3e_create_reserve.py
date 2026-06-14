@@ -146,11 +146,34 @@ def test_client_supplied_job_id_and_smart_state_stripped():
 
 def test_terminal_replay_idempotency_check():
     """🔥 CodeX 终审 P1#3：reserve 前查已有 PG job（同 deterministic id=重放）→
-    存在则不再 reserve（防终态后重放再扣 600），仍 forward deterministic id 去重。"""
+    存在则不再 reserve（防终态后重放再扣 600）。CodeX 复审：duplicate **不**回
+    supply _pre_job_id（否则 submit_job save_job 覆盖 + runner 重启已有 job=重跑
+    付费 workflow）→ Job API mint 新 id 新预设 job，不覆盖原 job。"""
     body = _create_src()
     flat = " ".join(body.split())
     assert "select(Job).where(Job.job_id == _pre_job_id)" in flat
     assert '"duplicate_create"' in flat
+    # duplicate 分支不得 request_data["job_id"] = _pre_job_id（防覆盖重启）
+    dup_idx = flat.index('"duplicate_create"')
+    else_idx = flat.index("else: await ensure_credit_buckets_for_user")
+    dup_branch = flat[dup_idx:else_idx]
+    assert 'request_data["job_id"] = _pre_job_id' not in dup_branch, (
+        "duplicate 分支不得回 supply _pre_job_id（否则 Job API 覆盖+重启原 job）"
+    )
+
+
+def test_forward_exception_releases_reservation():
+    """🔥 CodeX 复审 P2：proxy_request 抛异常 → 及时释放 reservation 后 re-raise
+    （否则 600 锁到 TTL）。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    # forward 包 try/except，except 内 release + raise
+    assert "upstream_response = await proxy_request(" in flat
+    i_forward = flat.index("upstream_response = await proxy_request(")
+    after = flat[i_forward:i_forward + 600]
+    assert "except Exception:" in after
+    assert "_release_smart_clone_reservation_on_create_failure(" in after
+    assert "raise" in after
 
 
 def test_release_helper_defined():

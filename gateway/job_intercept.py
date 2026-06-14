@@ -2132,8 +2132,15 @@ async def intercept_create_job(
                     await db.execute(select(Job).where(Job.job_id == _pre_job_id))
                 ).scalar_one_or_none()
                 if _smart_existing_job is not None:
+                    # CodeX 复审 P1#3：重放（同 user+key → 同 _pre_job_id，已有 PG
+                    # job）→ skip reserve（防终态后重放再扣 600）。**不**回 supply
+                    # _pre_job_id —— 否则 Job API submit_job 会 ``save_job`` 覆盖 +
+                    # ``runner.start`` **重启已有 job**（重跑付费 workflow / 污染
+                    # 产物状态）。留空 → Job API mint 新 id → 新预设 job（无
+                    # reservation → pipeline gate 关 → preset 无克隆）。重复 job 是
+                    # 既有"双提交无 create-level idempotency dedup"基线行为，本修
+                    # 只确保**不覆盖重启原 job**、**不再扣 600**。
                     _smart_clone_skipped_reason = "duplicate_create"
-                    request_data["job_id"] = _pre_job_id
                 else:
                     await ensure_credit_buckets_for_user(db, user=user)
                     _smart_lib_cap = int(
@@ -2175,6 +2182,9 @@ async def intercept_create_job(
             )
 
     # Forward to upstream with modified body
+    # CodeX 复审 P2：proxy_request 抛异常（httpx timeout / client 故障）会绕过
+    # 下方非 2xx/no-job_id/big-except 的 release → 已预留的 smart clone 600 锁到
+    # TTL。包 try/except：异常时及时释放后再 re-raise（保持既有错误传播）。
     try:
         upstream_response = await proxy_request(
             request=request,
@@ -2184,6 +2194,11 @@ async def intercept_create_job(
         )
     except Exception:
         await _release_smart_clone_create_reservation("proxy_exception")
+        if _smart_clone_reservation_id:
+            await _release_smart_clone_reservation_on_create_failure(
+                db, _smart_clone_reservation_id
+            )
+            _smart_clone_reservation_id = None
         raise
 
     # --- 6. Record in PostgreSQL ---
