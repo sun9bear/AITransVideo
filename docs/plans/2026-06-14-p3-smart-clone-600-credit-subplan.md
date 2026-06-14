@@ -25,6 +25,26 @@
 
 ---
 
+## v3 修订（2026-06-14，CodeX 复审 6 点全闭环 — 本节为权威，与下文冲突处以本节为准）
+
+CodeX 复审判定 v2「Not ready-to-implement」，6 点 P0/P1 全部闭环（**本节覆盖 §2/§9/§12 任何反向表述**）：
+
+1. **范围统一 = 只建 smart preview lane（P0）。** 本期**就是建 smart 3 分钟预览 lane** + `smart_preview_clone_enabled` **正式作 gate**。**作废** §2/§9/§12 里"不建预览 lane / 本方案不用该旋钮"的旧表述（那是 v1 误判）。
+
+2. **所有 smart MiniMax 克隆必须 reservation-gated（P0，封死既有漏收）。** 改 `process.py:4472` 选 provider 的条件：**没有有效 `smart_clone_reservation_id`（且状态=reserved）→ 一律不接真 provider，只能 preset / reuse**。即把"无 reservation 调付费 provider"这条既有漏收路径**硬封死**（顺带堵住现在 full smart 漏收 600）。守卫测试 AST 钉死。
+
+3. **durable billing event 写入路径明确（P0）。** **扩展既有 internal endpoint** `/api/internal/user-voices/register-smart`（pipeline 已在用，[`process.py:1375`](../../src/pipeline/process.py) / [`user_voice_api.py:1052`](../../gateway/user_voice_api.py)）为"register + bill"：**同一 DB 事务内** ① 校验 reservation 存在且 status=reserved 且属本 task ② 写 `clone_billing_event`(幂等键=reservation_id) ③ 入 user_voices。任一失败整体回滚。pipeline 仍只调这一个 endpoint（不碰钱逻辑，钱在 gateway 事务里）。
+
+4. **独立 terminal finalizer，不挂 capture_full（P0/P1）。** 新增 `settle_smart_clone_reservation(task_id)`：由 [`job_terminal_mirror`](../../gateway/job_terminal_mirror.py) 对**所有终态**调用（含被匿名标记跳过分钟结算的预览路径）；行锁 reservation，有 chargeable event → capture，无 → release；幂等（status 已非 reserved 则 no-op）。**不复用** `settle_job_credit_ledger`（那只看分钟 job_reserve）。
+
+5. **preview→正式 server-side 契约（P0）。** 转正式时前端只传 `preview_job_id`，**不传 voice_id**。gateway 校验：该 preview 属同一登录用户 + 有 captured clone_billing_event + voice 已入库；据此 server 端取回 voice_id + 原视频引用复用。**绝不信任前端传任意 voice_id**（防越权复用他人/任意音色）。
+
+6. **数据模型补并发/TTL/幂等（P1）。** `smart_clone_reservations`：唯一约束 `(task_id, purpose)` + `expires_at`/`expired`（TTL，防非终态卡死永久占点/占容量，镜像 [`express_reservation_service`](../../gateway/express_reservation_service.py)）；`clone_billing_event` 幂等键=reservation_id（防重复写）。**库容门并发**：reserve 时**行锁 user row + inline expire 过期 reservation + 把 active smart_clone_reservations 计入容量**（仅 count active voices 不够，两并发会双过）。
+
+7. **预览 lane 反滥用 cap（P1）。** "余额不足/库满/未 consent 仍给 3 分钟预设预览不扣分钟点" = 免费付费资源入口，须加 per-user/per-source/global/inflight cap fail-closed；`smart_preview_clone_daily_global_cap`/`inflight_cap` **正式生效**（不再占位；admin UI 去掉"预留"灰显、接入消费侧）。
+
+---
+
 > ⚠️ **本子方案动真钱（MiniMax 克隆 600 点预扣）。** 钱算错（双扣 / 扣了不退 / 退了不扣）是严重 bug。这是**用户显式 consent 的知情付费路径**（CLAUDE.md「✅ 用户显式触发」例外，不违反硬约束），但必须**计费正确**。批准前不写动钱代码。
 
 ---
