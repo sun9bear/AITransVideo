@@ -3298,6 +3298,7 @@ class ProcessPipeline:
                         source_audio_path=source_audio_path,
                         video_title=download_result.video_title,
                         video_url=normalized_url,
+                        cached_segments=translation_result.segments,
                     )
                     self._apply_review_speaker_styles_to_segments(
                         translation_result.segments,
@@ -8300,22 +8301,34 @@ class ProcessPipeline:
 
         for segment in segments:
             speaker_info = speaker_styles.get(segment.speaker_id, {})
-            voice_description = str(speaker_info.get("voice_description", "") or "")
-            segment.voice_description = voice_description
-            segment.gender = str(speaker_info.get("gender", "") or "")
-            segment.age_group = str(speaker_info.get("age_group", "") or "")
+            if not isinstance(speaker_info, dict) or not speaker_info:
+                continue
+            voice_description = str(speaker_info.get("voice_description", "") or "").strip()
+            if voice_description:
+                segment.voice_description = voice_description
+            effective_voice_description = voice_description or str(segment.voice_description or "")
+            gender = str(speaker_info.get("gender", "") or "").strip()
+            if gender:
+                segment.gender = gender
+            age_group = str(speaker_info.get("age_group", "") or "").strip()
+            if age_group:
+                segment.age_group = age_group
             # Propagate reviewer name to display_name for all speakers (including c+).
             # Overwrite default placeholders ("Speaker B", "Speaker C", etc.) but
             # do NOT overwrite a user-confirmed custom name.
-            speaker_name = str(speaker_info.get("name", "") or "")
+            speaker_name = str(speaker_info.get("name", "") or "").strip()
             if speaker_name and self._is_placeholder_display_name(segment.display_name, segment.speaker_id):
                 segment.display_name = speaker_name
-            segment.persona_style = str(
-                speaker_info.get("persona_style", "") or infer_persona_style(voice_description)
-            )
-            segment.energy_level = str(
-                speaker_info.get("energy_level", "") or infer_energy_level(voice_description)
-            )
+            persona_style = str(
+                speaker_info.get("persona_style", "") or infer_persona_style(effective_voice_description)
+            ).strip()
+            if persona_style:
+                segment.persona_style = persona_style
+            energy_level = str(
+                speaker_info.get("energy_level", "") or infer_energy_level(effective_voice_description)
+            ).strip()
+            if energy_level:
+                segment.energy_level = energy_level
 
     def _log_review_speaker_styles(
         self,
@@ -8367,23 +8380,88 @@ class ProcessPipeline:
         source_audio_path: Path,
         video_title: str,
         video_url: str,
+        cached_segments: list[DubbingSegment] | None = None,
     ) -> dict[str, dict[str, object]]:
-        # Try loading from cached s2_review_result.json first (avoids expensive LLM re-call).
-        # Voice fields (gender/age_group/persona/energy) are filled by Pass 3 later,
-        # so it's fine if they're empty here — no need to re-run S2 to get them.
-        s2_cache = Path(transcript_result.structured_transcript_path).parent / "s2_review_result.json"
+        # Restore persisted review facts without re-running S2.
+        # On translation cache hits Pass 3 may not run again, so merge Pass 3
+        # artifacts and existing segment metadata before falling back to names.
+        del source_audio_path, video_title, video_url
+
+        def _merge_non_empty(
+            target: dict[str, dict[str, object]],
+            speaker_id: str,
+            values: dict[str, object],
+            *,
+            overwrite: bool = True,
+        ) -> None:
+            if not speaker_id:
+                return
+            entry = target.setdefault(speaker_id, {})
+            for key, value in values.items():
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    value = value.strip()
+                if value == "":
+                    continue
+                if not overwrite and entry.get(key):
+                    continue
+                entry[key] = value
+
+        transcript_dir = Path(transcript_result.structured_transcript_path).parent
+        styles: dict[str, dict[str, object]] = {}
+
+        s2_cache = transcript_dir / "s2_review_result.json"
         if s2_cache.exists():
             try:
                 cached = json.loads(s2_cache.read_text(encoding="utf-8"))
                 speakers = cached.get("speakers", {})
-                if speakers:
-                    print(f"[S2] Restored speaker styles from cache ({len(speakers)} speakers).", flush=True)
-                    return speakers
+                if isinstance(speakers, dict):
+                    for speaker_id, speaker_info in speakers.items():
+                        if isinstance(speaker_info, dict):
+                            _merge_non_empty(styles, str(speaker_id), speaker_info)
             except Exception as exc:
                 print(f"[S2] Failed to load cached s2_review_result.json: {exc}", flush=True)
 
-        # Fallback: build minimal styles from transcript speaker IDs
-        print("[S2] No cached S2 result; using minimal speaker styles (Pass 3 will enrich later).", flush=True)
+        pass3_cache = transcript_dir / "s2_pass3_result.json"
+        if pass3_cache.exists():
+            try:
+                cached = json.loads(pass3_cache.read_text(encoding="utf-8"))
+                profiles = cached.get("speaker_profiles", {})
+                if isinstance(profiles, dict):
+                    for speaker_id, profile in profiles.items():
+                        if isinstance(profile, dict):
+                            _merge_non_empty(styles, str(speaker_id), profile)
+            except Exception as exc:
+                print(f"[S2] Failed to load cached s2_pass3_result.json: {exc}", flush=True)
+
+        for segment in cached_segments or []:
+            segment_values = {
+                "name": getattr(segment, "display_name", ""),
+                "voice_description": getattr(segment, "voice_description", ""),
+                "gender": getattr(segment, "gender", ""),
+                "age_group": getattr(segment, "age_group", ""),
+                "persona_style": getattr(segment, "persona_style", ""),
+                "energy_level": getattr(segment, "energy_level", ""),
+            }
+            if self._is_placeholder_display_name(
+                str(segment_values["name"] or ""),
+                getattr(segment, "speaker_id", ""),
+            ):
+                segment_values.pop("name", None)
+            _merge_non_empty(
+                styles,
+                getattr(segment, "speaker_id", ""),
+                segment_values,
+                overwrite=False,
+            )
+
+        if styles:
+            print(f"[S2] Restored speaker styles from persisted cache ({len(styles)} speakers).", flush=True)
+            return styles
+
+        # Fallback: build minimal styles from transcript speaker IDs.
+        print("[S2] No cached speaker style result; using minimal speaker names.", flush=True)
         speaker_ids = list({line.speaker_id for line in transcript_result.lines if line.speaker_id})
         return {
             sid: {"name": sid.replace("speaker_", "Speaker ").replace("_", " ").title()}

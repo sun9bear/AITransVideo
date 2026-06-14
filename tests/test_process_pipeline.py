@@ -2773,6 +2773,93 @@ def test_process_pipeline_recovers_missing_voice_metadata_from_cached_translatio
     }
 
 
+def test_recover_review_speaker_styles_uses_pass3_and_cached_segments_without_s2(
+    tmp_path: Path,
+) -> None:
+    transcript_dir = tmp_path / "transcript"
+    transcript_dir.mkdir(parents=True)
+    transcript_path = transcript_dir / "transcript.json"
+    transcript = TranscriptResult(
+        lines=[
+            TranscriptLine(1, 0, 1_000, "speaker_a", "A", "Hello."),
+            TranscriptLine(2, 1_000, 2_000, "speaker_b", "B", "Reply."),
+        ],
+        total_duration_ms=2_000,
+        language="en",
+        raw_response_path="",
+        structured_transcript_path=str(transcript_path),
+    )
+    (transcript_dir / "s2_pass3_result.json").write_text(
+        json.dumps(
+            {
+                "speaker_profiles": {
+                    "speaker_a": {
+                        "voice_description": "steady host voice",
+                        "gender": "male",
+                        "age_group": "middle",
+                        "persona_style": "professional",
+                        "energy_level": "medium",
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cached_segment = DubbingSegment(
+        segment_id=2,
+        speaker_id="speaker_b",
+        display_name="Guest",
+        voice_id="auto",
+        start_ms=1_000,
+        end_ms=2_000,
+        target_duration_ms=1_000,
+        source_text="Reply.",
+        cn_text="Reply.",
+        voice_description="warm guest voice",
+        gender="female",
+        age_group="young",
+        persona_style="warm",
+        energy_level="high",
+    )
+
+    styles = ProcessPipeline()._recover_review_speaker_styles(
+        transcript_result=transcript,
+        source_audio_path=tmp_path / "audio.wav",
+        video_title="title",
+        video_url="https://example.test/video",
+        cached_segments=[cached_segment],
+    )
+
+    assert styles["speaker_a"]["voice_description"] == "steady host voice"
+    assert styles["speaker_a"]["gender"] == "male"
+    assert styles["speaker_a"]["persona_style"] == "professional"
+    assert styles["speaker_b"]["name"] == "Guest"
+    assert styles["speaker_b"]["voice_description"] == "warm guest voice"
+    assert styles["speaker_b"]["energy_level"] == "high"
+
+
+def test_apply_review_speaker_styles_does_not_clear_cached_metadata_with_name_only() -> None:
+    segment = _make_single_speaker_segments()[0]
+    segment.voice_description = "steady host voice"
+    segment.gender = "male"
+    segment.age_group = "middle"
+    segment.persona_style = "professional"
+    segment.energy_level = "medium"
+
+    ProcessPipeline()._apply_review_speaker_styles_to_segments(
+        [segment],
+        {"speaker_a": {"name": "Conan O'Brien"}},
+    )
+
+    assert segment.display_name == "Conan O'Brien"
+    assert segment.voice_description == "steady host voice"
+    assert segment.gender == "male"
+    assert segment.age_group == "middle"
+    assert segment.persona_style == "professional"
+    assert segment.energy_level == "medium"
+
+
 def test_process_pipeline_wait_for_review_writes_state_files_to_final_project_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
