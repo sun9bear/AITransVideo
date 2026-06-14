@@ -193,11 +193,19 @@ CodeX 复审判定 v2「Not ready-to-implement」，6 点 P0/P1 全部闭环（*
 
 ## 11. 分步实现（批准后）
 
-- **P3a** 后端 gateway create reserve + JobRecord 字段 + 库容门 + insufficient→preset（TDD）→ CodeX。
-- **P3b** pipeline 限1 + 读 reserved 决定克隆/preset + 产物 manifest（TDD）→ CodeX。
-- **P3c** settlement capture/release 对账（TDD，钱-正确性重点）→ CodeX。
-- **P3d** 前端预扣弹窗 + 余额 + consent 驱动 + 退款提示（tsc + 守卫）→ CodeX。
-- **P3e** 全量 set-diff + 最终 CodeX。
+- **P3a ✅ 完成 + CodeX 审过**（commit 0db7e781 数据模型 + 3019c600 reserve 服务，24 测试过）。CodeX Non-Findings 确认 reserve 原子性/幂等/不双扣成立。
+- **P3b** register+bill endpoint（pipeline 在 MiniMax 成功瞬间写 billing event）+ pipeline reservation-gate（无 reservation 禁真 provider）+ 限主说话人 1。
+- **P3c** 独立 finalizer（capture/release 对账）+ TTL sweeper（钱-正确性重点）。
+- **P3d** 前端预扣弹窗 + 余额 + consent 驱动 + 退款提示 + smart_preview_clone 旋钮去占位（tsc + 守卫）。
+- **P3e** smart 预览 lane 接线（intake/job/preview_mode/3min+水印/reservation-gate）+ preview→正式 server-side 复用契约 + 反滥用 cap + 全量 set-diff + 最终 CodeX。
+
+### ⚠️ CodeX P3a 审核 → P3b/P3c 钱-正确性硬要求（必须落地）
+
+1. **finalizer 必须把 `expired + 未结算` 当待 release**（不是已结算终态）：inline-expire 只标 status=expired、**不 release 信用**；若 finalizer 按"status 非 reserved 即 no-op"实现，expired 的 600 会永久挂在 `credits_buckets.reserved`。finalizer/sweeper 须扫 `status IN (expired, <terminal-without-event>)` 且未 settle 的，release 信用 + 置 settled_at。
+2. **register+bill 必须单一事务**：既有 `add_user_voice()` 内部 commit → P3b register-smart endpoint 不能直接复用它写 billing event。须拆 **no-commit helper**（或 endpoint 自控完整 transaction）：同一事务内 ① 行锁+校验 reservation status=reserved 且属本 task ② 写 clone_billing_event ③ 入 user_voices ④ 一起 commit。任一失败整体回滚。
+3. **finalizer 不能把 shadow_capture/shadow_release 的 `[]` 当成功**：二者吞异常返回 `[]`。finalizer 须用 **strict wrapper**（或同事务校验确实写出 settlement ledger）后才置 `captured/released/settled_at`，否则永久错账。capture/release 的 `reserve_reason_code` 必须用 `smart_clone_reserve_{reservation_id}`（与 reserve 一致）。
+4. **task-level 幂等（P2，产品决策）**：当前 schema 允许同 task 在历史 terminal/expired 后再建 reservation → 理论可多条 chargeable event = 同 task 多次扣 600。**产品定**：同一 preview task 是否只允许一次 600？建议 finalizer/register 加 task-level 幂等（同 task 已有 chargeable event 则不再 bill），或 create 端不允许 retry 已 captured 的 task。
+5. **库容门全局锁域（P2）**：smart reserve 用 users-row-lock 串行 smart-vs-smart；但 CosyVoice 显式 clone 用 provider advisory lock、`add_user_voice()` 直接 commit，不共享这把锁 → "全库容不穿透"未全局成立。P3b register/bill 至少要参与同一锁域（reserve 与入库锁同一 user row）。
 
 ---
 
