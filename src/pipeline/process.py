@@ -4142,10 +4142,15 @@ class ProcessPipeline:
                     # reservation 的「真有效（status=reserved 且属本 task）」由
                     # gateway register-billed endpoint 在写 billing event 时**原子
                     # 再校验**；pipeline 这里只看 snapshot 有没有 id（不碰钱）。
-                    _smart_requires_reservation = bool(
+                    # CodeX P3e-1a P2：read_admin_setting **不做类型转换**，
+                    # bool("false")=True 会误开收紧。钱核心 flag 必须 ``is True``
+                    # 严格判定（StrictBool 只护 gateway 存盘路径，不护 pipeline
+                    # 直读 JSON）。见 memory feedback_tls_internal_trap 同类 strict-bool。
+                    _smart_requires_reservation = (
                         read_admin_setting(
                             "smart_clone_requires_reservation", default=False
                         )
+                        is True
                     )
                     _smart_clone_reservation_id = (
                         str(_snap("smart_clone_reservation_id") or "").strip()
@@ -4156,6 +4161,16 @@ class ProcessPipeline:
                             _smart_requires_reservation,
                             _smart_clone_reservation_id,
                         )
+                    )
+                    # CodeX P3e-1a P1：把 reservation 闸**折进** effective clone-enabled，
+                    # 使「闸关」与「admin 关克隆」语义**完全一致**=evaluate_voice_review
+                    # PRESET fall-through。否则只塞进 _smart_needs_new_clone 会让闸关时
+                    # 仍 admin_clone_enabled=True + quota=0 → 触发 PAUSED 水线/样本抽取
+                    # handoff（不是退预设）。**所有** clone 决策点（样本抽取 / needs_new
+                    # _clone / 外层 if / evaluate_voice_review 入参）一律改用本 effective 值。
+                    _smart_effective_clone_enabled = bool(
+                        _smart_admin_clone_enabled
+                        and _smart_reservation_gate_open_result
                     )
                     # Phase 4 (plan 2026-05-17 §Smart 弱匹配暂停): admin
                     # toggle. Default False so existing users see no
@@ -4279,7 +4294,7 @@ class ProcessPipeline:
                     ]
                     _smart_needs_new_clone = bool(
                         _smart_consent_allows_clone
-                        and _smart_admin_clone_enabled
+                        and _smart_effective_clone_enabled
                         and _smart_speaker_ids_requiring_clone
                     )
                     _smart_user_id_for_mirror = str(_snap("user_id") or "")
@@ -4577,19 +4592,18 @@ class ProcessPipeline:
                     # is empty. The gate below mirrors all conditions.
                     _smart_quota_remaining = 0
                     _smart_clone_provider = _build_b2_not_wired_clone_provider()
+                    # P3e §2: reservation 闸已折进 _smart_effective_clone_enabled
+                    # （= admin_clone_enabled AND gate）。闸关 → effective=False →
+                    # needs_new_clone=False → not-wired stub → PRESET fall-through，
+                    # 与 admin 关克隆字节级一致（绝不接真 provider）。
                     _smart_needs_new_clone = bool(
                         _smart_consent_allows_clone
-                        and _smart_admin_clone_enabled
+                        and _smart_effective_clone_enabled
                         and _smart_speaker_ids_requiring_clone
-                        # P3e §2: reservation 收紧闸（默认 open → 不改既有行为）。
-                        # 闸开=未启用收紧 或 已带 reservation_id。闸关 → 走下方
-                        # not-wired stub → evaluate_voice_review PRESET fall-through，
-                        # 镜像 admin_clone_enabled=False 路径（绝不接真 provider）。
-                        and _smart_reservation_gate_open_result
                     )
                     if (
                         _smart_consent_allows_clone
-                        and _smart_admin_clone_enabled
+                        and _smart_effective_clone_enabled
                         and _smart_main_speakers
                     ):
                         if (
@@ -4691,7 +4705,7 @@ class ProcessPipeline:
                         smart_decision_id_factory=lambda: _smart_uuid.uuid4().hex,
                         existing_voice_matches_by_speaker_id=_smart_existing_voice_matches,
                         possible_voice_matches_by_speaker_id=_smart_possible_voice_matches,
-                        admin_clone_enabled=_smart_admin_clone_enabled,
+                        admin_clone_enabled=_smart_effective_clone_enabled,
                         admin_pause_on_possible_match=_smart_admin_pause_on_possible,
                         admin_auto_reuse_on_possible_match=_smart_admin_auto_reuse_on_possible,
                         max_new_clones=_smart_max_new_clones_for_review,

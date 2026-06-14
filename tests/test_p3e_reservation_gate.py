@@ -58,29 +58,57 @@ def _process_src() -> str:
     return _PROCESS_PY.read_text(encoding="utf-8")
 
 
-def test_gate_wired_into_needs_new_clone():
-    """闸结果必须接进 `_smart_needs_new_clone` AND 链（闸关→不接真 provider）。"""
+def test_gate_folded_into_effective_clone_enabled():
+    """🔥 CodeX P3e-1a P1：闸必须**折进** _smart_effective_clone_enabled
+    （= admin_clone_enabled AND gate），使「闸关」=「admin 关克隆」=退预设。
+    否则只塞 needs_new_clone 会让闸关时仍 admin_clone_enabled=True → PAUSED
+    水线 / 样本抽取 handoff（不是 PRESET）。"""
     src = _process_src()
-    assert "_smart_reservation_gate_open_result" in src
-    # 出现在 _smart_needs_new_clone 赋值块里
     tree = ast.parse(src)
     found = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
-            if "_smart_needs_new_clone" in targets:
+            if "_smart_effective_clone_enabled" in targets:
                 seg = ast.get_source_segment(src, node) or ""
-                if "_smart_reservation_gate_open_result" in seg:
+                if "_smart_admin_clone_enabled" in seg and "_smart_reservation_gate_open_result" in seg:
                     found = True
                     break
-    assert found, "_smart_reservation_gate_open_result 必须出现在 _smart_needs_new_clone 赋值"
+    assert found, (
+        "_smart_effective_clone_enabled 必须 = _smart_admin_clone_enabled AND "
+        "_smart_reservation_gate_open_result"
+    )
 
 
-def test_flag_read_with_default_false():
-    """rollout flag 读取必须 default=False（默认 inert，不改既有行为）。"""
+def test_effective_used_in_all_clone_decision_points():
+    """effective 必须用于**所有** clone 决策点：样本抽取 / needs_new_clone /
+    外层 if / evaluate_voice_review 入参（任一漏用 → 闸关仍可能触达真 provider
+    或 PAUSED 而非 PRESET）。"""
+    src = _process_src()
+    # needs_new_clone 用 effective
+    assert "_smart_needs_new_clone = bool(" in src
+    # evaluate_voice_review 入参用 effective（不是 raw admin）
+    assert "admin_clone_enabled=_smart_effective_clone_enabled" in src
+    assert "admin_clone_enabled=_smart_admin_clone_enabled" not in src, (
+        "evaluate_voice_review 必须传 effective（含 reservation 闸），不是 raw admin"
+    )
+    # 至少 3 处 clone 决策用 effective（样本抽取 + needs_new_clone + 外层 if +
+    # evaluate 入参），raw admin 只剩定义 + effective 定义里各 1 次
+    assert src.count("_smart_effective_clone_enabled") >= 4
+
+
+def test_flag_read_strict_is_true():
+    """🔥 CodeX P3e-1a P2：read_admin_setting 不做类型转换，bool("false")=True。
+    钱核心 flag 必须 `is True` 严格判定（不能用 bool(...)）。"""
     src = _process_src()
     assert '"smart_clone_requires_reservation", default=False' in src, (
         "rollout flag 必须以 default=False 读取（默认不启用收紧）"
+    )
+    # 必须 is True，不能 bool(read_admin_setting("smart_clone_requires_reservation"...))
+    flat = " ".join(src.split())
+    assert "is True" in flat
+    assert 'bool( read_admin_setting( "smart_clone_requires_reservation"' not in flat, (
+        "钱核心 flag 不能用 bool() 读（StrictBool 不护 pipeline 直读 JSON）"
     )
 
 
@@ -91,7 +119,7 @@ def test_reservation_id_read_from_snapshot():
 
 
 def test_three_legacy_conditions_preserved():
-    """既有三条件 AND 必须保留（P3e 只新增第 4 条件，不削弱既有）。"""
+    """既有三条件 AND 必须保留（P3e 只新增 reservation 闸，不削弱既有）。"""
     src = _process_src()
     for cond in (
         "_smart_consent_allows_clone",

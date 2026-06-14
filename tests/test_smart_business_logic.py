@@ -1839,7 +1839,7 @@ class TestB3DCloneSampleExtractorContract:
         preceding = block[:quota_idx]
         gate_idx = preceding.rfind(
             "_smart_consent_allows_clone\n                        "
-            "and _smart_admin_clone_enabled\n                        "
+            "and _smart_effective_clone_enabled\n                        "
             "and _smart_main_speakers"
         )
         assert gate_idx >= 0, (
@@ -2151,7 +2151,7 @@ class TestB3DCloneSampleExtractorContract:
         # core conjunction substring spanning the three conditions.
         triple_gate = (
             "_smart_consent_allows_clone\n                        "
-            "and _smart_admin_clone_enabled\n                        "
+            "and _smart_effective_clone_enabled\n                        "
             "and _smart_main_speakers"
         )
         assert triple_gate in block, (
@@ -2396,10 +2396,10 @@ class TestB3DCloneSampleExtractorContract:
         lines = source[idx:].splitlines()
         # Phase 4 (2026-05-17) added per-speaker possible-match pause
         # audit loop + admin policy read, pushing the CLONED branch
-        # past the previous 900-line window. Bumped to 1300 to keep
+        # past the previous 900-line window. Bumped to 1500 to keep
         # covering the billed mirror arguments without inflating it
         # indefinitely.
-        block = "\n".join(lines[:1300])
+        block = "\n".join(lines[:1500])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (
