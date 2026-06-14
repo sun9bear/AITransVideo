@@ -4199,8 +4199,21 @@ class ProcessPipeline:
                         )
                         is True
                     )
+                    # P3e §2：reservation marker 落在 ``smart_state`` 字典里
+                    # （create/Option C 经 submit_job 预供 → JobRecord.smart_state；
+                    # 与 finalizer marker-gate `_smart_clone_settle_needed` 读的
+                    # 同一位置一致）。保留顶层 `_snap` 作防御 fallback。create 未
+                    # 接线前 smart_state 无此键 → None（inert，gate 恒按"无 reservation"）。
+                    _smart_state_snap = _snap("smart_state")
+                    _smart_state_dict = (
+                        _smart_state_snap if isinstance(_smart_state_snap, dict) else {}
+                    )
                     _smart_clone_reservation_id = (
-                        str(_snap("smart_clone_reservation_id") or "").strip()
+                        str(
+                            _smart_state_dict.get("smart_clone_reservation_id")
+                            or _snap("smart_clone_reservation_id")
+                            or ""
+                        ).strip()
                         or None
                     )
                     _smart_reservation_gate_open_result = (

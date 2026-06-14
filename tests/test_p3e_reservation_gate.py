@@ -118,6 +118,14 @@ def test_reservation_id_read_from_snapshot():
     assert '_snap("smart_clone_reservation_id")' in src
 
 
+def test_reservation_id_read_from_smart_state_dict():
+    """P3e §2：reservation marker 主读位置=smart_state 字典（与 finalizer
+    marker-gate 一致；create/Option C 经 submit_job 写进 JobRecord.smart_state）。"""
+    src = _process_src()
+    assert '_snap("smart_state")' in src
+    assert '_smart_state_dict.get("smart_clone_reservation_id")' in src
+
+
 def test_three_legacy_conditions_preserved():
     """既有三条件 AND 必须保留（P3e 只新增 reservation 闸，不削弱既有）。"""
     src = _process_src()
