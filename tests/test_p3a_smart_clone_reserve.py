@@ -457,3 +457,66 @@ def test_settle_two_sequential_reservations_same_task_no_held_credit():
             # 两个 600 都真扣：2000 - 600 - 600 = 800，无悬挂 reserved
             assert rem == 800 and resv == 0
     _run(go())
+
+
+# ---------------------------------------------------------------------------
+# P3c by-task finalizer 入口（job_terminal_mirror 单一入口，plan v3 §4）
+# ---------------------------------------------------------------------------
+
+
+def test_settle_for_task_releases_unbilled():
+    """🔥 by-task：reserved 无 chargeable event（克隆没触发）→ release 600。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            await _reserve(db, "job_t1")  # available 800→200
+            stats = await svc.settle_smart_clone_reservations_for_task(db, task_id="job_t1")
+            assert stats["released"] == 1 and stats["captured"] == 0
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 800 and resv == 0  # 全退、无悬挂
+    _run(go())
+
+
+def test_settle_for_task_captures_billed():
+    """🔥 by-task：有 chargeable event → capture 600。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_t2")
+            await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_t2", reservation_id=rid,
+                voice_id="mm_t2", label="x", source_job_id="job_t2",
+            )
+            stats = await svc.settle_smart_clone_reservations_for_task(db, task_id="job_t2")
+            assert stats["captured"] == 1 and stats["released"] == 0
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 200 and resv == 0  # 真扣 600
+    _run(go())
+
+
+def test_settle_for_task_no_reservation_is_noop():
+    """by-task：该 task 无 reservation → no-op（空计数），不报错、不动钱。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            stats = await svc.settle_smart_clone_reservations_for_task(db, task_id="job_none")
+            assert stats == {"captured": 0, "released": 0, "settlement_failed": 0, "other": 0}
+            assert await _bucket_available(db) == 800
+    _run(go())
+
+
+def test_settle_for_task_idempotent_already_settled():
+    """🔥 by-task 幂等：mirror level-triggered 反复对同一终态 job 调用——
+    第二次该 task 已无 active reservation（已 released）→ no-op，不双退/双扣。"""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            await _reserve(db, "job_t3")
+            s1 = await svc.settle_smart_clone_reservations_for_task(db, task_id="job_t3")
+            s2 = await svc.settle_smart_clone_reservations_for_task(db, task_id="job_t3")
+            assert s1["released"] == 1
+            # 第二次已无 active(reserved/expired) reservation → 不再选中 → 空
+            assert s2 == {"captured": 0, "released": 0, "settlement_failed": 0, "other": 0}
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 800 and resv == 0  # 仍只退一次
+    _run(go())

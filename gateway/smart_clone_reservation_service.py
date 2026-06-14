@@ -462,6 +462,40 @@ async def settle_smart_clone_reservation(
     return SettleOutcome(status=final, reservation_id=str(res_pk))
 
 
+async def settle_smart_clone_reservations_for_task(
+    db: AsyncSession, *, task_id: str, service_mode: str = "smart"
+) -> dict:
+    """P3c 终态 finalizer 入口（plan v3 §4）—— 结算某 task 的所有 active
+    (reserved/expired) smart clone reservation。
+
+    逐个调 ``settle_smart_clone_reservation``（行锁 + 幂等 + strict 验证 + 自带
+    commit/rollback）：有 chargeable billing event → capture，无 → release。
+    幂等：无 reservation / 全已结算 → no-op（空计数）。
+
+    ⚠️ **必须用专用 session 调用**：``settle_smart_clone_reservation`` 内部
+    commit/rollback，与 ``job_terminal_mirror`` 那种"批量、caller 末尾统一
+    commit"的 session 语义冲突——其 already_settled/settlement_failed 分支的
+    rollback 会连带丢弃同批其他 job 的 mirror 改动。终态结算入口
+    （``job_terminal_mirror``）须另开 ``async_session()`` 传入。TTL sweeper
+    （``sweep_settle_stale_reservations``）是非终态卡死的兜底。
+    """
+    rows = (
+        await db.execute(
+            select(SmartCloneReservation.id).where(
+                SmartCloneReservation.task_id == task_id,
+                SmartCloneReservation.status.in_([RESERVED, EXPIRED]),
+            )
+        )
+    ).scalars().all()
+    stats = {"captured": 0, "released": 0, "settlement_failed": 0, "other": 0}
+    for rid in rows:
+        out = await settle_smart_clone_reservation(
+            db, reservation_id=rid, service_mode=service_mode
+        )
+        stats[out.status if out.status in stats else "other"] += 1
+    return stats
+
+
 async def sweep_settle_stale_reservations(db: AsyncSession, *, limit: int = 200) -> dict:
     """P3c TTL sweeper — 结算所有过期未结算 reservation（CodeX #1）.
 
@@ -497,5 +531,6 @@ __all__ = [
     "reserve_smart_clone_credit",
     "register_smart_clone_with_billing",
     "settle_smart_clone_reservation",
+    "settle_smart_clone_reservations_for_task",
     "sweep_settle_stale_reservations",
 ]
