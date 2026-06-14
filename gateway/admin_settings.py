@@ -510,17 +510,21 @@ class AdminSettings(BaseModel):
     # CLAUDE.md「✅ 用户显式触发」例外）。克隆成功入个人音色库（source=
     # smart_preview）；失败/激活失败退点 + 清理 voice_id。默认 OFF。
     #
-    # ⚠️ **占位旋钮，对应特性 P3 故意延后（2026-06-14）**：真正的 smart MiniMax
-    # 克隆当前被 process.py ``_build_b2_not_wired_clone_provider`` **刻意 stub**
-    # 成 fail-closed（恒抛 → 回 PRESET），需 per-speaker ffmpeg 样本 + 真实
-    # voice_library_quota snapshot + 真 ``build_smart_clone_provider()`` **三者
-    # 一起接线**才能替换（保安全不变量，防 MiniMax 付费红线）。本旋钮 + 下方两
-    # cap 是该接线落地后的 gate 占位，**当前不 gate 任何真克隆路径**。
-    # **与 ``smart_auto_clone_enabled`` 的关系**：后者控制既有 smart 全量任务
-    # auto-clone 决策（默认 True，但 provider 仍是上述 stub → 实际回 PRESET）；
-    # 本 ``smart_preview_clone_enabled`` 是**未来 smart 预览 lane** 的独立 gate
-    # （默认 False）。两者**不互相 AND**（避免误关既有 smart 行为）。延后理由见
-    # plan §5。
+    # ⚠️ **占位旋钮，对应"smart 预览 lane"特性 P3 故意延后（2026-06-14，CodeX
+    # 最终复核校正）**：本旋钮 + 下方两 cap 是**未来 smart 3 分钟预览 lane**（含
+    # 预扣 600 + 退还 + 库容门）落地后的 gate 占位，**当前不 gate 任何运行时路径**。
+    #
+    # **重要——勿误判 smart 克隆现状**：`process.py` 的 `build_smart_clone_provider()`
+    # （真 MiniMax-capable provider）在 **smart 全量任务** 路径**已接线**（process.py
+    # ~4468-4472，条件=`smart_auto_clone_enabled` 默认 True + 用户 `smart_consent.
+    # auto_voice_clone` opt-in + 有 main speaker + quota 可用 时调用；条件不满足才
+    # 回 `_build_b2_not_wired_clone_provider` stub → PRESET）。即既有 smart 全量
+    # auto-clone **能**调真 MiniMax 克隆——这是 **pre-existing、用户经 smart_consent
+    # 显式 opt-in、CLAUDE.md「✅ 用户显式触发」合规**的路径，**本任务未改动它**。
+    # **与 ``smart_auto_clone_enabled`` 的关系**：那是控制既有 smart 全量 auto-clone
+    # 的真开关（默认 True）；要停既有 smart 克隆须用它，**不是**本 `smart_preview_
+    # clone_enabled`。两者作用于**不同流**、**不互相 AND**（避免误关既有 smart 行为）。
+    # 延后理由 + "智能版扣600点克隆已由既有路径交付"说明见 plan §5。
     smart_preview_clone_enabled: StrictBool = False
     # Smart 预览克隆每日全局上限 + 并发上限（fail-closed）。默认 200 / 5。
     smart_preview_clone_daily_global_cap: int = 200

@@ -203,19 +203,25 @@ src/pipeline/process.py::run()
 
 ## 5. 智能版 600 点预扣 + 退还（P3）
 
-> **⚠️ P3 实施状态（2026-06-14）：核心能力已就位；smart 预览 auto-clone 接线刻意延后，理由如下。**
+> **⚠️ P3 实施状态（2026-06-14，CodeX 最终复核校正）：智能版 600 点 MiniMax 克隆"核心能力已存在于既有路径"；本任务新增的是 600 点定价 + 占位旋钮，smart **预览 lane** 刻意延后。**
 >
-> 实施期核实发现 smart MiniMax **auto-clone 被现有代码刻意 stub 成 fail-closed**——`src/pipeline/process.py::_build_b2_not_wired_clone_provider` 恒抛 → smart 全量任务的克隆决策实际回 **PRESET**。其 docstring 明写：真 `build_smart_clone_provider()`（MiniMax adapter）**只有在 per-speaker ffmpeg 样本 + 真实 voice_library_quota snapshot + 真 provider 三者一起接线时才能替换 stub**（保安全不变量、防 MiniMax 付费红线）。这是上游开发者**有意**的安全设计。
+> **校正前文（CodeX 最终复核）**：早前曾误述"smart MiniMax auto-clone 被全 stub 成 fail-closed"。**准确事实**：`src/pipeline/process.py` 的真 `build_smart_clone_provider()`（MiniMax-capable）在 **smart 全量任务**路径**已接线**（process.py ~4468-4472）——当 `smart_auto_clone_enabled`（默认 True）+ 用户 `smart_consent.auto_voice_clone` opt-in + 有 main speaker + quota 可用 时调用真 MiniMax 克隆；条件不满足才回 `_build_b2_not_wired_clone_provider` stub→PRESET。即**既有 smart 全量 auto-clone 能调真 MiniMax**，这是 pre-existing、用户经 smart_consent 显式 opt-in、CLAUDE.md「✅ 用户显式触发」合规的路径，**本任务未改动**。
 >
-> **已就位（本任务交付）**：
+> **已就位（"智能版扣 600 点克隆"实质已交付）**：
 > - 克隆点数 **600**（P1，pricing_schema + 全 fallback）。
-> - **用户显式触发的 600 点 MiniMax 克隆已工作**：Studio / voice-selection「克隆音色」按钮 → `voice_selection_api` reserve/capture **600 点 + shadow credits 预扣/退还**（这正是 CLAUDE.md「✅ 用户显式点击按钮触发」的合规路径，也正是用户说的"智能版扣 600 点克隆一个音色"）。
-> - `smart_preview_clone_enabled` + daily/inflight cap admin 旋钮（P1，默认 OFF，占位）。
+> - **用户显式触发的 600 点 MiniMax 克隆有两条既有路径**：① Studio / voice-selection「克隆音色」按钮 → `voice_selection_api` reserve/capture **600 点 + shadow credits 预扣/退还**；② smart 全量任务 auto-clone（smart_consent opt-in + smart_auto_clone_enabled）。两者都是 CLAUDE.md 合规的用户知情付费路径。
+> - `smart_preview_clone_enabled` + daily/inflight cap admin 旋钮（P1，默认 OFF，**占位**）。
 >
-> **刻意延后（需专项 session，不在本 clone-enablement 任务的安全预算内）**：
-> - smart **预览 lane** 本身（3 分钟登录 smart 预览）当前不存在——建它是独立 funnel 特性。
-> - smart **auto-clone** 真 provider 接线（替换 `_build_b2_not_wired_clone_provider` stub）= per-speaker 样本 + quota snapshot + MiniMax adapter 三者协同的大型安全关键改动，触及最敏感的 MiniMax 付费红线，**不得在已耗尽的上下文里仓促接线**（与上游"三者一起才接"的安全约束一致）。
-> - 因此下列 §5 子项（auto 预扣/退还/库容门/激活/复用）是该专项 session 的设计目标，**本任务不落地真 auto-clone provider**；`smart_preview_clone_enabled` 旋钮当前**不 gate 任何真克隆**（见 admin_settings.py 注释 + 与 `smart_auto_clone_enabled` 的关系说明）。
+> **刻意延后（需专项 session）**：
+> - smart **3 分钟预览 lane** 本身（登录 smart 的短预览 + 预览阶段主说话人 600 点预扣克隆 + 激活 + 预览转完整复用 voice_id）当前不存在——建它是独立 funnel 特性，不在本 clone-enablement 任务范围。
+> - `smart_preview_clone_enabled` 旋钮当前**不 gate 任何运行时路径**，**不 gate 既有 smart_auto_clone**（要停既有 smart 克隆用 `smart_auto_clone_enabled`，不是本旋钮）。两者作用于不同流、不互相 AND。
+> - 下列 §5 子项是该 smart-预览-lane 专项的设计目标（**本任务不落地**）。
+>
+> **⚠️ 运营提示（CodeX 强调，避免误判）**：本任务**未**关闭既有 smart 全量 auto-clone 的 MiniMax 克隆能力（`smart_auto_clone_enabled` 仍默认 True）。若项目主希望"在 smart 预览 lane 接好前，既有 smart 全量也不自动调 MiniMax"，需**单独**把 `smart_auto_clone_enabled` 置 False（本任务未改其默认，以免回归既有 smart 行为）。
+
+> **⚠️ 已知功能缺口（CodeX 最终复核 P2，安全上是关闭态、不触达 MiniMax）：匿名/快捷前端尚未发送 `express_consent`。** `frontend-next/src/lib/api/anonymousPreview.ts::createPreview` body 只带 `anonymous_consent`，两个调用点（`anonymous-trial-panel.tsx`）也没传 express 克隆 opt-in。**后果**：即使项目主开 `anonymous_express_cosyvoice_clone_enabled`，匿名 express 因 consent 缺失仍 **fail-closed 回 CosyVoice 预设**（安全，但克隆链路功能上未闭合）。**后端 + 安全已完整**（create 已准备接收并注入 `express_consent`，pipeline L4 consent gate 已就位）；**剩最后一公里前端 opt-in UI**（在 express 卡片加"允许克隆我的音色"勾选 + availability gating + `createPreview` body 带 `express_consent={auto_voice_clone}`，镜像 PR3 登录态 express consent 的 jobs.ts/TranslationForm.tsx 模式）。因默认 OFF + fail-closed-to-preset，可安全在专项前端 session 接线（项目主开灰度前补即可）。
+
+复用现有 credit ledger / shadow credits（gateway voice-clone 端点已有 shadow credits 机制）—— **以下为延后 smart-预览-lane 专项的设计目标**：
 
 复用现有 credit ledger / shadow credits（gateway voice-clone 端点已有 shadow credits 机制）—— **以下为延后专项的设计目标**：
 
