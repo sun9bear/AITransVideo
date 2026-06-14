@@ -45,7 +45,8 @@ def test_register_helper_branches_to_billed_when_reservation():
     assert "/api/internal/user-voices/register-smart" in body
     # 分支条件：两者都在场才走 billed
     flat = " ".join(body.split())
-    assert "if _reservation_id and _task_id:" in flat
+    assert "_is_billed = bool(_reservation_id and _task_id)" in flat
+    assert "if _is_billed:" in flat
 
 
 def test_register_billed_payload_carries_reservation_and_task():
@@ -98,3 +99,20 @@ def test_endpoint_register_billed_forwards_rich_fields():
         assert f in body, f"endpoint 缺字段 parity {f}"
     # source_published_at 复用既有 datetime 解析器
     assert "_parse_optional_datetime(body.get(\"source_published_at\"))" in body
+
+
+# ---------------------------------------------------------------------------
+# 钱-可见性（对抗性复核 V2）：billing-route 失败 loud log
+# ---------------------------------------------------------------------------
+
+
+def test_register_billed_failure_logs_money_event():
+    """对抗性复核 V2：reservation 在场但 register-billed 失败（409 / 异常）或
+    task_id 缺失静默降级 register-smart → clone 已发生但未写 billing event →
+    finalizer release（业务白克隆）。必须 loud log [smart][MONEY] 供 ops 对账
+    （fail-safe 方向：用户不被扣，只业务漏收 + 孤儿 voice）。"""
+    body = _func_src(_PROCESS_PY, "_register_smart_clone_in_user_voices")
+    assert "[smart][MONEY]" in body
+    assert "register-billed FAILED" in body
+    # task_id 缺失但 reservation 在场的不一致也要 log
+    assert "_reservation_id and not _task_id" in " ".join(body.split())

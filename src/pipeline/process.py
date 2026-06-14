@@ -1486,12 +1486,24 @@ def _register_smart_clone_in_user_voices(
     # rich source_* 字段两端点都透传（字段 parity）。
     _reservation_id = (reservation_id or "").strip()
     _task_id = (task_id or "").strip()
-    if _reservation_id and _task_id:
+    _is_billed = bool(_reservation_id and _task_id)
+    if _is_billed:
         _endpoint = "http://127.0.0.1:8880/api/internal/smart-clone/register-billed"
         payload["reservation_id"] = _reservation_id
         payload["task_id"] = _task_id
     else:
         _endpoint = "http://127.0.0.1:8880/api/internal/user-voices/register-smart"
+        # 钱-可见性（对抗性复核 V2）：reservation_id 在场但 task_id 缺失（不一致
+        # 状态）→ 静默降级到 register-smart（不写 billing event）→ finalizer release
+        # → 业务白克隆。这种本不该发生（reservation 在场必有 job_id），loud log
+        # 供 ops 排查。注意：fail-safe 方向（用户**不**被扣，只是业务漏收）。
+        if _reservation_id and not _task_id:
+            print(
+                f"[smart][MONEY] reservation present ({_reservation_id}) but task_id "
+                f"empty — routing to register-smart (NO billing event). voice={voice_id}. "
+                f"finalizer will release; business eats clone cost. Needs reconcile.",
+                flush=True,
+            )
     try:
         resp = requests.post(
             _endpoint,
@@ -1500,9 +1512,29 @@ def _register_smart_clone_in_user_voices(
             timeout=5.0,
         )
         if resp.status_code != 200:
+            # 钱-可见性（对抗性复核 V2）：register-billed 失败（如 409
+            # no_active_reservation：reservation 失效/不属本 task）→ MiniMax 已克隆
+            # 但未写 billing event → finalizer release（用户**不**被扣，fail-safe）
+            # → 业务白克隆 + 留下孤儿 MiniMax voice。loud log 供 ops 对账 +
+            # best-effort 清理（自动删 voice 待后续接 MiniMax client，本期 follow-up）。
+            if _is_billed:
+                print(
+                    f"[smart][MONEY] register-billed FAILED status={resp.status_code} "
+                    f"task={_task_id} reservation={_reservation_id} voice={voice_id} "
+                    f"— clone done but NOT billed; finalizer will release. Needs reconcile.",
+                    flush=True,
+                )
             return False
         data = resp.json()
-    except Exception:
+    except Exception as _reg_exc:
+        if _is_billed:
+            print(
+                f"[smart][MONEY] register-billed EXCEPTION task={_task_id} "
+                f"reservation={_reservation_id} voice={voice_id}: "
+                f"{type(_reg_exc).__name__} — clone done but NOT billed; finalizer "
+                f"will release. Needs reconcile.",
+                flush=True,
+            )
         return False
     return bool(data.get("ok"))
 

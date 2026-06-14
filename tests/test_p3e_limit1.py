@@ -79,6 +79,32 @@ def test_cap_routes_non_allowed_speaker_to_preset_not_clone():
     assert len([c for c in fake.calls]) == 1
 
 
+def test_cap_handles_whitespace_in_speaker_id():
+    """对抗性复核 V1：speaker_id 带前后空白时 cap 仍正确（两侧 strip 一致）。
+    '  a  '（strip→a，在白名单）→ CLONED；'  b  '（strip→b，不在）→ PRESET capped。
+    防 vs_payload 带空白时本该放行的 speaker 被误 cap / 本该 cap 的漏网克隆。"""
+    from services.smart.auto_voice_review import (
+        evaluate_voice_review, VoiceReviewChoice,
+    )
+    from tests.fakes import FakeCloneProvider
+
+    fake = FakeCloneProvider()
+    result = evaluate_voice_review(
+        main_speakers=[_speaker("  a  ", sample_seconds=20.0), _speaker("  b  ", sample_seconds=20.0)],
+        smart_consent={"auto_voice_clone": True},
+        clone_provider=fake,
+        voice_library_quota_remaining=100,
+        smart_decision_id_factory=_id_factory(),
+        admin_clone_enabled=True,
+        clone_allowed_speaker_ids={"a"},  # strip 后的 sid
+    )
+    by_sid = {d.speaker_id: d for d in result.decisions}
+    assert by_sid["  a  "].choice is VoiceReviewChoice.CLONED  # 带空白但 strip 后在白名单
+    assert by_sid["  b  "].choice is VoiceReviewChoice.PRESET
+    assert by_sid["  b  "].reason_code == "clone_capped_by_reservation_limit"
+    assert len(fake.calls) == 1  # 只 a 克隆
+
+
 def test_cap_none_allows_all_speakers_to_clone():
     """🔥 回归：clone_allowed=None（默认，flag off / 无 reservation）→ 不限制，
     两 speaker 都克隆（既有多说话人行为字节级不变）。"""

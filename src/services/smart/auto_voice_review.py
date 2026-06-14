@@ -429,7 +429,11 @@ def evaluate_voice_review(
         # placeholder 音频克隆（漏收 + 错音频）。Provider NEVER 在本路径调用。
         if (
             clone_allowed_speaker_ids is not None
-            and speaker.speaker_id not in clone_allowed_speaker_ids
+            # 对抗性复核 V1：speaker_id 两侧 strip 一致化（caller 的 clone_allowed
+            # 用 strip 后的 sid 构建；这里也 strip 比较，防 vs_payload 带空白时
+            # 本该放行的 speaker 被误 cap 或漏网。零风险——只作用本 cap 分支。
+            and str(speaker.speaker_id or "").strip()
+            not in clone_allowed_speaker_ids
         ):
             decisions.append(_preset_decision(
                 speaker,
