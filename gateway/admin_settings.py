@@ -509,6 +509,18 @@ class AdminSettings(BaseModel):
     # 登录智能版预览：用户显式 consent + 预扣 600 点（知情付费路径，符合
     # CLAUDE.md「✅ 用户显式触发」例外）。克隆成功入个人音色库（source=
     # smart_preview）；失败/激活失败退点 + 清理 voice_id。默认 OFF。
+    #
+    # ⚠️ **占位旋钮，对应特性 P3 故意延后（2026-06-14）**：真正的 smart MiniMax
+    # 克隆当前被 process.py ``_build_b2_not_wired_clone_provider`` **刻意 stub**
+    # 成 fail-closed（恒抛 → 回 PRESET），需 per-speaker ffmpeg 样本 + 真实
+    # voice_library_quota snapshot + 真 ``build_smart_clone_provider()`` **三者
+    # 一起接线**才能替换（保安全不变量，防 MiniMax 付费红线）。本旋钮 + 下方两
+    # cap 是该接线落地后的 gate 占位，**当前不 gate 任何真克隆路径**。
+    # **与 ``smart_auto_clone_enabled`` 的关系**：后者控制既有 smart 全量任务
+    # auto-clone 决策（默认 True，但 provider 仍是上述 stub → 实际回 PRESET）；
+    # 本 ``smart_preview_clone_enabled`` 是**未来 smart 预览 lane** 的独立 gate
+    # （默认 False）。两者**不互相 AND**（避免误关既有 smart 行为）。延后理由见
+    # plan §5。
     smart_preview_clone_enabled: StrictBool = False
     # Smart 预览克隆每日全局上限 + 并发上限（fail-closed）。默认 200 / 5。
     smart_preview_clone_daily_global_cap: int = 200

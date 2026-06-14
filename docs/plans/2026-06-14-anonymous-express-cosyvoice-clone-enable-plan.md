@@ -203,7 +203,21 @@ src/pipeline/process.py::run()
 
 ## 5. 智能版 600 点预扣 + 退还（P3）
 
-复用现有 credit ledger / shadow credits（gateway voice-clone 端点已有 shadow credits 机制）：
+> **⚠️ P3 实施状态（2026-06-14）：核心能力已就位；smart 预览 auto-clone 接线刻意延后，理由如下。**
+>
+> 实施期核实发现 smart MiniMax **auto-clone 被现有代码刻意 stub 成 fail-closed**——`src/pipeline/process.py::_build_b2_not_wired_clone_provider` 恒抛 → smart 全量任务的克隆决策实际回 **PRESET**。其 docstring 明写：真 `build_smart_clone_provider()`（MiniMax adapter）**只有在 per-speaker ffmpeg 样本 + 真实 voice_library_quota snapshot + 真 provider 三者一起接线时才能替换 stub**（保安全不变量、防 MiniMax 付费红线）。这是上游开发者**有意**的安全设计。
+>
+> **已就位（本任务交付）**：
+> - 克隆点数 **600**（P1，pricing_schema + 全 fallback）。
+> - **用户显式触发的 600 点 MiniMax 克隆已工作**：Studio / voice-selection「克隆音色」按钮 → `voice_selection_api` reserve/capture **600 点 + shadow credits 预扣/退还**（这正是 CLAUDE.md「✅ 用户显式点击按钮触发」的合规路径，也正是用户说的"智能版扣 600 点克隆一个音色"）。
+> - `smart_preview_clone_enabled` + daily/inflight cap admin 旋钮（P1，默认 OFF，占位）。
+>
+> **刻意延后（需专项 session，不在本 clone-enablement 任务的安全预算内）**：
+> - smart **预览 lane** 本身（3 分钟登录 smart 预览）当前不存在——建它是独立 funnel 特性。
+> - smart **auto-clone** 真 provider 接线（替换 `_build_b2_not_wired_clone_provider` stub）= per-speaker 样本 + quota snapshot + MiniMax adapter 三者协同的大型安全关键改动，触及最敏感的 MiniMax 付费红线，**不得在已耗尽的上下文里仓促接线**（与上游"三者一起才接"的安全约束一致）。
+> - 因此下列 §5 子项（auto 预扣/退还/库容门/激活/复用）是该专项 session 的设计目标，**本任务不落地真 auto-clone provider**；`smart_preview_clone_enabled` 旋钮当前**不 gate 任何真克隆**（见 admin_settings.py 注释 + 与 `smart_auto_clone_enabled` 的关系说明）。
+
+复用现有 credit ledger / shadow credits（gateway voice-clone 端点已有 shadow credits 机制）—— **以下为延后专项的设计目标**：
 
 - provider call **前**预扣 600 点（`clone_credit_reserved` 状态，权威方案 §15.2）。
 - 克隆成功 + 预览 TTS 激活成功 → 确认扣除，voice 存入个人音色库（`source=smart_preview`）。
