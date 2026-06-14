@@ -357,9 +357,13 @@ def maybe_run_express_auto_clone(
     try:
         if not user_id or not job_id:
             return None
-        # L1 / L1' admin 主开关（默认 False → no-op，行为不变）
+        # L1 / L1' admin 主开关（默认 False → no-op，行为不变）。
+        # **strict ``is True``**（CodeX P2 审核）：pipeline 侧 _admin 读 raw JSON，
+        # 不经 gateway StrictBool 校验；手改 admin_settings.json 成字符串
+        # "false"/"0" 时 bool("false")=True 会误开。严格只认 Python True，
+        # malformed/字符串/数字一律 fail-closed skip（回预设）。
         master_key = _K_ANON_ENABLED if anonymous_preview else _K_ENABLED
-        if not bool(_admin(master_key, False)):
+        if _admin(master_key, False) is not True:
             return None
         # L4 consent（无 consent → skip，不调 auto_clone）
         if not _has_consent(express_consent):
