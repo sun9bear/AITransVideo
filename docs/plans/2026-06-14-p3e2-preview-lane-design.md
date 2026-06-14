@@ -82,3 +82,29 @@
 | 🔥 marker→finalizer | stamp 后 job 终态 → finalizer marker-gate 激活 → capture/release |
 | 回写失败 | Job API 回写失败 → pipeline 读不到 → 退预设（fail-safe），reservation 由 sweeper release |
 | 激活顺序 | flag=True 但 create 未 reserve（误配）→ 既有 smart 退预设（不崩、不漏收） |
+
+---
+
+## 7. P3e-3c-2 设计：preview→正式 server 复用契约（understand workflow wf_f03167ab 综合）
+
+**目标**：用户预览满意后转完整正式流程。前端**只传 `reuse_preview_job_id`**（不传 voice_id / 不传 source）。server 端校验 + 取回 voice_id + 原视频引用复用，生成一个**完整付费 smart 任务**（扣分钟、交付、**不重克隆、不重扣 600**）。
+
+**钱-不变量（本切片必守）**：
+1. ❌ **不重扣 600**：复用路径**不创建新 reservation**（强制 `auto_voice_clone=False` → create 600-reserve 块条件 `auto_voice_clone is True` 不满足 → 跳过）。
+2. ❌ **不重克隆**：pipeline `_smart_needs_new_clone` 要求 `_smart_consent_allows_clone`（=`auto_voice_clone is True`）→ 强制 False → 绝不调 MiniMax。
+3. ✅ **照常扣分钟**：不设 `smart_preview_mode`/`preview_mode` → 完整任务 minute reserve 正常 + 交付完整成片（无 teaser/水印/stream-only）。
+4. ❌ **防越权**：voice_a **server 端从 captured reservation.captured_voice_id 取**，源 from preview Job.source_*；客户端夹带的 voice_a/voice_b/source **一律覆盖**（不信任）。
+5. ❌ **拒绝不合格预览**：未捕获/已 release/voice 已过期 → 显式 4xx 拒绝，**绝不**静默回落到完整重克隆或错扣。
+
+**权威信号（reader B）**：`SmartCloneReservation(task_id=preview_job_id, user_id).status=='captured' AND settled_at IS NOT NULL` → `captured_voice_id`；佐以 `CloneBillingEvent.chargeable=true`。voice 活性 = `UserVoice(user_id, voice_id, expired_at IS NULL)`。
+
+**架构**：
+- **新服务模块** `gateway/preview_reuse_service.py::resolve_preview_reuse(db, *, user_id, preview_job_id) -> (PreviewReuseResolution | None, reason)`，纯 DB 校验/取回（独立可测，镜像 smart_clone_reservation_service 风格）。reason ∈ `{preview_not_found, preview_forbidden, preview_clone_not_captured, preview_voice_unavailable, preview_source_unavailable}`。
+- **create 路径薄接线**（`intercept_create_job`，trust-marker strip 之后、smart_consent 校验之前）：`reuse_preview_job_id` present + admin `smart_preview_clone_enabled` 开 → 调 resolve → 成功则覆盖 request_data（`service_mode=smart`、`source={type,value}`、`voice_a=voice_id`、`voice_b=None`、`smart_consent.auto_voice_clone=False` 的合法 6 字段 consent、pop `preview_mode`/`reuse_preview_job_id`）→ 走既有完整 create flow（DRY，分钟计费等同）。resolve 失败 → 4xx 拒绝。flag off + present → 403 `reuse_disabled`（不静默改建普通任务）。
+- **默认 inert**：`reuse_preview_job_id` 缺省 → 字节级不变。
+
+**source 复用** = reuse preview `Job.source_type`/`source_ref`（P3e-3b 只裁了派生 `preview_teaser.wav`，**source_ref 仍指原始全长源**：YouTube URL / 上传 final_path）。本地文件若已清理 → pipeline ingestion 失败 → 终态 release 分钟（非永久漏，graceful）；早期 fs 存在性检查 = 优化项，本切片不做（保持纯 DB 可测）。
+
+**voice 实际复用（非钱-关键，best-effort）**：完整任务复用**同源视频** → `source_content_hash` 同 → smart auto-reuse-by-hash（默认开）自然命中 `created_from='smart_preview'` 的克隆音色；显式 `voice_a` 加固。钱-安全由 `auto_voice_clone=False`（无法克隆）兜底——即便 voice 复用退化为 PRESET 也只是音质降级，绝不重克隆/重扣。
+
+**copy_as_new 缺口（CodeX 标，归 P3e-4）**：本契约是**新建完整任务**（不走 editing copy_as_new），故无 `preview_teaser.wav` 复制问题。但 P3e-4 的 enter-edit gate 须挡 smart 预览进 editing（否则 copy_as_new 复制清单缺 teaser → resume 满长出片）。

@@ -1334,6 +1334,95 @@ async def intercept_create_job(
         request_data.pop("smart_clone_reservation_id", None)
         request_data.pop("smart_clone_credit_reserved", None)
 
+    # P3e-3c-2: preview→full reuse contract. Frontend sends ONLY
+    # ``reuse_preview_job_id`` (NOT voice_id / NOT source — 防越权). Server
+    # validates same-user + CAPTURED 600-clone + live voice (preview_reuse_
+    # service), then OVERRIDES request_data with **server-derived** voice_a +
+    # original source, forces ``auto_voice_clone=False`` and clears
+    # ``preview_mode``. Money invariants:
+    #   - no re-charge 600: forced auto_voice_clone=False → the 600-reserve
+    #     block below (trigger = auto_voice_clone is True) is skipped → no new
+    #     reservation created.
+    #   - no re-clone: pipeline ``_smart_needs_new_clone`` requires consent
+    #     auto_voice_clone is True → never calls MiniMax. Cloned voice is
+    #     reused via explicit voice_a + same-source auto-reuse.
+    #   - minutes charged: no preview_mode/smart_preview_mode → full create
+    #     flow reserves minutes normally + delivers full output.
+    # Default inert: absent ``reuse_preview_job_id`` → byte-identical create.
+    _reuse_preview_job_id = None
+    if isinstance(request_data, dict) and "reuse_preview_job_id" in request_data:
+        # CodeX P2: key PRESENCE = reuse intent. A malformed / blank value must
+        # NOT silently fall through to a normal create — that could re-charge
+        # 600 + re-clone the voice the user already paid for in the preview
+        # (money surprise). Reject before any money path.
+        _rv = request_data.get("reuse_preview_job_id")
+        if isinstance(_rv, str) and _rv.strip():
+            _reuse_preview_job_id = _rv.strip()
+        else:
+            return _error_response(
+                400, "reuse_request_invalid",
+                "预览转完整请求无效（reuse_preview_job_id 缺失或格式错误）。",
+                {"reuse_preview_job_id": _rv},
+            )
+    if _reuse_preview_job_id is not None:
+        from admin_settings import load_settings as _load_admin_for_reuse
+        if (
+            getattr(_load_admin_for_reuse(), "smart_preview_clone_enabled", False)
+            is not True
+        ):
+            # flag off + explicit reuse request → reject (do NOT silently
+            # fall through to a normal create with client-supplied fields).
+            return _error_response(
+                403, "reuse_disabled",
+                "预览转完整功能当前未开放。",
+                {"reuse_preview_job_id": _reuse_preview_job_id},
+            )
+        if user is None:
+            return _error_response(
+                401, "auth_required",
+                "请先登录后再从预览转完整流程。",
+                {"reuse_preview_job_id": _reuse_preview_job_id},
+            )
+        from preview_reuse_service import resolve_preview_reuse
+        _reuse_resolution, _reuse_reason = await resolve_preview_reuse(
+            db, user_id=user.id, preview_job_id=_reuse_preview_job_id
+        )
+        if _reuse_resolution is None:
+            _reuse_status = {
+                "preview_not_found": 404,
+                "preview_forbidden": 403,
+            }.get(_reuse_reason or "", 409)
+            return _error_response(
+                _reuse_status, _reuse_reason or "preview_reuse_rejected",
+                "无法从该预览转完整流程，请重新生成预览后再试。",
+                {
+                    "reuse_preview_job_id": _reuse_preview_job_id,
+                    "reason": _reuse_reason,
+                },
+            )
+        # Server-authoritative overrides — 防越权：ignore any client-supplied
+        # voice_a/voice_b/source; the server controls them entirely.
+        request_data["service_mode"] = "smart"
+        request_data["source"] = {
+            "type": _reuse_resolution.source_type,
+            "value": _reuse_resolution.source_ref,
+        }
+        request_data["voice_a"] = _reuse_resolution.voice_id
+        request_data["voice_b"] = None
+        # Force a valid no-clone 6-field §5.3 consent. auto_voice_clone=False
+        # → 600-reserve block skips (no re-charge) + pipeline never re-clones.
+        request_data["smart_consent"] = {
+            "auto_voice_clone": False,
+            "auto_retranslate": False,
+            "auto_retts": False,
+            "auto_multimodal_verification": False,
+            "no_extra_charge_without_confirmation": True,
+            "on_budget_exhausted": "degraded_delivery_with_report",
+        }
+        # Full delivery + minutes charged (NOT a preview).
+        request_data.pop("preview_mode", None)
+        request_data.pop("reuse_preview_job_id", None)
+
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
     # but the entry-side gate was never updated — submissions of
