@@ -59,6 +59,37 @@ export function clearAnonClaimHint(): void {
   }
 }
 
+// 认领成功 → 转完整就绪标记（D7）。与 CLAIM_HINT_KEY 分离：后者在认领后即清
+// （只为「是否调 claim」），本 key 携带已认领的 preview_id 供创建页「转完整」用。
+// 仅存 preview_id（非凭证；服务端凭 claim_user_id 反查原视频）。创建页读后即清。
+const CONVERT_READY_KEY = "avt_anon_convert_ready"
+
+/** 认领成功后调用：记下「有一个已认领预览待转完整」+ 其 preview_id。 */
+export function setAnonConvertReady(previewId: string): void {
+  try {
+    window.localStorage.setItem(CONVERT_READY_KEY, previewId)
+  } catch {
+    // 忽略（隐私模式/配额）——转完整入口不显示，用户仍可正常上传创建。
+  }
+}
+
+/** 创建页读取待转完整的 preview_id（无则 null）。 */
+export function getAnonConvertReady(): string | null {
+  try {
+    return window.localStorage.getItem(CONVERT_READY_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function clearAnonConvertReady(): void {
+  try {
+    window.localStorage.removeItem(CONVERT_READY_KEY)
+  } catch {
+    // 忽略
+  }
+}
+
 /**
  * POST /gateway/anonymous-preview/claim — 必须在 waitForSessionReady() 返回
  * true 之后调用（否则 gateway 见不到 avt_session → 401，认领被静默丢弃）。
@@ -118,6 +149,10 @@ export async function maybeClaimAnonPreviewAfterLogin(): Promise<void> {
   try {
     const outcome = await claimAnonymousPreview()
     settled = outcome.settled
+    // 认领成功 → 把 preview_id 传给创建页「转完整」入口（独立 key，hint 即将被清）。
+    if (outcome.claimed && outcome.preview_ids && outcome.preview_ids[0]) {
+      setAnonConvertReady(outcome.preview_ids[0])
+    }
   } catch {
     // 永不阻断登录跳转；异常视为可重试 → 保留 hint。
     settled = false

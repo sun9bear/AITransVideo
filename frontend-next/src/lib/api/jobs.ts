@@ -159,6 +159,12 @@ export async function submitTranslationJob(
     requestBody.source_language = input.sourceLanguage
     requestBody.target_language = input.targetLanguage
   }
+  // D7 匿名预览转完整：服务端凭 reuse_anonymous_preview_id 反查认领的完整原视频，在
+  // 任何源校验之前覆盖 source（job_intercept.py _apply_anon_convert_source_override），
+  // 故上方 source 字段即便为空也无妨。仅在有认领预览时发送（普通创建 byte-identical）。
+  if (input.reuseAnonPreviewId) {
+    requestBody.reuse_anonymous_preview_id = input.reuseAnonPreviewId
+  }
   const payload = await apiClient.post<ApiJobRecord>('/jobs', {
     body: requestBody,
   })

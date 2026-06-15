@@ -216,6 +216,13 @@ export interface CreateTranslationJobInput {
    * The submit layer forces this false for non-free modes.
    */
   freeVoiceRightsConfirmed?: boolean
+  /**
+   * D7 匿名预览转完整：被认领的 preview_id。设置时 ``submitTranslationJob`` 注入
+   * ``reuse_anonymous_preview_id``，服务端凭 ``claim_user_id`` 反查认领的**完整原始
+   * 上传**覆盖 source、走正常付费流程（plan §6.5）。youtubeUrl/localFilePath 可留空
+   * （后端 D7 block 在任何源校验之前覆盖 source）。
+   */
+  reuseAnonPreviewId?: string
 }
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [
