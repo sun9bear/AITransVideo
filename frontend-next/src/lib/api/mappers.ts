@@ -105,6 +105,9 @@ export function toJobSummary(payload: ApiJobRecord): JobSummary {
     errorSummary: payload.error_summary,
     fallbackSummary: payload.fallback_summary,
     serviceMode: payload.service_mode,
+    // P3e-4c: server-stamped 3-min watermarked stream-only teaser flag.
+    // Strict ``=== true`` (fail-safe: never mis-flag a normal smart job).
+    smartPreviewMode: payload.smart_state?.smart_preview_mode === true,
     // --- Post-edit infra ---
     displayName: payload.display_name ?? null,
     expiresAt: payload.expires_at ?? null,

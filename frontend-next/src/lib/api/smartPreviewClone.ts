@@ -114,6 +114,11 @@ export async function convertPreviewToFull(
   previewJobId: string,
 ): Promise<JobSummary> {
   const body = buildSmartJobBody(input)
+  // 防越权 + 最小化：音色 / 源 / consent 全由服务端从被复用的预览任务派生（job_intercept
+  // reuse override，发生在任何源校验之前）。显式剔除 voice_a/voice_b，使转完整 body 只承载
+  // 「复用意图」——即便未来 gateway 覆盖顺序变化，也不会把预览的临时克隆音色误当作新选音。
+  delete body.voice_a
+  delete body.voice_b
   body.reuse_preview_job_id = previewJobId
   const payload = await apiClient.post<ApiJobRecord>('/jobs', { body })
   return toJobSummary(payload)
