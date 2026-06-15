@@ -14,6 +14,7 @@ import ast
 import asyncio
 import inspect
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -646,3 +647,32 @@ def test_where_semantics_on_real_sqlite_engine():
         assert owner("p_block") is None       # block 状态未绑
         assert owner("p_expired") is None     # 过期未绑
         assert owner("p_othersession") is None  # 别 session 未绑
+
+
+# ---------------------------------------------------------------------------
+# 9. 前端认领重试保留守卫（CodeX P2）：可重试失败不得清 hint（永久丢失）。
+#    项目无 JS test runner → Python 静态扫描（沿用 admin sync guard 约定）。
+# ---------------------------------------------------------------------------
+
+_CLAIM_TS = _REPO / "frontend-next" / "src" / "lib" / "api" / "claim.ts"
+
+
+def test_claim_ts_keeps_hint_on_retryable_failure():
+    """claim.ts 必须：① 非 2xx/异常路径返回 settled:false（可重试）；② 仅在 settled
+    时清 hint，**绝不**用无条件 finally 清——否则 503/429/网络失败后用户永久丢失认领。"""
+    assert _CLAIM_TS.exists(), f"claim.ts 不存在: {_CLAIM_TS}"
+    src = _CLAIM_TS.read_text(encoding="utf-8")
+
+    # ① 可重试标志存在（非 ok / catch 返回 settled:false）
+    assert re.search(r"settled:\s*false", src), (
+        "claimAnonymousPreview 非 2xx/异常路径必须返回 settled:false（可重试）"
+    )
+    # ② 清 hint 受 settled 守护
+    assert re.search(r"if\s*\(\s*settled\s*\)", src), (
+        "maybeClaimAnonPreviewAfterLogin 必须 `if (settled)` 守护 clearAnonClaimHint"
+    )
+    assert "clearAnonClaimHint()" in src
+    # ③ 绝不无条件 finally 清 hint（CodeX P2 的反模式）
+    assert not re.search(r"finally\s*\{\s*clearAnonClaimHint", src), (
+        "禁止无条件 finally { clearAnonClaimHint }——可重试失败会被清成永久丢失"
+    )

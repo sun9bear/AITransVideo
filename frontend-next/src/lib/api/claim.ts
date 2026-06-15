@@ -22,6 +22,17 @@ export interface ClaimResult {
   preview_ids?: string[]
 }
 
+/** claimAnonymousPreview 的结果：server 响应 + settled 终态标志。 */
+export interface ClaimOutcome extends ClaimResult {
+  /**
+   * true = 服务端返回 200 终态（成功 claimed:true，或确定性 no-op claimed:false：
+   *   无 cookie / session 过期 / 无可认领 / 已被他人认领）——可安全清 hint。
+   * false = **可重试**失败（403/429/503/网络/异常）——保留 hint，下次登录自动重试，
+   *   对齐后端「503 retryable」语义（CodeX P2：不把可重试失败变成永久丢失）。
+   */
+  settled: boolean
+}
+
 /** 预览 ready 时调用：记下「本会话有可认领预览」。previewId 仅作存在性提示。 */
 export function setAnonClaimHint(previewId: string): void {
   try {
@@ -55,7 +66,7 @@ export function clearAnonClaimHint(): void {
  * 绝不冒泡进登录流程。200 {claimed:false} 是正常静默路径（无 cookie / session
  * 过期 / 无可认领 / 已被他人认领），**不是**错误。
  */
-export async function claimAnonymousPreview(): Promise<ClaimResult> {
+export async function claimAnonymousPreview(): Promise<ClaimOutcome> {
   try {
     const response = await fetch("/gateway/anonymous-preview/claim", {
       method: "POST",
@@ -64,16 +75,24 @@ export async function claimAnonymousPreview(): Promise<ClaimResult> {
       body: "{}",
     })
     if (!response.ok) {
-      // 403/429/503 等 → 静默放弃（不打断登录）。
-      return { claimed: false, count: 0 }
+      // 403/429/503 等非 2xx → **可重试**，保留 hint（settled:false）。
+      return { claimed: false, count: 0, settled: false }
     }
     const data = (await response.json().catch(() => null)) as ClaimResult | null
     if (!data || typeof data.claimed !== "boolean") {
-      return { claimed: false, count: 0 }
+      // 200 但响应体畸形 → 当终态（避免对坏响应无限重试）。
+      return { claimed: false, count: 0, settled: true }
     }
-    return data
+    // 200 终态（成功 或 确定性 no-op）→ 可清 hint。
+    return {
+      claimed: data.claimed,
+      count: typeof data.count === "number" ? data.count : 0,
+      preview_ids: data.preview_ids,
+      settled: true,
+    }
   } catch {
-    return { claimed: false, count: 0 }
+    // 网络/异常 → **可重试**，保留 hint。
+    return { claimed: false, count: 0, settled: false }
   }
 }
 
@@ -86,11 +105,17 @@ export async function maybeClaimAnonPreviewAfterLogin(): Promise<void> {
   if (!hasAnonClaimHint()) {
     return
   }
+  let settled = false
   try {
-    await claimAnonymousPreview()
+    const outcome = await claimAnonymousPreview()
+    settled = outcome.settled
   } catch {
-    // 永不阻断登录跳转。
-  } finally {
+    // 永不阻断登录跳转；异常视为可重试 → 保留 hint。
+    settled = false
+  }
+  // 仅服务端 200 终态后清 hint；可重试失败（403/429/503/网络）**保留** hint，
+  // 下次登录自动重试（CodeX P2：不把可重试失败变成永久丢失）。
+  if (settled) {
     clearAnonClaimHint()
   }
 }
