@@ -24,11 +24,21 @@ Money / security invariants:
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import select
 
-from models import CloneBillingEvent, Job, SmartCloneReservation, UserVoice
+from models import (
+    AnonymousPreviewRecord,
+    CloneBillingEvent,
+    Job,
+    SmartCloneReservation,
+    UserVoice,
+)
 from smart_clone_reservation_service import CAPTURED as _CAPTURED_STATUS
 
 # Rejection reason codes (stable; surfaced to the create-path 4xx response).
@@ -38,6 +48,15 @@ REASON_NOT_PREVIEW = "preview_not_a_preview_job"
 REASON_NOT_CAPTURED = "preview_clone_not_captured"
 REASON_VOICE_UNAVAILABLE = "preview_voice_unavailable"
 REASON_SOURCE_UNAVAILABLE = "preview_source_unavailable"
+
+# D7 匿名预览转完整 reason codes（独立命名空间，与 smart preview reuse 区分）。
+REASON_ANON_NOT_FOUND = "anon_preview_not_found"
+REASON_ANON_FORBIDDEN = "anon_preview_forbidden"  # 未认领 / 非本人 / 非 ready 契约状态
+REASON_ANON_SOURCE_UNAVAILABLE = "anon_preview_source_unavailable"  # 无源/丢失/越界/teaser/hash 不符
+
+# 匿名预览只允许这个 ready 契约状态转完整（= anonymous_preview_api._READY_STATUS /
+# PreviewStatus.READY_FOR_MODE.value）。内联字面量避免跨模块 import 私有常量。
+_ANON_READY_STATUS = "ready_for_mode"
 
 
 @dataclass(frozen=True)
@@ -172,6 +191,163 @@ async def resolve_preview_reuse(
     )
 
 
+# ---------------------------------------------------------------------------
+# D7 匿名预览 → 转完整（plan 2026-06-15-anonymous-preview-claim-binding-plan.md §6.5）
+# ---------------------------------------------------------------------------
+#
+# 认领后的下一步：登录用户用**完整原始上传** audit.stored_upload_path（**非** 3min
+# teaser）生成正式计费 job。与 smart preview reuse 的关键区别：① 无 600 克隆点结转
+# （匿名 lane 是免费/快捷 CosyVoice，无 reservation）；② 不强制 service_mode（用户
+# 自选 express/studio/smart，正常 gating + 计费）；③ 不复用 voice（用户自选）。
+#
+# 红线：本 resolver 纯 DB 读 + 只读文件 hash（无写、无付费 API、无 clone）。source
+# 由服务端从认领 record 派生，**绝不**信客户端路径（防越权/遍历）。
+
+
+@dataclass(frozen=True)
+class AnonymousPreviewReuseResolution:
+    """D7 server-derived 转完整输入（绝不取自客户端）。"""
+
+    preview_id: str
+    source_type: str
+    source_ref: str  # 完整原始上传绝对路径（stored_upload_path），非 teaser
+
+
+def _normalize_hash(value: str | None) -> str:
+    """归一化 sha256 hex（剥可选 ``algo:`` 前缀 + lower），防 intake/比对格式漂移。
+
+    匿名 intake 存裸 hex（anonymous_preview_upload.py:316 ``digest.hexdigest()``），
+    但归一化两侧使比对对 ``sha256:<hex>`` / 裸 hex 都稳健。"""
+    h = str(value or "").strip().lower()
+    return h.split(":")[-1] if ":" in h else h
+
+
+def _sha256_file(path: Path, buf_size: int = 4 * 1024 * 1024) -> str:
+    """流式 sha256（与 intake 同算法：对整个文件字节）。阻塞 I/O，须经 to_thread 调。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(buf_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _anon_upload_root() -> Path:
+    """匿名上传根目录（唯一真源 = anonymous_preview_upload._resolve_project_root），
+    用于 is_relative_to 越权校验锚点。本地 import 避模块加载期耦合。"""
+    from anonymous_preview_upload import _resolve_project_root
+
+    return (_resolve_project_root() / "uploads" / "anonymous").resolve()
+
+
+async def resolve_anonymous_preview_reuse(
+    db, *, user_id, preview_id: str
+) -> tuple[AnonymousPreviewReuseResolution | None, str | None]:
+    """校验 + 解析「匿名预览转完整」请求。
+
+    成功 → ``(AnonymousPreviewReuseResolution, None)``；拒绝 → ``(None, reason_code)``
+    （不 raise，调用方映射 4xx）。纯 DB 读 + 只读文件 hash，无写、无付费 API。
+
+    校验链（plan §6.5 / v3 #5）：record 存在 → claim_user_id==本人（认领过）→ status
+    == ready_for_mode → audit.stored_upload_path 非空 → 规范化后**位于匿名上传根内**
+    （防遍历）→ **非 teaser** → 文件存在 → sha256 **匹配 record.source_hash**（防陈旧/替换）。
+    """
+    pid = str(preview_id or "").strip()
+    if not pid:
+        return None, REASON_ANON_NOT_FOUND
+
+    # 1. record 存在。
+    rec = (
+        await db.execute(
+            select(AnonymousPreviewRecord).where(
+                AnonymousPreviewRecord.preview_id == pid
+            )
+        )
+    ).scalar_one_or_none()
+    if rec is None:
+        return None, REASON_ANON_NOT_FOUND
+
+    # 2. 所有权：必须已被本用户认领（claim_user_id==user）。未认领（NULL）/他人 → 拒。
+    #    str().strip() 两侧比较，对 UUID 列稳健（不依赖 asyncpg 严格类型）+ 容忍尾随空白。
+    if str(getattr(rec, "claim_user_id", "") or "").strip() != str(user_id or "").strip():
+        return None, REASON_ANON_FORBIDDEN
+
+    # 3. 状态：仅 ready 契约态可转（与 create gate / 认领过滤同契约）。strip 容忍空白。
+    if str(getattr(rec, "status", "") or "").strip() != _ANON_READY_STATUS:
+        return None, REASON_ANON_FORBIDDEN
+
+    # 3.5. expires_at 防御（认领已延长 7d）：过期 → 源可能已被 sweeper 清，提前拒。
+    exp = getattr(rec, "expires_at", None)
+    if exp is not None:
+        try:
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp <= datetime.now(timezone.utc):
+                return None, REASON_ANON_SOURCE_UNAVAILABLE
+        except Exception:  # noqa: BLE001 — 时间比较异常不阻断（后续文件存在/hash 兜底）
+            pass
+
+    # 4. 完整源路径来自 audit（**非** job.source_ref——那是 teaser）。audit 可能 NULL。
+    audit = getattr(rec, "audit", None) or {}
+    stored_str = audit.get("stored_upload_path")
+    if not stored_str:
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+    try:
+        stored = Path(str(stored_str)).resolve()
+    except Exception:  # noqa: BLE001
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+
+    # 5. 越权/遍历：规范化后必须在匿名上传根内（用 .resolve()+is_relative_to，非
+    #    str.startswith——后者可被 ``../`` 绕过）。
+    try:
+        if not stored.is_relative_to(_anon_upload_root()):
+            return None, REASON_ANON_SOURCE_UNAVAILABLE
+    except Exception:  # noqa: BLE001
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+
+    # 6. 非 teaser（防误用 3min 裁剪片）。权威判定 = 精确比对 audit['teaser_path']
+    #    （CodeX P3：stem 前缀启发式可能误伤名为 teaser_* 的原始上传）；teaser_path
+    #    缺失/异常时退到 stem 兜底（uploads 带 upload_id 前缀，实际不会误伤）。
+    teaser_str = audit.get("teaser_path")
+    if teaser_str:
+        try:
+            if stored == Path(str(teaser_str)).resolve():
+                return None, REASON_ANON_SOURCE_UNAVAILABLE
+        except Exception:  # noqa: BLE001 — teaser_path 异常 → 退 stem 兜底
+            pass
+    if stored.stem.startswith("teaser_"):
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+
+    # 7. 文件存在。
+    if not stored.is_file():
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+
+    # 8. hash 匹配 record.source_hash（防陈旧/被替换文件）。流式 sha256 走 to_thread。
+    expected = _normalize_hash(getattr(rec, "source_hash", ""))
+    if not expected:
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+    try:
+        actual = await asyncio.to_thread(_sha256_file, stored)
+    except Exception:  # noqa: BLE001
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+    if _normalize_hash(actual) != expected:
+        return None, REASON_ANON_SOURCE_UNAVAILABLE
+
+    # source_type 固定 "local_video"（**不**透传 rec.source_type）。CodeX P1：匿名
+    # record 的 source_type 是 intake 内部值 "local_upload"（SourceType.LOCAL_UPLOAD），
+    # 而正式 create 流程只归一化 local_file→local_video、**不认 local_upload**
+    # （job_intercept.py:1827），pipeline 本地分支也只认 local_video（process.py:2870）。
+    # 匿名 create 自身发给 Job API 的也是硬编码 "local_video"（anonymous_preview_api.py:1433）。
+    # stored_upload_path 恒为本地文件 → 正确规范类型就是 local_video。
+    return (
+        AnonymousPreviewReuseResolution(
+            preview_id=pid,
+            source_type="local_video",
+            source_ref=str(stored),
+        ),
+        None,
+    )
+
+
 __all__ = [
     "PreviewReuseResolution",
     "resolve_preview_reuse",
@@ -181,4 +357,9 @@ __all__ = [
     "REASON_NOT_CAPTURED",
     "REASON_VOICE_UNAVAILABLE",
     "REASON_SOURCE_UNAVAILABLE",
+    "AnonymousPreviewReuseResolution",
+    "resolve_anonymous_preview_reuse",
+    "REASON_ANON_NOT_FOUND",
+    "REASON_ANON_FORBIDDEN",
+    "REASON_ANON_SOURCE_UNAVAILABLE",
 ]

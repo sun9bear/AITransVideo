@@ -1529,6 +1529,117 @@ async def intercept_create_job(
         }
         request_data["smart_state"] = dict(_convert_smart_state)
 
+    # D7 匿名预览转完整（plan 2026-06-15-anonymous-preview-claim-binding-plan.md §6.5）。
+    # 前端只送 ``reuse_anonymous_preview_id``（**不**送 source/path——防越权）。server
+    # 校验所有权（claim_user_id==user，已认领）+ 完整源 stored_upload_path（在上传根内/
+    # 非 teaser/hash 匹配 source_hash），用**完整原始上传**覆盖 source，走既有计费 create。
+    # 与 smart reuse 区别：**不**强制 service_mode（用户自选 express/studio/smart，正常
+    # gating + 计费）、**不**设 voice_a/smart_consent/smart_state（无 600 结转、不触
+    # clone → 下方 600-reserve 块不进、分钟正常扣）。默认 inert：absent → byte-identical。
+    _reuse_anon_preview_id = None
+    if isinstance(request_data, dict) and "reuse_anonymous_preview_id" in request_data:
+        if _reuse_preview_job_id is not None:
+            # 同时指定 smart preview reuse 与匿名 reuse → 歧义，拒（前端只应送其一）。
+            return _error_response(
+                400, "reuse_request_ambiguous",
+                "不能同时指定 reuse_preview_job_id 与 reuse_anonymous_preview_id。",
+                {"reuse_anonymous_preview_id": request_data.get("reuse_anonymous_preview_id")},
+            )
+        _av = request_data.get("reuse_anonymous_preview_id")
+        if isinstance(_av, str) and _av.strip():
+            _reuse_anon_preview_id = _av.strip()
+        else:
+            # key 存在 = 转完整意图；畸形/空值不得静默走普通 create（用户本想用完整源）。
+            return _error_response(
+                400, "reuse_request_invalid",
+                "匿名预览转完整请求无效（reuse_anonymous_preview_id 缺失或格式错误）。",
+                {"reuse_anonymous_preview_id": _av},
+            )
+    if _reuse_anon_preview_id is not None:
+        from admin_settings import load_settings as _load_admin_for_anon_reuse
+        if (
+            getattr(_load_admin_for_anon_reuse(), "anonymous_preview_claim_enabled", False)
+            is not True
+        ):
+            # flag off + 显式转完整 → 拒（与认领同旗：flag off 时本就无 record 被认领
+            # → resolver 也会 FORBIDDEN，此处提前给明确错误，不静默走普通 create）。
+            return _error_response(
+                403, "reuse_disabled",
+                "匿名预览转完整功能当前未开放。",
+                {"reuse_anonymous_preview_id": _reuse_anon_preview_id},
+            )
+        if user is None:
+            return _error_response(
+                401, "auth_required",
+                "请先登录并认领预览后再转完整。",
+                {"reuse_anonymous_preview_id": _reuse_anon_preview_id},
+            )
+        from preview_reuse_service import resolve_anonymous_preview_reuse
+        _anon_resolution, _anon_reason = await resolve_anonymous_preview_reuse(
+            db, user_id=user.id, preview_id=_reuse_anon_preview_id
+        )
+        if _anon_resolution is None:
+            _anon_status = {
+                "anon_preview_not_found": 404,
+                "anon_preview_forbidden": 403,
+                # 源已验证但不可处理（丢失/越界/teaser/hash 不符/过期）→ 422（非
+                # 409「并发冲突」，避免前端误导用户重试不可恢复的源缺失）。
+                "anon_preview_source_unavailable": 422,
+            }.get(_anon_reason or "", 409)
+            return _error_response(
+                _anon_status, _anon_reason or "anon_preview_reuse_rejected",
+                "无法从该预览转完整，请确认已登录认领且预览未过期。",
+                {
+                    "reuse_anonymous_preview_id": _reuse_anon_preview_id,
+                    "reason": _anon_reason,
+                },
+            )
+        # Server-authoritative source override（完整原始源 server 派生，防越权）。
+        # **不**改 service_mode（用户自选，正常 gating/计费）；**不**设 voice/
+        # smart_consent/smart_state（无 600 结转、不触 clone）。
+        request_data["source"] = {
+            "type": _anon_resolution.source_type,
+            "value": _anon_resolution.source_ref,
+        }
+        request_data.pop("reuse_anonymous_preview_id", None)
+        # 中和 preview/clone 机制（复审 HIGH×2）：
+        # ① D7 是**完整转换非预览** → 剥 preview_mode，否则 smart+preview_mode=True 会让
+        #    _is_smart_preview 跳过分钟预扣却跑 full 任务 → settle 透支（HIGH#1）。
+        # ② D7 **不自动克隆**（红线 + 注释承诺）：smart 模式硬要求 6 字段 consent，故
+        #    强制 no-clone consent（镜像 smart reuse L1369）；否则客户端夹带
+        #    auto_voice_clone=True 会触发 600-reserve（覆盖 D7 确定性 job_id + 授权
+        #    MiniMax 克隆，HIGH#2）。用户要克隆走后续 Studio 显式 gated 路径。
+        request_data.pop("preview_mode", None)
+        if str(request_data.get("service_mode") or "") == "smart":
+            request_data["smart_consent"] = {
+                "auto_voice_clone": False,
+                "auto_retranslate": False,
+                "auto_retts": False,
+                "auto_multimodal_verification": False,
+                "no_extra_charge_without_confirmation": True,
+                "on_budget_exhausted": "degraded_delivery_with_report",
+            }
+        else:
+            request_data.pop("smart_consent", None)
+        request_data.pop("voice_a", None)  # D7 不复用 voice（用户自选 preset）
+        request_data.pop("voice_b", None)
+
+        # 单飞幂等（镜像 D-C）：确定性 job_id 从 (user, anon preview_id) 派生 → 同一
+        # 预览重复 convert（双击/重发）收敛到同一任务。seed 用 'anon_convert:' 前缀
+        # （与 smart 'convert:' 隔离）。advisory lock 串行并发双击 → 第二个 pre-check
+        # 命中现有 F 幂等返回，不重 forward。job_id 是 server-only（上方已剥客户端值）。
+        _anon_convert_job_id = "job_" + hashlib.sha256(
+            f"{user.id}:anon_convert:{_reuse_anon_preview_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        await _acquire_convert_singleflight_lock(db, _anon_convert_job_id)
+        _existing_anon_convert = (
+            await db.execute(select(Job).where(Job.job_id == _anon_convert_job_id))
+        ).scalar_one_or_none()
+        if _existing_anon_convert is not None:
+            return await _idempotent_convert_job_response(_anon_convert_job_id)
+        request_data["job_id"] = _anon_convert_job_id
+        # 不设 smart_state（无 600 结转；plan §6.5「不同入口，无 reservation 可结转」）。
+
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
     # but the entry-side gate was never updated — submissions of
