@@ -99,9 +99,20 @@ def backfill_smart_cost_summary(
     project_dir: str | None,
     credit_entries: Iterable[Any],
     quota_used: int | None,
+    carryover_applied_credits: int | None = None,
+    carryover_source_job_id: str | None = None,
 ) -> bool:
     """Read-modify-write ``{project_dir}/audit/smart_cost_summary.json``
     with post-settle real values for the two ``pending_*`` fields.
+
+    P3e D-C (CodeX 复审 P1): ``carryover_applied_credits`` /
+    ``carryover_source_job_id`` (read by the caller from
+    ``db_job.metering_snapshot``, stamped at settle by
+    ``_smart_clone_minute_offset``) are written into
+    ``cost_breakdown_internal_only`` so the convert minute减免 is
+    **auditable** — otherwise a convert F's lower ``pending_credits_charged``
+    looks like an unexplained under-charge. None → not a convert / no
+    carryover → field omitted (inert).
 
     Returns True when the file was updated successfully, False
     otherwise (non-smart job / missing project_dir / missing file /
@@ -146,6 +157,13 @@ def backfill_smart_cost_summary(
     # When quota_used is None, leave breakdown field as-is (preserves
     # the original null from pipeline emit time — admin sees "待查询"
     # rather than a fake 0 per Codex 第二十七轮 P0).
+    # P3e D-C (CodeX P1): make the convert 600-carryover minute减免 auditable
+    # in cost summary. Only stamped when a positive carryover was applied
+    # (convert F); single-task full-smart / non-convert → omitted (inert).
+    if carryover_applied_credits:
+        breakdown["clone_carryover_applied_credits"] = int(carryover_applied_credits)
+        if carryover_source_job_id:
+            breakdown["clone_carryover_source_job_id"] = str(carryover_source_job_id)
     updated["cost_breakdown_internal_only"] = breakdown
 
     # Stamp settled_at so admin tooling can distinguish pre/post

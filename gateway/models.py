@@ -1001,6 +1001,10 @@ class SmartCloneReservation(Base):
         String(200), nullable=True
     )
     reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # P3e D-C（migration 039）：预览→完整 600 结转 single-use 闸。哪个完整任务消费了
+    # 本预览 reservation 的 600 结转额度（NULL=未结转）。完整任务终态结算时对预览
+    # reservation 行 FOR UPDATE + 条件置本列（status=captured ∧ 本列 IS NULL ∧ 同
+    # user），原子防一次预览被多个完整任务重复抵扣。见 plan 2026-06-15 §4.6。
     carryover_applied_to_task_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )

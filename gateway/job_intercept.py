@@ -93,6 +93,10 @@ _SMART_PAID_CLONE_CONFIRM_FIELDS = (
     "confirm_paid_voice_clone_600_credits",
 )
 _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES = 24 * 60
+# P3e（plan 2026-06-15 §4.5，CodeX 复审 P3）：智能版预览克隆 600 点预扣 =
+# offset 的单一来源。普通智能版新克隆的 create reservation 仍通过 runtime
+# pricing 读取（见 _get_smart_clone_cost_credits），二者不可混用。
+_SMART_CLONE_RESERVE_CREDITS = 600
 
 
 def _get_smart_clone_cost_credits() -> int:
@@ -464,6 +468,35 @@ def _error_response(
         status_code=status_code,
         headers={"content-type": "application/json"},
     )
+
+
+async def _idempotent_convert_job_response(job_id: str) -> Response:
+    """P3e D-C single-flight：重复 convert（同一预览双击/重发）幂等返回现有完整任务。
+
+    **绝不重新 forward create**——Job API ``submit_job`` 无 dedupe，重供已存在 job_id 会
+    ``save_job`` 覆盖 + ``runner.start`` 重启已有 job（重跑付费 workflow / 污染产物）。
+    改为代理一次 Job API ``GET /jobs/{id}`` 取回完整 JobRecord（与 create 响应同
+    ApiJobRecord 形状），保证前端 toJobSummary 不破。ownership 隐式（job_id 由
+    ``sha256(user.id:convert:preview_job_id)`` 派生，跨用户不会撞同一 id）。
+    """
+    from internal_auth import internal_headers
+    from proxy import get_client
+
+    url = f"{settings.job_api_upstream.rstrip('/')}/jobs/{job_id}"
+    try:
+        resp = await get_client().get(url, headers=internal_headers())
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers={"content-type": resp.headers.get("content-type", "application/json")},
+        )
+    except Exception:
+        logger.warning("idempotent convert: GET existing job %s failed", job_id, exc_info=True)
+        return _error_response(
+            409, "convert_already_exists",
+            "该预览已在转换为完整任务，请在任务列表查看。",
+            {"job_id": job_id},
+        )
 
 
 def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
@@ -1350,6 +1383,9 @@ async def intercept_create_job(
     #     flow reserves minutes normally + delivers full output.
     # Default inert: absent ``reuse_preview_job_id`` → byte-identical create.
     _reuse_preview_job_id = None
+    # P3e D-C：convert 结转 marker（server-set；指向预览 reservation）。None = 非 convert。
+    # 流到 PG Job.smart_state 写入（泛化分支）+ 经 request_data forward 进 JobRecord。
+    _convert_smart_state: dict | None = None
     if isinstance(request_data, dict) and "reuse_preview_job_id" in request_data:
         # CodeX P2: key PRESENCE = reuse intent. A malformed / blank value must
         # NOT silently fall through to a normal create — that could re-charge
@@ -1422,6 +1458,39 @@ async def intercept_create_job(
         # Full delivery + minutes charged (NOT a preview).
         request_data.pop("preview_mode", None)
         request_data.pop("reuse_preview_job_id", None)
+
+        # P3e D-C single-flight + 600 结转 marker（plan 2026-06-15 §4.6）。
+        # 确定性 job_id 从 (user, preview_job_id) 派生 → 同一预览的重复 convert（双击/
+        # 重发）收敛到同一完整任务。gateway pre-forward existing-check 命中 → 幂等返回
+        # 现有 F（**绝不 forward**）。job_id/smart_state 是 server-only（上方已剥离客户端
+        # 夹带值，1220-1221），此处由 server 设。marker 经 request_data forward 进
+        # JobRecord，并由下方泛化的 PG Job.smart_state 写入落 PG（settle 读 PG 列）。
+        # ⚠️ 措辞精确（CodeX 复审 P2）：这是 **best-effort 单飞 + 账本层 single-use 兜底**，
+        # 非"严格幂等单飞"。pre-check 在 PG insert 之前，真正并发的双击仍可能两个都 miss →
+        # 都 forward 同 job_id → Job API submit_job 覆盖+重启上游 worker（重跑付费 pipeline）。
+        # **钱仍安全**：PG job_id PK 原子回滚 loser 的分钟 reserve → 只一次 settle；carryover
+        # single-use + shadow_capture 幂等兜底。残留=transient 重跑算力，非重复扣费。
+        # 激活前硬化（advisory lock 串行 check+forward，镜像 P3e-4b _acquire_global_cap_lock）
+        # 由 plan §4.6 step 1.5 「视压测决定」，**翻旗激活前补**。
+        _convert_job_id = "job_" + hashlib.sha256(
+            f"{user.id}:convert:{_reuse_preview_job_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        _existing_convert = (
+            await db.execute(select(Job).where(Job.job_id == _convert_job_id))
+        ).scalar_one_or_none()
+        if _existing_convert is not None:
+            return await _idempotent_convert_job_response(_convert_job_id)
+        request_data["job_id"] = _convert_job_id
+        _convert_smart_state = {
+            # settle helper 读 preview_clone_offset_reservation_id（credits_service
+            # _CLONE_CARRYOVER_MARKER）single-use 消费预览结转额度；offset 金额取自
+            # 预览 reservation.amount_credits（不写死 600）。preview_source_job_id 供
+            # 审计链接 P↔F。
+            "preview_clone_credit_offset": int(_reuse_resolution.preview_credit_amount),
+            "preview_clone_offset_reservation_id": _reuse_resolution.preview_reservation_id,
+            "preview_source_job_id": _reuse_resolution.preview_job_id,
+        }
+        request_data["smart_state"] = dict(_convert_smart_state)
 
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
@@ -2300,6 +2369,9 @@ async def intercept_create_job(
                         db,
                         user_id=user.id,
                         task_id=_pre_job_id,
+                        # 克隆 reserve 金额（== _SMART_CLONE_RESERVE_CREDITS；保留字面量
+                        # 让既有钱-守卫 test_create_600_clone_reserve_untouched /
+                        # test_reserve_amount_600_and_lib_cap 钉住真值。改价须同步常量）。
                         amount_credits=600,
                         ttl_minutes=60,
                         library_cap=_smart_lib_cap,
@@ -2431,6 +2503,11 @@ async def intercept_create_job(
                 _smart_state_for_pg["smart_preview_mode"] = (
                     request_data.get("preview_mode") is True
                 )
+            elif _convert_smart_state:
+                # P3e D-C: convert-full has no fresh clone reservation, but it
+                # must persist the preview carryover marker in PG smart_state so
+                # the settlement helper can consume the preview credit exactly once.
+                _smart_state_for_pg = dict(_convert_smart_state)
             if job_id:
                 existing = await db.execute(select(Job).where(Job.job_id == job_id))
                 if existing.scalar_one_or_none() is None:
@@ -2533,6 +2610,20 @@ async def intercept_create_job(
                     _is_smart_preview = bool(_smart_clone_reservation_id) and (
                         request_data.get("preview_mode") is True
                     )
+                    # P3e D-B（plan 2026-06-15 §4.5）：克隆 600 抵扣进分钟点 → reserve 也减
+                    # offset，避免「付得起最终 max(600,分钟×100) 但不够 gross 600+分钟×100」
+                    # 的用户被误拒。R_own=600（自有克隆 reservation 已在上方预留）；
+                    # R_carryover=convert 结转额度。settle 仍是钱的权威（offset 按 actual
+                    # 重算）；reserve 偏少时 settle additional-debit 补足、不漏扣。net=0 时
+                    # reserve_credits_or_raise(0) no-op（短任务只占 600 克隆）。
+                    _reserve_offset = (
+                        _SMART_CLONE_RESERVE_CREDITS if _smart_clone_reservation_id else 0
+                    )
+                    if _convert_smart_state:
+                        _reserve_offset += int(
+                            _convert_smart_state.get("preview_clone_credit_offset") or 0
+                        )
+                    _minute_reserve_credits = max(0, shadow_credits - _reserve_offset)
                     if shadow_credits > 0 and not _is_smart_preview:
                         try:
                             await ensure_credit_buckets_for_user(db, user=user)
@@ -2540,7 +2631,7 @@ async def intercept_create_job(
                                 db,
                                 user_id=user.id,
                                 job_id=job_id,
-                                estimated_credits=shadow_credits,
+                                estimated_credits=_minute_reserve_credits,
                                 service_mode=service_mode,
                             )
                         except InsufficientCreditsError as exc:
@@ -6022,6 +6113,18 @@ async def update_source_metadata(
                         _late_is_smart_preview = extract_smart_preview_flag(
                             getattr(job, "smart_state", None)
                         )
+                        # P3e D-B（plan 2026-06-15 §4.5）：late reserve 也减克隆 600 offset
+                        # （与 create 端同口径，CodeX #3 要求两处都改）。读 PG Job.smart_state：
+                        # 自有克隆（smart_clone_reservation_id）→ R_own=600；convert 结转
+                        # （preview_clone_credit_offset）→ R_carryover。create 已 reserve 时
+                        # already_reserved 短路本块（不双减）。settle 仍权威。
+                        _late_ss = dict(getattr(job, "smart_state", None) or {})
+                        _late_offset = (
+                            _SMART_CLONE_RESERVE_CREDITS
+                            if _late_ss.get("smart_clone_reservation_id") else 0
+                        )
+                        _late_offset += int(_late_ss.get("preview_clone_credit_offset") or 0)
+                        _late_minute_reserve = max(0, late_credits - _late_offset)
                         if late_credits > 0 and not _late_is_smart_preview:
                             snap["credits_estimated"] = late_credits
                             job.metering_snapshot = dict(snap)
@@ -6032,10 +6135,13 @@ async def update_source_metadata(
                             )
                             await reserve_credits_or_raise(
                                 db, user_id=job.user_id, job_id=job_id,
-                                estimated_credits=late_credits,
+                                estimated_credits=_late_minute_reserve,
                                 service_mode=_svc_mode,
                             )
-                            logger.info("V3 late credit reserve for %s: %d credits", job_id, late_credits)
+                            logger.info(
+                                "V3 late credit reserve for %s: %d credits (gross=%d offset=%d)",
+                                job_id, _late_minute_reserve, late_credits, _late_offset,
+                            )
                 except InsufficientCreditsError as exc:
                     job.status = "failed"
                     job.current_stage = "failed"

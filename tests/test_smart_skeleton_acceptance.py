@@ -411,7 +411,12 @@ class TestSettleDispatchSmartCreditsPolicy:
                    return_value=(500, "standard", 5.0, "smart")), \
              patch("credits_service.ensure_credit_buckets_for_user", new=AsyncMock()), \
              patch("credits_service.should_settle_job_credits", return_value=True), \
-             patch("credits_service._has_job_credit_reserve", new=AsyncMock(return_value=True)):
+             patch("credits_service._has_job_credit_reserve", new=AsyncMock(return_value=True)), \
+             patch("credits_service._smart_clone_minute_offset",
+                   new=AsyncMock(side_effect=lambda *a, **k: (k["actual_credits"], {}))):
+            # P3e D-C: 抵扣 helper passthrough（隔离 dispatch 路由契约——克隆 600 抵扣
+            # 的钱-数学由 test_p3e_dc_clone_offset.py 单独覆盖；此处 mock_db 的 SUM 查询
+            # 返回 MagicMock(int()=1) 会误减 1，与本测试无关）。
             _run(settle_job_credit_ledger(mock_db, job, "succeeded"))
 
         assert m_capture.await_count == 1

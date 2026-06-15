@@ -48,6 +48,11 @@ class PreviewReuseResolution:
     voice_id: str
     source_type: str
     source_ref: str
+    # P3e D-C（plan 2026-06-15 §4.6）：预览 600 结转 marker 的**唯一权威来源**。
+    # full 任务终态结算时凭 ``preview_reservation_id`` single-use 消费该预览的
+    # ``preview_credit_amount``（取自 reservation.amount_credits，不写死 600）。
+    preview_reservation_id: str
+    preview_credit_amount: int
 
 
 async def resolve_preview_reuse(
@@ -160,6 +165,8 @@ async def resolve_preview_reuse(
             voice_id=voice_id,
             source_type=source_type,
             source_ref=source_ref,
+            preview_reservation_id=str(reservation.id),
+            preview_credit_amount=int(getattr(reservation, "amount_credits", 0) or 0),
         ),
         None,
     )

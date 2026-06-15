@@ -396,9 +396,16 @@ async def _backfill_smart_cost_summary_post_settle(
             )
             quota_used = None  # fail-closed: leave field null
 
+    # P3e D-C (CodeX P1): propagate the convert 600-carryover audit fields from
+    # the Job's metering_snapshot (stamped at settle by _smart_clone_minute_offset)
+    # into smart_cost_summary.json so the convert minute减免 is auditable. Inert
+    # (None) for non-convert / single-task jobs.
+    _snap = dict(getattr(db_job, "metering_snapshot", None) or {})
     backfill_smart_cost_summary(
         service_mode=str(service_mode or ""),
         project_dir=str(project_dir),
         credit_entries=persisted_entries,
         quota_used=quota_used,
+        carryover_applied_credits=_snap.get("clone_carryover_applied_credits"),
+        carryover_source_job_id=_snap.get("clone_carryover_source_job_id"),
     )
