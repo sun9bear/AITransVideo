@@ -125,6 +125,25 @@ def test_dc_idempotent_response_does_not_re_forward():
     assert "proxy_request" not in flat
 
 
+def test_dc_convert_singleflight_advisory_lock():
+    """🔥🔥 CodeX P2：advisory lock 在 pre-check **之前**串行同一预览的并发 convert，
+    关掉 transient 重跑窗口。key 跨进程稳定（sha256，禁 python hash()）；非 PG no-op。"""
+    create = _flat(_create_src())
+    assert "_acquire_convert_singleflight_lock(db, _convert_job_id)" in create
+    # lock 必须在 existing-check 之前
+    assert create.index("_acquire_convert_singleflight_lock(") < create.index(
+        "select(Job).where(Job.job_id == _convert_job_id)"
+    )
+    helper = _func_src(_JI, "_acquire_convert_singleflight_lock")
+    assert helper, "_acquire_convert_singleflight_lock 未找到"
+    hflat = _flat(helper)
+    assert 'dialect.name != "postgresql"' in hflat  # 非 PG → no-op
+    assert "pg_advisory_xact_lock" in hflat
+    assert "hashlib.sha256(convert_job_id" in hflat  # 跨进程稳定 key
+    # 🔥 禁用 python hash()（PYTHONHASHSEED 每进程随机 → 多 worker 算出不同 key → 不串行）
+    assert "hash(convert_job_id" not in hflat
+
+
 def test_dc_convert_markers_stamped_server_side():
     """🔥🔥 三 marker server-set 进 request_data['smart_state']（forward 进 JobRecord）。"""
     flat = _flat(_create_src())

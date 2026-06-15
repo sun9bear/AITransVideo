@@ -499,6 +499,37 @@ async def _idempotent_convert_job_response(job_id: str) -> Response:
         )
 
 
+async def _acquire_convert_singleflight_lock(db: AsyncSession, convert_job_id: str) -> None:
+    """串行化**同一预览**的并发 convert（双击/重发），关掉 single-flight 的 transient
+    重跑窗口（CodeX P2 / plan §4.6 step 1.5）。
+
+    取一个**派生自 convert_job_id 的事务级 advisory lock**（PG）：两个并发 convert
+    同一预览 → 同一 key → 第二个阻塞到第一个 commit 后才继续 → 其 pre-forward
+    existing-check 命中现有 F → 幂等返回、不再 forward → 上游 worker **不重跑**。
+    lock 随本事务 commit/rollback 自动释放（``xact`` 级），持有期 ≈ create forward
+    时延（submit_job queue 后即返，非整条 pipeline）。
+
+    **key 必须跨进程稳定**——uvicorn 多 worker 并发可能落在不同进程；**禁用
+    Python ``hash()``**（PYTHONHASHSEED 每进程随机化 → 同 job_id 在两进程算出不同
+    key → 不串行）。用 ``sha256(convert_job_id)`` 取 60 bit **正** bigint（< 2^63，
+    落在 PG advisory key 的 signed-bigint 范围）。key 含 (user, preview)（convert_
+    job_id 即由二者派生），故**不同 convert 不争用**，contention 仅限真双击。
+
+    锁顺序：本 advisory lock 在 convert 块**最早**获取（先于 reserve_quota /
+    credit buckets 的 FOR UPDATE）→ 固定顺序、无 lock-ordering 死锁；与
+    ``_acquire_global_cap_lock`` 固定 key 不同域、不冲突（convert 强制
+    auto_voice_clone=False，根本不进全局 cap 那段）。sqlite/非 PG → **no-op**
+    （与既有 advisory-lock 同语义；并发硬化只在 PG 生效）。
+    """
+    bind = db.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    _key = int(hashlib.sha256(convert_job_id.encode("utf-8")).hexdigest()[:15], 16)
+    await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _key})
+
+
 def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
     return _error_response(
         402,
@@ -1465,16 +1496,19 @@ async def intercept_create_job(
         # 现有 F（**绝不 forward**）。job_id/smart_state 是 server-only（上方已剥离客户端
         # 夹带值，1220-1221），此处由 server 设。marker 经 request_data forward 进
         # JobRecord，并由下方泛化的 PG Job.smart_state 写入落 PG（settle 读 PG 列）。
-        # ⚠️ 措辞精确（CodeX 复审 P2）：这是 **best-effort 单飞 + 账本层 single-use 兜底**，
-        # 非"严格幂等单飞"。pre-check 在 PG insert 之前，真正并发的双击仍可能两个都 miss →
-        # 都 forward 同 job_id → Job API submit_job 覆盖+重启上游 worker（重跑付费 pipeline）。
-        # **钱仍安全**：PG job_id PK 原子回滚 loser 的分钟 reserve → 只一次 settle；carryover
-        # single-use + shadow_capture 幂等兜底。残留=transient 重跑算力，非重复扣费。
-        # 激活前硬化（advisory lock 串行 check+forward，镜像 P3e-4b _acquire_global_cap_lock）
-        # 由 plan §4.6 step 1.5 「视压测决定」，**翻旗激活前补**。
+        # 钱-语义（CodeX 复审 P2）：单飞 = pre-check 收敛 + **账本层 single-use 兜底**
+        # （钱-权威）。真并发双击的极小窗口（两个都在对方 commit 前 pre-check）由
+        # **advisory lock 串行关掉**（下方 _acquire_convert_singleflight_lock）：同一预览
+        # 的并发 convert 串成单队，第二个在第一个 commit 后 pre-check 命中现有 F → 幂等
+        # 返回、不再 forward → 上游 worker **不重跑**。即便 advisory lock 不在（非 PG），
+        # 钱仍安全：PG job_id PK 原子回滚 loser 分钟 reserve → 只一次 settle；carryover
+        # single-use + shadow_capture 幂等兜底。
         _convert_job_id = "job_" + hashlib.sha256(
             f"{user.id}:convert:{_reuse_preview_job_id}".encode("utf-8")
         ).hexdigest()[:32]
+        # 在 pre-check **之前**取 advisory lock（持有至本事务 commit，覆盖 pre-check→
+        # forward→PG insert 全程），关掉并发 convert 的 transient 重跑窗口。
+        await _acquire_convert_singleflight_lock(db, _convert_job_id)
         _existing_convert = (
             await db.execute(select(Job).where(Job.job_id == _convert_job_id))
         ).scalar_one_or_none()
