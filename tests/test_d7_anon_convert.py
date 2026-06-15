@@ -2,12 +2,12 @@
 
 plan 2026-06-15-anonymous-preview-claim-binding-plan.md §6.5 / D7。
 
-认领后用**完整原始源** audit.stored_upload_path（非 teaser）建正式计费 job。复用既有
-smart-preview-reuse 模式：前端送 reuse_anonymous_preview_id，server 校验所有权
-（claim_user_id==user）+ 路径/hash（在上传根内/非 teaser/sha256 匹配 source_hash）→
-覆盖 source → 走既有计费 create。**不**强制 service_mode、不复用 voice、无 600 结转。
-**categorically 不自动克隆**：系统性中和三条 auto-clone lane（smart 强制 no-clone
-consent / express 剥 express_consent / free 剥 voice_strategy+free_consent）。
+认领后用**完整原始源** audit.stored_upload_path（非 teaser）建正式计费 job。前端送
+reuse_anonymous_preview_id，server 校验所有权（claim_user_id==user）+ 路径/hash（在上传
+根内/非 teaser/sha256 匹配 source_hash）→ **只覆盖 source** → 走**正常付费流程**。
+2026-06-16 项目主拍板：转完整=认领原视频后走完整正常流程，用户重选模式（快捷/工作台/
+智能），各模式克隆行为照旧（快捷/智能自动克隆、工作台可选），正常扣点、不漏计费——
+**不**强制预设、**不**中和克隆。唯一额外处理=剥 preview_mode（转完整≠预览，防跳分钟透支）。
 
 resolver 行为测试用**真 tmp 文件**（真路径/hash 校验覆盖，非全 mock）；intercept 块用
 区域源扫描锁结构（database-stub 见 memory feedback_test_database_stub_convention）。
@@ -266,35 +266,31 @@ def test_d7_block_reads_field_and_overrides_source():
     assert 'request_data.pop("reuse_anonymous_preview_id"' in b
 
 
-def test_d7_block_neutralizes_preview_and_clone():
-    """D7 **categorically 不自动克隆**：系统性中和全部三条 auto-clone lane（复审 HIGH×2
-    + CodeX express P1）。扫剥注释后代码。"""
+def test_d7_block_is_thin_source_override():
+    """D7 = **轻量 source 覆盖**（2026-06-16 项目主拍板）：覆盖 source + 剥 preview_mode
+    （计费正确性）；**不**中和克隆（各模式克隆走正常付费流程）、**不**强制 service_mode、
+    **不**自设 job_id（不与 smart 600-reserve 抢，避 HIGH#2）。扫剥注释后代码。"""
     b = _d7_block_code()
-    assert 'service_mode"] = "smart"' not in b, "D7 不得强制 smart（用户自选 mode）"
-    # ① preview_mode（HIGH#1：否则 smart+preview_mode 跳分钟预扣跑 full→透支）
-    assert 'pop("preview_mode"' in b, "D7 必须剥 preview_mode（非预览）"
-    # ② smart MiniMax：强制 no-clone consent（HIGH#2）
-    assert '"auto_voice_clone": False' in b, "D7 smart 模式必须强制 no-clone consent"
-    assert '"auto_voice_clone": True' not in b, "D7 绝不授权自动克隆"
-    assert "smart_state" not in b, "D7 无 600 结转 marker"
-    # ③ express CosyVoice：剥 express_consent（CodeX P1）
-    assert 'pop("express_consent"' in b, "D7 必须剥 express_consent（防 express 自动克隆）"
-    # ④ free MiMo voiceclone：剥 voice_strategy（→ preset_mapping）+ free_consent + ref
-    assert 'pop("voice_strategy"' in b, "D7 必须剥 voice_strategy（防 free voiceclone）"
-    assert 'pop("free_consent"' in b
-    assert 'pop("voiceclone_reference_path"' in b
-    # 不复用 voice（用户自选 preset）
-    assert 'pop("voice_a"' in b
+    # 覆盖完整源 + 剥 preview_mode（HIGH#1：转完整≠预览，防跳分钟透支）
+    assert 'request_data["source"]' in b
+    assert 'pop("preview_mode"' in b, "D7 必须剥 preview_mode（防跳分钟透支）"
+    # **不**强制 smart、**不**中和克隆 → 克隆按各模式正常付费流程触发
+    assert 'service_mode"] = "smart"' not in b, "D7 不强制 smart（用户自选 mode）"
+    assert '"auto_voice_clone": False' not in b, "D7 不再强制 no-clone（克隆走正常流程）"
+    assert 'pop("express_consent"' not in b, "D7 不剥 express_consent（express 自动克隆照常）"
+    assert 'pop("voice_strategy"' not in b, "D7 不剥 voice_strategy（克隆策略照常）"
+    assert 'pop("smart_consent"' not in b, "D7 不剥 smart_consent（智能版克隆照常）"
+    # **不**自设 job_id（HIGH#2：不与 600-reserve 的 idempotency_key job_id 抢）
+    assert "anon_convert" not in b, "D7 不自设确定性 job_id"
+    assert "_acquire_convert_singleflight_lock" not in b, "D7 不用 advisory lock"
 
 
-def test_d7_block_gate_auth_ambiguity_singleflight():
+def test_d7_block_gate_auth_ambiguity():
     b = _d7_block_src()
     assert "anonymous_preview_claim_enabled" in b, "gate 同认领旗"
     assert "reuse_request_ambiguous" in b, "同时指定两 reuse key → 拒"
     assert "user is None" in b and "auth_required" in b, "未登录 → 401"
-    assert "anon_convert:" in b, "确定性 job_id seed 用 anon_convert 前缀（与 smart 隔离）"
-    assert "_acquire_convert_singleflight_lock" in b
-    assert "_idempotent_convert_job_response" in b
+    assert "resolve_anonymous_preview_reuse" in b
 
 
 # ---------------------------------------------------------------------------

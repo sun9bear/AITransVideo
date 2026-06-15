@@ -1533,10 +1533,11 @@ async def intercept_create_job(
     # 前端只送 ``reuse_anonymous_preview_id``（**不**送 source/path——防越权）。server
     # 校验所有权（claim_user_id==user，已认领）+ 完整源 stored_upload_path（在上传根内/
     # 非 teaser/hash 匹配 source_hash），用**完整原始上传**覆盖 source，走既有计费 create。
-    # 与 smart reuse 区别：**不**强制 service_mode（用户自选 express/studio/smart，正常
-    # gating + 计费）、不复用 voice、无 600 结转/smart_state。**categorically 不自动克隆**：
-    # 系统性中和全部三条 auto-clone lane（smart 强制 no-clone consent / express+free 剥
-    # consent + voice_strategy）——见下方 source override 后的中和块。默认 inert：absent
+    # 与 smart reuse 区别：D7 是**轻量 source 覆盖**——只把 source 换成认领的完整原始
+    # 视频，service_mode/consent/clone/voice 全部走**正常付费流程**（用户重选模式，各
+    # 模式克隆行为照旧：快捷/智能自动克隆、工作台可选）。**不**自设 job_id、**不**强制
+    # service_mode、**不**复用 voice、**不**中和克隆（2026-06-16 项目主拍板）。唯一额外
+    # 处理=剥 preview_mode（转完整≠预览，防跳分钟透支）。默认 inert：absent
     # reuse_anonymous_preview_id → byte-identical create。
     _reuse_anon_preview_id = None
     if isinstance(request_data, dict) and "reuse_anonymous_preview_id" in request_data:
@@ -1597,60 +1598,24 @@ async def intercept_create_job(
                 },
             )
         # Server-authoritative source override（完整原始源 server 派生，防越权）。
-        # **不**改 service_mode（用户自选，正常 gating/计费）；**不**设 voice/
-        # smart_consent/smart_state（无 600 结转、不触 clone）。
+        # D7 **只覆盖 source**（完整原始上传，server 派生防越权）；其余 service_mode/
+        # consent/clone/voice **全部走正常付费流程**——用户重选模式（快捷/工作台/智能），
+        # 各模式克隆行为照旧（快捷/智能自动克隆、工作台可选克隆或预设），正常扣点、
+        # 不漏计费（2026-06-16 项目主拍板：转完整=认领原视频后走完整正常付费流程，
+        # 禁止强制预设以免降低体验/收入）。
         request_data["source"] = {
             "type": _anon_resolution.source_type,
             "value": _anon_resolution.source_ref,
         }
         request_data.pop("reuse_anonymous_preview_id", None)
-        # 中和 preview/clone（复审 HIGH×2 + CodeX express P1）：D7 是**完整转换非预览、
-        # 不自动克隆**（红线：转完整=干净付费任务，克隆走后续 Studio 显式 gated 路径）。
-        # 系统性堵死全部三条 auto-clone lane（CLAUDE.md 付费 API 段定义的全集）：
-        #  ① preview_mode：剥——否则 smart+preview_mode=True 让 _is_smart_preview 跳分钟
-        #     预扣却跑 full → settle 透支（HIGH#1）。
-        #  ② smart MiniMax：smart 硬要求 6 字段 consent（L1616 validate-or-400），故强制
-        #     no-clone consent（镜像 smart reuse L1369）；否则 auto_voice_clone=True 触发
-        #     600-reserve（覆盖 D7 确定性 job_id + 授权克隆，HIGH#2）。non-smart 直接 pop。
-        #  ③ express CosyVoice：剥 express_consent——否则 auto_voice_clone=True 经
-        #     maybe_run_express_auto_clone 触发 worker 克隆（CodeX P1）。
-        #  ④ free MiMo voiceclone：剥 voice_strategy（→ 默认 preset_mapping，process.py:2794/
-        #     6249 free_voiceclone 分支不触）+ free_consent + voiceclone_reference_path。
+        # 唯一额外处理（计费正确性，与克隆无关）：剥 preview_mode。D7 是**完整转换、
+        # 非预览**——若客户端夹带 preview_mode=True，配合 smart+reservation 会让
+        # _is_smart_preview 跳过分钟预扣却跑 full 任务 → settle 透支（复审 HIGH#1）。
+        # 转完整永远是 full job，preview_mode 无意义。
         request_data.pop("preview_mode", None)
-        if str(request_data.get("service_mode") or "") == "smart":
-            request_data["smart_consent"] = {
-                "auto_voice_clone": False,
-                "auto_retranslate": False,
-                "auto_retts": False,
-                "auto_multimodal_verification": False,
-                "no_extra_charge_without_confirmation": True,
-                "on_budget_exhausted": "degraded_delivery_with_report",
-            }
-        else:
-            request_data.pop("smart_consent", None)
-        request_data.pop("express_consent", None)
-        request_data.pop("express_consent_parse_error", None)
-        request_data.pop("free_consent", None)
-        request_data.pop("voice_strategy", None)  # → 默认 preset_mapping（不触 free voiceclone）
-        request_data.pop("voiceclone_reference_path", None)
-        request_data.pop("voice_a", None)  # D7 不复用 voice（用户自选 preset）
-        request_data.pop("voice_b", None)
-
-        # 单飞幂等（镜像 D-C）：确定性 job_id 从 (user, anon preview_id) 派生 → 同一
-        # 预览重复 convert（双击/重发）收敛到同一任务。seed 用 'anon_convert:' 前缀
-        # （与 smart 'convert:' 隔离）。advisory lock 串行并发双击 → 第二个 pre-check
-        # 命中现有 F 幂等返回，不重 forward。job_id 是 server-only（上方已剥客户端值）。
-        _anon_convert_job_id = "job_" + hashlib.sha256(
-            f"{user.id}:anon_convert:{_reuse_anon_preview_id}".encode("utf-8")
-        ).hexdigest()[:32]
-        await _acquire_convert_singleflight_lock(db, _anon_convert_job_id)
-        _existing_anon_convert = (
-            await db.execute(select(Job).where(Job.job_id == _anon_convert_job_id))
-        ).scalar_one_or_none()
-        if _existing_anon_convert is not None:
-            return await _idempotent_convert_job_response(_anon_convert_job_id)
-        request_data["job_id"] = _anon_convert_job_id
-        # 不设 smart_state（无 600 结转；plan §6.5「不同入口，无 reservation 可结转」）。
+        # **不自设 job_id**：让正常流程 mint（smart+clone 的 600-reserve 会按
+        # idempotency_key 设自己的 job_id，D7 不与之抢——复审 HIGH#2 的根因）。双击防护
+        # = 前端 debounce（与普通 create 一致，本就无 server 端 dedup）。
 
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
