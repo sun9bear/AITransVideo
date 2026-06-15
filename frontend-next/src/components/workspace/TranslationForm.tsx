@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useRef, useState, type FormEvent } from "react"
 import Link from "next/link"
 import { toast } from "sonner"
 
@@ -116,6 +116,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // 渲染认领来源 banner、跳过源校验、提交带 reuse_anonymous_preview_id（服务端覆盖 source
   // 走正常付费流程，用户照常选模式付费）。
   const [reuseAnonPreviewId, setReuseAnonPreviewId] = useState<string | null>(null)
+  // 双击守卫（CodeX P2）：submitState 异步，按钮禁用前的快速双击可能触发两次提交→
+  // 两个付费任务。ref 级 guard 同步拦截（普通 create + 转完整都防）。
+  const submittingRef = useRef(false)
 
   const sourceValidationError = reuseAnonPreviewId
     ? null
@@ -294,10 +297,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (submittingRef.current) return // 双击守卫（CodeX P2）：同步拦截快速重复提交
     if (validationError) {
       toast.error(validationError)
       return
     }
+    submittingRef.current = true
     setSubmitState("submitting")
     setCreditGateError(null)
     // PR-A part 2 §7: resolve the selected direction. Only send the language
@@ -347,6 +352,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         await loadActiveJobs(true)
       }
       setSubmitState("error")
+      // D7（CodeX P2）：转完整失败且是「预览不可复用」（认领过期/越权/源失效，
+      // anon_preview_* 系列）→ 清转完整模式 + 提示重新上传，避免卡在用不了的认领来源。
+      if (reuseAnonPreviewId && isAnonConvertRejected(error)) {
+        setReuseAnonPreviewId(null)
+        clearAnonConvertReady()
+        toast.error("该预览已无法转完整（可能已过期），请重新上传视频创建。")
+        return
+      }
       const msg = getErrorMessage(error)
       if (isCreditGateError(error)) {
         setCreditGateError(msg)
@@ -355,6 +368,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       } else {
         toast.error(msg)
       }
+    } finally {
+      submittingRef.current = false // 失败可重试；成功已 onCreated 跳转（组件卸载）
     }
   }
 
@@ -1123,6 +1138,16 @@ function isCreditGateError(error: unknown): boolean {
   if (!detail || typeof detail !== "object") return false
   const code = (detail as { error_code?: unknown }).error_code
   return typeof code === "string" && CREDIT_GATE_ERROR_CODES.has(code)
+}
+
+// D7：「预览不可复用」错误（gateway _error_response 把 code 放 body.error）。
+// anon_preview_not_found/forbidden/source_unavailable → 认领过期/越权/源失效 →
+// 转完整模式应清除并提示重新上传。
+function isAnonConvertRejected(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false
+  if (!error.payload || typeof error.payload !== "object") return false
+  const code = (error.payload as { error?: unknown }).error
+  return typeof code === "string" && code.startsWith("anon_preview")
 }
 
 function validateYoutubeUrl(value: string) {

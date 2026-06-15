@@ -61,23 +61,40 @@ export function clearAnonClaimHint(): void {
 
 // 认领成功 → 转完整就绪标记（D7）。与 CLAIM_HINT_KEY 分离：后者在认领后即清
 // （只为「是否调 claim」），本 key 携带已认领的 preview_id 供创建页「转完整」用。
-// 仅存 preview_id（非凭证；服务端凭 claim_user_id 反查原视频）。创建页读后即清。
+// 仅存 preview_id（非凭证；服务端凭 claim_user_id 反查原视频 + 挡错账号）。
+// 存 {previewId, ts} 带 24h TTL（CodeX P2）：防跨会话/跨账号在同一浏览器残留旧
+// banner（如 A 认领未转完整登出、B 登录看到 A 的 banner）。读时超期/损坏即清。
 const CONVERT_READY_KEY = "avt_anon_convert_ready"
+const CONVERT_READY_TTL_MS = 24 * 60 * 60 * 1000
 
-/** 认领成功后调用：记下「有一个已认领预览待转完整」+ 其 preview_id。 */
+/** 认领成功后调用：记下「有一个已认领预览待转完整」+ 其 preview_id（带时间戳）。 */
 export function setAnonConvertReady(previewId: string): void {
   try {
-    window.localStorage.setItem(CONVERT_READY_KEY, previewId)
+    window.localStorage.setItem(
+      CONVERT_READY_KEY,
+      JSON.stringify({ previewId, ts: Date.now() }),
+    )
   } catch {
     // 忽略（隐私模式/配额）——转完整入口不显示，用户仍可正常上传创建。
   }
 }
 
-/** 创建页读取待转完整的 preview_id（无则 null）。 */
+/** 创建页读取待转完整的 preview_id（无 / 超 24h / 损坏 → null 并清）。 */
 export function getAnonConvertReady(): string | null {
   try {
-    return window.localStorage.getItem(CONVERT_READY_KEY)
+    const raw = window.localStorage.getItem(CONVERT_READY_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { previewId?: unknown; ts?: unknown }
+    const previewId = typeof parsed.previewId === "string" ? parsed.previewId : null
+    const ts = typeof parsed.ts === "number" ? parsed.ts : 0
+    if (!previewId || Date.now() - ts > CONVERT_READY_TTL_MS) {
+      clearAnonConvertReady()
+      return null
+    }
+    return previewId
   } catch {
+    // 解析失败（旧裸字符串 / 损坏）→ 清除，回 null。
+    clearAnonConvertReady()
     return null
   }
 }
