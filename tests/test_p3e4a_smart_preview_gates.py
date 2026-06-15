@@ -213,12 +213,14 @@ class TestEntitlementGateWiring:
 
     def test_gate_a_smart_disabled_guarded_by_exemption(self):
         """Gate A（smart kill switch，403 smart_disabled）必须先问放行判定，
-        否则免费预览用户在 Gate A 就被 403、永远进不了受限 lane。"""
+        否则免费预览用户在 Gate A 就被 403、永远进不了受限 lane。
+        （P3e-4c 后 Gate A 内多了 smart_upgrade_required 升级子分支，故以结构性
+        guard 定位最近的 `if not _smart_preview_exempt:` 而非固定字符窗口。）"""
         src = self._src()
         idx = src.find('"smart_disabled"')
         assert idx >= 0, "smart_disabled 403 分支未找到"
-        window = src[max(0, idx - 400):idx]
-        assert "_smart_preview_exempt" in window, (
+        guard = src.rfind("if not _smart_preview_exempt:", 0, idx)
+        assert guard >= 0, (
             "Gate A 的 smart_disabled 403 未被 _smart_preview_exempt 守卫——"
             "免费预览放行会在 Gate A 被吞。"
         )

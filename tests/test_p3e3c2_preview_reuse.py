@@ -317,3 +317,47 @@ def test_create_reuse_malformed_key_rejected_not_silent():
     assert '"reuse_preview_job_id" in request_data' in flat
     # 非法值显式拒绝（不静默 fall through）
     assert "reuse_request_invalid" in flat
+
+
+# ---------------------------------------------------------------------------
+# entitlement 决策 A（项目主 2026-06-15「走正式流程·需升级套餐」）：
+# preview→full 转化由 plan 不含 smart 的用户（免费档）发起时，给可区分的升级指引。
+# 钱模型不变（照常按分钟扣、复用不重扣 600）；这里只验证 4xx reason 的可区分性。
+# ---------------------------------------------------------------------------
+
+
+def test_create_reuse_blocked_plan_gives_upgrade_not_contact_admin():
+    """🔥 plan 不含 smart 的用户转完整 → smart_upgrade_required（前端渲染升级 CTA），
+    而非误导性的全局 smart_disabled「联系管理员开启」。"""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert "smart_upgrade_required" in flat, "缺升级 reason code"
+    up = body.index("smart_upgrade_required")
+    # 升级分支仅由 reuse 转化触发（_reuse_preview_job_id is not None 守卫在前）
+    guard = body.rfind("_reuse_preview_job_id is not None", 0, up)
+    assert guard != -1, "smart_upgrade_required 必须在 reuse 守卫之内"
+    # 且基于 plan base（allowed_service_modes）不含 smart 判定 —— 区分 kill-switch 全局关
+    window = body[guard:up]
+    assert "get_effective_plan_gate" in window and "not in _plan_base_modes" in window, \
+        "升级文案须基于 plan base 不含 smart 判定，而非笼统拦截"
+
+
+def test_create_reuse_upgrade_preserves_generic_smart_disabled():
+    """🔥 既有 kill-switch 语义不破：升级分支只在 reuse+plan-缺-smart 命中；其余
+    smart 被停（kill-switch 全局关 / 非 reuse）仍回 smart_disabled 兜底。"""
+    body = _create_src()
+    assert "smart_disabled" in body
+    up = body.index("smart_upgrade_required")
+    # 通用 smart_disabled 返回必须保留在升级分支**之后**（兜底未被替换）
+    disabled = body.index("smart_disabled", up)
+    assert disabled > up, "通用 smart_disabled 兜底返回必须保留在升级分支之后"
+
+
+def test_create_reuse_upgrade_inside_smart_entitlement_gate():
+    """🔥 位置正确：升级分支嵌在 smart entitlement 门（"smart" not in effective_modes）
+    + not _smart_preview_exempt 块内 —— 经预览 exemption 放行的 lane 不受影响。"""
+    body = _create_src()
+    gate = body.index('"smart" not in effective_modes')
+    exempt = body.index("if not _smart_preview_exempt:", gate)
+    up = body.index("smart_upgrade_required", exempt)
+    assert gate < exempt < up, "升级分支须嵌在 smart 门 + not exempt 块内"

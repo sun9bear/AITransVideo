@@ -134,4 +134,11 @@
 - **CodeX MEDIUM**：migration `038_smart_clone_created_at_index` 给 `created_at` 建索引（daily 全局 count 提速，避免反滥用闸成 DB 热点 + 缩短锁持有）。
 - 评审：4-lens 对抗（money/abuse/failclosed/counting）**0 real** + CodeX（无 CRITICAL，HIGH/MEDIUM 已修，LOW=测试入提交+1）。`job_intercept` 读两旗透传 `_reserve_smart_clone`。测试 `tests/test_p3e4b_global_caps.py`（15）。默认 inert：`smart_preview_clone_enabled=False` → 不 reserve → cap 路径不触发 → 字节级不变。
 
-**非钱依赖（归后续）**：免费用户**转完整**（reuse→full）仍过既有 smart entitlement kill-switch；预览**前端入口** + 预扣弹窗 + consent 驱动 + 反滥用 cap 的**前端降级提示**（`daily_cap_exceeded`/`inflight_cap_exceeded` 文案）= P3e-4c。
+**P3e-4c 决策（项目主 2026-06-15 拍板，两问已定）**：
+
+1. **钱模型 = 转换照常按分钟扣**。免费用户看完 3min 预览后转完整正式片**不享特殊计费**——走正式 create 流程，按所选 mode（快捷/智能）的分钟费率**正常扣点**。600 只为预览克隆；完整成片照常按分钟扣。**此模型早已由 `preview_reuse_service` + reuse 覆盖块实现**（reuse 强制 `auto_voice_clone=False` → 跳 600 重扣 + 不重克隆；pop `preview_mode` → 完整流程照常 reserve 分钟）。结论：**钱侧零改动**。
+2. **entitlement = 走正式流程·需升级套餐**（不开 entitlement 旁路）。免费档 plan 仅含 express（`plan_catalog` free `allowed_service_modes=("express",)`），转完整智能版仍受既有 smart kill-switch / plan gate 约束 → 必须升级到含 smart 的套餐（Plus/Pro）。**不**为 reuse 开一次性 smart 通行。
+
+**本 slice（决策 A 后端，唯一改动）**：`intercept_create_job` Gate A 在 `_reuse_preview_job_id is not None`（转化路径）且 `get_effective_plan_gate(user)` 的 plan base **不含 smart** 时，返回可区分的 **403 `smart_upgrade_required`**（"转完整智能版需升级到 Plus/Pro …复用不会重复扣除预览已支付的克隆费用"，detail `via=preview_reuse`），而非误导性的全局 `smart_disabled`「联系管理员开启」。kill-switch 全局关（plan 含 smart 但 env/admin 停）或非 reuse 仍回既有 `smart_disabled`——`test_smart_kill_switch` 的 Plus-user 断言不受影响。`service_mode` 在 `_gate_service_mode` 后由 request_data 重派生（reuse 覆盖强制 `service_mode="smart"`），故 `express+reuse` 伪造**无法绕过**本门。测试：`test_p3e3c2_preview_reuse`（+3 source-scan）、`test_p3e4a_smart_preview_gates::test_gate_a_smart_disabled_guarded_by_exemption`（窗口→结构性 guard 定位，更鲁棒）。
+
+**剩 = P3e-4c 纯前端**：预览**入口** + 600 预扣弹窗（`getMyCredits` 余额）+ consent 驱动 `auto_voice_clone`（`jobs.ts` 现硬编 `true`）+ admin 旋钮去占位 + 反滥用 cap 降级提示（`daily_cap_exceeded`/`inflight_cap_exceeded`）+ reservation 失败 UI + **转完整 CTA**（送 `reuse_preview_job_id`；免费用户撞 `smart_upgrade_required` → 渲染**升级 CTA**而非死路）。**后端已全完成**，前端不再 gate 任何钱/entitlement 决策。

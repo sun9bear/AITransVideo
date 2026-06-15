@@ -1469,6 +1469,29 @@ async def intercept_create_job(
         effective_modes = get_effective_allowed_service_modes(user)
         if "smart" not in effective_modes:
             if not _smart_preview_exempt:
+                # P3e-4c entitlement 决策 A（项目主 2026-06-15 拍板「走正式流程·
+                # 需升级套餐」）：preview→full 转化由 plan 不含 smart 的用户（免费档）
+                # 发起时，给"升级套餐"指引而非误导性的全局"未启用 / 联系管理员"。
+                # 钱模型不变（完整流程照常按分钟扣、复用不重扣 600）；此处只让 4xx
+                # reason 可区分 "plan 缺 smart" 与 "kill-switch 全局关"，前端据此渲染
+                # 升级 CTA 而非死路。注：service_mode 已在 _gate_service_mode 后由
+                # request_data 重派生（reuse 覆盖强制 service_mode="smart"），故
+                # express+reuse 伪造无法绕过本门。仅 reuse 转化且 plan base 不含
+                # smart 才走升级文案；kill-switch 关（plan 含 smart 但 env/admin 停）
+                # 仍回既有 smart_disabled——test_smart_kill_switch 的 Plus-user 断言
+                # 不受影响。
+                if _reuse_preview_job_id is not None:
+                    from plan_catalog import get_effective_plan_gate
+                    _plan_base_modes = tuple(
+                        get_effective_plan_gate(user).get("allowed_service_modes", ())
+                    )
+                    if "smart" not in _plan_base_modes:
+                        return _error_response(
+                            403, "smart_upgrade_required",
+                            "转完整智能版需升级到 Plus / Pro 套餐后再试。"
+                            "复用不会重复扣除预览已支付的克隆费用。",
+                            {"requested_mode": "smart", "via": "preview_reuse"},
+                        )
                 return _error_response(
                     403, "smart_disabled",
                     "智能版当前未启用。请联系管理员开启 Smart 模式后再试。",
