@@ -31,13 +31,13 @@ import hashlib
 import logging
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from anonymous_preview_policy import (
@@ -69,11 +69,12 @@ from anonymous_session import (
     get_or_create_anonymous_session,
     require_anonymous_session,
 )
+from auth import get_current_user
 from config import settings
 from csrf import require_same_origin_state_change
 from database import get_db
 from internal_auth import internal_headers
-from models import AnonymousPreviewRecord
+from models import AnonymousPreviewRecord, AnonymousSession, User
 from proxy import get_client
 
 logger = logging.getLogger(__name__)
@@ -1694,4 +1695,256 @@ async def anonymous_preview_create(
     return JSONResponse(
         status_code=202,
         content={"preview_id": safe_id, "status": "processing"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /claim — 匿名预览 → 登录认领（Model A 元数据桥）
+# ---------------------------------------------------------------------------
+#
+# plan 2026-06-15-anonymous-preview-claim-binding-plan.md §5.
+# 登录用户凭浏览器既有的 avt_anon HttpOnly cookie，把那次匿名预览的
+# anonymous_sessions + anonymous_preview_records 绑定到账户。Model A 元数据桥：
+# 只绑 owner / 元数据，**绝不**改 jobs.user_id、不触终态结算、不触发任何 clone。
+
+# 认领后媒体保留窗口（plan D4，默认 7d）。改为 admin 旋钮属后续切片（YAGNI）。
+_CLAIM_RETENTION = timedelta(days=7)
+
+# 轻量 per-IP/日限频（plan §5.3.6，防 cookie 扫描/撞库式认领）。/claim 已 login-gated
+# + avt_anon token 不可猜（32B 随机 HMAC），故 cap 取宽松值（防扫描非 UX throttle，
+# 兼顾共享 NAT 办公网多用户同 IP 登录）。
+_CLAIM_RATE_CAP_PER_IP = 60
+_CLAIM_RATE_MODE = "claim"
+
+
+def _claim_admin_enabled() -> bool:
+    """admin ``anonymous_preview_claim_enabled`` 严格读取，fail-closed。
+
+    默认 False（plan v3.1 #4：认领会延长媒体保留 + 新增认证写端点 → 默认 OFF
+    灰度）。strict ``is True`` 防 raw-JSON 字符串 ``"false"`` 误开；任何读取异常
+    → False（端点 inert）。镜像既有 ``_get_admin_enabled`` / clone-gate 模式。
+    """
+    try:
+        from admin_settings import load_settings
+
+        return load_settings().anonymous_preview_claim_enabled is True
+    except Exception:  # noqa: BLE001 — fail-closed
+        return False
+
+
+async def _claim_rate_limited(db: AsyncSession, request: Request) -> bool:
+    """Per-IP/日认领限频（消费式，独立提交）。返回 True=超限（应 429）。
+
+    用与 ``PgRateLimitCounterStore.try_acquire``（anonymous_preview_quota.py:197）
+    **完全相同的实证 upsert SQL** 在路由自身 AsyncSession 上执行，``mode='claim'``
+    与 intake 计数器完全隔离（唯一约束 scope+scope_key+mode+usage_date）。增量须
+    **独立提交**——失败尝试也消耗预算，防扫描刷量被回滚退款。
+
+    空 IP / 限频存储异常 → **fail-open**（返回 False，放行）：本端点 login-gated +
+    无付费下游 + token 不可猜，限频纯属纵深防御，不应因 DB 抖动降低可用性（**有意**
+    区别于 /upload 守护免费算力的 fail-closed；见 plan 一致性自检 / 交 CodeX 复核）。
+    """
+    ip = extract_client_ip(request) or ""
+    if not ip:
+        return False  # 空 IP → 跳过（避免所有流量挤进单一桶集体触顶 / 自我 DoS）
+    day = shanghai_today()
+    ip_hash = hash_scope_key(
+        f"claim_ip:{ip}", secret=settings.anonymous_preview_hash_secret
+    )
+    claim_key = f"claim_ip:{ip_hash}:{day}"
+    try:
+        row = (
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO anonymous_preview_daily_usage
+                        (id, scope, scope_key, mode, usage_date, count,
+                         created_at, updated_at)
+                    VALUES
+                        (gen_random_uuid(), :scope, :key, :mode, :day, 1,
+                         now(), now())
+                    ON CONFLICT (scope, scope_key, mode, usage_date)
+                    DO UPDATE SET
+                        count = anonymous_preview_daily_usage.count + 1,
+                        updated_at = now()
+                    WHERE anonymous_preview_daily_usage.count < :cap
+                    RETURNING count
+                    """
+                ),
+                {
+                    "scope": ANON_PREVIEW_COUNTER_SCOPE,
+                    "key": claim_key,
+                    "mode": _CLAIM_RATE_MODE,
+                    "day": day,
+                    "cap": _CLAIM_RATE_CAP_PER_IP,
+                },
+            )
+        ).fetchone()
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 — fail-open（见 docstring）
+        await db.rollback()
+        logger.warning(
+            "anon_claim: rate-limit store error — fail-open（放行）: %s", exc
+        )
+        return False
+    return row is None
+
+
+@router.post("/claim")
+async def anonymous_preview_claim(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> Response:
+    """POST /gateway/anonymous-preview/claim — 登录认领匿名预览（Model A 元数据桥）.
+
+    凭 avt_anon HttpOnly cookie 把匿名 session + 其预览 record 绑定到当前登录
+    用户。**绝不**改 jobs.user_id / 不触结算 / 不触发 clone（plan §5.4 红线）。
+
+    返回：
+      200 {claimed:true, preview_ids:[...], count}  — 认领成功
+      200 {claimed:false, count:0}                  — no-op（无 cookie / session
+            过期 / 无 eligible record / 已被他人认领；**统一防探测**，plan v3.1 #3）
+      401  — 未登录（flag ON 时；显式挡 None，不依赖 require_auth）
+      403  — CSRF 跨站
+      429  — 限频
+      503  — DB 写失败（retryable，plan §5.3.7）
+    """
+    # 0. CSRF same-origin（plan v3 #4；与 /upload /create 同款 inline try/except）。
+    try:
+        require_same_origin_state_change(request)
+    except Exception:  # noqa: BLE001
+        return JSONResponse(
+            status_code=403, content={"error": "csrf_origin_rejected"}
+        )
+
+    # 1. admin gate（fail-closed，默认 OFF → 端点存在但 inert no-op，不 404）。
+    if not _claim_admin_enabled():
+        return JSONResponse(status_code=200, content={"claimed": False, "count": 0})
+
+    # 2. 认证：显式 None→401（plan v2 #2；require_auth 在 auth_required=false 放行 None）。
+    if user is None:
+        return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
+    # 3. avt_anon bearer：缺失 → 200 no-op（读侧 miss，**非** 401）。
+    avt_anon = request.cookies.get("avt_anon")
+    if not avt_anon:
+        return JSONResponse(status_code=200, content={"claimed": False, "count": 0})
+
+    # 4. 限频（per-IP/日，fail-open）。
+    if await _claim_rate_limited(db, request):
+        return JSONResponse(status_code=429, content={"error": "rate_limited"})
+
+    # 5. 双层 HMAC 派生（plan v2 #1 / CodeX#1）：session 表 PK = 裸 cookie hash；
+    #    record.session_id = hash_scope_key("sess:"+裸hash)。错用裸 hash 查 record
+    #    恒 0 行（2026-06-11 冒烟事故根因）。
+    session_id_hash = hash_scope_key(
+        avt_anon, secret=settings.anonymous_preview_hash_secret
+    )
+    stored_session_key = hash_scope_key(
+        f"sess:{session_id_hash}", secret=settings.anonymous_preview_hash_secret
+    )
+
+    now = datetime.now(timezone.utc)
+    retention_cutoff = now + _CLAIM_RETENTION
+    claimed_at_iso = now.isoformat()
+    uid = user.id
+
+    try:
+        # 6a. record 绑定 = 单条原子 UPDATE...RETURNING（plan v3.1 #1，无 SELECT
+        #     窗口/无半状态）。条件 expires_at>now（不绑已过期）+ (claim_user_id IS
+        #     NULL OR =本人)（幂等 + 防绑他人，安全由条件保证非返回码）。延长
+        #     expires_at=GREATEST(...)（覆盖 stored_upload_path/teaser_path 保留，
+        #     §6.1）；audit.claimed_at 经 jsonb_set(COALESCE(audit,'{}'::jsonb),...)
+        #     （plan v3.1 #2 防 jsonb_set(NULL)→NULL）。决胜用 RETURNING.all() 非 rowcount。
+        bound = (
+            await db.execute(
+                update(AnonymousPreviewRecord)
+                .where(
+                    AnonymousPreviewRecord.session_id == stored_session_key,
+                    AnonymousPreviewRecord.expires_at > now,
+                    # 只绑「可认领」record = create gate 的 ready 契约状态（L885/L1267）。
+                    # 排除 block-status 死 record（rejected/failed/...）：① 它们本不
+                    # 可转完整；② 媒体由 sweeper phase(a) 按合规即时清，认领延长
+                    # expires_at 对其无意义（复审 sql-concurrency/inert 多 lens 收敛）。
+                    AnonymousPreviewRecord.status == _READY_STATUS,
+                    or_(
+                        AnonymousPreviewRecord.claim_user_id.is_(None),
+                        AnonymousPreviewRecord.claim_user_id == uid,
+                    ),
+                )
+                .values(
+                    claim_user_id=uid,
+                    expires_at=func.greatest(
+                        AnonymousPreviewRecord.expires_at, retention_cutoff
+                    ),
+                    audit=func.jsonb_set(
+                        func.coalesce(
+                            AnonymousPreviewRecord.audit, text("'{}'::jsonb")
+                        ),
+                        text("'{claimed_at}'"),
+                        func.to_jsonb(claimed_at_iso),
+                    ),
+                )
+                .returning(AnonymousPreviewRecord.preview_id)
+            )
+        ).all()
+
+        if not bound:
+            # 无 eligible record（无该 session 的 record / 全过期 / 全被他人占）
+            # → 统一 200 no-op（防探测，plan v3.1 #3）。
+            await db.rollback()
+            return JSONResponse(
+                status_code=200, content={"claimed": False, "count": 0}
+            )
+
+        # 6b. session 一次性认领锁（同事务，**record 之后**；plan v3.1 #1）。RETURNING
+        #     决胜；失败（被他人占）→ rollback 整个事务（含 record 绑定）→ 绝无
+        #     session-claimed-但-record-未绑半状态。延长 session expires_at 使其与
+        #     record 同生命周期（re-claim 一致）。
+        won = (
+            await db.execute(
+                update(AnonymousSession)
+                .where(
+                    AnonymousSession.session_id_hash == session_id_hash,
+                    or_(
+                        AnonymousSession.claim_user_id.is_(None),
+                        AnonymousSession.claim_user_id == uid,
+                    ),
+                )
+                .values(
+                    claim_user_id=uid,
+                    expires_at=func.greatest(
+                        AnonymousSession.expires_at, retention_cutoff
+                    ),
+                )
+                .returning(AnonymousSession.session_id_hash)
+            )
+        ).first()  # session_id_hash 是 PK，UPDATE 至多 1 行 → .first() 即决胜
+
+        if won is None:
+            await db.rollback()
+            return JSONResponse(
+                status_code=200, content={"claimed": False, "count": 0}
+            )
+
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 — 写失败 → 503 retryable（plan §5.3.7）
+        await db.rollback()
+        logger.warning("anon_claim: bind failed — 503 retryable: %s", exc)
+        return JSONResponse(
+            status_code=503, content={"error": "claim_unavailable"}
+        )
+
+    preview_ids = [r[0] for r in bound]
+    logger.info(
+        "anon_claim: bound %d record(s) to user=%s", len(preview_ids), uid
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "claimed": True,
+            "preview_ids": preview_ids,
+            "count": len(preview_ids),
+        },
     )

@@ -27,6 +27,7 @@ import {
   type UploadResponse,
   type PreviewStatus,
 } from "@/lib/api/anonymousPreview"
+import { setAnonClaimHint } from "@/lib/api/claim"
 import {
   getChunkedUploadLimits,
   uploadFileInChunksAnonymous,
@@ -527,6 +528,10 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     const ps: PreviewStatus = statusResp.preview_status
 
     if (ps === 'ready') {
+      // 匿名预览→登录认领 hint（plan 2026-06-15 §7）：预览就绪即记下「本会话有
+      // 可认领预览」（localStorage，跨 /auth 导航与弹窗关闭存活）。登录成功后
+      // post-auth-redirect 据此触发 /claim。非敏感——真凭证是 HttpOnly avt_anon。
+      setAnonClaimHint(previewId)
       setState((s) => ({ ...s, step: 'ready', stageLabel: '预览就绪', progress: 100 }))
       return
     }

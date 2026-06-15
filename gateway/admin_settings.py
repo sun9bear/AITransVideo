@@ -544,6 +544,16 @@ class AdminSettings(BaseModel):
     # 与本项目所有 P3 钱-核心一致：默认 OFF、inert、由项目主显式翻开激活。
     smart_clone_requires_reservation: StrictBool = False
 
+    # --- 匿名预览 → 登录认领 (plan 2026-06-15-anonymous-preview-claim-binding) ---
+    # 登录用户凭 avt_anon HttpOnly cookie 把匿名预览 record/session 绑定到账户
+    # （Model A 元数据桥，不改 jobs.user_id / 不触结算 / 不触发 clone）。
+    # **默认 OFF（plan v3.1 #4）**：认领会延长媒体保留（CLAIM_RETENTION 7d）+ 新增
+    # 一个认证写端点（POST /gateway/anonymous-preview/claim），故默认关、admin 灰度
+    # 确认后再开。flag OFF 时端点存在但返 200 {claimed:false} no-op（inert）。
+    # **类型用 StrictBool**：宽松 bool 下 "1"/"on"/"true" 会被解析为 True，admin UI
+    # marshalling bug 可能意外打开。纯 bool 旗无需 field_validator（同两个匿名主开关）。
+    anonymous_preview_claim_enabled: StrictBool = False
+
     @field_validator(
         "anonymous_preview_max_upload_mb",
         "anonymous_preview_max_seconds",

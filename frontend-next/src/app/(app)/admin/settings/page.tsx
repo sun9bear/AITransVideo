@@ -143,6 +143,9 @@ interface AdminSettings {
   smart_preview_clone_enabled: boolean
   smart_preview_clone_daily_global_cap: number
   smart_preview_clone_inflight_cap: number
+  // 匿名预览→登录认领主开关（默认 OFF）。full-body POST 同步必需。
+  // 守卫：tests/test_anonymous_preview_claim_admin_sync_guard.py。
+  anonymous_preview_claim_enabled: boolean
   // per-mode 三维度配额旋钮（2026-06-13）：legacy per-scope cap 之上，对每个
   // lane 各自再限 ip/device/source 每日次数。per_ip_per_mode 是免费档"同 IP
   // 每日次数"的实际绑定闸。full-body POST 同步必需（否则保存别的设置会把
@@ -271,6 +274,8 @@ const DEFAULT_SETTINGS: AdminSettings = {
   smart_preview_clone_enabled: false,
   smart_preview_clone_daily_global_cap: 200,
   smart_preview_clone_inflight_cap: 5,
+  // 必须与 gateway/admin_settings.py 默认严格一致（False=休眠灰度）。
+  anonymous_preview_claim_enabled: false,
   // per-mode 三维度旋钮默认值必须与 gateway/admin_settings.py 严格一致（全 1）：
   anonymous_preview_cap_per_ip_per_mode: 1,
   anonymous_preview_cap_per_device_per_mode: 1,
@@ -1323,6 +1328,31 @@ export default function AdminSettingsPage() {
           </div>
         </label>
 
+        {/* 匿名预览 → 登录认领（plan 2026-06-15）：登录/注册后凭 avt_anon cookie
+            把匿名预览绑定到账户（Model A 元数据桥，不改 jobs.user_id / 不触结算 /
+            不触发 clone）。默认 OFF：认领会延长媒体保留 7d + 新增认证写端点。 */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.anonymous_preview_claim_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, anonymous_preview_claim_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              开启登录认领
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                Phase 4 · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后，匿名用户注册/登录时会把那次预览的来源/方案/合规/估价/consent
+              绑定到新账户（转化漏斗桥），并把该预览媒体保留期延长至 7 天。关闭时
+              认领端点存在但直接 no-op（不绑定、不延长保留）。绝不迁移任务所有权或触发付费克隆。
+            </p>
+          </div>
+        </label>
+
         {/* APF Express lane（plan 2026-06-12 T0）：express 优先于 free，
             开启后匿名预览走真实快捷版管线（Pass 3 + CosyVoice TTS）。
             与 express TTS provider = MiMo 互斥，后端保存校验 422。 */}
@@ -1805,6 +1835,9 @@ export default function AdminSettingsPage() {
               DEFAULT_SETTINGS.smart_preview_clone_daily_global_cap,
             smart_preview_clone_inflight_cap:
               DEFAULT_SETTINGS.smart_preview_clone_inflight_cap,
+            // --- 登录认领 reset 规则（plan 2026-06-15）：可见主开关显式回 DEFAULT（false）---
+            anonymous_preview_claim_enabled:
+              DEFAULT_SETTINGS.anonymous_preview_claim_enabled,
             anonymous_preview_cap_per_ip_per_mode:
               DEFAULT_SETTINGS.anonymous_preview_cap_per_ip_per_mode,
             anonymous_preview_cap_per_device_per_mode:

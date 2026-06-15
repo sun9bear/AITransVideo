@@ -1798,6 +1798,7 @@ class AnonymousPreviewRecord(Base):
     __table_args__ = (
         Index("ix_anon_preview_records_session_id", "session_id"),
         Index("ix_anon_preview_records_expires_at", "expires_at"),
+        Index("ix_anon_preview_records_claim_user_id", "claim_user_id"),
     )
 
     preview_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -1810,9 +1811,15 @@ class AnonymousPreviewRecord(Base):
         String(16), nullable=False, server_default="free"
     )
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Phase 4 留行
+    # Phase 4 留行（deprecated；cookie-bearer 认领改用 avt_anon，本列不再下发前端）
     claim_token_placeholder: Mapped[str | None] = mapped_column(
         String(256), nullable=True
+    )
+    # Phase 4 启用：匿名预览→登录认领后写真实用户 UUID（owner + "按 user
+    # 列出已认领预览" 查询真源；non-FK bare UUID，与 AnonymousSession.claim_user_id
+    # 同款）。NULL=未认领。plan 2026-06-15-anonymous-preview-claim-binding-plan.md §4。
+    claim_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
     audit: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

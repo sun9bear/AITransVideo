@@ -2,7 +2,20 @@
 
 - **日期**：2026-06-15
 - **作者**：Claude Code（待项目主 + CodeX 审）
-- **状态**：DRAFT **v3.1**（CodeX 三轮审核共 14 点已纳入，设计待审，**未写实现代码**）
+- **状态**：**已实现 + 5-lens 对抗复审收口**（设计 v3.1 = CodeX 三轮 14 点；实现见下「实现状态」，默认 OFF 待项目主灰度）
+
+## 实现状态（2026-06-15，分支 claude/anon-claim-binding）
+
+T1-T4 全部实现，默认 OFF inert：
+- **T1 数据层**：migration 040（`anonymous_preview_records.claim_user_id` UUID NULL + 索引）+ ORM 列。alembic 单 head。
+- **T2 端点**：`POST /gateway/anonymous-preview/claim`（CSRF→admin gate→显式 None→401→cookie no-op→限频→单条 `UPDATE...RETURNING` 绑 record→session 锁→失败回滚无半状态）。admin 旗 `anonymous_preview_claim_enabled` StrictBool 默认 False（前端 admin 页 4 处同步）。**记录绑定加 `status == 'ready_for_mode'` 过滤**（只绑可认领的 ready record，排除 block 死 record；复审多 lens 收敛）。
+- **T3 sweeper**：无代码改动（保留靠 expires_at GREATEST 延长，sweeper 凭 expires_at 自然跳过）。
+- **T4 前端**：`lib/api/claim.ts`（fire-and-forget）+ `post-auth-redirect` 登录后认领 hook + 试用面板 ready 设 localStorage hint。
+- **测试**：`test_anonymous_preview_t10_claim.py`（35 项，含 4 项真 SQL 覆盖——捕获 handler 真实 statement 编译到 PG dialect 验 jsonb_set/greatest/coalesce/条件 WHERE/RETURNING + 真 SQLite 引擎验越权/status/expiry 过滤真语义）+ `test_anonymous_preview_claim_admin_sync_guard.py`。
+- **5-lens 对抗复审**（money-redline/security-overreach/sql-concurrency/inert-availability/test-adequacy）：4 lens SHIP；test-adequacy 的 HIGH（真 SQL 零覆盖）+ MEDIUM（越权只 mock）已修；其余全 LOW（限频 fail-open 等有意取舍，docstring 记）。回归 908 passed / 0 新失败（3 失败为预存基线，stash 验证过）。
+- **激活前 gate（项目主）**：merge 分支 + 生产 alembic upgrade 040 + 真金小额 E2E（匿名预览→登录→认领→转完整）+ CodeX 终审 → 才翻 `anonymous_preview_claim_enabled`。
+
+---
 - **前置链**：
   - `docs/plans/2026-06-01-anonymous-preview-funnel-ux-plan.md` §11（登录与任务认领设计）、§17.1/§17.2（登录引导/登录墙文案）
   - `docs/plans/2026-06-10-apf-anonymous-preview-vertical-slice-plan.md` §3（明列「claim token 消费/绑定」= Phase 4 后置）、AD-4（匿名 session 表「给 Phase 4 claim 绑定留行」）
