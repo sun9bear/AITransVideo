@@ -2264,6 +2264,15 @@ async def intercept_create_job(
                     _smart_lib_cap = int(
                         getattr(_admin_for_clone, "smart_user_voice_clone_cap", 30) or 30
                     )
+                    # P3e-4b 全局反滥用 cap：今日全局上限 + 在飞并发上限（防免费 3min
+                    # 预览刷爆 MiniMax 账号）。reserve 端在扣 600 前 fail-closed deny →
+                    # deny_reason 经下方 _smart_clone_skipped_reason 流到 402/预设。
+                    _smart_daily_cap = int(
+                        getattr(_admin_for_clone, "smart_preview_clone_daily_global_cap", 200) or 200
+                    )
+                    _smart_inflight_cap = int(
+                        getattr(_admin_for_clone, "smart_preview_clone_inflight_cap", 5) or 5
+                    )
                     _smart_resv = await _reserve_smart_clone(
                         db,
                         user_id=user.id,
@@ -2271,6 +2280,8 @@ async def intercept_create_job(
                         amount_credits=600,
                         ttl_minutes=60,
                         library_cap=_smart_lib_cap,
+                        daily_global_cap=_smart_daily_cap,
+                        inflight_cap=_smart_inflight_cap,
                     )
                     if _smart_resv.status == "reserved":
                         _smart_clone_reservation_id = _smart_resv.reservation_id

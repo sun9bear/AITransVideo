@@ -65,6 +65,27 @@ def shanghai_day_key(now: datetime | None = None) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def shanghai_day_start_utc(now: datetime | None = None) -> datetime:
+    """Asia/Shanghai 当日 00:00 对应的 **UTC** 时刻（用于 ``created_at >= 日界``
+    范围查询，配合 ``shanghai_day_key`` 的 per-SH-day 语义）.
+
+    与 ``shanghai_day_key`` 同 tz 处理（ZoneInfo 优先、UTC+8 兜底；naive 当 UTC）。
+    取本地午夜后转回 UTC（aware datetime）。Pure —— 无 DB，可测。
+    """
+    dt = now or _now()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Asia/Shanghai")
+    except Exception:
+        tz = timezone(timedelta(hours=8))
+    local = dt.astimezone(tz)
+    local_midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc)
+
+
 @dataclass(frozen=True)
 class FreeDailyOutcome:
     """``reserve_free_daily`` result. ``status`` drives the caller:
@@ -232,6 +253,7 @@ async def release_free_daily(
 
 __all__ = [
     "shanghai_day_key",
+    "shanghai_day_start_utc",
     "reserve_free_daily",
     "consume_free_daily",
     "release_free_daily",

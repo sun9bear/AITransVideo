@@ -159,6 +159,79 @@ def _available_credits_from_buckets(buckets: list[object]) -> int:
     )
 
 
+async def count_global_smart_reservations_today(
+    db: AsyncSession, *, now: datetime | None = None
+) -> int:
+    """今日（Asia/Shanghai 自然日）**全局**（跨所有 user）smart clone reservation
+    创建数 —— ``smart_preview_clone_daily_global_cap`` 分量（P3e-4b）.
+
+    计**所有状态**（reserved/captured/released/expired）：每条 reservation 已授权过
+    一次克隆尝试，释放/过期的也算"今日已发名额"——fail-closed 抗刷（防 create→fail
+    循环刷免费预览却不增计数）。幂等重试不建新行 → 不重复计数。
+    """
+    from free_service_quota import shanghai_day_start_utc
+
+    now = now or _now()
+    day_start = shanghai_day_start_utc(now)
+    result = await db.execute(
+        select(func.count())
+        .select_from(SmartCloneReservation)
+        .where(SmartCloneReservation.created_at >= day_start)
+    )
+    return int(result.scalar() or 0)
+
+
+async def count_global_inflight_smart_reservations(
+    db: AsyncSession, *, now: datetime | None = None
+) -> int:
+    """当前**全局**在飞（``status=reserved`` 且 ``expires_at >= now``）smart clone
+    reservation 数 —— ``smart_preview_clone_inflight_cap`` 分量（供应商并发保护）.
+
+    过 TTL 的 reserved（卡死非终态、待 sweeper/inline-expire 回收）**不计**——否则
+    一堆卡死行会虚占并发名额、把活人挡在外面。
+    """
+    now = now or _now()
+    result = await db.execute(
+        select(func.count())
+        .select_from(SmartCloneReservation)
+        .where(
+            SmartCloneReservation.status == RESERVED,
+            SmartCloneReservation.expires_at >= now,
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+# 全局 cap advisory-lock 固定 key（任意常量，在 signed-bigint 范围内）—— 标识
+# "smart-clone reserve 全局串行域"，与任何其它 advisory lock key 不冲突。
+_SMART_CLONE_GLOBAL_LOCK_KEY = 0x53435243  # "SCRC"
+
+
+async def _acquire_global_cap_lock(db: AsyncSession) -> None:
+    """串行化全局 cap（daily/inflight）的 count→insert 窗口（CodeX P3e-4b HIGH）.
+
+    全局 cap 是 ``count → reserve → insert``，仅靠 users-row ``FOR UPDATE`` 只串行
+    **同一 user**；跨 user 并发可各自读到 count<cap 后全部放行 → overshoot ≈ 并发量，
+    把反滥用**硬**上限打成软上限。取一个**固定 key 的事务级 advisory lock**（PG）让全局
+    reserve 串成单队、count 在锁内一致 → 真硬 cap。lock 随本事务 commit/rollback 自动
+    释放（``xact`` 级）。
+
+    锁顺序固定为 users-row 锁 → 本全局锁（本函数内唯一获取点）→ 无 lock-ordering 死锁。
+    sqlite/其它无 advisory lock → **no-op**（逻辑路径相同；并发硬上限只在 PG 生效，与本
+    服务既有 users-row FOR UPDATE 的 PG-only 语义一致）。预览克隆是低频 funnel，全局
+    串行化开销可忽略。
+    """
+    bind = db.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": _SMART_CLONE_GLOBAL_LOCK_KEY},
+    )
+
+
 async def reserve_smart_clone_credit(
     db: AsyncSession,
     *,
@@ -168,6 +241,8 @@ async def reserve_smart_clone_credit(
     ttl_minutes: int,
     library_cap: int,
     required_available_credits: int | None = None,
+    daily_global_cap: int | None = None,
+    inflight_cap: int | None = None,
 ) -> SmartReserveOutcome:
     """原子预扣一个智能版预览克隆 600 点名额（v3 §3 预览阶段）。
 
@@ -205,6 +280,29 @@ async def reserve_smart_clone_credit(
         return SmartReserveOutcome(
             status="reserved", reservation_id=str(existing.id), idempotent_hit=True
         )
+
+    # 3.5 全局反滥用 cap（P3e-4b）—— 保护 MiniMax 账号被免费 3min 预览刷爆。两者均在
+    #     **信用预扣 600 之前** fail-closed deny（denied 不阻断：caller 据 deny_reason
+    #     走预设 / 免费 exemption 收 402，与 insufficient/library_full 同语义）。
+    #     **幂等命中（上面已 return）不入此 cap**——已授权的预览重试不被误降级。
+    #     **软上限**：全局计数不被 users row 锁串行化（该锁只串行同一 user），并发可
+    #     轻微 overshoot；硬钱不变量（per-user 600 reserve 原子性）不受影响。
+    #     inflight 先于 daily：瞬时在飞名额是更强的供应商压力信号。
+    #     cap is None（旧 caller / flag 关）→ 不设上限（inert，向后兼容）。
+    if inflight_cap is not None or daily_global_cap is not None:
+        # CodeX P3e-4b HIGH：先取全局 advisory lock 串行化 count→insert，把 soft cap
+        # 收紧为 hard cap（PG；sqlite no-op）。仅当确有 cap 时取锁（caps=None 全 inert）。
+        await _acquire_global_cap_lock(db)
+    if inflight_cap is not None:
+        inflight_total = await count_global_inflight_smart_reservations(db, now=now)
+        if inflight_total >= int(inflight_cap):
+            await db.commit()  # 提交 inline expire（即便 deny）
+            return SmartReserveOutcome(status="denied", deny_reason="inflight_cap_exceeded")
+    if daily_global_cap is not None:
+        daily_total = await count_global_smart_reservations_today(db, now=now)
+        if daily_total >= int(daily_global_cap):
+            await db.commit()
+            return SmartReserveOutcome(status="denied", deny_reason="daily_cap_exceeded")
 
     # 4. 库容门（含 active reservations 防并发穿透）→ 满则 denied、走预设
     lib_total = (
@@ -786,6 +884,8 @@ __all__ = [
     "credit_related_job_id",
     "count_active_smart_reservations",
     "count_active_library_voices",
+    "count_global_smart_reservations_today",
+    "count_global_inflight_smart_reservations",
     "reserve_smart_clone_credit",
     "check_smart_clone_reservation_active",
     "register_smart_clone_with_billing",

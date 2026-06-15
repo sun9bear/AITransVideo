@@ -127,4 +127,11 @@
 
 **P3e-4a-2 ✅ 预览只读检视面闸（CodeX 第二轮标的遗留已关）**：smart 预览任务的只读检视面（`GET /jobs/{id}/review-state` 暴露 transcript/translation items 的 `source_text`/`cn_text`=译文；`GET /jobs/{id}/speaker-audio/{speaker}[/{seg}.wav]` 源文+源音字节；`GET /jobs/{id}/reports/{name}` 文件流如 `subtitle_width_report.json` cue 文本）现都加同一 `_policy_mode_for(record) == "anonymous_preview"` → 403 闸（与 P3e-3d 同档，strict is True）。覆盖 CodeX 标的全部**价值泄漏面**（译文/配音/字幕）。**未 gate（已评估安全）**：reports 目录 catalog（仅报告名非内容）、`segments/{id}/preview-source-audio`（编辑态缓存,预览不可进编辑→404,且是用户自有源音非产品价值）、segments mutation（POST,enter-edit 已封）。默认 inert（非预览 `_policy_mode_for != anonymous_preview` → 字节级不变）。
 
-**非钱依赖（归后续）**：免费用户**转完整**（reuse→full）仍过既有 smart entitlement kill-switch；预览**前端入口** + 预扣弹窗 + consent 驱动 + 反滥用 cap 真生效（`smart_preview_clone_daily_global_cap`/`inflight_cap` 现仍 inert）= P3e-4c。
+**P3e-4b ✅ 全局反滥用 cap 真生效（最后一块后端钱-安全）**：`smart_preview_clone_daily_global_cap`(默认200)/`smart_preview_clone_inflight_cap`(默认5) 从"定义但 inert"接入消费侧。
+- `smart_clone_reservation_service.count_global_smart_reservations_today`（今日 Asia/Shanghai 自然日跨所有 user 的 reservation 创建数，计**所有状态** → fail-closed 抗刷：一次成功授权永久消耗一个日名额，杜绝 reserve→release→再 reserve 刷量）+ `count_global_inflight_smart_reservations`（全局 `status=reserved AND expires_at>=now`；过 TTL 的卡死行不虚占并发名额）。
+- `reserve_smart_clone_credit` 新增 `daily_global_cap`/`inflight_cap`（默认 None=inert）；闸在**幂等命中之后、库容门/信用预扣 600 之前**（inflight 先 daily 后）→ deny 绝不扣点/不建行/不阻断，`deny_reason` 经 `_smart_clone_skipped_reason` 流到免费 exemption→402 / entitled→预设。
+- **CodeX HIGH 硬化**：全局 cap 原 `count→insert` 只被 users-row 锁串行（仅同 user），跨 user 并发可 overshoot≈并发量 → 加固定-key `pg_advisory_xact_lock`（`_acquire_global_cap_lock`，PG hard cap；sqlite no-op，与既有 FOR UPDATE 同 PG-only 语义）串行化 count→insert。仅 caps 非 None 时取锁（inert 不退化吞吐）。
+- **CodeX MEDIUM**：migration `038_smart_clone_created_at_index` 给 `created_at` 建索引（daily 全局 count 提速，避免反滥用闸成 DB 热点 + 缩短锁持有）。
+- 评审：4-lens 对抗（money/abuse/failclosed/counting）**0 real** + CodeX（无 CRITICAL，HIGH/MEDIUM 已修，LOW=测试入提交+1）。`job_intercept` 读两旗透传 `_reserve_smart_clone`。测试 `tests/test_p3e4b_global_caps.py`（15）。默认 inert：`smart_preview_clone_enabled=False` → 不 reserve → cap 路径不触发 → 字节级不变。
+
+**非钱依赖（归后续）**：免费用户**转完整**（reuse→full）仍过既有 smart entitlement kill-switch；预览**前端入口** + 预扣弹窗 + consent 驱动 + 反滥用 cap 的**前端降级提示**（`daily_cap_exceeded`/`inflight_cap_exceeded` 文案）= P3e-4c。
