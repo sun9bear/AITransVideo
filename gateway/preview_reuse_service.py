@@ -34,6 +34,7 @@ from smart_clone_reservation_service import CAPTURED as _CAPTURED_STATUS
 # Rejection reason codes (stable; surfaced to the create-path 4xx response).
 REASON_NOT_FOUND = "preview_not_found"
 REASON_FORBIDDEN = "preview_forbidden"
+REASON_NOT_PREVIEW = "preview_not_a_preview_job"
 REASON_NOT_CAPTURED = "preview_clone_not_captured"
 REASON_VOICE_UNAVAILABLE = "preview_voice_unavailable"
 REASON_SOURCE_UNAVAILABLE = "preview_source_unavailable"
@@ -75,6 +76,27 @@ async def resolve_preview_reuse(
     #    reuse THEIR paid clone voice.
     if str(getattr(job, "user_id", "") or "") != str(user_id or ""):
         return None, REASON_FORBIDDEN
+
+    # 2.5. Contract: the reused job MUST be an actual smart *preview* job
+    #      (``smart_state.smart_preview_mode is True``). CodeX P3e-4c merge
+    #      review: because ``smart_preview_clone_enabled`` couples *full* smart
+    #      tasks into the same 600 reservation gate, a non-preview full-smart
+    #      job ALSO has a captured reservation + chargeable billing event +
+    #      cloned voice — so without this guard it could be "converted" via the
+    #      preview→full path. Same-user + already-paid-clone constraints make
+    #      that money-safe (the voice is already in the user's library and
+    #      reusable by explicit selection anyway), but it violates the
+    #      preview→full contract. Placed AFTER ownership so a non-owner can't
+    #      probe whether a job is a preview. Strict ``is True`` (fail-safe;
+    #      mirrors ``preview_policy.extract_smart_preview_flag``, inlined to keep
+    #      this module's import surface minimal — see memory
+    #      feedback_test_database_stub_convention).
+    _smart_state = getattr(job, "smart_state", None)
+    if not (
+        isinstance(_smart_state, dict)
+        and _smart_state.get("smart_preview_mode") is True
+    ):
+        return None, REASON_NOT_PREVIEW
 
     # 3. Authoritative capture proof: a CAPTURED reservation for (task, user)
     #    with settled_at set + captured_voice_id present (reader B). A
@@ -148,6 +170,7 @@ __all__ = [
     "resolve_preview_reuse",
     "REASON_NOT_FOUND",
     "REASON_FORBIDDEN",
+    "REASON_NOT_PREVIEW",
     "REASON_NOT_CAPTURED",
     "REASON_VOICE_UNAVAILABLE",
     "REASON_SOURCE_UNAVAILABLE",

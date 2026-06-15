@@ -116,6 +116,33 @@ def test_resolve_rejects_cross_user_overreach():
     assert reason == "preview_forbidden"
 
 
+def test_resolve_rejects_when_job_is_not_a_preview():
+    """🔥🔥 契约硬化（CodeX P3e-4c 合并前审查）：reuse 的源 job 必须是 smart **预览**
+    任务（smart_state.smart_preview_mode is True）。因为 smart_preview_clone_enabled
+    把 *full* smart 也纳入 600 reservation gate，一个普通 full-smart 成品 job 同样会有
+    captured reservation + chargeable billing + 活 voice——若无此守卫即可被当预览
+    convert（同用户 + 已付费故钱安全，但破坏 preview→full 契约）。守卫在 ownership 之后
+    （非 owner 不能探测是否预览），smart_state 缺键 / None 一律 fail-safe 拒绝。"""
+    import preview_reuse_service as prs
+
+    owner = uuid.uuid4()
+    # 普通 full-smart 成品：owner 对、字段齐全，但 smart_state 不含 smart_preview_mode
+    # （缺键）或整体为 None → 在 ownership 之后、reservation 查询之前被挡（只发生 1 次
+    # Job lookup）。
+    for bad_state in ({"status": "completed"}, None, {"smart_preview_mode": False}):
+        non_preview_job = SimpleNamespace(
+            job_id="job_full", user_id=owner,
+            source_type="youtube_url", source_ref="https://youtu.be/abc",
+            smart_state=bad_state,
+        )
+        db = _make_db(non_preview_job)
+        resolution, reason = _run(
+            prs.resolve_preview_reuse(db, user_id=owner, preview_job_id="job_full")
+        )
+        assert resolution is None, f"smart_state={bad_state!r} 应被拒"
+        assert reason == "preview_not_a_preview_job", f"smart_state={bad_state!r} reason 错"
+
+
 def test_resolve_rejects_when_clone_not_captured():
     """🔥🔥 钱-关键：没有 captured reservation（reserve 后 release / 从未克隆）→
     not_captured，绝不当作"已付 600"来复用。"""
