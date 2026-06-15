@@ -1534,8 +1534,10 @@ async def intercept_create_job(
     # 校验所有权（claim_user_id==user，已认领）+ 完整源 stored_upload_path（在上传根内/
     # 非 teaser/hash 匹配 source_hash），用**完整原始上传**覆盖 source，走既有计费 create。
     # 与 smart reuse 区别：**不**强制 service_mode（用户自选 express/studio/smart，正常
-    # gating + 计费）、**不**设 voice_a/smart_consent/smart_state（无 600 结转、不触
-    # clone → 下方 600-reserve 块不进、分钟正常扣）。默认 inert：absent → byte-identical。
+    # gating + 计费）、不复用 voice、无 600 结转/smart_state。**categorically 不自动克隆**：
+    # 系统性中和全部三条 auto-clone lane（smart 强制 no-clone consent / express+free 剥
+    # consent + voice_strategy）——见下方 source override 后的中和块。默认 inert：absent
+    # reuse_anonymous_preview_id → byte-identical create。
     _reuse_anon_preview_id = None
     if isinstance(request_data, dict) and "reuse_anonymous_preview_id" in request_data:
         if _reuse_preview_job_id is not None:
@@ -1602,13 +1604,18 @@ async def intercept_create_job(
             "value": _anon_resolution.source_ref,
         }
         request_data.pop("reuse_anonymous_preview_id", None)
-        # 中和 preview/clone 机制（复审 HIGH×2）：
-        # ① D7 是**完整转换非预览** → 剥 preview_mode，否则 smart+preview_mode=True 会让
-        #    _is_smart_preview 跳过分钟预扣却跑 full 任务 → settle 透支（HIGH#1）。
-        # ② D7 **不自动克隆**（红线 + 注释承诺）：smart 模式硬要求 6 字段 consent，故
-        #    强制 no-clone consent（镜像 smart reuse L1369）；否则客户端夹带
-        #    auto_voice_clone=True 会触发 600-reserve（覆盖 D7 确定性 job_id + 授权
-        #    MiniMax 克隆，HIGH#2）。用户要克隆走后续 Studio 显式 gated 路径。
+        # 中和 preview/clone（复审 HIGH×2 + CodeX express P1）：D7 是**完整转换非预览、
+        # 不自动克隆**（红线：转完整=干净付费任务，克隆走后续 Studio 显式 gated 路径）。
+        # 系统性堵死全部三条 auto-clone lane（CLAUDE.md 付费 API 段定义的全集）：
+        #  ① preview_mode：剥——否则 smart+preview_mode=True 让 _is_smart_preview 跳分钟
+        #     预扣却跑 full → settle 透支（HIGH#1）。
+        #  ② smart MiniMax：smart 硬要求 6 字段 consent（L1616 validate-or-400），故强制
+        #     no-clone consent（镜像 smart reuse L1369）；否则 auto_voice_clone=True 触发
+        #     600-reserve（覆盖 D7 确定性 job_id + 授权克隆，HIGH#2）。non-smart 直接 pop。
+        #  ③ express CosyVoice：剥 express_consent——否则 auto_voice_clone=True 经
+        #     maybe_run_express_auto_clone 触发 worker 克隆（CodeX P1）。
+        #  ④ free MiMo voiceclone：剥 voice_strategy（→ 默认 preset_mapping，process.py:2794/
+        #     6249 free_voiceclone 分支不触）+ free_consent + voiceclone_reference_path。
         request_data.pop("preview_mode", None)
         if str(request_data.get("service_mode") or "") == "smart":
             request_data["smart_consent"] = {
@@ -1621,6 +1628,11 @@ async def intercept_create_job(
             }
         else:
             request_data.pop("smart_consent", None)
+        request_data.pop("express_consent", None)
+        request_data.pop("express_consent_parse_error", None)
+        request_data.pop("free_consent", None)
+        request_data.pop("voice_strategy", None)  # → 默认 preset_mapping（不触 free voiceclone）
+        request_data.pop("voiceclone_reference_path", None)
         request_data.pop("voice_a", None)  # D7 不复用 voice（用户自选 preset）
         request_data.pop("voice_b", None)
 

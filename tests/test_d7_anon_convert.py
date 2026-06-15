@@ -5,8 +5,9 @@ plan 2026-06-15-anonymous-preview-claim-binding-plan.md §6.5 / D7。
 认领后用**完整原始源** audit.stored_upload_path（非 teaser）建正式计费 job。复用既有
 smart-preview-reuse 模式：前端送 reuse_anonymous_preview_id，server 校验所有权
 （claim_user_id==user）+ 路径/hash（在上传根内/非 teaser/sha256 匹配 source_hash）→
-覆盖 source → 走既有计费 create。**不**强制 service_mode、**不**设 voice/smart_consent/
-smart_state（无 600 结转、不触 clone）。
+覆盖 source → 走既有计费 create。**不**强制 service_mode、不复用 voice、无 600 结转。
+**categorically 不自动克隆**：系统性中和三条 auto-clone lane（smart 强制 no-clone
+consent / express 剥 express_consent / free 剥 voice_strategy+free_consent）。
 
 resolver 行为测试用**真 tmp 文件**（真路径/hash 校验覆盖，非全 mock）；intercept 块用
 区域源扫描锁结构（database-stub 见 memory feedback_test_database_stub_convention）。
@@ -266,17 +267,22 @@ def test_d7_block_reads_field_and_overrides_source():
 
 
 def test_d7_block_neutralizes_preview_and_clone():
-    """D7 中和 preview/clone（复审 HIGH×2）：不强制 service_mode='smart'、剥 preview_mode、
-    强制 auto_voice_clone=False（不自动克隆）、不设 600 结转 marker。扫剥注释后代码。"""
+    """D7 **categorically 不自动克隆**：系统性中和全部三条 auto-clone lane（复审 HIGH×2
+    + CodeX express P1）。扫剥注释后代码。"""
     b = _d7_block_code()
     assert 'service_mode"] = "smart"' not in b, "D7 不得强制 smart（用户自选 mode）"
-    # 剥 preview_mode（HIGH#1：否则 smart+preview_mode 跳分钟预扣跑 full→透支）
+    # ① preview_mode（HIGH#1：否则 smart+preview_mode 跳分钟预扣跑 full→透支）
     assert 'pop("preview_mode"' in b, "D7 必须剥 preview_mode（非预览）"
-    # 强制 no-clone（HIGH#2：否则客户端 auto_voice_clone=True 触 600-reserve + 覆盖 job_id）
+    # ② smart MiniMax：强制 no-clone consent（HIGH#2）
     assert '"auto_voice_clone": False' in b, "D7 smart 模式必须强制 no-clone consent"
     assert '"auto_voice_clone": True' not in b, "D7 绝不授权自动克隆"
-    # 不设 600 结转 marker（无 reservation 可结转）
     assert "smart_state" not in b, "D7 无 600 结转 marker"
+    # ③ express CosyVoice：剥 express_consent（CodeX P1）
+    assert 'pop("express_consent"' in b, "D7 必须剥 express_consent（防 express 自动克隆）"
+    # ④ free MiMo voiceclone：剥 voice_strategy（→ preset_mapping）+ free_consent + ref
+    assert 'pop("voice_strategy"' in b, "D7 必须剥 voice_strategy（防 free voiceclone）"
+    assert 'pop("free_consent"' in b
+    assert 'pop("voiceclone_reference_path"' in b
     # 不复用 voice（用户自选 preset）
     assert 'pop("voice_a"' in b
 
