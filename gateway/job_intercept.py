@@ -533,6 +533,23 @@ async def _acquire_convert_singleflight_lock(db: AsyncSession, convert_job_id: s
     await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _key})
 
 
+def _apply_anon_convert_source_override(request_data: dict, resolution) -> None:
+    """D7 匿名预览转完整：用 server 派生的**完整原始视频**覆盖 source + 剥
+    preview_mode（转完整≠预览，防 _is_smart_preview 跳分钟预扣→透支）。其余
+    service_mode/consent/clone/voice **不动**——走正常付费流程（各模式克隆照旧，
+    2026-06-16 项目主拍板）。纯 dict mutation，可独立行为测试。
+
+    resolution = AnonymousPreviewReuseResolution（source_type 恒 local_video、
+    source_ref = stored_upload_path 绝对路径，已过 claim_user_id/路径/hash 校验）。
+    """
+    request_data["source"] = {
+        "type": resolution.source_type,
+        "value": resolution.source_ref,
+    }
+    request_data.pop("reuse_anonymous_preview_id", None)
+    request_data.pop("preview_mode", None)
+
+
 def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
     return _error_response(
         402,
@@ -1603,19 +1620,12 @@ async def intercept_create_job(
         # 各模式克隆行为照旧（快捷/智能自动克隆、工作台可选克隆或预设），正常扣点、
         # 不漏计费（2026-06-16 项目主拍板：转完整=认领原视频后走完整正常付费流程，
         # 禁止强制预设以免降低体验/收入）。
-        request_data["source"] = {
-            "type": _anon_resolution.source_type,
-            "value": _anon_resolution.source_ref,
-        }
-        request_data.pop("reuse_anonymous_preview_id", None)
-        # 唯一额外处理（计费正确性，与克隆无关）：剥 preview_mode。D7 是**完整转换、
-        # 非预览**——若客户端夹带 preview_mode=True，配合 smart+reservation 会让
-        # _is_smart_preview 跳过分钟预扣却跑 full 任务 → settle 透支（复审 HIGH#1）。
-        # 转完整永远是 full job，preview_mode 无意义。
-        request_data.pop("preview_mode", None)
-        # **不自设 job_id**：让正常流程 mint（smart+clone 的 600-reserve 会按
-        # idempotency_key 设自己的 job_id，D7 不与之抢——复审 HIGH#2 的根因）。双击防护
-        # = 前端 debounce（与普通 create 一致，本就无 server 端 dedup）。
+        # 覆盖 source（完整原始视频，server 派生）+ 剥 preview_mode（计费正确性，
+        # 与克隆无关：转完整≠预览，防 _is_smart_preview 跳分钟预扣→透支，复审 HIGH#1）。
+        # 其余全走正常付费流程。**不自设 job_id**：让正常流程 mint（smart+clone 的
+        # 600-reserve 按 idempotency_key 设自己的 job_id，D7 不与之抢——复审 HIGH#2）。
+        # 双击防护 = 前端 debounce（与普通 create 一致，本就无 server 端 dedup）。
+        _apply_anon_convert_source_override(request_data, _anon_resolution)
 
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py

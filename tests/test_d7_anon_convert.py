@@ -244,8 +244,10 @@ def test_resolve_hash_normalized_prefix(monkeypatch, tmp_path):
 
 
 def _d7_block_src() -> str:
+    # 锚点用 intercept 块独有的 ``_reuse_anon_preview_id = None``（"D7 匿名预览转完整"
+    # 在 helper docstring + intercept 注释里都出现，find 会命中 helper → 范围跨错）。
     src = _JI.read_text(encoding="utf-8")
-    start = src.find("D7 匿名预览转完整")
+    start = src.find("_reuse_anon_preview_id = None")
     assert start != -1, "intercept_create_job 未找到 D7 块"
     end = src.find("PR#3C-b3g", start)
     assert end != -1, "D7 块结束锚点未找到"
@@ -258,31 +260,68 @@ def _d7_block_code() -> str:
     return "\n".join(line.split("#", 1)[0] for line in _d7_block_src().splitlines())
 
 
-def test_d7_block_reads_field_and_overrides_source():
+def test_d7_block_reads_field_and_calls_override():
+    """D7 块：读 reuse_anonymous_preview_id → resolve → 调 helper 覆盖 source。
+    （source 覆盖的具体 mutation 在 _apply_anon_convert_source_override，行为测试覆盖。）"""
     b = _d7_block_src()
     assert "reuse_anonymous_preview_id" in b
     assert "resolve_anonymous_preview_reuse" in b
-    assert 'request_data["source"]' in b
-    assert 'request_data.pop("reuse_anonymous_preview_id"' in b
+    assert "_apply_anon_convert_source_override" in b
 
 
 def test_d7_block_is_thin_source_override():
-    """D7 = **轻量 source 覆盖**（2026-06-16 项目主拍板）：覆盖 source + 剥 preview_mode
-    （计费正确性）；**不**中和克隆（各模式克隆走正常付费流程）、**不**强制 service_mode、
-    **不**自设 job_id（不与 smart 600-reserve 抢，避 HIGH#2）。扫剥注释后代码。"""
+    """D7 块 = 调 _apply_anon_convert_source_override（覆盖 source + 剥 preview_mode）；
+    **不**中和克隆、**不**强制 service_mode、**不**自设 job_id（避 HIGH#2）。扫剥注释代码。"""
     b = _d7_block_code()
-    # 覆盖完整源 + 剥 preview_mode（HIGH#1：转完整≠预览，防跳分钟透支）
-    assert 'request_data["source"]' in b
-    assert 'pop("preview_mode"' in b, "D7 必须剥 preview_mode（防跳分钟透支）"
+    assert "_apply_anon_convert_source_override" in b, "D7 块经 helper 覆盖 source"
     # **不**强制 smart、**不**中和克隆 → 克隆按各模式正常付费流程触发
     assert 'service_mode"] = "smart"' not in b, "D7 不强制 smart（用户自选 mode）"
     assert '"auto_voice_clone": False' not in b, "D7 不再强制 no-clone（克隆走正常流程）"
     assert 'pop("express_consent"' not in b, "D7 不剥 express_consent（express 自动克隆照常）"
     assert 'pop("voice_strategy"' not in b, "D7 不剥 voice_strategy（克隆策略照常）"
     assert 'pop("smart_consent"' not in b, "D7 不剥 smart_consent（智能版克隆照常）"
-    # **不**自设 job_id（HIGH#2：不与 600-reserve 的 idempotency_key job_id 抢）
-    assert "anon_convert" not in b, "D7 不自设确定性 job_id"
+    # **不**自设 job_id（HIGH#2：不与 600-reserve 的 idempotency_key job_id 抢）。
+    # 注：用精确标记 _anon_convert_job_id（已删变量），不能用 "anon_convert"（会误匹配
+    # helper 名 _apply_anon_convert_source_override）。
+    assert "_anon_convert_job_id" not in b, "D7 不自设确定性 job_id"
     assert "_acquire_convert_singleflight_lock" not in b, "D7 不用 advisory lock"
+
+
+def test_apply_anon_convert_override_behavior():
+    """行为级（CodeX P3）：_apply_anon_convert_source_override 覆盖 source（server 派生）
+    + 剥 preview_mode/reuse 字段；**保留** smart_consent/express_consent/voice_strategy/
+    voice（克隆走正常付费流程，2026-06-16 拍板）+ 不改 service_mode。"""
+    import job_intercept as ji
+
+    resolution = SimpleNamespace(
+        source_type="local_video",
+        source_ref="/opt/x/uploads/anonymous/sess/u123_full.mp4",
+    )
+    rd = {
+        "reuse_anonymous_preview_id": "prv_x",
+        "service_mode": "smart",
+        "preview_mode": True,
+        "smart_consent": {"auto_voice_clone": True, "auto_retranslate": False},
+        "express_consent": {"auto_voice_clone": True},
+        "voice_strategy": "free_voiceclone",
+        "voice_a": "v1",
+    }
+    ji._apply_anon_convert_source_override(rd, resolution)
+    # source 被 server 派生覆盖（完整原始视频）
+    assert rd["source"] == {
+        "type": "local_video",
+        "value": "/opt/x/uploads/anonymous/sess/u123_full.mp4",
+    }
+    # 剥 preview_mode（防跳分钟透支）+ reuse 字段
+    assert "preview_mode" not in rd
+    assert "reuse_anonymous_preview_id" not in rd
+    # **保留**全部克隆相关字段（克隆走各模式正常付费流程）
+    assert rd["smart_consent"] == {"auto_voice_clone": True, "auto_retranslate": False}
+    assert rd["express_consent"] == {"auto_voice_clone": True}
+    assert rd["voice_strategy"] == "free_voiceclone"
+    assert rd["voice_a"] == "v1"
+    # 不改 service_mode（用户自选）
+    assert rd["service_mode"] == "smart"
 
 
 def test_d7_block_gate_auth_ambiguity():
