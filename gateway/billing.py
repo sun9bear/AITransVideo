@@ -763,6 +763,13 @@ async def receive_webhook(
         resolved_order_id = await _resolve_refund_order_id(
             db, provider_name=provider_name, raw_payload=event.raw_payload
         )
+    if is_refund_resource_event and not resolved_order_id:
+        logger.warning(
+            "Ignoring unbound refund resource event %s from %s",
+            event.provider_event_id,
+            provider_name,
+        )
+        return _provider_webhook_response(provider_name, settled=False)
     if is_refund_resource_event and event.new_status != "refunded":
         logger.info(
             "Ignoring non-final refund resource event %s from %s (order_id=%s)",
