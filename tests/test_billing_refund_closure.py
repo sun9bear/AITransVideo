@@ -391,7 +391,7 @@ async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatc
         user_id="u1", plan_code="plus", status="active",
         cancelled_at=None, updated_at=None,
     )
-    other_paid_order = SimpleNamespace(id="ord-2")
+    other_paid_order = SimpleNamespace(id="ord-2", target_plan_code="plus")
     session = _FakeSession([[user], [sub], [other_paid_order]])
     revoke_calls = {}
 
@@ -412,6 +412,44 @@ async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatc
     assert sub.cancelled_at is None
     assert [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"] == []
     assert revoke_calls["args"] == ("u1", "ord-1")
+
+
+@pytest.mark.asyncio
+async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch):
+    user = SimpleNamespace(id="u1", plan_code="pro")
+    sub = SimpleNamespace(
+        user_id="u1", plan_code="pro", billing_period="monthly",
+        provider="wechatpay", status="active", cancelled_at=None, updated_at=None,
+    )
+    lower_paid_order = _order(
+        id="ord-plus",
+        target_plan_code="plus",
+        status="paid",
+        billing_period="monthly",
+    )
+    session = _FakeSession([[user], [sub], [lower_paid_order]])
+
+    async def fake_revoke(db, *, user_id, related_order_id, reason_code="refund_revoke"):
+        return 1
+
+    import credits_service
+    monkeypatch.setattr(credits_service, "revoke_buckets_for_order", fake_revoke)
+
+    now = datetime.now(timezone.utc)
+    await billing._recall_entitlements_for_refund(
+        session,
+        order=_order(id="ord-pro", target_plan_code="pro"),
+        now=now,
+    )
+
+    assert user.plan_code == "plus"
+    assert sub.status == "active"
+    assert sub.plan_code == "plus"
+    assert sub.cancelled_at is None
+    assert sub.updated_at == now
+    audit = [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"]
+    assert len(audit) == 1
+    assert audit[0].old_value == "pro" and audit[0].new_value == "plus"
 
 
 @pytest.mark.asyncio
@@ -502,3 +540,9 @@ def test_process_payment_event_partial_refund_guard():
     )
     assert "partial_refunded" in src
     assert "_recall_entitlements_for_refund" in src
+
+
+def test_process_payment_event_locked_order_query_refreshes_identity_map():
+    src = inspect.getsource(billing._process_payment_event)
+    assert ".with_for_update()" in src
+    assert "populate_existing=True" in src
