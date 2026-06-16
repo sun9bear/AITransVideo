@@ -39,7 +39,11 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
   const [playerError, setPlayerError] = useState<string | null>(null)
   const [converting, setConverting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  // upgradeRequired 给 /pricing CTA（决策 A smart entitlement 或 A 方案时长可升级）；
+  // durationOverMax 是「升级也没用」（原视频超最高自助套餐）→ 仅提示用更短视频 / 联系
+  // 客服，**不**给 /pricing、**不**给转完整按钮（重试同源必再失败）。
   const [upgradeRequired, setUpgradeRequired] = useState(false)
+  const [durationOverMax, setDurationOverMax] = useState(false)
 
   const videoUrl = buildStreamUrl(job.id, "video")
 
@@ -70,6 +74,7 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
     setConverting(true)
     setErrorMessage(null)
     setUpgradeRequired(false)
+    setDurationOverMax(false)
     try {
       const fullJob = await convertPreviewToFull(buildReuseInput(), job.id)
       toast.success("正在转完整成片，按分钟正常扣点…")
@@ -77,7 +82,12 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
     } catch (error) {
       const mapped = mapSmartPreviewReuseError(error)
       setErrorMessage(mapped.message)
-      setUpgradeRequired(mapped.reason === "upgrade_required")
+      // 决策 A smart entitlement 与 A 方案「时长可升级」都给 /pricing 升级 CTA。
+      setUpgradeRequired(
+        mapped.reason === "upgrade_required" || mapped.reason === "duration_upgrade",
+      )
+      // 原视频超最高自助套餐 → 升级也没用，走「仅提示」分支（无 /pricing、无转完整按钮）。
+      setDurationOverMax(mapped.reason === "duration_over_max")
     } finally {
       setConverting(false)
     }
@@ -152,7 +162,14 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
 
         {/* 转完整 CTA */}
         <div className="rounded-lg border border-border bg-muted/30 p-4">
-          {upgradeRequired ? (
+          {durationOverMax ? (
+            // 原视频超最高自助套餐：升级也没用 → 仅提示用更短视频 / 联系客服，
+            // 不给 /pricing（升无可升）、不给转完整按钮（重试同源必再失败，CodeX P1）。
+            <p className="text-sm leading-relaxed text-foreground">
+              {errorMessage ??
+                "原视频时长超过当前最高套餐上限，请改用更短的视频，或联系客服了解更长视频的处理方案。"}
+            </p>
+          ) : upgradeRequired ? (
             <div className="space-y-3">
               <p className="text-sm leading-relaxed text-foreground">
                 {errorMessage ??

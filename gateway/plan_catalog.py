@@ -216,6 +216,44 @@ def get_plan(code: str) -> PlanDefinition:
     return plans.get(code, plans["free"])
 
 
+def max_self_serve_duration_minutes() -> int:
+    """最高**自助升级**套餐的时长上限（分钟）——所有 ``self_serve=True`` 套餐里
+    ``max_duration_minutes`` 的最大值（当前 Pro=180）。
+
+    用于「升级也解决不了」的分流（CodeX P1）：源时长超过此值时，导向 /pricing
+    付费升级是**误导**（升级到最高自助套餐仍处理不了），应提示用更短视频 / 联系
+    客服。runtime-aware（读 ``_get_runtime_plans``，pricing 可被 admin 改）。无自助
+    套餐（配置异常）→ 0（调用方据此保守归类为可升级，至少给一条 /pricing 路径）。
+    """
+    plans = _get_runtime_plans()
+    caps = [p.max_duration_minutes for p in plans.values() if p.self_serve]
+    return max(caps) if caps else 0
+
+
+def minimum_self_serve_plan_for(minutes: float) -> tuple[str, int] | None:
+    """能处理 ``minutes`` 时长的**最低**自助升级套餐 ``(display_name, cap_minutes)``，
+    或 ``None``（无任何自助套餐 cap ≥ minutes，即超过最高自助套餐）。
+
+    按 cap 升序取第一个 ``cap >= minutes`` 的 ``self_serve`` 套餐。用于把升级文案
+    **具名**到真正能处理该时长的套餐——避免推荐 Plus(45) 给一个只有 Pro(180) 能处理
+    的时长（CodeX P1 延伸：误导用户付费买仍跑不了的套餐）。自然跳过 cap 不够的套餐
+    （含用户当前层级），故绝不推荐零改善的套餐。runtime-aware。
+    """
+    plans = _get_runtime_plans()
+    candidates = sorted(
+        (
+            (p.display_name, p.max_duration_minutes)
+            for p in plans.values()
+            if p.self_serve
+        ),
+        key=lambda nc: nc[1],
+    )
+    for name, cap in candidates:
+        if cap >= minutes:
+            return (name, cap)
+    return None
+
+
 def get_price(plan_code: str, billing_period: str) -> int | None:
     """Return the price in CNY fen, or ``None`` if unavailable."""
     plan = _get_runtime_plans().get(plan_code)

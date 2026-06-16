@@ -78,6 +78,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // 扣费门拦截（点数不足/额度用尽）不走转瞬即逝的 toast，落成持久 banner，
   // 带升级入口——这是购买意图最高的时刻。
   const [creditGateError, setCreditGateError] = useState<string | null>(null)
+  // A 方案（转化漏斗 UX）：转完整时原视频超套餐时长上限被后端 pre-flight 闸拦 →
+  // 落成持久 banner（而非转瞬即逝的 toast——这是购买意图最高的时刻）。两档（CodeX
+  // P1）：``canUpgrade`` true=超出当前套餐但升级可解决 → 给 /pricing CTA；false=超过
+  // 最高自助套餐（Pro 180min），升级也没用 → 只提示用更短视频 / 联系客服，**不**给
+  // /pricing。两档都保留转完整模式（源有效，升级 / 换更短视频后可重试）。
+  const [durationBlock, setDurationBlock] = useState<{ message: string; canUpgrade: boolean } | null>(null)
   const [creditsLoadFailed, setCreditsLoadFailed] = useState(false)
   const [ratesLoadFailed, setRatesLoadFailed] = useState(false)
   const [credits, setCredits] = useState<CreditsResponse | null>(null)
@@ -314,6 +320,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     submittingRef.current = true
     setSubmitState("submitting")
     setCreditGateError(null)
+    setDurationBlock(null)
     // PR-A part 2 §7: resolve the selected direction. Only send the language
     // fields for a NON-default pair, so default submissions stay byte-identical
     // to pre-i18n requests (zero-regression).
@@ -367,6 +374,24 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         setReuseAnonPreviewId(null)
         clearAnonConvertReady()
         toast.error("该预览已无法转完整（可能已过期），请重新上传视频创建。")
+        return
+      }
+      // A 方案：转完整因原视频超套餐时长上限被拦 → 持久 banner。两档分流（CodeX P1）：
+      // upgrade=升级可解决（→ /pricing CTA）；over_max=超过最高自助套餐、升级也没用
+      // （只提示用更短视频 / 联系客服）。**保留**转完整模式：源有效，升级 / 换更短
+      // 视频后可重试，不清 reuseAnonPreviewId / convert-ready key。
+      const durationReason = readDurationBlockReason(error)
+      if (durationReason) {
+        // 后端 body.message 含具名套餐推荐（minimum_self_serve_plan_for）；这里 fallback
+        // 仅在 message 缺失时兜底，故用**不具名**通用文案，避免再误导买某档（CodeX P1）。
+        const fallback =
+          durationReason === "over_max"
+            ? "原视频时长超过当前最高套餐上限，请改用更短的视频，或联系客服。"
+            : "原视频时长超出当前套餐上限，升级套餐即可处理更长视频。"
+        setDurationBlock({
+          message: readGatewayErrorMessage(error) ?? fallback,
+          canUpgrade: durationReason === "upgrade",
+        })
         return
       }
       const msg = getErrorMessage(error)
@@ -469,6 +494,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   onClick={() => {
                     setReuseAnonPreviewId(null)
                     clearAnonConvertReady()
+                    // CodeX P3：换视频要清掉旧的时长 banner，否则残留误导。
+                    setDurationBlock(null)
                   }}
                 >
                   改用其它视频
@@ -1101,6 +1128,22 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
             </section>
           )}
 
+          {durationBlock && (
+            <section className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm leading-relaxed text-foreground">{durationBlock.message}</p>
+                {durationBlock.canUpgrade ? (
+                  <Link
+                    href="/pricing"
+                    className="inline-flex h-9 shrink-0 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                  >
+                    升级套餐
+                  </Link>
+                ) : null}
+              </div>
+            </section>
+          )}
+
           <button
             type="submit"
             disabled={Boolean(validationError) || isBlockedByConcurrency || submitState === "submitting" || isLoadingGuard}
@@ -1157,6 +1200,27 @@ function isAnonConvertRejected(error: unknown): boolean {
   if (!error.payload || typeof error.payload !== "object") return false
   const code = (error.payload as { error?: unknown }).error
   return typeof code === "string" && code.startsWith("anon_preview")
+}
+
+// A 方案（转化漏斗 UX）：转完整时原视频超套餐时长上限 → gateway pre-flight 闸返回
+// 两档可区分 reason（_error_response 把 code 放 body.error、文案放 body.message）：
+//   - duration_upgrade_required（≤ 最高自助套餐，升级可解决）→ "upgrade"（给 /pricing）
+//   - duration_over_max_plan（超过最高自助套餐，升级也没用）→ "over_max"（不给 /pricing）
+function readDurationBlockReason(error: unknown): "upgrade" | "over_max" | null {
+  if (!(error instanceof ApiError)) return null
+  if (!error.payload || typeof error.payload !== "object") return null
+  const code = (error.payload as { error?: unknown }).error
+  if (code === "duration_upgrade_required") return "upgrade"
+  if (code === "duration_over_max_plan") return "over_max"
+  return null
+}
+
+// gateway _error_response 的 body.message（友好文案，含具体分钟数 / cap）。
+function readGatewayErrorMessage(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null
+  if (!error.payload || typeof error.payload !== "object") return null
+  const msg = (error.payload as { message?: unknown }).message
+  return typeof msg === "string" && msg.trim() ? msg : null
 }
 
 function validateYoutubeUrl(value: string) {

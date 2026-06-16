@@ -550,6 +550,137 @@ def _apply_anon_convert_source_override(request_data: dict, resolution) -> None:
     request_data.pop("preview_mode", None)
 
 
+def _anon_convert_over_duration_cap(
+    source_duration_seconds: float | int | None,
+    cap_minutes: float | int | None,
+    *,
+    is_admin: bool,
+) -> tuple[float, float] | None:
+    """A 方案 pre-flight 时长判定（纯函数，可独立行为测试）。
+
+    plan 2026-06-16 转化漏斗 UX：匿名预览转完整时，用认领的**完整源真实时长** +
+    用户**套餐层级** cap 提前判定，超限不建注定失败的 job。返回 ``(source_minutes,
+    cap_minutes)`` 表示超限需拒；返回 ``None`` 表示放行——
+
+    * ``is_admin``（与既有创建期 duration gate 一致地豁免），或
+    * 源时长未知（探测失败 → ``None``；纯增强语义，绝不误拒可转完整的源，管线
+      ``_check_duration_limit`` 仍兜底），或
+    * cap 未知，或非数值，或
+    * 未超 cap（严格 ``>`` 比较，恰好等于 cap 放行）。
+
+    cap 是 plan-tier 级（plan_catalog ``max_duration_minutes``，trial-aware），与所选
+    service_mode 无关。
+    """
+    if is_admin:
+        return None
+    if source_duration_seconds is None or cap_minutes is None:
+        return None
+    try:
+        src_minutes = float(source_duration_seconds) / 60.0
+        cap = float(cap_minutes)
+    except (TypeError, ValueError):
+        return None
+    if src_minutes > cap:
+        return (src_minutes, cap)
+    return None
+
+
+def _anon_convert_duration_block(
+    source_duration_seconds: float | int | None,
+    user_cap_minutes: float | int | None,
+    max_self_serve_minutes: float | int | None,
+    *,
+    is_admin: bool,
+) -> tuple[str, float, float] | None:
+    """A 方案 pre-flight 时长阻断决策（纯函数，可独立行为测试）。
+
+    返回 ``(reason_code, source_minutes, user_cap_minutes)`` 表示需拒，或 ``None``
+    放行（条件见 ``_anon_convert_over_duration_cap``：admin / 时长未知 / 未超）。
+
+    ``reason_code`` 分两档，让前端正确分流升级 CTA（CodeX P1：超过最高自助套餐时
+    升级也解决不了，不能再导向 /pricing 付费）：
+
+    * ``"duration_over_max_plan"``——源时长 > 最高**自助升级**套餐上限
+      （``max_self_serve_minutes``，当前 Pro=180）。升级到任何自助套餐都处理不了，
+      应提示用更短视频 / 联系客服，**不**给 /pricing 升级 CTA。
+    * ``"duration_upgrade_required"``——超出当前套餐但 ≤ 最高自助套餐，升级可解决。
+
+    ``max_self_serve_minutes`` 不可信（None / 非数值 / ≤0，配置异常）时**保守**归类
+    为可升级（至少给用户一条 /pricing 路径，不误判为"升无可升"）。
+    """
+    over = _anon_convert_over_duration_cap(
+        source_duration_seconds, user_cap_minutes, is_admin=is_admin
+    )
+    if over is None:
+        return None
+    src_minutes, cap_minutes = over
+    try:
+        max_ss = float(max_self_serve_minutes)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        max_ss = 0.0
+    if max_ss > 0 and src_minutes > max_ss:
+        return ("duration_over_max_plan", src_minutes, cap_minutes)
+    return ("duration_upgrade_required", src_minutes, cap_minutes)
+
+
+def _anon_convert_duration_error_response(
+    block: tuple[str, float, float],
+    *,
+    max_self_serve_minutes: float | int,
+    recommended_plan: tuple[str, int] | None,
+    plan_code: str,
+    requested_mode: str,
+    via: str = "anonymous_preview_convert",
+) -> Response:
+    """把 ``_anon_convert_duration_block`` 决策渲染成可区分的 403 响应（纯函数，
+    可独立行为测试——锁定 helper→emitted ``body.error`` 字面量契约，前端据此分流）。
+
+    ``block`` = ``(reason_code, source_minutes, user_cap_minutes)``。两档（CodeX P1）：
+
+    * ``duration_over_max_plan``——超过最高自助套餐，升级也没用：提示用更短视频 /
+      联系客服，**不**给 /pricing 升级 CTA（前端据 reason 不渲染 Link）。
+    * ``duration_upgrade_required``——升级可解决：**具名**推荐能处理该时长的最低自助
+      套餐（``recommended_plan``，CodeX P1 延伸），而非恒提 "Plus / Pro"（对
+      45<源≤180 只有 Pro 能处理时，提 Plus 仍是误导付费）。``recommended_plan`` 为
+      None（配置异常）时回退通用文案。
+
+    ``via`` = 阻断来源（观测/审计 detail 字段）：D7 匿名转完整默认
+    ``anonymous_preview_convert``；smart 预览转完整传 ``smart_preview_convert``。
+    两路径复用同一两档渲染（reason 字面量契约一致 → 前端单一 mapper 即可识别）。
+    """
+    reason, src_minutes, cap_minutes = block
+    detail: dict = {
+        "current_minutes": round(src_minutes, 1),
+        "cap_minutes": int(cap_minutes),
+        "max_self_serve_minutes": int(max_self_serve_minutes),
+        "plan_code": plan_code,
+        "requested_mode": requested_mode,
+        "via": via,
+    }
+    if reason == "duration_over_max_plan":
+        return _error_response(
+            403, "duration_over_max_plan",
+            f"原视频约 {src_minutes:.0f} 分钟，超过当前最高套餐 "
+            f"{int(max_self_serve_minutes)} 分钟时长上限。请改用更短的视频，"
+            "或联系客服了解更长视频的处理方案。",
+            detail,
+        )
+    if recommended_plan is not None:
+        _rec_name, _rec_cap = recommended_plan
+        detail["recommended_plan"] = _rec_name
+        detail["recommended_plan_minutes"] = int(_rec_cap)
+        _msg = (
+            f"原视频约 {src_minutes:.0f} 分钟，超出当前套餐 {int(cap_minutes)} 分钟"
+            f"时长上限。升级到 {_rec_name} 套餐（支持 {int(_rec_cap)} 分钟）即可处理。"
+        )
+    else:
+        _msg = (
+            f"原视频约 {src_minutes:.0f} 分钟，超出当前套餐 {int(cap_minutes)} 分钟"
+            "时长上限。升级套餐即可处理更长视频。"
+        )
+    return _error_response(403, "duration_upgrade_required", _msg, detail)
+
+
 def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
     return _error_response(
         402,
@@ -1510,6 +1641,44 @@ async def intercept_create_job(
         request_data.pop("preview_mode", None)
         request_data.pop("reuse_preview_job_id", None)
 
+        # A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX）——消除与 D7 匿名转完整
+        # 路径的不对称缺口（2026-06-16 对抗审查 finding #2，原为已记录的刻意取舍，现补齐）。
+        # 源是**本地文件**且超套餐 cap 时，创建期共享 duration gate（estimated_duration_
+        # seconds 仅对 youtube_url 探测，本地不探，见 ~L2090）会跳过 → 注定失败的 job 跑到
+        # 管线 _check_duration_limit 才以 raw RuntimeError 失败（不友好、无升级/超额分流）。
+        # 此处对认领的**完整本地源真实时长**（resolve_preview_reuse 已对 local_video 重探
+        # stored final_path 全长，纯只读、无付费 API）+ 用户**套餐层级** cap 提前判定，超限
+        # → 返回可区分两档 reason，**不建注定失败的 job**。YouTube 源 source_duration_
+        # seconds 恒 None（resolver 不重探）→ 本闸跳过，仍由创建期 yt-dlp 探测路径处理
+        # （既有行为，不重复探测）。探测失败 → 放行（纯增强语义，绝不误拒），管线
+        # _check_duration_limit 仍兜底。user 此处必非 None（上方 1478 已校验）；admin 与
+        # 既有创建期 duration gate 一致地豁免（is_admin 此处尚未定义，用内联 role 判定）。
+        # 本闸在 single-flight / smart 套餐升级闸（Gate A，下方 ~L1753）之前，给比后者更
+        # 精确的时长指引（具名能处理该时长的最低自助套餐）。复用 D7 同款两档 helper
+        # （_anon_convert_duration_block / _anon_convert_duration_error_response）——reason
+        # 字面量契约与 D7 一致，前端 mapSmartPreviewReuseError 单一 mapper 即可识别。
+        from plan_catalog import (
+            get_effective_plan_gate as _gate_for_smart_dur,
+            max_self_serve_duration_minutes as _max_self_serve_for_smart_dur,
+            minimum_self_serve_plan_for as _min_plan_for_smart_dur,
+        )
+        _smart_max_ss = _max_self_serve_for_smart_dur()
+        _smart_dur_block = _anon_convert_duration_block(
+            getattr(_reuse_resolution, "source_duration_seconds", None),
+            _gate_for_smart_dur(user).get("max_duration_minutes"),
+            _smart_max_ss,
+            is_admin=(getattr(user, "role", "user") or "user") == "admin",
+        )
+        if _smart_dur_block is not None:
+            return _anon_convert_duration_error_response(
+                _smart_dur_block,
+                max_self_serve_minutes=_smart_max_ss,
+                recommended_plan=_min_plan_for_smart_dur(_smart_dur_block[1]),
+                plan_code=getattr(user, "plan_code", "free") or "free",
+                requested_mode="smart",
+                via="smart_preview_convert",
+            )
+
         # P3e D-C single-flight + 600 结转 marker（plan 2026-06-15 §4.6）。
         # 确定性 job_id 从 (user, preview_job_id) 派生 → 同一预览的重复 convert（双击/
         # 重发）收敛到同一完整任务。gateway pre-forward existing-check 命中 → 幂等返回
@@ -1626,6 +1795,42 @@ async def intercept_create_job(
         # 600-reserve 按 idempotency_key 设自己的 job_id，D7 不与之抢——复审 HIGH#2）。
         # 双击防护 = 前端 debounce（与普通 create 一致，本就无 server 端 dedup）。
         _apply_anon_convert_source_override(request_data, _anon_resolution)
+
+        # A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX）：用认领的**完整源
+        # 真实时长**（resolver 重探 stored_upload_path，纯只读，无付费 API）+ 用户
+        # **套餐层级** cap 提前判定。超限 → 返回可区分的 ``duration_upgrade_required``
+        # （前端渲染升级 CTA → /pricing），**不建注定失败的 job**——避免跑到管线 S0
+        # 才抛 RuntimeError、给用户看不友好的原始时长日志（"音频实际时长 11905.71 秒"）。
+        # cap 是 plan-tier 级（plan_catalog max_duration_minutes，trial-aware），与所选
+        # service_mode 无关；admin 与既有创建期 duration gate（下方 ~L1916）一致地豁免。
+        # 源时长未知（探测失败）→ 放行（纯增强语义，绝不误拒可转完整的源），管线
+        # _check_duration_limit 仍兜底。user 此处必非 None（上方 1476 已校验）。
+        # 两档分流（CodeX P1）：源时长超过**最高自助套餐**（Pro=180）时升级也没用 →
+        # duration_over_max_plan（前端不给 /pricing CTA，提示用更短视频 / 联系客服）；
+        # 否则 duration_upgrade_required，**具名**推荐能处理该时长的最低自助套餐
+        # （minimum_self_serve_plan_for——避免对 45<源≤180 误导买 Plus，CodeX P1 延伸）。
+        # 渲染抽到纯 helper _anon_convert_duration_error_response（行为可测、锁定 emitted
+        # body.error 字面量↔前端 readDurationBlockReason 契约）。
+        from plan_catalog import (
+            get_effective_plan_gate as _gate_for_anon_dur,
+            max_self_serve_duration_minutes as _max_self_serve_for_anon_dur,
+            minimum_self_serve_plan_for as _min_plan_for_anon_dur,
+        )
+        _anon_max_ss = _max_self_serve_for_anon_dur()
+        _anon_block = _anon_convert_duration_block(
+            getattr(_anon_resolution, "source_duration_seconds", None),
+            _gate_for_anon_dur(user).get("max_duration_minutes"),
+            _anon_max_ss,
+            is_admin=(getattr(user, "role", "user") or "user") == "admin",
+        )
+        if _anon_block is not None:
+            return _anon_convert_duration_error_response(
+                _anon_block,
+                max_self_serve_minutes=_anon_max_ss,
+                recommended_plan=_min_plan_for_anon_dur(_anon_block[1]),
+                plan_code=getattr(user, "plan_code", "free") or "free",
+                requested_mode=request_data.get("service_mode", "express"),
+            )
 
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py

@@ -184,3 +184,37 @@ def test_form_hides_smart_preview_entry_in_convert_mode():
     assert re.search(
         r"smartPreviewEntryEnabled\s*&&\s*!reuseAnonPreviewId", src
     ), "转完整模式应隐藏 smart 预览试用入口"
+
+
+# ---------------------------------------------------------------------------
+# 4. A 方案 pre-flight 时长闸前端 CTA（plan 2026-06-16 转化漏斗 UX）
+# ---------------------------------------------------------------------------
+
+
+def test_form_maps_duration_block_two_tier_cta():
+    src = _read(FORM_TSX)
+    # 识别两档可区分 reason（body.error）：可升级 + 超过最高自助套餐（CodeX P1）。
+    assert "duration_upgrade_required" in src, "缺可升级错误码识别"
+    assert "duration_over_max_plan" in src, "缺『超过最高套餐』错误码识别（CodeX P1）"
+    assert "readDurationBlockReason" in src, "缺两档 reason 检测 helper"
+    # 命中 → 持久 banner（state，带 canUpgrade）而非死路 toast。
+    assert "durationBlock" in src, "缺时长 banner state"
+    assert "setDurationBlock(" in src, "命中须设置 banner"
+    # 升级 CTA 仅在 canUpgrade 时给 /pricing（over_max 升级也没用 → 不给 /pricing）。
+    assert re.search(r"durationBlock\.canUpgrade\s*\?[\s\S]*?href=\"/pricing\"", src), \
+        "/pricing CTA 须由 durationBlock.canUpgrade 守门（CodeX P1：升无可升不给升级口）"
+    # 保留转完整模式：源有效，升级 / 换更短视频后可重试 → duration 分支不得清 reuseAnonPreviewId。
+    block = re.search(r"const durationReason = readDurationBlockReason\(error\)[\s\S]*?\n      \}", src)
+    assert block, "找不到 duration block catch 分支"
+    assert "setReuseAnonPreviewId(null)" not in block.group(0), \
+        "时长超限不应清转完整模式（源有效，升级 / 换视频后可重试）"
+
+
+def test_form_clears_duration_banner_on_switch_video():
+    src = _read(FORM_TSX)
+    # CodeX P3：点「改用其它视频」清 reuseAnonPreviewId 时，须一并清旧的时长 banner。
+    switch = re.search(
+        r"setReuseAnonPreviewId\(null\)\s*\n\s*clearAnonConvertReady\(\)[\s\S]*?setDurationBlock\(null\)",
+        src,
+    )
+    assert switch, "『改用其它视频』须 setDurationBlock(null) 清残留 banner（CodeX P3）"

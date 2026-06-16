@@ -244,6 +244,8 @@ export function mapSmartPreviewCreateError(
 
 export type SmartPreviewReuseReason =
   | 'upgrade_required' // 决策 A：免费 plan 缺 smart → 渲染升级 CTA
+  | 'duration_upgrade' // A 方案：原视频超当前套餐但 ≤ 最高自助套餐 → 升级可解决（→ /pricing）
+  | 'duration_over_max' // A 方案：原视频超最高自助套餐 → 升级也没用（用更短视频 / 联系客服）
   | 'disabled' // 转完整 / 智能版 kill-switch 未开放
   | 'auth_required' // 未登录
   | 'preview_unavailable' // 预览不存在 / 无权 / 状态不可复用（need re-generate）
@@ -267,6 +269,22 @@ export function mapSmartPreviewReuseError(err: unknown): SmartPreviewReuseError 
       reason: 'upgrade_required',
       message:
         message ?? '转完整智能版需升级到 Plus / Pro 套餐后再试。复用不会重复扣除预览已支付的克隆费用。',
+    }
+  }
+  // A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX）——与 D7 匿名转完整同款两档
+  // 可区分 reason（后端 _anon_convert_duration_error_response 把 code 放 body.error、
+  // 含具名套餐推荐的友好文案放 body.message）。沿用后端文案；fallback 仅在缺失时兜底，
+  // 用**不具名**通用文案，避免再误导买某档（CodeX P1）。
+  if (code === 'duration_upgrade_required') {
+    return {
+      reason: 'duration_upgrade',
+      message: message ?? '原视频时长超出当前套餐上限，升级套餐即可处理更长视频。',
+    }
+  }
+  if (code === 'duration_over_max_plan') {
+    return {
+      reason: 'duration_over_max',
+      message: message ?? '原视频时长超过当前最高套餐上限，请改用更短的视频，或联系客服。',
     }
   }
   if (status === 401 || code === 'auth_required') {
