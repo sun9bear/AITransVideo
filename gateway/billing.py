@@ -53,6 +53,7 @@ from payment_providers import (
 from plan_catalog import (
     VALID_BILLING_PERIODS as _CATALOG_BILLING_PERIODS,
     get_legacy_price_table,
+    get_plan,
     get_price,
     valid_target_plan_codes,
 )
@@ -1107,7 +1108,10 @@ async def _process_payment_event(
     # 必须在订单行上串行化，后到者拿锁后重读到终态被守卫挡掉，防止
     # 双结算/重复发订阅点数。sqlite（测试）方言无 FOR UPDATE，自动忽略。
     result = await db.execute(
-        select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update()
+        select(PaymentOrder)
+        .where(PaymentOrder.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     order = result.scalar_one_or_none()
     if order is None:
@@ -1283,46 +1287,73 @@ async def _recall_entitlements_for_refund(
         )
     ).scalar_one_or_none()
 
-    same_plan_access_remains = False
-    if (
+    affected_current_access = (
         (subscription is not None and subscription.plan_code == order.target_plan_code)
         or (user.plan_code or "free") == order.target_plan_code
-    ):
-        same_plan_access_remains = await _has_other_paid_order_for_plan(
+    )
+    remaining_paid_order = None
+    fallback_plan_code = None
+    if affected_current_access:
+        remaining_paid_order = await _highest_remaining_paid_order_for_user(
             db, order=order
         )
+        fallback_plan_code = (
+            getattr(remaining_paid_order, "target_plan_code", None)
+            if remaining_paid_order is not None else None
+        )
+
+    same_plan_access_remains = fallback_plan_code == order.target_plan_code
 
     subscription_cancelled = False
+    subscription_restored = False
     plan_downgraded = False
 
     if (
         subscription is not None
         and subscription.plan_code == order.target_plan_code
-        and not same_plan_access_remains
     ):
-        subscription.status = "cancelled"
-        subscription.cancelled_at = now
-        subscription.updated_at = now
-        subscription_cancelled = True
+        if fallback_plan_code is None:
+            subscription.status = "cancelled"
+            subscription.cancelled_at = now
+            subscription.updated_at = now
+            subscription_cancelled = True
+        elif fallback_plan_code != subscription.plan_code:
+            subscription.plan_code = fallback_plan_code
+            if getattr(remaining_paid_order, "billing_period", None):
+                subscription.billing_period = remaining_paid_order.billing_period
+            if getattr(remaining_paid_order, "provider", None):
+                subscription.provider = remaining_paid_order.provider
+            if getattr(remaining_paid_order, "paid_at", None):
+                subscription.current_period_start = remaining_paid_order.paid_at
+            subscription.updated_at = now
+            subscription_restored = True
 
-    if (user.plan_code or "free") == order.target_plan_code and not same_plan_access_remains:
+    if (user.plan_code or "free") == order.target_plan_code:
+        new_plan_code = fallback_plan_code or "free"
         old_plan = user.plan_code
-        user.plan_code = "free"
-        db.add(AdminAuditLog(
-            admin_user_id=user.id,
-            target_user_id=user.id,
-            action="payment_refund_downgrade",
-            field_name="plan_code",
-            old_value=old_plan,
-            new_value="free",
-        ))
-        plan_downgraded = True
-    elif same_plan_access_remains:
+        if old_plan != new_plan_code:
+            user.plan_code = new_plan_code
+            db.add(AdminAuditLog(
+                admin_user_id=user.id,
+                target_user_id=user.id,
+                action="payment_refund_downgrade",
+                field_name="plan_code",
+                old_value=old_plan,
+                new_value=new_plan_code,
+            ))
+            plan_downgraded = True
+    if same_plan_access_remains:
         logger.info(
             "Refund recall for order %s kept plan %s because another paid "
             "same-plan order remains",
             order.id,
             order.target_plan_code,
+        )
+    elif fallback_plan_code is not None:
+        logger.info(
+            "Refund recall for order %s restored remaining paid plan %s",
+            order.id,
+            fallback_plan_code,
         )
 
     try:
@@ -1337,9 +1368,11 @@ async def _recall_entitlements_for_refund(
         )
 
     logger.info(
-        "Refund settled for order %s: subscription_cancelled=%s plan_downgraded=%s",
+        "Refund settled for order %s: subscription_cancelled=%s "
+        "subscription_restored=%s plan_downgraded=%s",
         order.id,
         subscription_cancelled,
+        subscription_restored,
         plan_downgraded,
     )
 
@@ -1360,3 +1393,51 @@ async def _has_other_paid_order_for_plan(
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+
+async def _highest_remaining_paid_order_for_user(
+    db: AsyncSession,
+    *,
+    order: PaymentOrder,
+) -> PaymentOrder | None:
+    result = await db.execute(
+        select(PaymentOrder)
+        .where(
+            PaymentOrder.user_id == order.user_id,
+            PaymentOrder.id != order.id,
+            PaymentOrder.status.in_(("paid", "partial_refunded")),
+        )
+    )
+    paid_orders = list(result.scalars().all())
+    if not paid_orders:
+        return None
+    return max(
+        paid_orders,
+        key=lambda paid_order: (
+            _plan_entitlement_rank(getattr(paid_order, "target_plan_code", None)),
+            _order_paid_sort_key(paid_order),
+            str(getattr(paid_order, "id", "")),
+        ),
+    )
+
+
+def _plan_entitlement_rank(plan_code: str | None) -> tuple[int, int, int]:
+    code = plan_code or "free"
+    try:
+        plan = get_plan(code)
+    except Exception:
+        return (0, 0, 0)
+    return (
+        get_price(code, "monthly") or 0,
+        getattr(plan, "max_duration_minutes", 0) or 0,
+        getattr(plan, "max_concurrent_jobs", 0) or 0,
+    )
+
+
+def _order_paid_sort_key(order: PaymentOrder) -> float:
+    paid_at = getattr(order, "paid_at", None) or getattr(order, "created_at", None)
+    if not isinstance(paid_at, datetime):
+        return 0.0
+    if paid_at.tzinfo is None:
+        paid_at = paid_at.replace(tzinfo=timezone.utc)
+    return paid_at.timestamp()
