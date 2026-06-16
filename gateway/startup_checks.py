@@ -273,9 +273,10 @@ def validate_anonymous_preview_config(settings) -> None:
         return
 
     logger.info(
-        "Anonymous preview ENABLED (max_seconds=%d, cap_global=%d/day, "
-        "cap_ip=%d/day, cap_device=%d/day, cap_source=%d/day)",
+        "Anonymous preview ENABLED (preview_seconds=%d, max_source_seconds=%d, "
+        "cap_global=%d/day, cap_ip=%d/day, cap_device=%d/day, cap_source=%d/day)",
         settings.anonymous_preview_max_seconds,
+        settings.anonymous_preview_max_source_seconds,
         settings.anonymous_preview_cap_global_per_day,
         settings.anonymous_preview_cap_per_ip,
         settings.anonymous_preview_cap_per_device,

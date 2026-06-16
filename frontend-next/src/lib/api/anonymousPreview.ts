@@ -239,6 +239,8 @@ export function mapStatusReason(reason: string | null): string {
     // 上限是 admin 热配置（limits 端点），此处不硬编码具体数值
     file_too_large: '文件超过大小限制，请压缩后重试',
     unsupported_format: '不支持的视频格式，请上传 mp4、mov、m4v 或 webm',
+    // 源视频时长超过匿名预览上限（gateway _redact_reason 细分出的 code）→ 引导换更短视频。
+    duration_exceeded: '视频时长超限，请更换视频再上传',
     quota_exceeded: '系统预览配额已满，请稍后再试',
     service_unavailable: '预览服务暂不可用，请稍后再试',
   }

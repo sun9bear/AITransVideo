@@ -113,6 +113,7 @@ def _patch_settings(monkeypatch):
         lambda: ApfLimits(
             anonymous_preview_max_upload_bytes=200 * 1024 * 1024,
             anonymous_preview_max_seconds=180,
+            anonymous_preview_max_source_seconds=1800,
             anonymous_preview_cap_global_per_day=500,
             anonymous_preview_cap_per_ip=3,
             anonymous_preview_cap_per_device=1,

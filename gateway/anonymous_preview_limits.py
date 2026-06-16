@@ -1,6 +1,6 @@
 """APF 限制解析层 — admin 热配置优先，env settings fail-safe fallback（2026-06-11）。
 
-把 6 个原 env-only 的匿名预览限制（上传大小 / teaser 时长 / 四个每日 cap）
+把 7 个原 env-only 的匿名预览限制（上传大小 / 预览长度 / 源上传时长 / 四个每日 cap）
 统一收口到 ``resolve_apf_limits()``：
 
 * admin_settings.json 读取成功 → 用 admin 值（``anonymous_preview_max_upload_mb``
@@ -45,6 +45,8 @@ class ApfLimits:
 
     anonymous_preview_max_upload_bytes: int
     anonymous_preview_max_seconds: int
+    # 源视频上传时长上限（秒）——与预览长度解耦（2026-06-16）。intake 据此拒超长源。
+    anonymous_preview_max_source_seconds: int
     anonymous_preview_cap_global_per_day: int
     anonymous_preview_cap_per_ip: int
     anonymous_preview_cap_per_device: int
@@ -56,6 +58,7 @@ def _limits_from_env(env_settings) -> ApfLimits:
     return ApfLimits(
         anonymous_preview_max_upload_bytes=int(env_settings.anonymous_preview_max_upload_bytes),
         anonymous_preview_max_seconds=int(env_settings.anonymous_preview_max_seconds),
+        anonymous_preview_max_source_seconds=int(env_settings.anonymous_preview_max_source_seconds),
         anonymous_preview_cap_global_per_day=int(env_settings.anonymous_preview_cap_global_per_day),
         anonymous_preview_cap_per_ip=int(env_settings.anonymous_preview_cap_per_ip),
         anonymous_preview_cap_per_device=int(env_settings.anonymous_preview_cap_per_device),
@@ -79,6 +82,7 @@ def resolve_apf_limits(env_settings=None) -> ApfLimits:
         return ApfLimits(
             anonymous_preview_max_upload_bytes=int(adm.anonymous_preview_max_upload_mb) * 1024 * 1024,
             anonymous_preview_max_seconds=int(adm.anonymous_preview_max_seconds),
+            anonymous_preview_max_source_seconds=int(adm.anonymous_preview_max_source_seconds),
             anonymous_preview_cap_global_per_day=int(adm.anonymous_preview_cap_global_per_day),
             anonymous_preview_cap_per_ip=int(adm.anonymous_preview_cap_per_ip),
             anonymous_preview_cap_per_device=int(adm.anonymous_preview_cap_per_device),

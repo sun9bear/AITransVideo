@@ -308,8 +308,16 @@ class GatewaySettings(BaseSettings):
     # 同时也需要 AVT_ENABLE_FREE_TIER=true（匿名 surface 不绕过 free tier 总开关，AD-7）。
     enable_anonymous_preview: bool = False
 
-    # 单次预览 teaser 最大时长（秒）。pipeline 按此 cap 截取子文件。
+    # 对匿名用户**广告/交付的预览长度**（秒）——/limits ``preview_seconds`` + admission
+    # preview_duration 钳值。实际 teaser 文件恒裁 180s（build_intake_probe_fn 硬编码），
+    # 故建议保持 180。**不再**作源上传时长上限（2026-06-16 解耦，见下 *_max_source_seconds）。
     anonymous_preview_max_seconds: int = 180
+
+    # 匿名**源视频上传**时长上限（秒）——与上面的预览长度**解耦**（2026-06-16）：源可比
+    # 预览长得多（上传长视频、只预览前 ~180s teaser）。intake 据此拒超长源（拒绝→前端
+    # "视频时长超限，请更换视频再上传"）。默认 1800s=30min；admin 可调上限见 admin_settings
+    # ``_APF_LIMIT_BOUNDS``（30min 默认、最高 180min=10800s）。
+    anonymous_preview_max_source_seconds: int = 1800
 
     # 上传文件大小上限（字节）。远小于登录用户 2GB，防带宽白嫖。
     anonymous_preview_max_upload_bytes: int = 200 * 1024 * 1024  # 200 MB

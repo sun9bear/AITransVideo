@@ -106,11 +106,19 @@ def _redact_reason(reason: Optional[str]) -> Optional[str]:
     """Return a redacted reason string safe for clients (no internal detail)."""
     if not reason:
         return None
+    low = (reason or "").lower()
+    # 源视频时长超限（intake/adapter 的 "... exceeds intake cap"，含 source>cap 拒绝）→
+    # 给前端**可区分**的 friendly code（mapStatusReason 据此显示"视频时长超限，请更换
+    # 视频再上传"，2026-06-16 项目主裁定）。持久 status_reason 文本**不变**（审计契约，
+    # 多处测试 pin "exceeds intake cap"）；这里只把对客户端**暴露**的 code 细分，避免
+    # 与其它 rejected 混为一谈、漏给用户具体的换视频指引。在 _safe_codes 之前判定，
+    # 因为越限文案不含任何 safe code 子串、本会落到末尾的通用 "rejected"。
+    if "exceeds intake cap" in low:
+        return "duration_exceeded"
     _safe_codes = {
         "rate_limited", "rejected", "failed", "content_blocked",
         "needs_review", "storage_unavailable", "ready",
     }
-    low = (reason or "").lower()
     for code in _safe_codes:
         if code in low:
             return code

@@ -70,6 +70,9 @@ _VALID_CLONE_TARGET_MODELS = frozenset({"cosyvoice-v3.5-flash", "cosyvoice-v3.5-
 _APF_LIMIT_BOUNDS = {
     "anonymous_preview_max_upload_mb": (10, 2048),
     "anonymous_preview_max_seconds": (30, 7200),
+    # 源上传时长上限：下界 180s（=teaser 长度，源短于此则预览=整段，无意义）、
+    # 上界 10800s=180min（2026-06-16 项目主：对齐最高自助套餐 Pro=180min）。默认 30min。
+    "anonymous_preview_max_source_seconds": (180, 10800),
     "anonymous_preview_cap_global_per_day": (1, 100000),
     "anonymous_preview_cap_per_ip": (1, 1000),
     "anonymous_preview_cap_per_device": (1, 100),
@@ -390,6 +393,9 @@ class AdminSettings(BaseModel):
     # ``anonymous_preview_max_upload_bytes``（字节）。其余 5 项单位同 env。
     anonymous_preview_max_upload_mb: int = 200
     anonymous_preview_max_seconds: int = 180
+    # 匿名**源视频上传**时长上限（秒）——与预览长度（上行）**解耦**（2026-06-16）。
+    # 默认 30min；上界 180min（_APF_LIMIT_BOUNDS）。源可比预览长，预览仍恒 3min teaser。
+    anonymous_preview_max_source_seconds: int = 1800
     anonymous_preview_cap_global_per_day: int = 500
     anonymous_preview_cap_per_ip: int = 3
     anonymous_preview_cap_per_device: int = 1
@@ -557,6 +563,7 @@ class AdminSettings(BaseModel):
     @field_validator(
         "anonymous_preview_max_upload_mb",
         "anonymous_preview_max_seconds",
+        "anonymous_preview_max_source_seconds",
         "anonymous_preview_cap_global_per_day",
         "anonymous_preview_cap_per_ip",
         "anonymous_preview_cap_per_device",
