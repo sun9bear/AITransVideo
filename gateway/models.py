@@ -365,6 +365,7 @@ class PaymentOrder(Base):
     __table_args__ = (
         Index("idx_payment_orders_user_id", "user_id"),
         Index("idx_payment_orders_status", "status"),
+        Index("idx_payment_orders_last_reconciled_at", "last_reconciled_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -389,6 +390,9 @@ class PaymentOrder(Base):
     checkout_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)

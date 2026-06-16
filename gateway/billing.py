@@ -1282,12 +1282,30 @@ async def _recall_entitlements_for_refund(
             )
         )
     ).scalar_one_or_none()
-    if subscription is not None and subscription.plan_code == order.target_plan_code:
+
+    same_plan_access_remains = False
+    if (
+        (subscription is not None and subscription.plan_code == order.target_plan_code)
+        or (user.plan_code or "free") == order.target_plan_code
+    ):
+        same_plan_access_remains = await _has_other_paid_order_for_plan(
+            db, order=order
+        )
+
+    subscription_cancelled = False
+    plan_downgraded = False
+
+    if (
+        subscription is not None
+        and subscription.plan_code == order.target_plan_code
+        and not same_plan_access_remains
+    ):
         subscription.status = "cancelled"
         subscription.cancelled_at = now
         subscription.updated_at = now
+        subscription_cancelled = True
 
-    if (user.plan_code or "free") == order.target_plan_code:
+    if (user.plan_code or "free") == order.target_plan_code and not same_plan_access_remains:
         old_plan = user.plan_code
         user.plan_code = "free"
         db.add(AdminAuditLog(
@@ -1298,6 +1316,14 @@ async def _recall_entitlements_for_refund(
             old_value=old_plan,
             new_value="free",
         ))
+        plan_downgraded = True
+    elif same_plan_access_remains:
+        logger.info(
+            "Refund recall for order %s kept plan %s because another paid "
+            "same-plan order remains",
+            order.id,
+            order.target_plan_code,
+        )
 
     try:
         from credits_service import revoke_buckets_for_order
@@ -1313,6 +1339,24 @@ async def _recall_entitlements_for_refund(
     logger.info(
         "Refund settled for order %s: subscription_cancelled=%s plan_downgraded=%s",
         order.id,
-        bool(subscription is not None and subscription.status == "cancelled"),
-        user.plan_code == "free",
+        subscription_cancelled,
+        plan_downgraded,
     )
+
+
+async def _has_other_paid_order_for_plan(
+    db: AsyncSession,
+    *,
+    order: PaymentOrder,
+) -> bool:
+    result = await db.execute(
+        select(PaymentOrder.id)
+        .where(
+            PaymentOrder.user_id == order.user_id,
+            PaymentOrder.id != order.id,
+            PaymentOrder.target_plan_code == order.target_plan_code,
+            PaymentOrder.status.in_(("paid", "partial_refunded")),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None

@@ -58,9 +58,9 @@ _UNSETTLED_STATUSES = ("created", "pending")
 def _candidate_orders_stmt(now: datetime):
     """滞留订单的选单语句：created/pending、非 fake、落在对账窗口内。
 
-    轮转语义：按 ``updated_at`` 升序（最久未检查的优先；NULL 视为从未检查
-    排最前），且距上次检查至少 ``RETRY_INTERVAL_S``——reconcile_once 在每次
-    尝试后无条件 bump ``updated_at``，保证失败/无结果的单也会让位。
+    轮转语义：按 ``last_reconciled_at`` 升序（最久未检查的优先；NULL 视为
+    从未检查排最前），且距上次检查至少 ``RETRY_INTERVAL_S``——reconcile_once
+    在每次尝试后无条件 bump ``last_reconciled_at``，保证失败/无结果的单也会让位。
     """
     newest_allowed = now - timedelta(seconds=MIN_AGE_S)
     oldest_allowed = now - timedelta(seconds=MAX_AGE_S)
@@ -73,12 +73,12 @@ def _candidate_orders_stmt(now: datetime):
             PaymentOrder.created_at <= newest_allowed,
             PaymentOrder.created_at >= oldest_allowed,
             or_(
-                PaymentOrder.updated_at.is_(None),
-                PaymentOrder.updated_at <= retry_cutoff,
+                PaymentOrder.last_reconciled_at.is_(None),
+                PaymentOrder.last_reconciled_at <= retry_cutoff,
             ),
         )
         .order_by(
-            PaymentOrder.updated_at.asc().nulls_first(),
+            PaymentOrder.last_reconciled_at.asc().nulls_first(),
             PaymentOrder.created_at.asc(),
         )
         .limit(SWEEP_BATCH_SIZE)
@@ -126,7 +126,9 @@ async def reconcile_once(
                 # refresh 内部只有 pending 结果会 commit updated_at，
                 # 早退（provider 无结果 / NotImplementedError / 异常）不会，
                 # 不补这里就会出现「最老一批永远霸占批次」（Codex P2）。
-                order.updated_at = datetime.now(timezone.utc)
+                attempted_at = datetime.now(timezone.utc)
+                order.last_reconciled_at = attempted_at
+                order.updated_at = attempted_at
             if order.status == "paid" and status_before != "paid":
                 stats["settled"] += 1
                 logger.warning(
