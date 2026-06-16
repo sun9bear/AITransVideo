@@ -1115,8 +1115,10 @@ async def _process_payment_event(
     # depends on to keep `billing_invoices.status` truthful. Without allowing
     # that transition here, a later refund webhook would be silently rejected
     # and billing history would lie.
-    _is_paid_to_refund = order.status == "paid" and new_status == "refunded"
-    if order.status in ("paid", "refunded", "cancelled") and not _is_paid_to_refund:
+    _is_refund_transition = (
+        order.status in ("paid", "partial_refunded") and new_status == "refunded"
+    )
+    if order.status in ("paid", "partial_refunded", "refunded", "cancelled") and not _is_refund_transition:
         event.processed = True
         event.error_message = f"Order already in terminal state: {order.status}"
         event.processed_at = now
@@ -1134,8 +1136,15 @@ async def _process_payment_event(
                         provider_event_id, order_id)
         return False
 
+    is_known_partial_refund = (
+        new_status == "refunded"
+        and refund_amount_fen is not None
+        and refund_amount_fen < order.amount_cny
+    )
+    settlement_status = "partial_refunded" if is_known_partial_refund else new_status
+
     # Update order status
-    order.status = new_status
+    order.status = settlement_status
     if new_status == "paid":
         order.paid_at = now
 
@@ -1198,13 +1207,13 @@ async def _process_payment_event(
     elif new_status == "refunded":
         # Refund truth layer: billing history made truthful (T4 既有行为)。
         await record_invoice_for_order(
-            db, order=order, settled_at=now, status="refunded"
+            db, order=order, settled_at=now, status=settlement_status
         )
         # R7 退款闭环：回收订阅 / plan 投影 / 本单关联 credits。
         # 部分退款（已知退款金额 < 订单金额）不自动回收，留人工复核——
         # admin /api/admin/billing/unsettled 的 recent_refunds 面板可见；
         # 金额未知（query 路径 / 字段缺失）按全额处理。
-        if refund_amount_fen is not None and refund_amount_fen < order.amount_cny:
+        if is_known_partial_refund:
             logger.warning(
                 "Partial refund for order %s (refund=%s < order=%s); "
                 "entitlements kept — manual review required",

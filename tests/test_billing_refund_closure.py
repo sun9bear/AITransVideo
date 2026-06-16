@@ -450,7 +450,8 @@ def test_receive_webhook_wires_refund_binding_and_amount():
 
 def test_process_payment_event_partial_refund_guard():
     src = inspect.getsource(billing._process_payment_event)
-    assert "refund_amount_fen is not None and refund_amount_fen < order.amount_cny" in src, (
+    assert "refund_amount_fen is not None" in src
+    assert "refund_amount_fen < order.amount_cny" in src, (
         "部分退款守卫缺失：已知退款金额小于订单金额时不得自动回收权益"
     )
     assert "partial_refunded" in src

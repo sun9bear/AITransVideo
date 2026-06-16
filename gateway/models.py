@@ -385,7 +385,7 @@ class PaymentOrder(Base):
     currency: Mapped[str] = mapped_column(String(8), nullable=False, server_default="CNY")
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="created"
-    )  # "created" | "pending" | "paid" | "failed" | "cancelled" | "expired" | "refunded"
+    )  # "created" | "pending" | "paid" | "failed" | "cancelled" | "expired" | "refunded" | "partial_refunded"
     checkout_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -551,7 +551,7 @@ class BillingInvoice(Base):
     )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="paid"
-    )  # "paid" | "failed" | "refunded"
+    )  # "paid" | "failed" | "refunded" | "partial_refunded"
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
