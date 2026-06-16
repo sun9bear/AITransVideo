@@ -12,6 +12,10 @@
 - CosyVoice clone 灰度、GA、max voices、sample uploader 与 mainland worker health
 - Express CosyVoice 自动克隆 admin 主开关、allowlist、reservation TTL、临时音色 cleanup 与手动 CLI
 - Free tier feature flag、free voiceclone kill switch、daily quota ledger 与 launch-gate 诊断
+- Anonymous Preview APF caps、claim switch、direct/chunked upload knobs 与匿名 TTL 诊断
+- Smart Preview clone 主开关、600 点 reservation caps、strict reservation gate 与 sweeper
+- Paddle / WeChat payment provider reconciliation、refund closure 与 fake payment guard
+- rotating logs、process runner watchdog 与任务 terminal mirror 诊断
 - MiMo v2.5 / MiMo TTS promotional pricing / provider usage capture 的成本诊断
 - Smart analytics、report analysis 与 Phase 1b rollout flags
 - CSRF same-origin guard、production startup guard 与 fake payment gate
@@ -51,12 +55,18 @@ graph TD
     Settings --> CosyVoicePolicy["cosyvoice clone allowlist / GA / worker / max voices"]
     Settings --> ExpressPolicy["express auto-clone enabled / allowlist / caps / TTL"]
     Settings --> FreePolicy["free_tier_voiceclone_enabled kill switch"]
+    Settings --> AnonymousPolicy["anonymous preview APF caps / claim switch"]
+    Settings --> ChunkedPolicy["chunked upload limits / TTL / disk floor"]
+    Settings --> SmartPreviewPolicy["smart preview clone caps / reservation strict gate"]
     Settings --> Phase1BFlags["phase1b report flags"]
     PromptModels --> LLMRegistry["llm_registry mode defaults + admin override"]
     SmartVoicePolicy --> SmartRuntime["process.py read_admin_setting"]
     CosyVoicePolicy --> CloneGate["/api/voice/cosyvoice/clone-gate"]
     ExpressPolicy --> ExpressAvailability["/api/me/express-auto-clone-availability"]
     ExpressPolicy --> ExpressReservation["express_clone_reservations"]
+    AnonymousPolicy --> AnonymousPreview["anonymous preview admission / claim"]
+    ChunkedPolicy --> ChunkedUpload["chunked upload service"]
+    SmartPreviewPolicy --> SmartCloneReservation["smart_clone_reservations"]
     AdminCosyVoice --> ExpressCleanupStatus["temporary voice cleanup dry-run / execute status"]
     FreePolicy --> FreeQuotaLedger["free_service_daily_usage ledger"]
     FreePolicy --> FreePaidGuard["free voiceclone -> MiMo-only paid API guard"]
@@ -89,11 +99,15 @@ graph TD
     MainLife --> PanSchedulers["pan scheduler loops"]
     MainLife --> ExpressReservationSweeper["express_reservation_sweeper"]
     MainLife --> ExpressVoiceCleanupSweeper["express_voice_cleanup_sweeper"]
+    MainLife --> SmartCloneSweeper["smart_clone_reservation_sweeper"]
     ExpressReservationSweeper --> ExpressReservation
     ExpressVoiceCleanupSweeper --> ExpressCleanupStatus
+    SmartCloneSweeper --> SmartCloneReservation
     Sweeper --> Mirror["job_terminal_mirror"]
     Mirror --> SmartState["smart_state mirror"]
     Mirror --> Settle["credit/quota settle"]
+    Mirror --> SmartCloneSettle["smart preview clone settle"]
+    SmartCloneSettle --> SmartCloneReservation
     Settle --> Backfill["cost_summary_backfill.py"]
     Backfill --> CostFile["audit/smart_cost_summary.json"]
     CostFile --> AdminCost
@@ -121,6 +135,7 @@ graph TD
     SupportAdmin --> Handoff["handoff / WeChat QR / ops email"]
     Traffic --> Categories["human / search / AI crawler / scanner"]
     Costs --> CostRows["LLM / TTS / voice_clone / smart policy / margin rows"]
+    Costs --> PaymentRecon["billing_reconciliation / refund closure"]
     CostCatalog["cost_management RMB-direct catalog"] --> Costs
     MiMoUsage["MiMo v2.5 provider usage + promotional TTS pricing"] --> CostCatalog
     FreeCost["free=0 debit truth + MiMo voiceclone cost visibility"] --> CostCatalog
@@ -347,6 +362,33 @@ graph TD
 
 结论：Free tier 的运维排查先看 feature flag、consent、daily ledger 和 paid API guard，再看普通 pipeline/TTS 错误。
 
+### 3.22 Anonymous Preview / chunked upload 运维面以 APF 与磁盘水位为主
+
+- `gateway/admin_settings.py` 暴露 anonymous preview max in-flight、max upload MB、max seconds、global/day、IP/device/source/mode caps 与 claim switch。
+- chunked upload knobs 覆盖 max file MB、chunk MB、per-user active、per-user/global inflight GB、daily GB、disk floor、TTL 和 anonymous TTL。
+- 匿名预览被拒时先看 APF admission、rate limiter、probe/compliance 和 chunked upload ready TTL，不应先放宽正式任务权益。
+- chunked upload 是传输层，ready artifact 仍需要通过 intake/admission 才能创建 preview 或正式任务。
+
+结论：匿名试用的稳定性和成本风险主要由 APF、chunked upload 配额和磁盘水位共同治理。
+
+### 3.23 Smart Preview clone 运维面以 reservation 和 sweeper 为主
+
+- `smart_preview_clone_enabled` 决定 public Smart Preview 是否可触发自动克隆。
+- `smart_clone_requires_reservation` 开启后，任何 Smart MiniMax clone 都必须有有效 reservation。
+- daily global cap、inflight cap、billing event idempotency 和 carryover single-use marker 共同保护 600 点 clone charge。
+- terminal mirror 与 `smart_clone_reservation_sweeper` 负责 capture/release/expire 补偿，避免 provider 成功但 ledger 卡住。
+
+结论：排查 Smart Preview 预览克隆问题时，先看 reservation row、terminal settle、sweeper 和 carryover，而不是只看 provider 调用。
+
+### 3.24 Payment reconciliation 是多 provider 上线后的补偿面
+
+- Paddle / WeChat provider 接入后，订单状态不再只来自同步 checkout 返回。
+- `billing_reconciliation.py` 用 sweeper/补偿式逻辑修正 provider status、本地 payment/order state 与 ledger 的漂移。
+- refund closure 要通过 Gateway 统一落账，不能由前端看到 provider 状态后自行推断权益。
+- fake payment dev/test guard 仍是生产安全排查点。
+
+结论：真实支付 provider 增多后，admin 排障应同时看 provider callback、reconciliation、ledger 和 fake-payment production guard。
+
 ## 4. 关键证据
 
 - `gateway/admin_disk_api.py`
@@ -435,6 +477,24 @@ graph TD
   - free launch-gate voice-rights consent
 - `gateway/free_service_quota.py`
   - free daily quota reserve / consume / release
+- `gateway/anonymous_preview_api.py`
+  - anonymous preview admin-visible lifecycle surface
+- `gateway/anonymous_preview_chunked_api.py`
+  - anonymous chunked upload path
+- `gateway/chunked_upload_api.py`
+  - chunked upload control API
+- `gateway/chunked_upload_service.py`
+  - TTL / disk floor / inflight enforcement
+- `gateway/smart_clone_reservation_service.py`
+  - Smart Preview clone reservation state machine
+- `gateway/smart_clone_reservation_sweeper.py`
+  - Smart clone reservation expiry sweeper
+- `gateway/billing_reconciliation.py`
+  - provider/payment state reconciliation
+- `gateway/payment_provider_paddle.py`
+  - Paddle provider integration
+- `gateway/payment_provider_wechat.py`
+  - WeChat provider integration
 - `gateway/alembic/versions/034_free_service_daily_usage.py`
   - free daily quota ledger schema
 - `gateway/alembic/versions/030_cosyvoice_clone_metadata.py`
@@ -484,6 +544,9 @@ graph TD
 - 想排查 CosyVoice clone-gate、mainland worker health、sample uploader 或 worker secret 配置
 - 想排查 Express 自动克隆 admin 开关、allowlist、reservation TTL、临时音色 cleanup、manual cleanup CLI
 - 想排查 Free tier flag、voiceclone kill switch、free daily quota ledger、voice-rights consent 403
+- 想排查 Anonymous Preview APF 限流、claim 开关、chunked upload TTL、磁盘水位或匿名上传失败
+- 想排查 Smart Preview clone cap、600 点 reservation、carryover、sweeper 或 terminal settle
+- 想排查 Paddle / WeChat 支付状态、refund closure、billing reconciliation 或 fake payment 生产门禁
 - 想排查 MiMo v2.5、MiMo TTS promotional rate、真实 provider usage 与 admin cost 明细
 - 想看 Smart analytics、report analysis、Phase 1b flags 为什么显示某个统计或开关状态
 - 想排查 CSRF 403、生产启动 safety guard、fake payment 被禁用

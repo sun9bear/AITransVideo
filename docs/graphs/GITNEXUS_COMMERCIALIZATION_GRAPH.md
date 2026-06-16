@@ -10,6 +10,7 @@
 - phone auth 前门
 - email auth 前门
 - Smart service mode 入口与固定价
+- Smart Preview 入口、3 分钟 teaser、600 点 clone reservation 与转完整抵扣
 - Smart consent schema、预算耗尽策略与固定价承诺边界
 - Smart kill switch、pricing consistency 与 `fail_and_refund` deferred blocker
 - Smart voice policy、possible-match 自动复用、弱匹配暂停提示与候选音色确认边界
@@ -17,6 +18,8 @@
 - CosyVoice clone 的用户显式付费触发、allowlist/GA gate 与 worker runtime gate
 - Express CosyVoice 自动克隆的 availability、consent、admin allowlist、reservation cap 与临时音色 cleanup
 - Free tier 的 feature flag、voice-rights consent、free=0 pricing、daily quota 与交付限制
+- 匿名预览试用、claim、convert-to-full 与正式付费任务边界
+- Paddle MoR、WeChat Native、refund closure、billing reconciliation
 - entitlements 与 allowed service modes
 - trial 发放边界
 - fake payment production gate
@@ -34,6 +37,10 @@ graph TD
     FAQ --> FaqLd["FaqJsonLd / FAQPage"]
     Home --> SiteLd["SiteJsonLd"]
     Home --> Legal["privacy / terms pages"]
+    Home --> AnonymousTrial["anonymous trial panel"]
+    AnonymousTrial --> AnonymousPreview["anonymous preview create/status"]
+    AnonymousPreview --> AnonymousClaim["post-login claim"]
+    AnonymousClaim --> AnonConvert["reuse_anonymous_preview_id full create"]
 
     Robots["robots.ts"] --> Crawlers["search + AI crawlers"]
     Sitemap["sitemap.ts"] --> Crawlers
@@ -59,6 +66,7 @@ graph TD
     EmailFlow --> EmailRisk["captcha + email/IP rate limits + attempts"]
 
     Workspace["TranslationForm"] --> Entitlements["GET entitlements"]
+    Workspace --> SmartPreview["Smart preview confirm/result"]
     Entitlements --> AllowedModes["allowed_service_modes"]
     Entitlements --> SmartKill["Smart kill switch env + admin"]
     SmartKill --> AllowedModes
@@ -81,6 +89,10 @@ graph TD
     Workspace --> SmartPricingMeta["getVoiceSelectionPricing metadata"]
     SmartPricingMeta --> WeakMatchWarning["smart_pause_warning_enabled notice"]
     Smart --> FullAuto["full-auto product promise"]
+    SmartPreview --> SmartPreviewReservation["600-credit smart clone reservation"]
+    SmartPreviewReservation --> SmartPreviewTeaser["3-min stream-only teaser"]
+    SmartPreviewTeaser --> SmartPreviewConvert["reuse_preview_job_id convert full"]
+    SmartPreviewConvert --> Submit
     Smart --> Consent["smart_consent payload"]
     Consent --> Submit["submitTranslationJob"]
     Submit --> ConsentValidator["Gateway smart_consent.py validator"]
@@ -102,7 +114,11 @@ graph TD
     AdminExpressPolicy --> ExpressReservation
 
     Billing["billing / checkout"] --> PaymentProviders["payment_providers"]
+    PaymentProviders --> Paddle["Paddle MoR provider"]
+    PaymentProviders --> WeChat["WeChat Native provider"]
     PaymentProviders --> FakeGate["fake payment dev/test default"]
+    Billing --> Reconciliation["billing_reconciliation sweeper"]
+    Reconciliation --> RefundClosure["refund closure / status compensation"]
     FakeGate --> ProdSafety["AVT_ENV production safety"]
     Billing --> CSRF
 
@@ -110,6 +126,8 @@ graph TD
     GatewayPlans --> Estimate
     GatewayPlans --> Policy
     GatewayPlans --> ConsentValidator
+    GatewayPlans --> SmartPreviewReservation
+    AnonConvert --> Submit
 
     PhoneComplete --> NewUserAnn["dispatch_announcements_for_new_user"]
     EmailComplete --> NewUserAnn
@@ -259,6 +277,33 @@ graph TD
 
 结论：Free tier 是拉新漏斗，不是“无约束的免费 Express”；它的 consent、quota、voiceclone、duration、watermark 和 artifact 限制都是商业事实的一部分。
 
+### 3.16 Anonymous Preview 是未登录拉新漏斗，不是匿名付费替身
+
+- 匿名预览通过 marketing trial panel 进入 Gateway anonymous preview create/status，而不是直接创建普通 paid job。
+- APF admission、rate limit、probe 和 compliance 在预览任务前保护成本与合规边界。
+- 登录后的 claim 只绑定 ownership；真正转完整还要通过 `reuse_anonymous_preview_id` 进入正式 create flow。
+- 匿名 preview 只提供 stream-only teaser，不开放 materials、clean audio、editor draft 或完整下载。
+
+结论：匿名预览降低首次试用门槛，但商业边界仍在登录后的正式任务创建和权益判断中。
+
+### 3.17 Smart Preview 的 600 点 clone 语义独立于完整 Smart 固定价
+
+- Smart Preview 可展示 3 分钟 teaser，但如果触发 MiniMax clone，需要先通过 600 点 reservation。
+- reservation capture/release/expire 由 Gateway ledger 和 sweeper 补偿，不由前端自行判断。
+- 转完整通过 `reuse_preview_job_id` 和 carryover marker 抵扣一次 clone charge，避免用户先预览后购买时重复扣 600 点。
+- Smart Preview 不提供完整任务的后编辑、剪映草稿、materials pack 或 clean artifact。
+
+结论：Smart Preview 是购买前决策产品，收费核心是受 reservation 保护的 clone 成本，而不是完整 Smart 任务的低价入口。
+
+### 3.18 Paddle / WeChat / reconciliation 扩展支付面但不扩展事实源
+
+- `gateway/payment_provider_paddle.py` 与 `gateway/payment_provider_wechat.py` 承接 provider-specific checkout / callback / native pay 逻辑。
+- `gateway/billing_reconciliation.py` 用补偿式扫描修正 provider 状态、订单状态和本地 billing 状态的漂移。
+- refund closure 仍应通过 Gateway billing/ledger 状态落地，不能让前端或 provider callback 成为唯一真源。
+- fake payment 生产门禁继续存在，真实支付上线不代表 dev fake path 可以进 production。
+
+结论：多 provider 是接入层扩展，套餐、权益、支付状态和 ledger 仍由 Gateway 统一裁决。
+
 ## 4. 关键证据
 
 - `gateway/plan_catalog.py`
@@ -285,6 +330,20 @@ graph TD
   - Free voice-rights consent schema and server confirmation
 - `gateway/free_service_quota.py`
   - Free daily quota reserve / consume / release
+- `gateway/anonymous_preview_api.py`
+  - anonymous preview create / status / claim
+- `gateway/anonymous_preview_chunked_api.py`
+  - anonymous chunked upload path
+- `gateway/smart_clone_reservation_service.py`
+  - Smart Preview 600 credit reservation
+- `gateway/smart_clone_reservation_sweeper.py`
+  - expired reservation cleanup
+- `gateway/payment_provider_paddle.py`
+  - Paddle MoR provider
+- `gateway/payment_provider_wechat.py`
+  - WeChat Native provider
+- `gateway/billing_reconciliation.py`
+  - payment status reconciliation
 - `gateway/admin_settings.py`
   - Smart voice policy settings
   - Express CosyVoice auto-clone policy settings
@@ -340,9 +399,11 @@ graph TD
 ## 5. 什么时候优先读这张图
 
 - 想改 pricing / trial / billing truth
-- 想改 Smart 可售入口、固定价、allowed service modes
+- 想改 Smart 可售入口、Smart Preview、固定价、allowed service modes
+- 想改匿名预览、claim、convert-to-full、anonymous preview 限流或 stream-only 边界
 - 想改 Express auto-clone availability、consent、allowlist、reservation cap 或临时音色 cleanup
 - 想改 Free tier 入口、free=0 pricing、voice-rights consent、daily quota 或免费交付限制
+- 想改 Paddle、WeChat、refund closure 或 billing reconciliation
 - 想改 Smart consent、预算耗尽策略、admin voice policy、possible-match auto-reuse、voice library quota 预检
 - 想排查 Smart 为什么被 kill switch 下线、为什么 `fail_and_refund` 被拒
 - 想排查 CosyVoice clone 为什么不可用、为什么必须用户显式触发

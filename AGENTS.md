@@ -17,6 +17,8 @@ Build a Python workflow that outputs Jianying draft projects rather than rendere
 - CosyVoice / Mainland Worker: `docs/graphs/GITNEXUS_COSYVOICE_MAINLAND_WORKER_GRAPH.md`
 - Express CosyVoice Auto-Clone: `docs/graphs/GITNEXUS_EXPRESS_COSYVOICE_AUTO_CLONE_GRAPH.md`
 - Smart Auto Review: `docs/graphs/GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
+- Anonymous Preview Funnel: `docs/graphs/GITNEXUS_ANONYMOUS_PREVIEW_FUNNEL_GRAPH.md`
+- Smart Preview Clone / Billing: `docs/graphs/GITNEXUS_SMART_PREVIEW_CLONE_BILLING_GRAPH.md`
 - Jianying draft delivery: `docs/graphs/GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
 - Review flow: `docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
 - Editing / Post-Edit / Regeneration: `docs/graphs/GITNEXUS_EDITING_POST_EDIT_GRAPH.md`

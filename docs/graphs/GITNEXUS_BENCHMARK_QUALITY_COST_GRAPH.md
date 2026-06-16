@@ -16,6 +16,8 @@
 - MiMo TTS v2.5 limited-free promotional pricing
 - MiMo voiceclone usage/cost visibility for free tier
 - free=0 debit truth 与免费档 artifact/watermark observability
+- Smart Preview 600 点 clone reservation、preview minute release 与 full-job carryover offset
+- Paddle / WeChat provider status、refund closure 与 billing reconciliation 观测
 - Smart sidecar trio
 - Smart handoff quality report synthesis
 - Smart admin-only cost summary 与 settlement backfill
@@ -55,6 +57,9 @@ graph TD
     Smart --> SmartQuality["smart_quality_report.json"]
     Smart --> SmartCost["smart_cost_summary.json"]
     Smart --> SmartState["JobRecord.smart_state"]
+    SmartPreview["Smart Preview clone"] --> SmartPreviewReservation["600-credit reservation"]
+    SmartPreviewReservation --> SmartPreviewOffset["carryover offset into full job"]
+    SmartPreviewOffset --> Settlement
     Smart --> RetryStats["retry_summary / budget_exhausted events"]
     Smart --> SmartAnalytics["admin_smart_analytics summary/csv"]
     SmartDecision --> ReuseQuality["voice_reuse_quality"]
@@ -79,6 +84,8 @@ graph TD
     ReportAnalysis --> PhaseFlags["phase1b flags"]
 
     SmartState --> Settlement["credits_service smart credits_policy"]
+    PaymentProviders["Paddle / WeChat providers"] --> BillingRecon["billing_reconciliation"]
+    BillingRecon --> Settlement
     Settlement --> Backfill["cost_summary_backfill.py"]
     Backfill --> SmartCost
 
@@ -88,6 +95,7 @@ graph TD
     CostCatalog["gateway cost_management RMB-direct catalog"] --> CostRead["cost / quality / provider read models"]
     MiMoCatalog["MiMo v2.5 + promotional TTS catalog rows"] --> CostCatalog
     FreeCatalog["free=0 debit truth"] --> CostCatalog
+    SmartPreviewReservation --> CostRead
     ProviderModel --> CostRead["cost / quality / provider read models"]
     VoiceMetrics --> CostRead
     PostEditMetrics --> CostRead
@@ -288,6 +296,23 @@ graph TD
 
 结论：free=0 是用户计价事实，不等于内部零成本；admin 成本与质量分析要保留 MiMo voiceclone、水印重编码和受限 artifact 的上下文。
 
+### 3.20 Smart Preview 成本要拆分 clone reservation 与完整任务分钟费
+
+- Smart Preview 触发 MiniMax clone 时，核心财务证据是 `smart_clone_reservations` 的 600 点 reservation/capture/release/expire。
+- preview teaser 不应按完整 Smart 分钟价计费，terminal settle 需要释放 preview minute reservation。
+- 转完整后，carryover marker 对 full job 的 clone charge 做单次 offset，避免预览和完整任务重复扣 600 点。
+- 成本分析要同时看 reservation row、billing event、credit ledger、terminal mirror 和 cost summary，而不是只看 provider 调用是否成功。
+
+结论：Smart Preview 的成本口径是“预览 clone 成本 + 完整任务 offset”，不能和完整 Smart fixed price 混算。
+
+### 3.21 Payment reconciliation 是财务观测数据源
+
+- Paddle / WeChat provider status 可能异步到达，checkout 返回、callback、ledger 和订单状态可能短暂不一致。
+- `billing_reconciliation.py` 是补偿式状态收敛入口，适合分析支付漂移、refund closure 和重复通知。
+- fake payment 的 dev/test guard 不应进入真实支付成功率或退款率统计。
+
+结论：真实支付分析要把 provider events、reconciliation 结果和 Gateway ledger 连接起来看。
+
 ## 4. 关键证据
 
 - `src/services/smart/sidecar_emitter.py`
@@ -329,6 +354,18 @@ graph TD
   - MiMo v2.5 / v2.5-pro and promotional MiMo TTS pricing
 - `gateway/credits_service.py`
   - free=0 debit truth
+- `gateway/smart_clone_reservation_service.py`
+  - Smart Preview 600-credit reservation and billing event
+- `gateway/smart_clone_reservation_sweeper.py`
+  - Smart clone reservation expiry compensation
+- `gateway/alembic/versions/039_smart_clone_carryover.py`
+  - single-use carryover marker
+- `gateway/billing_reconciliation.py`
+  - payment status reconciliation
+- `gateway/payment_provider_paddle.py`
+  - Paddle provider status source
+- `gateway/payment_provider_wechat.py`
+  - WeChat provider status source
 - `src/services/r2_publisher_lib/downloadable_keys.py`
   - free restricted artifact keys
 - `src/utils/free_watermark.py`
@@ -387,6 +424,8 @@ graph TD
 - 想改 provider/model RMB 成本目录或 admin 成本读模型
 - 想排查 MiMo v2.5 provider usage、MiMo TTS promotional rate 或 `mimo_omni` 迁移后的成本归因
 - 想排查 free=0 价格、MiMo voiceclone 内部消耗、水印重编码或 free artifact 限制
+- 想排查 Smart Preview 600 点 reservation、preview minute release、full-job carryover offset 或重复扣点
+- 想排查 Paddle / WeChat 支付漂移、refund closure 或 billing reconciliation
 - 想看 Smart analytics summary / CSV 的指标来源
 - 想排查 CosyVoice worker billed chars、worker_request_id 或 clone/TTS 成本归因
 - 想评估 Smart 自动复用后是否被人工修改
