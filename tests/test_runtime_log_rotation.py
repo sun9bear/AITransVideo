@@ -80,6 +80,38 @@ def test_attach_rotating_file_log_creates_file(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_attach_rotating_file_log_captures_info_when_root_default_warning(tmp_path, monkeypatch):
+    """Job API startup should persist INFO logs even without basicConfig."""
+    _ensure_src_on_path()
+
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
+
+    root_logger = logging.getLogger()
+    old_level = root_logger.level
+    pre_handlers = list(root_logger.handlers)
+
+    from utils.rotating_log import attach_rotating_file_log
+
+    try:
+        root_logger.setLevel(logging.WARNING)
+        attach_rotating_file_log("info_helper.log")
+
+        new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
+        assert new_handlers, "No new handler was attached to the root logger"
+
+        logging.getLogger("runtime_info_test").info("info line should persist")
+        for h in new_handlers:
+            h.flush()
+
+        log_file = tmp_path / "info_helper.log"
+        assert "info line should persist" in log_file.read_text(encoding="utf-8")
+    finally:
+        for h in [h for h in root_logger.handlers if h not in pre_handlers]:
+            root_logger.removeHandler(h)
+            h.close()
+        root_logger.setLevel(old_level)
+
+
 def test_attach_rotating_file_log_bad_dir_no_raise(tmp_path, monkeypatch):
     """attach_rotating_file_log must not raise even if the log dir is unusable."""
     _ensure_src_on_path()

@@ -521,6 +521,67 @@ async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_recall_restores_subscription_bucket_before_revoking_refunded_upgrade(monkeypatch):
+    plus_paid_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    user = SimpleNamespace(id="u1", plan_code="pro")
+    sub = SimpleNamespace(
+        id="sub-1",
+        user_id="u1",
+        plan_code="pro",
+        billing_period="annual",
+        provider="wechatpay",
+        status="active",
+        cancelled_at=None,
+        updated_at=None,
+        current_period_start=datetime(2026, 1, 10, tzinfo=timezone.utc),
+        current_period_end=datetime(2027, 1, 10, tzinfo=timezone.utc),
+    )
+    lower_paid_order = _order(
+        id="ord-plus",
+        target_plan_code="plus",
+        status="paid",
+        billing_period="monthly",
+        paid_at=plus_paid_at,
+    )
+    session = _FakeSession([[user], [sub], [lower_paid_order]])
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_ensure_subscription_bucket(db, **kwargs):
+        calls.append(("ensure", kwargs))
+        return SimpleNamespace(id="bucket-plus")
+
+    async def fake_revoke(db, *, user_id, related_order_id, reason_code="refund_revoke"):
+        calls.append(("revoke", {
+            "user_id": user_id,
+            "related_order_id": related_order_id,
+            "reason_code": reason_code,
+        }))
+        return 1
+
+    import credits_service
+    monkeypatch.setattr(
+        credits_service, "ensure_subscription_bucket", fake_ensure_subscription_bucket
+    )
+    monkeypatch.setattr(credits_service, "revoke_buckets_for_order", fake_revoke)
+
+    await billing._recall_entitlements_for_refund(
+        session,
+        order=_order(id="ord-pro", target_plan_code="pro"),
+        now=now,
+    )
+
+    assert [name for name, _ in calls] == ["ensure", "revoke"]
+    ensure_kwargs = calls[0][1]
+    assert ensure_kwargs["user_id"] == "u1"
+    assert ensure_kwargs["plan_code"] == "plus"
+    assert ensure_kwargs["related_order_id"] == "ord-plus"
+    assert ensure_kwargs["related_subscription_id"] == "sub-1"
+    assert ensure_kwargs["expires_at"] == plus_paid_at + timedelta(days=30)
+    assert calls[1][1]["related_order_id"] == "ord-pro"
+
+
+@pytest.mark.asyncio
 async def test_recall_ignores_expired_lower_paid_plan_when_refunded_upgrade(monkeypatch):
     now = datetime(2026, 3, 15, tzinfo=timezone.utc)
     expired_paid_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
