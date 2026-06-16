@@ -108,6 +108,11 @@ async def record_invoice_for_order(
             invoice.status = "refunded"
             invoice.updated_at = settled_at
             return invoice
+        if invoice.status == "partial_refunded" and status == "paid":
+            if invoice.paid_at is None:
+                invoice.paid_at = settled_at
+            invoice.updated_at = settled_at
+            return invoice
         # Any other transition (e.g. paid → failed, refunded → paid) is not
         # supported in the T4 minor revision scope. Caller should not ask for
         # these; returning the unchanged row preserves the existing truth.

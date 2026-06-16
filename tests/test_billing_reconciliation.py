@@ -74,7 +74,7 @@ class _FakeSession:
 
 def _fake_factory(rows):
     def factory():
-        return _FakeSession([rows])
+        return _FakeSession([rows, *[[row] for row in rows]])
 
     return factory
 
@@ -197,7 +197,7 @@ async def test_reconcile_once_bumps_last_reconciled_at_even_on_error():
 async def test_reconcile_once_rolls_back_failed_refresh_before_final_commit():
     """A refresh exception after session mutation must not commit partial settlement."""
     order = _order("pending")
-    session = _FakeSession([[order]])
+    session = _FakeSession([[order], [order]])
 
     async def partial_settle_then_boom(*, db, order):
         order.status = "paid"
@@ -219,7 +219,7 @@ async def test_reconcile_once_commits_attempt_marker_before_later_rollback():
     """A later failed order must not roll back earlier retry markers in the batch."""
     first = _order("pending")
     second = _order("created")
-    session = _FakeSession([[first, second]])
+    session = _FakeSession([[first, second], [first], [second]])
 
     async def refresh(*, db, order):
         if order is second:
@@ -259,7 +259,7 @@ async def test_reconcile_once_requeries_each_candidate_before_processing():
 @pytest.mark.asyncio
 async def test_reconcile_once_default_refresh_surfaces_provider_failures(monkeypatch):
     order = _order("pending")
-    session = _FakeSession([[order]])
+    session = _FakeSession([[order], [order]])
     seen_raise_flags = []
 
     import billing

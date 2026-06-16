@@ -116,8 +116,15 @@ async def reconcile_once(
 
     async with factory() as db:
         result = await db.execute(_candidate_orders_stmt(current))
-        orders = list(result.scalars().all())
-        for order in orders:
+        order_ids = [order.id for order in result.scalars().all()]
+        for order_id in order_ids:
+            order_result = await db.execute(
+                select(PaymentOrder).where(PaymentOrder.id == order_id)
+            )
+            order_rows = list(order_result.scalars().all())
+            if not order_rows:
+                continue
+            order = order_rows[0]
             stats["scanned"] += 1
             status_before = order.status
             attempt_failed = False
