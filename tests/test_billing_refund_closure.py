@@ -658,6 +658,86 @@ async def test_partial_refund_keeps_order_non_terminal_for_later_full_refund(mon
 # 接线守卫
 # ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
+async def test_paid_event_after_early_partial_refund_grants_remaining_entitlement(monkeypatch):
+    order = _order(status="pending", amount_cny=990, paid_at=None)
+    early_refund_event = SimpleNamespace(
+        processed=False, error_message=None, processed_at=None
+    )
+    early_refund_session = _FakeSession([["evt-row-early"], [early_refund_event], [order]])
+    invoice_statuses: list[str] = []
+    recalls: list[str] = []
+
+    async def fake_record_invoice_for_order(db, *, order, settled_at, status):
+        invoice_statuses.append(status)
+        return SimpleNamespace(status=status, subscription_id=None)
+
+    async def fake_recall_entitlements(db, *, order, now):
+        recalls.append(order.id)
+
+    monkeypatch.setattr(
+        billing, "record_invoice_for_order", fake_record_invoice_for_order
+    )
+    monkeypatch.setattr(
+        billing, "_recall_entitlements_for_refund", fake_recall_entitlements
+    )
+
+    await billing._process_payment_event(
+        db=early_refund_session,
+        provider="wechatpay",
+        provider_event_id="evt-early-partial-refund",
+        event_type="REFUND.SUCCESS",
+        order_id=order.id,
+        new_status="refunded",
+        signature_valid=True,
+        raw_payload={},
+        refund_amount_fen=500,
+    )
+
+    assert order.status == "partial_refunded"
+    assert order.paid_at is None
+    assert invoice_statuses == ["partial_refunded"]
+    assert recalls == []
+
+    user = SimpleNamespace(id="u1", plan_code="free")
+    paid_event = SimpleNamespace(processed=False, error_message=None, processed_at=None)
+    paid_session = _FakeSession([["evt-row-paid"], [paid_event], [order], [user]])
+    upserts: list[str] = []
+
+    async def fake_upsert_active_subscription(db, *, user, order, paid_at):
+        upserts.append(order.id)
+        return SimpleNamespace(id="sub-1", current_period_end=None)
+
+    async def fake_ensure_subscription_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        billing, "upsert_active_subscription", fake_upsert_active_subscription
+    )
+    import credits_service
+    monkeypatch.setattr(
+        credits_service, "ensure_subscription_bucket", fake_ensure_subscription_bucket
+    )
+
+    settled = await billing._process_payment_event(
+        db=paid_session,
+        provider="wechatpay",
+        provider_event_id="evt-paid-after-partial",
+        event_type="TRANSACTION.SUCCESS",
+        order_id=order.id,
+        new_status="paid",
+        signature_valid=True,
+        raw_payload={},
+    )
+
+    assert settled is True
+    assert order.status == "partial_refunded"
+    assert order.paid_at is not None
+    assert user.plan_code == "plus"
+    assert upserts == [order.id]
+    assert invoice_statuses == ["partial_refunded", "paid"]
+
+
 def test_receive_webhook_wires_refund_binding_and_amount():
     src = inspect.getsource(billing.receive_webhook)
     assert "_resolve_refund_order_id" in src, "退款绑定未接入 receive_webhook"
