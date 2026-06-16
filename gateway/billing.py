@@ -756,10 +756,21 @@ async def receive_webhook(
     # 仍走 order-not-found no-op（见 _validate_*_event_against_order 的
     # INVARIANT 注记），不得借道结算。
     resolved_order_id = event.order_id
-    if event.new_status == "refunded" and not resolved_order_id:
+    is_refund_resource_event = _is_refund_resource_event(
+        provider_name, event.event_type, event.raw_payload
+    )
+    if is_refund_resource_event and not resolved_order_id:
         resolved_order_id = await _resolve_refund_order_id(
             db, provider_name=provider_name, raw_payload=event.raw_payload
         )
+    if is_refund_resource_event and event.new_status != "refunded":
+        logger.info(
+            "Ignoring non-final refund resource event %s from %s (order_id=%s)",
+            event.provider_event_id,
+            provider_name,
+            resolved_order_id or "<unbound>",
+        )
+        return _provider_webhook_response(provider_name, settled=False)
 
     if provider_name == "alipay":
         signature_valid = signature_valid and await _validate_alipay_event_against_order(
@@ -831,6 +842,24 @@ async def _resolve_refund_order_id(
     )
     order = result.scalar_one_or_none()
     return str(order.id) if order is not None else ""
+
+
+def _is_refund_resource_event(
+    provider_name: str,
+    event_type: str,
+    raw_payload: dict | None,
+) -> bool:
+    payload = raw_payload or {}
+    raw_event_type = str(payload.get("event_type") or event_type or "").strip()
+    if provider_name == "wechatpay":
+        return raw_event_type.upper().startswith("REFUND.")
+    if provider_name == "paddle":
+        if raw_event_type not in ("adjustment.created", "adjustment.updated"):
+            return False
+        data = payload.get("data") or {}
+        action = str(data.get("action") or "").strip().lower()
+        return action in ("refund", "chargeback")
+    return False
 
 
 def _extract_refund_amount_fen(provider_name: str, raw_payload: dict | None) -> int | None:
@@ -1369,20 +1398,12 @@ async def _recall_entitlements_for_refund(
             subscription.cancelled_at = now
             subscription.updated_at = now
             subscription_cancelled = True
-        elif fallback_plan_code != subscription.plan_code:
-            subscription.plan_code = fallback_plan_code
-            if getattr(remaining_paid_order, "billing_period", None):
-                subscription.billing_period = remaining_paid_order.billing_period
-            if getattr(remaining_paid_order, "provider", None):
-                subscription.provider = remaining_paid_order.provider
-            fallback_paid_at = getattr(remaining_paid_order, "paid_at", None)
-            if isinstance(fallback_paid_at, datetime):
-                subscription.current_period_start = fallback_paid_at
-                subscription.current_period_end = _subscription_period_end(
-                    fallback_paid_at,
-                    getattr(remaining_paid_order, "billing_period", ""),
-                )
-            subscription.updated_at = now
+        elif remaining_paid_order is not None:
+            _restore_subscription_from_paid_order(
+                subscription,
+                paid_order=remaining_paid_order,
+                now=now,
+            )
             subscription_restored = True
 
     if (user.plan_code or "free") == order.target_plan_code:
@@ -1432,6 +1453,29 @@ async def _recall_entitlements_for_refund(
         subscription_restored,
         plan_downgraded,
     )
+
+
+def _restore_subscription_from_paid_order(
+    subscription: Subscription,
+    *,
+    paid_order: PaymentOrder,
+    now: datetime,
+) -> None:
+    plan_code = getattr(paid_order, "target_plan_code", None)
+    if plan_code:
+        subscription.plan_code = plan_code
+    if getattr(paid_order, "billing_period", None):
+        subscription.billing_period = paid_order.billing_period
+    if getattr(paid_order, "provider", None):
+        subscription.provider = paid_order.provider
+    fallback_paid_at = getattr(paid_order, "paid_at", None)
+    if isinstance(fallback_paid_at, datetime):
+        subscription.current_period_start = fallback_paid_at
+        subscription.current_period_end = _subscription_period_end(
+            fallback_paid_at,
+            getattr(paid_order, "billing_period", ""),
+        )
+    subscription.updated_at = now
 
 
 async def _has_other_paid_order_for_plan(
