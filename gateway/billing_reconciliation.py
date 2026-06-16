@@ -118,15 +118,18 @@ async def reconcile_once(
         for order in orders:
             stats["scanned"] += 1
             status_before = order.status
+            attempt_failed = False
             try:
                 await refresh_fn(db=db, order=order)
             except Exception:
+                attempt_failed = True
                 stats["errors"] += 1
                 logger.exception(
                     "billing_reconciliation: refresh failed for order %s (provider=%s)",
                     order.id,
                     order.provider,
                 )
+                await db.rollback()
             finally:
                 # 无条件 bump：让本单在 RETRY_INTERVAL_S 内不再被选中——
                 # refresh 内部只有 pending 结果会 commit updated_at，
@@ -135,7 +138,7 @@ async def reconcile_once(
                 attempted_at = datetime.now(timezone.utc)
                 order.last_reconciled_at = attempted_at
                 order.updated_at = attempted_at
-            if order.status == "paid" and status_before != "paid":
+            if not attempt_failed and order.status == "paid" and status_before != "paid":
                 stats["settled"] += 1
                 logger.warning(
                     "billing_reconciliation: order %s settled via reconcile "
