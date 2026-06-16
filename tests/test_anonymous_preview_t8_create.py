@@ -356,6 +356,21 @@ def test_create_job_api_failure_resets_claim(wired):
     wired["reset"].assert_awaited_once()
 
 
+def test_create_keeps_record_reserved_until_pg_job_row_exists(wired):
+    db = _db()
+    record_job_ids_seen_by_pg_insert: list[str | None] = []
+
+    def _add_spy(_row):
+        record_job_ids_seen_by_pg_insert.append(wired["record"].job_id)
+
+    db.add.side_effect = _add_spy
+    resp = _call(db)
+
+    assert resp.status_code == 202
+    assert record_job_ids_seen_by_pg_insert == [None]
+    assert wired["record"].job_id == "job-abc"
+
+
 # --- 对抗审核 P1 回归：status 端点不得拿 __creating__ 哨兵去查 Job API -------
 
 

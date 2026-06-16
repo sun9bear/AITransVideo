@@ -1063,32 +1063,7 @@ async def anonymous_preview_create(
         await _reset_create_claim(db, safe_id)
         return JSONResponse(status_code=502, content={"error": "job_create_failed"})
 
-    # 对抗审核 P1 修复——写入顺序对调：先把 record 指向真实 job_id（单独
-    # 提交），__creating__ 哨兵的存活窗从"整个 create 后半段"缩到单条
-    # UPDATE；record 写成功后即使 PG Job 行失败，status/stream 仍可用
-    # （job 真实存在），不会出现永久锁死。
-    try:
-        fresh = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
-        if fresh is not None:
-            fresh.job_id = job_id
-            fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
-            merged = dict(fresh.audit or {})
-            merged["anonymous_consent"] = consent_payload
-            fresh.audit = merged
-        await db.commit()
-    except Exception as exc:
-        # job 已在 Job API 跑、record 仍是 __creating__：不回滚抢占（重试
-        # 会双建任务）；status 端点的 creating 分支可见此态，留 TTL 清理。
-        logger.critical(
-            "anon_create: record 回写失败 job=%s — record 滞留 __creating__, "
-            "需人工核对: %s", job_id, exc,
-        )
-        return JSONResponse(status_code=500, content={"error": "persist_failed"})
-
-    # PG Job 行（sentinel owner + 标记列）。失败不再 5xx：job 已在跑、
-    # record 已指向真实 job_id；损失的只有 in-flight 计数与 mirror 标记
-    # （r2 sweeper 对无 PG 行的 job 直接跳过、不结算——已核验
-    # r2_artifact_sweeper.py:219-222），CRITICAL 日志供运维补行。
+    # Keep the capacity reservation visible until the PG Job row exists.
     try:
         db.add(
             Job(
@@ -1113,9 +1088,35 @@ async def anonymous_preview_create(
         await db.commit()
     except Exception as exc:
         logger.critical(
-            "anon_create: PG Job 行写入失败 job=%s — in-flight 计数与 mirror "
-            "标记缺失, 需人工补行: %s", job_id, exc,
+            "anon_create: PG Job row insert failed job=%s; record remains reserved "
+            "for capacity accounting and needs manual reconciliation: %s",
+            job_id,
+            exc,
         )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "persist_failed"},
+        )
+
+    # PG Job row is now durable, so exposing the real job_id no longer creates
+    # a capacity-accounting gap between the record and the Job mirror row.
+    try:
+        fresh = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
+        if fresh is not None:
+            fresh.job_id = job_id
+            fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
+            merged = dict(fresh.audit or {})
+            merged["anonymous_consent"] = consent_payload
+            fresh.audit = merged
+        await db.commit()
+    except Exception as exc:
+        # job 已在 Job API 跑、record 仍是 __creating__：不回滚抢占（重试
+        # 会双建任务）；status 端点的 creating 分支可见此态，留 TTL 清理。
+        logger.critical(
+            "anon_create: record 回写失败 job=%s — record 滞留 __creating__, "
+            "需人工核对: %s", job_id, exc,
+        )
+        return JSONResponse(status_code=500, content={"error": "persist_failed"})
 
     return JSONResponse(
         status_code=202,
