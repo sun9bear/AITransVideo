@@ -919,6 +919,60 @@ async def test_receive_webhook_binds_and_skips_pending_refund_without_order_id(m
     }]
 
 
+@pytest.mark.asyncio
+async def test_receive_webhook_skips_unbound_refunded_resource_before_validation(monkeypatch):
+    raw_payload = {
+        "event_type": "adjustment.updated",
+        "data": {
+            "transaction_id": "txn_missing",
+            "action": "refund",
+            "status": "approved",
+        },
+    }
+    event = SimpleNamespace(
+        provider_event_id="evt_unbound_refund",
+        event_type="adjustment.updated",
+        order_id="",
+        new_status="refunded",
+        raw_payload=raw_payload,
+    )
+    provider = SimpleNamespace(
+        verify_signature=lambda raw_body, headers: True,
+        parse_webhook=lambda raw_body: event,
+    )
+    resolve_calls: list[dict] = []
+
+    async def fake_resolve(db, *, provider_name, raw_payload):
+        resolve_calls.append({
+            "provider_name": provider_name,
+            "raw_payload": raw_payload,
+        })
+        return ""
+
+    async def fake_validate(**kwargs):
+        raise AssertionError("unbound refund resources should skip provider validation")
+
+    async def fake_process(**kwargs):
+        raise AssertionError("unbound refund resources must not process an empty order id")
+
+    monkeypatch.setattr(billing, "get_provider", lambda name: provider)
+    monkeypatch.setattr(billing, "_resolve_refund_order_id", fake_resolve)
+    monkeypatch.setattr(billing, "_validate_paddle_event_against_order", fake_validate)
+    monkeypatch.setattr(billing, "_process_payment_event", fake_process)
+
+    response = await billing.receive_webhook(
+        "paddle",
+        _FakeRequest(b"{}"),
+        _FakeSession([]),
+    )
+
+    assert response == {"ok": True, "settled": False}
+    assert resolve_calls == [{
+        "provider_name": "paddle",
+        "raw_payload": raw_payload,
+    }]
+
+
 def test_process_payment_event_partial_refund_guard():
     src = inspect.getsource(billing._process_payment_event)
     assert "refund_amount_fen is not None" in src
