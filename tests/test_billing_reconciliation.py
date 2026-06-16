@@ -150,6 +150,13 @@ def test_candidate_stmt_window_and_exclusions():
     assert "LIMIT" in sql
 
 
+def test_candidate_stmt_retries_use_last_reconciled_at_not_updated_at():
+    sql = str(recon._candidate_orders_stmt(datetime.now(timezone.utc)))
+    assert "payment_orders.last_reconciled_at IS NULL" in sql
+    assert "payment_orders.last_reconciled_at <=" in sql
+    assert "payment_orders.updated_at <=" not in sql
+
+
 @pytest.mark.asyncio
 async def test_reconcile_once_bumps_updated_at_even_on_error():
     """每次尝试后无条件 bump updated_at——失败的单也要让位（轮转语义）。"""

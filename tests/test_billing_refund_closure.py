@@ -361,7 +361,7 @@ async def test_recall_downgrades_matching_plan(monkeypatch):
         user_id="u1", plan_code="plus", status="active",
         cancelled_at=None, updated_at=None,
     )
-    session = _FakeSession([[user], [sub]])
+    session = _FakeSession([[user], [sub], []])
 
     revoke_calls = {}
 
@@ -382,6 +382,36 @@ async def test_recall_downgrades_matching_plan(monkeypatch):
     audit = [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"]
     assert len(audit) == 1
     assert audit[0].old_value == "plus" and audit[0].new_value == "free"
+
+
+@pytest.mark.asyncio
+async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatch):
+    user = SimpleNamespace(id="u1", plan_code="plus")
+    sub = SimpleNamespace(
+        user_id="u1", plan_code="plus", status="active",
+        cancelled_at=None, updated_at=None,
+    )
+    other_paid_order = SimpleNamespace(id="ord-2")
+    session = _FakeSession([[user], [sub], [other_paid_order]])
+    revoke_calls = {}
+
+    async def fake_revoke(db, *, user_id, related_order_id, reason_code="refund_revoke"):
+        revoke_calls["args"] = (user_id, related_order_id)
+        return 1
+
+    import credits_service
+    monkeypatch.setattr(credits_service, "revoke_buckets_for_order", fake_revoke)
+
+    await billing._recall_entitlements_for_refund(
+        session, order=_order(id="ord-1", target_plan_code="plus"),
+        now=datetime.now(timezone.utc),
+    )
+
+    assert user.plan_code == "plus"
+    assert sub.status == "active"
+    assert sub.cancelled_at is None
+    assert [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"] == []
+    assert revoke_calls["args"] == ("u1", "ord-1")
 
 
 @pytest.mark.asyncio
