@@ -12,10 +12,14 @@ Phase 6 architecture:
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
+
+import anyio
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -68,6 +72,33 @@ VALID_BILLING_PERIODS: set[str] = set(_CATALOG_BILLING_PERIODS)
 PLAN_PRICES_CNY: dict[tuple[str, str], int] = get_legacy_price_table()
 
 ORDER_EXPIRY_MINUTES = 30
+
+# Provider webhooks are unauthenticated endpoints: cap the body BEFORE any
+# parse/base64/AES work (security review 2026-06-10, HIGH). Real provider
+# notifications are a few KB; 64 KiB leaves 10x headroom.
+WEBHOOK_MAX_BODY_BYTES = 64 * 1024
+
+# Frontend polls GET /orders/{id}?refresh=true every few seconds (QR dialog 3s,
+# banner 15s). Throttle the upstream provider query per order so polling can't
+# amplify into the provider's rate limits (security review 2026-06-10, HIGH).
+# Skipped refreshes still return the current DB state — webhooks remain the
+# settlement truth, so confirmation is delayed by at most the interval.
+_REFRESH_MIN_INTERVAL_S = 5.0
+_refresh_last_at: dict[str, float] = {}
+
+
+def _refresh_allowed(order_id: str) -> bool:
+    now = time.monotonic()
+    last = _refresh_last_at.get(order_id)
+    if last is not None and (now - last) < _REFRESH_MIN_INTERVAL_S:
+        return False
+    if len(_refresh_last_at) > 2048:
+        cutoff = now - 3600.0
+        for key, stamp in list(_refresh_last_at.items()):
+            if stamp < cutoff:
+                _refresh_last_at.pop(key, None)
+    _refresh_last_at[order_id] = now
+    return True
 
 
 # --- Request/Response models ---
@@ -142,14 +173,24 @@ async def create_order(
     # Flush to get order.id without committing — if adapter fails, we rollback
     await db.flush()
 
-    # Create checkout through provider adapter
+    # Create checkout through provider adapter. customer_email prefills the
+    # buyer email on hosted checkouts (Paddle); phone-only accounts have no
+    # email (User.email is nullable) and pass None — providers must treat it
+    # as a UX nicety, never a checkout gate.
+    # Providers are sync (blocking httpx) — run off the event loop so a slow
+    # provider API can't stall the whole gateway (auth, webhooks, other users).
+    account_email = (getattr(user, "email", None) or "").strip() or None
     try:
-        checkout = provider.create_checkout(
-            order_id=str(order.id),
-            amount_cny=amount,
-            target_plan_code=body.target_plan_code,
-            billing_period=body.billing_period,
-            checkout_surface=checkout_surface,
+        checkout = await anyio.to_thread.run_sync(
+            functools.partial(
+                provider.create_checkout,
+                order_id=str(order.id),
+                amount_cny=amount,
+                target_plan_code=body.target_plan_code,
+                billing_period=body.billing_period,
+                checkout_surface=checkout_surface,
+                customer_email=account_email,
+            )
         )
     except Exception as exc:
         await db.rollback()
@@ -179,6 +220,10 @@ async def create_order(
         "provider": order.provider,
         "checkout_surface": checkout_surface,
         "checkout_url": checkout.checkout_url,
+        # "qrcode" => frontend renders qr_code_url in-page (WeChat Native);
+        # "redirect" (default) => frontend navigates to checkout_url.
+        "display_mode": getattr(checkout, "display_mode", "redirect"),
+        "qr_code_url": getattr(checkout, "qr_code_url", None),
         "expires_at": order.expires_at.isoformat() if order.expires_at else None,
     }
 
@@ -204,7 +249,14 @@ async def get_order(
         if role != "admin":
             raise HTTPException(status_code=403, detail="无权查看此订单")
 
-    if refresh and order.provider == "alipay" and order.status in ("created", "pending"):
+    # §7.5/R2: any provider with a query_order impl can refresh on demand (was
+    # alipay-only). Stub providers raise NotImplementedError, which
+    # _refresh_order_from_provider swallows.
+    if (
+        refresh
+        and order.status in ("created", "pending")
+        and _refresh_allowed(str(order.id))
+    ):
         await _refresh_order_from_provider(db=db, order=order)
 
     return {
@@ -256,6 +308,46 @@ async def _refresh_order_from_provider(
             logger.warning("Ignoring alipay query result for %s: %s", order.id, exc)
             return
 
+    if order.provider == "paddle":
+        from payment_provider_paddle import PaddleConfig, validate_paddle_webhook_payload
+
+        try:
+            validate_paddle_webhook_payload(
+                PaddleConfig.from_env(),
+                query_result.raw_payload,
+                order_id=str(order.id),
+                target_plan_code=order.target_plan_code,
+                billing_period=order.billing_period,
+                provider_order_id=order.provider_order_id,
+            )
+        except ValueError as exc:
+            logger.warning("Ignoring paddle query result for %s: %s", order.id, exc)
+            return
+
+    if order.provider == "wechatpay":
+        from payment_provider_wechat import (
+            WechatPayConfig,
+            map_wechat_trade_state,
+            validate_wechat_webhook_payload,
+        )
+
+        # NOTPAY/USERPAYING query responses may omit attach/amount — only gate
+        # the transitions that can settle. Pending never settles downstream.
+        if map_wechat_trade_state(query_result.provider_status) != "pending":
+            try:
+                # The query response IS the transaction object (same shape as
+                # the decrypted webhook resource): same fact gates apply.
+                validate_wechat_webhook_payload(
+                    WechatPayConfig.from_env(),
+                    query_result.raw_payload,
+                    order_id=str(order.id),
+                    amount_cny=order.amount_cny,
+                    provider_order_id=order.provider_order_id,
+                )
+            except ValueError as exc:
+                logger.warning("Ignoring wechat query result for %s: %s", order.id, exc)
+                return
+
     if query_result.provider_order_id and order.provider_order_id != query_result.provider_order_id:
         order.provider_order_id = query_result.provider_order_id
 
@@ -291,6 +383,7 @@ _PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "alipay": "支付宝",
     "wechatpay": "微信支付",
     "stripe": "Stripe",
+    "paddle": "信用卡 / 微信 (Paddle)",
 }
 
 
@@ -301,6 +394,7 @@ def _display_name(provider_code: str) -> str:
 @router.get("/checkout-config")
 async def get_checkout_config(
     user: User | None = Depends(get_current_user),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict:
     """Return the list of checkout providers currently usable by this gateway.
 
@@ -324,7 +418,7 @@ async def get_checkout_config(
     if user is None:
         raise HTTPException(status_code=401, detail="未登录")
 
-    preference = ["alipay", "wechatpay", "stripe", "fake"]
+    preference = ["alipay", "wechatpay", "paddle", "stripe", "fake"]
     all_providers = list_providers()
 
     providers_payload: list[dict] = []
@@ -356,8 +450,32 @@ async def get_checkout_config(
         "fake",
     )
 
+    # Surface-aware recommendation (plan 2026-06-08 §4 three-rail routing):
+    # - desktop + domestic: own WeChat Native QR (~0.6% fee) when operational
+    # - mobile web: Paddle — WeChat Native QR needs a SECOND device on mobile
+    #   (the weixin:// QR cannot be long-press-recognized inside WeChat), and
+    #   WeChat-via-Paddle is desktop-only, so Paddle (card / future Alipay)
+    #   is the usable mobile rail.
+    # default_provider keeps its historical "first operational" semantics for
+    # backward compatibility; the frontend should prefer recommended_provider.
+    operational_codes = {p["code"] for p in providers_payload if p["operational"]}
+    surface = detect_checkout_surface(
+        None,
+        request.headers.get("user-agent") if request is not None else None,
+    )
+    if surface == "mobile_web":
+        surface_preference = ["paddle", "wechatpay"]
+    else:
+        surface_preference = ["wechatpay", "paddle"]
+    recommended_provider = next(
+        (code for code in surface_preference if code in operational_codes),
+        default_provider,
+    )
+
     return {
         "default_provider": default_provider,
+        "recommended_provider": recommended_provider,
+        "checkout_surface": surface,
         "providers": providers_payload,
     }
 
@@ -573,7 +691,17 @@ async def receive_webhook(
     3. Parse payload via adapter.parse_webhook()
     4. Pass to _process_payment_event with verified signature_valid
     """
+    # Reject oversized bodies before reading where possible (Content-Length),
+    # and unconditionally after reading (chunked encoding has no length header).
+    # This is an unauthenticated endpoint; the wechatpay path additionally
+    # base64-decodes and AES-decrypts the body, so each extra MB allocates
+    # several times over.
+    declared_length = request.headers.get("content-length")
+    if declared_length and declared_length.isdigit() and int(declared_length) > WEBHOOK_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="webhook body too large")
     raw_body = await request.body()
+    if len(raw_body) > WEBHOOK_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="webhook body too large")
     headers = dict(request.headers)
 
     # Resolve provider
@@ -625,6 +753,20 @@ async def receive_webhook(
             is_query_result=False,
         )
 
+    if provider_name == "paddle":
+        signature_valid = signature_valid and await _validate_paddle_event_against_order(
+            db=db,
+            order_id=event.order_id,
+            payload=event.raw_payload,
+        )
+
+    if provider_name == "wechatpay":
+        signature_valid = signature_valid and await _validate_wechat_event_against_order(
+            db=db,
+            order_id=event.order_id,
+            payload=event.raw_payload,
+        )
+
     settled = await _process_payment_event(
         db=db,
         provider=provider_name,
@@ -645,6 +787,10 @@ def _provider_webhook_response(
 ) -> dict | PlainTextResponse:
     if provider_name == "alipay":
         return PlainTextResponse("success")
+    if provider_name == "wechatpay":
+        # WeChat Pay v3 treats HTTP 200 as the ACK; the spec response body is
+        # {"code": "SUCCESS"}. Anything else triggers redelivery storms.
+        return {"code": "SUCCESS"}
     return {"ok": True, "settled": settled}
 
 
@@ -678,6 +824,85 @@ async def _validate_alipay_event_against_order(
         return True
     except ValueError as exc:
         logger.warning("Alipay payload validation failed for %s: %s", order_id, exc)
+        return False
+
+
+async def _validate_paddle_event_against_order(
+    *,
+    db: AsyncSession,
+    order_id: str,
+    payload: dict | None,
+) -> bool:
+    result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if order is None:
+        # Order-less event (e.g. adjustment.created carries no
+        # custom_data.order_id). _process_payment_event records it and no-ops —
+        # a safe 200-ACK. Refund credit clawback via transaction_id is a P2 task
+        # (R7); P1 must not error here and trigger Paddle retry storms.
+        #
+        # INVARIANT (review F-E): this `return True` is safe ONLY because a
+        # missing order cannot settle downstream. When R7 wires refund clawback
+        # resolved by transaction_id under this path, a signed "paid"-type event
+        # with an unknown order_id must NOT bypass binding — return False for
+        # settlement events before adding clawback resolution here.
+        return True
+
+    from payment_provider_paddle import PaddleConfig, validate_paddle_webhook_payload
+
+    data = (payload or {}).get("data") or {}
+    try:
+        validate_paddle_webhook_payload(
+            PaddleConfig.from_env(),
+            data,
+            order_id=str(order.id),
+            target_plan_code=order.target_plan_code,
+            billing_period=order.billing_period,
+            provider_order_id=order.provider_order_id,
+        )
+        return True
+    except ValueError as exc:
+        logger.warning("Paddle payload validation failed for %s: %s", order_id, exc)
+        return False
+
+
+async def _validate_wechat_event_against_order(
+    *,
+    db: AsyncSession,
+    order_id: str,
+    payload: dict | None,
+) -> bool:
+    result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if order is None:
+        # Order-less event: recorded by _process_payment_event and no-op'd —
+        # safe 200-ACK so WeChat doesn't retry-storm.
+        #
+        # INVARIANT (mirrors the Paddle F-E note): this `return True` is safe
+        # ONLY because a missing order cannot settle downstream. WeChat's
+        # provider_event_id IS the transaction_id, so if refund clawback /
+        # reconciliation resolved by transaction_id is ever wired under this
+        # path, a signed event with an unknown order_id must NOT bypass
+        # binding — return False for settle/refund-semantic events first.
+        return True
+
+    from payment_provider_wechat import (
+        WechatPayConfig,
+        validate_wechat_webhook_payload,
+    )
+
+    transaction = (payload or {}).get("transaction") or {}
+    try:
+        validate_wechat_webhook_payload(
+            WechatPayConfig.from_env(),
+            transaction,
+            order_id=str(order.id),
+            amount_cny=order.amount_cny,
+            provider_order_id=order.provider_order_id,
+        )
+        return True
+    except ValueError as exc:
+        logger.warning("WeChat payload validation failed for %s: %s", order_id, exc)
         return False
 
 

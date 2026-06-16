@@ -2,11 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## CRITICAL: Do NOT create worktrees or new branches
+## CRITICAL: Git 协作模型（多 agent，2026-06-02 更新）
 
-- **直接在当前目录工作**，不要创建 git worktree
-- **直接在 main 分支上修改**，不要新建分支
-- 这是一个单人开发项目，不需要分支隔离
+> 旧约定"在当前目录工作 / 不建 worktree / 在 main 上改 / 单人不需要分支隔离"已**过时**——它只适合单人顺序开发。现在本项目由项目主（单一所有者）+ 多个 AI agent（Claude Code / CodeX 等）协作、常并行改动相邻代码。多个 agent 共用**同一个工作树**会互相覆盖 git 状态（曾发生：HEAD 被切走、WIP 被 stash、提交落错分支），必须改用隔离工作树。
+
+**给每个 agent 的行为底线：**
+
+- **`main` 是集成分支**，只接收已审核的 commit；不要在 main 上堆并行进行中的 WIP。
+- **当前确认只有你一个 actor 在动这个仓库**：可以直接在 main 上小步提交。
+- **多 actor 并行时**：每个 agent 必须在**自己的 git worktree + feature 分支**里干活（分支命名按编排约定，如 `codex/<feature>` / `claude/<feature>`），完成后由项目主 review 合并回 main，再删分支/worktree。
+- **绝对禁止**多个 agent 同时对**同一个工作树**做改变状态的 git 操作（切分支 `checkout` / `stash` / `cherry-pick` / `reset`）——这是此前所有 git 事故的根因。
+- 提交只用**显式 pathspec**（`git commit -- <files>`），永远不要 `git add .`（会误纳入 `.codegraph/`、`.codex_worktrees/` 等未跟踪目录）。
+- worktree 由**编排层 / 项目主在启动 agent 时建好并指向**，agent 不在共享目录里自行造 worktree。
+
+机制细节（worktree 布局、分支命名、任务所有权分配、合并流程）以 [`docs/plans/2026-05-25-ai-agent-collaboration-orchestration-plan.md`](docs/plans/2026-05-25-ai-agent-collaboration-orchestration-plan.md) 为准；本节是底线行为约束。
 
 ## CRITICAL: 付费 API 不能自动调用
 
@@ -24,6 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - ❌ 在 "找不到数据时自动 X" 的兜底逻辑里调用付费 API
 - ❌ 在 "用户没选择时默认帮他做 X" 的便利逻辑里调用付费 API
 - ❌ 在 batch / loop / retry 里无上限调用付费 API
+- ❌ 支付渠道之间自动 fallback（如 Paddle/Alipay 失败时自动改走 wechatpay 重新下单）——各 provider 独立，渠道由用户在前端显式选择（plan 2026-05-22 §8.1）
 
 允许的模式：
 - ✅ 用户在前端显式点击按钮触发（例如 "克隆音色" 按钮）

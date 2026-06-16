@@ -24,7 +24,7 @@
  * - All numeric facts come from the gateway. Nothing is hardcoded.
  */
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -34,6 +34,7 @@ import type { Plan, PlanPriceMap, BillingPeriod } from "@/lib/billing/types"
 import type { MeSubscriptionResponse } from "@/lib/billing/get-subscription"
 import type { CheckoutConfigResponse } from "@/lib/billing/get-checkout-config"
 import { createOrder } from "@/lib/billing/create-order"
+import { WechatQrDialog } from "@/components/billing/wechat-qr-dialog"
 
 const PLAN_RANK: Record<string, number> = {
   free: 0,
@@ -67,16 +68,24 @@ function currentPlanRank(sub: MeSubscriptionResponse | null): number {
   return PLAN_RANK[sub.plan_code] ?? 0
 }
 
+type QrCheckoutState = {
+  orderId: string
+  qrCodeUrl: string
+  amountFen: number
+}
+
 type CheckoutCardProps = {
   plans: Plan[]
   subscription: MeSubscriptionResponse | null
   checkoutConfig: CheckoutConfigResponse | null
+  onOrderSettled?: () => void
 }
 
 export function CheckoutCard({
   plans,
   subscription,
   checkoutConfig,
+  onOrderSettled,
 }: CheckoutCardProps) {
   const paidPlans = useMemo(
     () => plans.filter((p) => p.price_cny_fen !== null),
@@ -88,6 +97,24 @@ export function CheckoutCard({
   )
   const [selectedPeriod, setSelectedPeriod] = useState<BillingPeriod>("monthly")
   const [submitting, setSubmitting] = useState(false)
+  const [redirecting, setRedirecting] = useState(false)
+  // User's explicit channel pick; null = follow the gateway recommendation.
+  const [pickedProvider, setPickedProvider] = useState<string | null>(null)
+  const [qrCheckout, setQrCheckout] = useState<QrCheckoutState | null>(null)
+
+  useEffect(() => {
+    // Browser Back from the provider checkout restores this page from the
+    // bfcache with JS state intact — without this reset the pay button would
+    // stay disabled on "正在跳转支付页…" forever.
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        setSubmitting(false)
+        setRedirecting(false)
+      }
+    }
+    window.addEventListener("pageshow", handlePageShow)
+    return () => window.removeEventListener("pageshow", handlePageShow)
+  }, [])
 
   const selectedPlan = paidPlans.find((p) => p.code === selectedPlanCode) ?? null
   const periods = periodsForPlan(selectedPlan?.price_cny_fen ?? null)
@@ -102,10 +129,21 @@ export function CheckoutCard({
   const selectedRank = PLAN_RANK[selectedPlanCode] ?? 0
   const isDowngradeOrSame = selectedRank <= currentRank && currentRank > 0
 
-  // Provider selection is gateway-owned. Use the default the server told us.
-  const defaultProvider = checkoutConfig?.default_provider ?? "fake"
+  // Provider AVAILABILITY is gateway-owned (checkout-config). When 2+ rails
+  // are operational the user picks one (P3 three-rail selection); the initial
+  // pick follows the gateway's surface-aware recommendation (desktop →
+  // wechatpay QR, mobile → paddle).
+  const operationalProviders =
+    checkoutConfig?.providers.filter((p) => p.operational) ?? []
+  const gatewayPick =
+    checkoutConfig?.recommended_provider ?? checkoutConfig?.default_provider ?? "fake"
+  const selectedProvider =
+    pickedProvider !== null &&
+    operationalProviders.some((p) => p.code === pickedProvider)
+      ? pickedProvider
+      : gatewayPick
   const providerEntry = checkoutConfig?.providers.find(
-    (p) => p.code === defaultProvider,
+    (p) => p.code === selectedProvider,
   )
   const providerDisplay = providerEntry?.display_name ?? "测试支付"
   const providerOperational = providerEntry?.operational ?? true
@@ -123,21 +161,47 @@ export function CheckoutCard({
       const result = await createOrder({
         target_plan_code: selectedPlan.code,
         billing_period: effectivePeriod,
-        provider: defaultProvider,
+        provider: selectedProvider,
       })
+      // Stash the pending order so the billing page can keep confirming and
+      // auto-update even if the user closes the (async) WeChat QR page without
+      // returning through the success redirect. Banner reads "avt_pending_order".
+      try {
+        window.localStorage.setItem(
+          "avt_pending_order",
+          JSON.stringify({
+            order_id: result.order_id,
+            provider: selectedProvider,
+            ts: Date.now(),
+          }),
+        )
+      } catch {
+        // localStorage unavailable — non-fatal; webhook still settles server-side
+      }
+      if (result.display_mode === "qrcode" && result.qr_code_url) {
+        // WeChat Native: render the weixin:// string as an in-page QR dialog
+        // instead of navigating (it is not a web URL).
+        setQrCheckout({
+          orderId: result.order_id,
+          qrCodeUrl: result.qr_code_url,
+          amountFen: result.amount_cny,
+        })
+        setSubmitting(false)
+        return
+      }
       if (!result.checkout_url) {
         throw new Error("未收到支付链接,请稍后重试")
       }
-      // Hand off to the provider checkout URL. For fake provider this is
-      // `/api/billing/fake-pay/{order_id}`; for Alipay this is the signed
-      // payment URL from the gateway.
-      toast.success("正在跳转到支付页…")
-      await new Promise((r) => setTimeout(r, 300))
+      // Hand off to the provider checkout URL immediately — every ms of delay
+      // on the pay CTA is conversion loss, and a toast would be destroyed by
+      // the navigation anyway. Keep the button disabled (redirecting) until
+      // the page actually unloads so a double-click can't create a 2nd order.
+      setRedirecting(true)
       window.location.assign(result.checkout_url)
     } catch (err) {
       const message = err instanceof Error ? err.message : "创建订单失败"
       toast.error(message)
-    } finally {
+      setRedirecting(false)
       setSubmitting(false)
     }
   }
@@ -222,6 +286,47 @@ export function CheckoutCard({
         </div>
       )}
 
+      {/* Provider picker (P3 three-rail selection) — only when there is a
+          real choice. Single-rail keeps the old static "支付方式" row. */}
+      {operationalProviders.length > 1 && (
+        <div>
+          <Label className="text-xs font-medium text-muted-foreground">
+            支付方式
+          </Label>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            {operationalProviders.map((p) => {
+              const active = p.code === selectedProvider
+              const hint =
+                p.code === "wechatpay"
+                  ? "微信扫码,手续费最低"
+                  : p.code === "paddle"
+                    ? "银行卡/国际支付,手机端推荐"
+                    : null
+              return (
+                <button
+                  key={p.code}
+                  type="button"
+                  onClick={() => setPickedProvider(p.code)}
+                  className={cn(
+                    "rounded-md border px-4 py-3 text-left transition-colors",
+                    active
+                      ? "border-primary/60 bg-primary/5 text-foreground"
+                      : "border-border bg-background text-foreground hover:border-primary/40",
+                  )}
+                >
+                  <div className="text-sm font-medium">{p.display_name}</div>
+                  {hint && (
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">
+                      {hint}
+                    </div>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Summary */}
       <div className="rounded-md border border-border bg-background px-4 py-3 text-sm">
         <div className="flex items-center justify-between">
@@ -252,12 +357,31 @@ export function CheckoutCard({
         onClick={handleCheckout}
       >
         {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-        {submitting ? "正在创建订单…" : "立即支付"}
+        {redirecting ? "正在跳转支付页…" : submitting ? "正在创建订单…" : "立即支付"}
       </Button>
 
       <p className="text-xs leading-relaxed text-muted-foreground">
         支付渠道和价格均由服务器侧配置,试用与退款规则参见后续通知。本次支付仅创建当前选中套餐的订单,不会自动续费。
       </p>
+
+      {qrCheckout && (
+        <WechatQrDialog
+          orderId={qrCheckout.orderId}
+          qrCodeUrl={qrCheckout.qrCodeUrl}
+          amountFen={qrCheckout.amountFen}
+          onClose={() => setQrCheckout(null)}
+          onPaid={() => {
+            setQrCheckout(null)
+            try {
+              window.localStorage.removeItem("avt_pending_order")
+            } catch {
+              // non-fatal
+            }
+            toast.success("支付成功,订阅已更新")
+            onOrderSettled?.()
+          }}
+        />
+      )}
     </div>
   )
 }

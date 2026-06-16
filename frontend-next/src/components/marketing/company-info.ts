@@ -1,5 +1,5 @@
-export const COMPANY_NAME = "武汉九骏电子商务有限公司"
-export const SUPPORT_EMAIL = "sxz999@proton.me"
+export const COMPANY_NAME = "武汉市洪山区九俊电子经营部"
+export const SUPPORT_EMAIL = "sun9bear@126.com"
 export const SUPPORT_EMAIL_HREF = `mailto:${SUPPORT_EMAIL}`
 export const COMPANY_ADDRESS = ""
 

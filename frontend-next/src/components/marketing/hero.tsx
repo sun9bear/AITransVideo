@@ -1,37 +1,42 @@
-import { PrimaryCta } from "./primary-cta"
 import { SealStamp } from "./seal-stamp"
+import { HeroSamplePlayer } from "./hero-sample-player"
+import { AnonymousTrialLauncher } from "./anonymous-trial-launcher"
+import { loadFeaturedDemos } from "./featured-demos-data"
 
 /**
- * Marketing homepage hero — Ink Aesthetic redesign.
+ * Marketing homepage hero — Ink Aesthetic, sample-player-led (anonymous-preview
+ * funnel Phase 1).
  *
- * See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md
+ * The hero now leads with PROOF: a large A/B sample player (中文配音 ↔ 英文原片)
+ * is the primary visual signal instead of a static painting. The Ink backdrop
+ * (oil → ink wash → rice paper) and cinnabar SealStamp are retained as texture.
  *
- * Composition (desktop):
- *   - Full-bleed background image (hero-paper.webp): West oil → ink wash transition.
- *     Anchored so the rice-paper right half is the text canvas.
- *   - Text content right-aligned, vertically centered, occupies the rice-paper area.
- *   - Pre-headline (痛点钩子) → Display-class headline → cinnabar accent line →
- *     subhead (对照式定位) → primary CTA (cinnabar) + secondary link → trust line.
- *   - Cinnabar SealStamp sits lower-right over the rice paper, replacing the
- *     AI-painted seal that was masked out during asset processing.
+ * Composition:
+ *   - Desktop (lg+): two columns — text + CTA on the rice-paper card (left),
+ *     sample player (right). Both above the fold.
+ *   - Mobile: the player is visually first (it muted-autoplays in view), with
+ *     the text card below. DOM order keeps the <h1> first for semantics/SEO via
+ *     CSS `order`, so the visual swap doesn't cost heading priority.
  *
- * Composition (mobile):
- *   - Image stacks above text. Image is wide-cropped to keep the right half
- *     (mountain + rice paper) visible. Text fills below in centered single column.
+ * CTA: the primary action is `立即试用` (AnonymousTrialLauncher) — it opens the
+ * anonymous trial panel WITHOUT routing to registration, per the funnel. The
+ * registration path still lives in the header / pricing sections.
  *
- * Hard rules:
- *   - No `text-white` / `bg-white/N` carryover from the old dark hero — colors
- *     come from the [data-theme="ink"] token chain via Tailwind utilities.
- *   - The image is decorative (alt=""); semantic h1 carries page meaning.
- *   - LCP target: image is `priority` so it preloads, with explicit sizes hint
- *     to avoid downloading the 1920w on phones.
+ * Hard rules (unchanged):
+ *   - No `text-white` / `bg-white/N` carryover — colors come from the
+ *     [data-theme="ink"] token chain via Tailwind utilities.
+ *   - The background image is decorative (alt=""); the semantic <h1> carries
+ *     page meaning. The text card guarantees legibility over either half of the
+ *     painting.
  */
 export function Hero() {
+  const demos = loadFeaturedDemos()
+  const hasDemos = demos.length > 0
+
   return (
     <section className="relative overflow-hidden marketing-hero-surface">
-      {/* Full-width hero background — shows the complete oil → ink → paper
-          narrative. Text legibility is solved by an explicit paper card behind
-          the text content (rendered below), not by trying to fade the image. */}
+      {/* Full-bleed Ink backdrop. The paper text card + the player's own dark
+          frame keep their contents legible over it, so no image fade needed. */}
       <div className="absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
         <picture>
           <source
@@ -51,33 +56,17 @@ export function Hero() {
         </picture>
       </div>
 
-      <div className="relative z-10 mx-auto max-w-7xl px-4 py-24 sm:px-6 sm:py-28 lg:px-8 lg:py-32">
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-8 md:gap-12">
-          {/* Left half on desktop: empty (image speaks). On mobile: hidden. */}
-          <div className="hidden md:block md:col-span-5" aria-hidden="true" />
-
-          {/* Right half: text canvas with rice-paper card backdrop. The card
-              gives text a guaranteed-legible surface regardless of what's
-              behind, and visually echoes a folded paper laid over the
-              ink-wash backdrop — extending the metaphor rather than fighting it.
-
-              Mobile: card is opaque-er (0.95) and uses tighter padding so the
-              full headline still fits comfortably above the fold. Desktop drops
-              opacity to 0.92 for the painted-paper translucency effect to
-              actually read. Fixes a prior mobile readability bug where the
-              hero text fell directly on the ink-splatter half of the image
-              with poor contrast. */}
-          <div
-            className="md:col-span-7 md:pl-4 lg:pl-8 rounded-md bg-[rgba(245,240,230,0.95)] p-6 md:bg-[rgba(245,240,230,0.92)] md:p-8 lg:p-10 backdrop-blur-[2px] shadow-[0_8px_40px_-20px_rgba(26,26,26,0.18)]"
-          >
-            {/* Pre-headline — brand label + chinese-led positioning */}
+      <div className="relative z-10 mx-auto max-w-7xl px-4 py-16 sm:px-6 sm:py-20 lg:px-8 lg:py-24">
+        <div className="grid grid-cols-1 items-center gap-8 lg:grid-cols-12 lg:gap-12">
+          {/* Text canvas — DOM-first (so <h1> stays the first heading), but
+              visually below the player on mobile and to the left on desktop. */}
+          <div className="order-2 lg:order-1 lg:col-span-5 rounded-md bg-[rgba(245,240,230,0.95)] p-6 sm:p-7 md:bg-[rgba(245,240,230,0.92)] md:p-8 backdrop-blur-[2px] shadow-[0_8px_40px_-20px_rgba(26,26,26,0.18)]">
             <p className="ink-heading text-xs sm:text-sm uppercase tracking-[0.25em] text-[color:var(--cinnabar)]">
               爱译视频 · AITrans.Video
             </p>
 
-            {/* Display-class headline — slogan-as-headline */}
             <h1
-              className="ink-display mt-4 text-4xl sm:text-5xl lg:text-6xl leading-tight text-foreground"
+              className="ink-display mt-4 text-4xl leading-tight text-foreground sm:text-5xl lg:text-5xl xl:text-6xl"
               style={{ letterSpacing: "-0.01em" }}
             >
               让世界视频，
@@ -85,46 +74,49 @@ export function Hero() {
               开口说中文
             </h1>
 
-            {/* Cinnabar accent rule — visual anchor between display and subhead */}
             <div
               className="mt-6 h-px w-16"
               style={{ backgroundColor: "var(--cinnabar)" }}
               aria-hidden="true"
             />
 
-            {/* Subhead — long-video focus + multi-format + edit-anytime */}
-            <p className="zh-body-lg mt-6 text-foreground/80 max-w-xl">
-              把英文长视频变成可发布的中文配音版。支持最长 3 小时视频，自动生成中文字幕、中文配音和多种交付结果；第一版不满意，可以逐句修改、单句重生成。
+            <p className="zh-body-lg mt-6 max-w-xl text-foreground/80">
+              把英文长视频变成可发布的中文配音版。免注册先预览效果——前 3 分钟中文配音，满意再注册下载、生成完整视频。
             </p>
 
-            {/* CTAs */}
-            <div className="mt-9 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-              <PrimaryCta className="min-w-[10rem]" />
+            <div className="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
+              <AnonymousTrialLauncher />
               <a
                 href="#pricing"
-                className="inline-flex items-center gap-1 text-sm font-medium text-foreground/80 hover:text-foreground transition-colors"
+                className="inline-flex items-center gap-1 text-sm font-medium text-foreground/80 transition-colors hover:text-foreground"
               >
                 查看套餐价格
                 <span aria-hidden="true">→</span>
               </a>
             </div>
 
-            {/* Trust line under CTAs — leads with the source-language scope
-                so visitors immediately know what's supported. The product
-                currently only does English → Chinese; before this line was
-                added the page implied broader source coverage via "海外视频"
-                phrasing. Source-scope first, then trust signals. */}
             <p className="mt-5 text-xs text-foreground/55">
-              英文转中文 · 无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
+              免注册试用 · 英文转中文 · 失败不计费 · 支持长视频
             </p>
           </div>
+
+          {/* Sample player — visually first on mobile (muted-autoplays in view),
+              right column on desktop. */}
+          {hasDemos ? (
+            <div className="order-1 lg:order-2 lg:col-span-7">
+              <HeroSamplePlayer demos={demos} />
+              <p className="mt-3 hidden text-xs text-foreground/70 lg:block">
+                鼠标移到画面上自动播放，点左上角{" "}
+                <span className="font-medium text-foreground/85">开启声音</span> 试听；右上角切换{" "}
+                <span className="font-medium text-foreground/85">英文原片 / 中文配音</span> 对比。
+              </p>
+            </div>
+          ) : null}
         </div>
       </div>
 
-      {/* Seal stamp — lower-right, over rice paper.
-          Replaces the AI-rendered seal that was removed during asset processing.
-          Hidden on small screens to avoid clutter. */}
-      <div className="absolute bottom-8 right-6 lg:bottom-12 lg:right-12 hidden md:block pointer-events-none">
+      {/* Cinnabar seal — lower-right over rice paper. Hidden on small screens. */}
+      <div className="pointer-events-none absolute bottom-8 right-6 hidden md:block lg:bottom-12 lg:right-12">
         <SealStamp size={56} rotation={-4} />
       </div>
     </section>

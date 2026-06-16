@@ -806,8 +806,17 @@ class TestCheckoutConfig:
         payment_providers._PROVIDERS = {}
         user = _make_user(plan_code="free")
         result = self._run_get_config(user=user)
-        # Response shape is strictly {default_provider, providers} — no prices.
-        assert set(result.keys()) == {"default_provider", "providers"}
+        # Strict shape lock — routing facts only, never prices. P3 (2026-06-10)
+        # added recommended_provider + checkout_surface (surface-aware rail
+        # recommendation); both are provider codes / surface tokens, not money.
+        assert set(result.keys()) == {
+            "default_provider",
+            "recommended_provider",
+            "checkout_surface",
+            "providers",
+        }
+        assert isinstance(result["recommended_provider"], str)
+        assert result["checkout_surface"] in {"pc_web", "mobile_web"}
         for entry in result["providers"]:
             assert "price" not in entry
             assert "amount_cny" not in entry
