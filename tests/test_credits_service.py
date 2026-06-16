@@ -38,6 +38,7 @@ from credits_service import (
     ensure_admin_credits_bucket,
     infer_quality_tier_from_execution,
     reserve_credits_or_raise,
+    revoke_buckets_for_order,
     settle_job_credit_ledger,
     shadow_grant,
     shadow_reserve,
@@ -979,6 +980,30 @@ class TestBucketLocking:
         assert any(
             getattr(s, "_for_update_arg", None) is not None for s in bucket_selects
         ), "shadow_rollback must use SELECT ... FOR UPDATE on bucket read"
+
+    def test_revoke_buckets_for_order_acquires_bucket_lock(self):
+        uid = uuid.uuid4()
+        order_id = uuid.uuid4()
+        bucket = _make_bucket(
+            bucket_type="subscription", remaining=3000, reserved=500,
+            user_id=uid,
+        )
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [bucket]
+        db.execute = AsyncMock(return_value=result)
+        db.add = lambda obj: None
+
+        revoked = _run(
+            revoke_buckets_for_order(db, user_id=uid, related_order_id=order_id)
+        )
+
+        assert revoked == 1
+        bucket_selects = self._bucket_selects_from_mock(db)
+        assert bucket_selects, "revoke_buckets_for_order must SELECT CreditsBucket"
+        assert any(
+            getattr(s, "_for_update_arg", None) is not None for s in bucket_selects
+        ), "revoke_buckets_for_order must use SELECT ... FOR UPDATE on bucket read"
 
 
 @pytest.mark.postgres

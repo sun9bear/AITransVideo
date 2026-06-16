@@ -53,13 +53,17 @@ class _FakeSession:
     def __init__(self, results):
         self._results = list(results)
         self.executed = []
+        self.events = []
 
     async def execute(self, stmt):
         self.executed.append(stmt)
         return _FakeResult(self._results.pop(0))
 
     async def commit(self):
-        pass
+        self.events.append("commit")
+
+    async def rollback(self):
+        self.events.append("rollback")
 
     async def __aenter__(self):
         return self
@@ -188,6 +192,27 @@ async def test_reconcile_once_bumps_last_reconciled_at_even_on_error():
 # ---------------------------------------------------------------------------
 # sweeper_loop 续命
 # ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_reconcile_once_rolls_back_failed_refresh_before_final_commit():
+    """A refresh exception after session mutation must not commit partial settlement."""
+    order = _order("pending")
+    session = _FakeSession([[order]])
+
+    async def partial_settle_then_boom(*, db, order):
+        order.status = "paid"
+        raise RuntimeError("settlement failed mid-transaction")
+
+    stats = await recon.reconcile_once(
+        session_factory=lambda: session,
+        refresh_fn=partial_settle_then_boom,
+    )
+
+    assert stats == {"scanned": 1, "settled": 0, "errors": 1}
+    assert session.events == ["rollback", "commit"]
+    assert order.last_reconciled_at is not None
+    assert order.updated_at == order.last_reconciled_at
+
 
 @pytest.mark.asyncio
 async def test_sweeper_loop_survives_tick_failure(monkeypatch):
