@@ -28,7 +28,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
 from database import async_session
 from models import PaymentOrder
@@ -68,7 +68,13 @@ def _candidate_orders_stmt(now: datetime):
     return (
         select(PaymentOrder)
         .where(
-            PaymentOrder.status.in_(_UNSETTLED_STATUSES),
+            or_(
+                PaymentOrder.status.in_(_UNSETTLED_STATUSES),
+                and_(
+                    PaymentOrder.status == "partial_refunded",
+                    PaymentOrder.paid_at.is_(None),
+                ),
+            ),
             PaymentOrder.provider != "fake",
             PaymentOrder.created_at <= newest_allowed,
             PaymentOrder.created_at >= oldest_allowed,

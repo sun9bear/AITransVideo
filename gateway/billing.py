@@ -67,6 +67,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
+_REFUND_AMOUNT_METADATA_KEY = "refund_amount_fen_total"
+
 # Frozen import-time snapshots kept for backward-compatible test imports.
 # Request-time code paths call the live functions (valid_target_plan_codes(),
 # get_price()) directly so they pick up runtime pricing changes.
@@ -864,6 +866,25 @@ def _extract_refund_amount_fen(provider_name: str, raw_payload: dict | None) -> 
     return None
 
 
+def _record_order_refund_amount_fen(order: PaymentOrder, refund_amount_fen: int) -> int:
+    previous = _order_refund_amount_fen_total(order)
+    current = max(int(refund_amount_fen or 0), 0)
+    total = previous + current
+    metadata = dict(getattr(order, "metadata_json", None) or {})
+    metadata[_REFUND_AMOUNT_METADATA_KEY] = total
+    order.metadata_json = metadata
+    return total
+
+
+def _order_refund_amount_fen_total(order: PaymentOrder) -> int:
+    metadata = getattr(order, "metadata_json", None) or {}
+    raw_value = metadata.get(_REFUND_AMOUNT_METADATA_KEY, 0)
+    try:
+        return max(int(raw_value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _provider_webhook_response(
     provider_name: str,
     settled: bool,
@@ -1166,10 +1187,15 @@ async def _process_payment_event(
                         provider_event_id, order_id)
         return False
 
+    cumulative_refund_amount_fen = None
+    if new_status == "refunded" and refund_amount_fen is not None:
+        cumulative_refund_amount_fen = _record_order_refund_amount_fen(
+            order, refund_amount_fen
+        )
     is_known_partial_refund = (
         new_status == "refunded"
-        and refund_amount_fen is not None
-        and refund_amount_fen < order.amount_cny
+        and cumulative_refund_amount_fen is not None
+        and cumulative_refund_amount_fen < order.amount_cny
     )
     if _is_paid_after_early_partial_refund:
         settlement_status = "partial_refunded"
@@ -1255,7 +1281,7 @@ async def _process_payment_event(
             logger.warning(
                 "Partial refund for order %s (refund=%s < order=%s); "
                 "entitlements kept — manual review required",
-                order_id, refund_amount_fen, order.amount_cny,
+                order_id, cumulative_refund_amount_fen, order.amount_cny,
             )
         else:
             await _recall_entitlements_for_refund(db, order=order, now=now)
