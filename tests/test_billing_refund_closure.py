@@ -425,6 +425,57 @@ async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_recall_restores_same_plan_subscription_period_from_remaining_order(monkeypatch):
+    monthly_paid_at = datetime(2026, 1, 10, tzinfo=timezone.utc)
+    annual_paid_at = datetime(2026, 1, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    user = SimpleNamespace(id="u1", plan_code="plus")
+    sub = SimpleNamespace(
+        user_id="u1", plan_code="plus", billing_period="annual",
+        provider="wechatpay", status="active", cancelled_at=None,
+        updated_at=None, current_period_start=annual_paid_at,
+        current_period_end=annual_paid_at + timedelta(days=365),
+    )
+    remaining_monthly_order = _order(
+        id="ord-plus-monthly",
+        provider="paddle",
+        target_plan_code="plus",
+        status="paid",
+        billing_period="monthly",
+        paid_at=monthly_paid_at,
+    )
+    session = _FakeSession([[user], [sub], [remaining_monthly_order]])
+
+    async def fake_revoke(db, *, user_id, related_order_id, reason_code="refund_revoke"):
+        return 1
+
+    import credits_service
+    monkeypatch.setattr(credits_service, "revoke_buckets_for_order", fake_revoke)
+
+    await billing._recall_entitlements_for_refund(
+        session,
+        order=_order(
+            id="ord-plus-annual",
+            target_plan_code="plus",
+            billing_period="annual",
+            paid_at=annual_paid_at,
+        ),
+        now=now,
+    )
+
+    assert user.plan_code == "plus"
+    assert sub.status == "active"
+    assert sub.plan_code == "plus"
+    assert sub.billing_period == "monthly"
+    assert sub.provider == "paddle"
+    assert sub.cancelled_at is None
+    assert sub.updated_at == now
+    assert sub.current_period_start == monthly_paid_at
+    assert sub.current_period_end == monthly_paid_at + timedelta(days=30)
+    assert [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"] == []
+
+
+@pytest.mark.asyncio
 async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch):
     plus_paid_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
     now = datetime(2026, 1, 15, tzinfo=timezone.utc)
@@ -803,6 +854,69 @@ def test_receive_webhook_wires_refund_binding_and_amount():
     assert "refund_amount_fen=" in src, "退款金额未传入 _process_payment_event"
     # INVARIANT：绑定只对 refunded 事件做
     assert 'event.new_status == "refunded"' in src
+
+
+class _FakeRequest:
+    def __init__(self, body: bytes):
+        self._body = body
+        self.headers = {"content-length": str(len(body))}
+
+    async def body(self):
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_receive_webhook_binds_and_skips_pending_refund_without_order_id(monkeypatch):
+    raw_payload = {
+        "event_type": "adjustment.created",
+        "data": {
+            "transaction_id": "txn_1",
+            "action": "refund",
+            "status": "pending_approval",
+        },
+    }
+    event = SimpleNamespace(
+        provider_event_id="evt_pending_refund",
+        event_type="adjustment.created",
+        order_id="",
+        new_status="pending",
+        raw_payload=raw_payload,
+    )
+    provider = SimpleNamespace(
+        verify_signature=lambda raw_body, headers: True,
+        parse_webhook=lambda raw_body: event,
+    )
+    resolve_calls: list[dict] = []
+
+    async def fake_resolve(db, *, provider_name, raw_payload):
+        resolve_calls.append({
+            "provider_name": provider_name,
+            "raw_payload": raw_payload,
+        })
+        return "ord-1"
+
+    async def fake_validate(**kwargs):
+        raise AssertionError("pending refund resources should skip provider validation")
+
+    async def fake_process(**kwargs):
+        raise AssertionError("pending refund resources must not process an order event")
+
+    monkeypatch.setattr(billing, "get_provider", lambda name: provider)
+    monkeypatch.setattr(billing, "_resolve_refund_order_id", fake_resolve)
+    monkeypatch.setattr(billing, "_validate_paddle_event_against_order", fake_validate)
+    monkeypatch.setattr(billing, "_process_payment_event", fake_process)
+
+    response = await billing.receive_webhook(
+        "paddle",
+        _FakeRequest(b"{}"),
+        _FakeSession([]),
+    )
+
+    assert response == {"ok": True, "settled": False}
+    assert resolve_calls == [{
+        "provider_name": "paddle",
+        "raw_payload": raw_payload,
+    }]
 
 
 def test_process_payment_event_partial_refund_guard():
