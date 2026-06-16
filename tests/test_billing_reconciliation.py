@@ -237,6 +237,26 @@ async def test_reconcile_once_commits_attempt_marker_before_later_rollback():
 
 
 @pytest.mark.asyncio
+async def test_reconcile_once_requeries_each_candidate_before_processing():
+    first = _order("pending")
+    second = _order("created")
+    session = _FakeSession([[first, second], [first], [second]])
+
+    async def refresh(*, db, order):
+        if order is first:
+            raise RuntimeError("first provider failed")
+
+    stats = await recon.reconcile_once(
+        session_factory=lambda: session,
+        refresh_fn=refresh,
+    )
+
+    assert stats == {"scanned": 2, "settled": 0, "errors": 1}
+    assert len(session.executed) == 3
+    assert session.events == ["rollback", "commit", "commit"]
+
+
+@pytest.mark.asyncio
 async def test_reconcile_once_default_refresh_surfaces_provider_failures(monkeypatch):
     order = _order("pending")
     session = _FakeSession([[order]])
