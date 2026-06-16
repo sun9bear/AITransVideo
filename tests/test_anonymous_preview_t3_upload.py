@@ -743,9 +743,18 @@ class TestF18ImportSmoke:
             )
             # Apply the fix: make services.* point to src.services.* object.
             sys.modules["services.anonymous_preview_intake"] = src_mod
-            # Also unify the parent packages if needed.
-            if "services" in sys.modules and "src.services" in sys.modules:
-                sys.modules["services"] = sys.modules["src.services"]
+            # F18 isolation fix (do NOT re-add the parent-package alias):
+            # the old code also did
+            #   sys.modules["services"] = sys.modules["src.services"]
+            # which globally replaced the top-level ``services`` package and was
+            # never restored. Any later test importing an UN-aliased
+            # ``services.*`` submodule then broke — e.g. test_r2_sweeper_race's
+            # lazy ``import services.r2_publisher_lib.r2_publisher`` failed with
+            # ``ImportError: cannot import name 'r2_publisher_lib' from
+            # 'src.services'`` in full-suite runs (passed when run alone). The
+            # specific-submodule alias above is all the F18 unification needs;
+            # the 4 dual-namespace test files import at collection time (before
+            # this test runs) so the parent alias never helped them anyway.
             # Re-import to confirm.
             import importlib
             importlib.invalidate_caches()
@@ -809,3 +818,59 @@ class TestHelpers:
         }
         ip = extract_client_ip(req)
         assert ip == "1.2.3.4"
+
+
+# ---------------------------------------------------------------------------
+# 9. P0 回归守卫：upload 成功响应必须搬运 Set-Cookie（2026-06-11 e2e 冒烟发现）
+# ---------------------------------------------------------------------------
+
+class TestUploadSetCookieGuard:
+    """FastAPI 不会把依赖注入 ``response`` 上的 header 合并进 handler 显式
+    返回的 JSONResponse。get_or_create_anonymous_session 把 avt_anon
+    Set-Cookie 设在注入 response 上，upload 成功路径若直接 return 自建
+    JSONResponse，cookie 永远到不了客户端 → /create 恒 401
+    anonymous_session_required，漏斗对所有新访客完全不可用（生产冒烟实测）。
+
+    源码级契约：anonymous_upload 内必须存在 set-cookie 搬运逻辑。
+    """
+
+    def test_upload_success_return_merges_session_set_cookie(self):
+        src = (Path(_GATEWAY_DIR) / "anonymous_preview_api.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+        upload_fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "anonymous_upload"
+        )
+        fn_src = ast.get_source_segment(src, upload_fn) or ""
+        assert 'getlist("set-cookie")' in fn_src, (
+            "anonymous_upload 丢失了 Set-Cookie 搬运逻辑：注入 response 上的 "
+            "avt_anon cookie 必须复制到显式返回的 JSONResponse，否则匿名会话"
+            "到不了客户端，/create 恒 401（2026-06-11 P0 回归）"
+        )
+        assert ".append(" in fn_src and "set-cookie" in fn_src.lower()
+
+    def test_upload_sync_intake_commits(self):
+        """P0 回归守卫 #2（2026-06-11 冒烟）：run_intake_and_save 契约是
+        "the caller commits/rolls back"（store 内部只 flush）。调用方漏
+        commit → close() 静默回滚整个事务（record + 配额计数），upload 返
+        200 但 /create 恒 404 not_found。"""
+        src = (Path(_GATEWAY_DIR) / "anonymous_preview_api.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+        upload_fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "anonymous_upload"
+        )
+        fn_src = ast.get_source_segment(src, upload_fn) or ""
+        assert "sync_db.commit()" in fn_src, (
+            "anonymous_upload._run_sync 丢失 sync_db.commit()：intake 事务会被 "
+            "close() 静默回滚，记录永不落库（2026-06-11 P0 回归）"
+        )
+        assert "sync_db.rollback()" in fn_src

@@ -1,6 +1,9 @@
 "use client"
 
 import { useEffect, useState, useCallback, useMemo } from 'react'
+import { toast } from 'sonner'
+import { useConfirmDialog } from '@/components/ui/confirm-dialog'
+import { sleep, useIsMountedRef } from '@/lib/react/useIsMountedRef'
 import type {
   VoiceCatalogItem,
   VoiceCatalogListResponse,
@@ -9,14 +12,13 @@ import type {
   ImportPreviewEntry,
 } from '@/types/voiceCatalog'
 import {
+  AdminApiError,
   listVoices,
   createVoice,
   updateVoice,
   deleteVoice,
   finalizeLabel,
   getLabelStatus,
-  triggerTextLabeling,
-  triggerAudioLabeling,
   submitLabelTask,
   pollLabelTask,
   batchFinalizeLabels,
@@ -541,6 +543,9 @@ export default function VoiceCatalogPage() {
   const [labelFilter, setLabelFilter] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [forbidden, setForbidden] = useState(false)
+  const { confirm, confirmDialog } = useConfirmDialog()
+  const isMountedRef = useIsMountedRef()
 
   // Modals
   const [showAdd, setShowAdd] = useState(false)
@@ -576,6 +581,10 @@ export default function VoiceCatalogPage() {
       setItems(resp.items)
       setTotal(resp.total)
     } catch (err) {
+      if (err instanceof AdminApiError && (err.status === 401 || err.status === 403)) {
+        setForbidden(true)
+        return
+      }
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsLoading(false)
@@ -586,7 +595,9 @@ export default function VoiceCatalogPage() {
 
   // Load label status on mount
   useEffect(() => {
-    getLabelStatus().then(setLabelStatus).catch(() => {})
+    getLabelStatus()
+      .then(setLabelStatus)
+      .catch(() => toast.warning('标注状态加载失败，统计面板可能不完整'))
   }, [])
 
   // Clear selection on page/filter change
@@ -595,12 +606,17 @@ export default function VoiceCatalogPage() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
   const handleDelete = async (voiceId: string) => {
-    if (!confirm(`确认归档音色 ${voiceId}？（软删除）`)) return
+    const confirmed = await confirm({
+      title: '归档音色',
+      description: `确认归档音色 ${voiceId}？（软删除）`,
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await deleteVoice(voiceId)
       load()
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err))
+      toast.error(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -613,7 +629,7 @@ export default function VoiceCatalogPage() {
         item.voice_id === voiceId ? resp.voice : item
       ))
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err))
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setVerifying(v => { const n = new Set(v); n.delete(voiceId); return n })
     }
@@ -622,14 +638,18 @@ export default function VoiceCatalogPage() {
   const handleBatchVerify = async () => {
     const ids = Array.from(selected)
     if (ids.length === 0) return
-    if (!confirm(`验证选中的 ${ids.length} 个音色？`)) return
+    const confirmed = await confirm({
+      title: '批量验证',
+      description: `验证选中的 ${ids.length} 个音色？`,
+    })
+    if (!confirmed) return
 
     setVerifying(new Set(ids))
     try {
       await verifyBatch(ids)
       load()
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err))
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
       setVerifying(new Set())
       setSelected(new Set())
@@ -646,13 +666,17 @@ export default function VoiceCatalogPage() {
     const supported = new Set(['volcengine', 'cosyvoice'])
     const unsupported = items.filter(i => selected.has(i.voice_id) && !supported.has(i.provider))
     if (unsupported.length > 0) {
-      alert(`标注仅支持 volcengine/cosyvoice，已选中 ${unsupported.length} 个不支持的音色`)
+      toast.error(`标注仅支持 volcengine/cosyvoice，已选中 ${unsupported.length} 个不支持的音色`)
       return
     }
 
     const isAudio = type !== 'text'
     const labelName = isAudio ? `音频 ${type.toUpperCase()}` : '文本标注'
-    if (!confirm(`对选中的 ${ids.length} 个音色执行${labelName}？`)) return
+    const confirmed = await confirm({
+      title: '批量标注',
+      description: `对选中的 ${ids.length} 个音色执行${labelName}？`,
+    })
+    if (!confirmed) return
 
     setLabeling(true)
     setSelected(new Set())
@@ -662,11 +686,18 @@ export default function VoiceCatalogPage() {
       const taskType = isAudio ? 'trigger-audio' : 'trigger-text'
       const { task_id } = await submitLabelTask(ids, taskType as 'trigger-text' | 'trigger-audio', isAudio ? type : undefined)
 
-      // Poll progress
+      // Poll progress (bounded; stop tracking on unmount — the backend
+      // task keeps running on its own)
+      const POLL_INTERVAL_MS = 3000
+      const MAX_POLLS = 600 // 30 分钟上限，任务悬挂时不再无限轮询
       let done = false
-      while (!done) {
-        await new Promise(r => setTimeout(r, 3000))
+      let polls = 0
+      while (!done && polls < MAX_POLLS) {
+        await sleep(POLL_INTERVAL_MS)
+        if (!isMountedRef.current) return
+        polls += 1
         const task = await pollLabelTask(task_id)
+        if (!isMountedRef.current) return
         const p = task.progress
         setLabelProgress(`${labelName} ${p.completed}/${p.total}（批次 ${p.current_batch}）...`)
 
@@ -675,19 +706,28 @@ export default function VoiceCatalogPage() {
           const r = task.result
           const written = r?.written?.length ?? 0
           const errors = r?.errors?.length ?? 0
-          alert(`${labelName}完成：${written} 成功${errors ? `，${errors} 失败` : ''}`)
+          if (errors) {
+            toast.warning(`${labelName}完成：${written} 成功，${errors} 失败`)
+          } else {
+            toast.success(`${labelName}完成：${written} 成功`)
+          }
         } else if (task.status === 'failed') {
           done = true
-          alert(`${labelName}失败：${task.error || '未知错误'}`)
+          toast.error(`${labelName}失败：${task.error || '未知错误'}`)
         }
+      }
+      if (!done) {
+        toast.error(`${labelName}超过 30 分钟未完成，已停止跟踪进度`)
       }
       load()
       getLabelStatus().then(setLabelStatus).catch(() => {})
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err))
+      toast.error(err instanceof Error ? err.message : String(err))
     } finally {
-      setLabeling(false)
-      setLabelProgress('')
+      if (isMountedRef.current) {
+        setLabeling(false)
+        setLabelProgress('')
+      }
     }
   }
 
@@ -711,31 +751,49 @@ export default function VoiceCatalogPage() {
   const handleBatchFinalize = async () => {
     const ids = Array.from(selected)
     if (!ids.length) return
-    if (!confirm(`为选中的 ${ids.length} 个音色生成 Final 标签？`)) return
+    const confirmed = await confirm({
+      title: '生成 Final 标签',
+      description: `为选中的 ${ids.length} 个音色生成 Final 标签？`,
+    })
+    if (!confirmed) return
     try {
       const resp = await batchFinalizeLabels(ids)
-      alert(`Final 标签：${resp.succeeded.length} 成功${resp.failed.length ? `，${resp.failed.length} 失败` : ''}`)
+      if (resp.failed.length) {
+        toast.warning(`Final 标签：${resp.succeeded.length} 成功，${resp.failed.length} 失败`)
+      } else {
+        toast.success(`Final 标签：${resp.succeeded.length} 成功`)
+      }
       load()
       getLabelStatus().then(setLabelStatus).catch(() => {})
       setSelected(new Set())
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err))
+      toast.error(err instanceof Error ? err.message : String(err))
     }
   }
 
   const handleFinalize = async (voiceId: string) => {
     try {
       await finalizeLabel(voiceId)
-      alert(`final 标签已生成: ${voiceId}`)
+      toast.success(`final 标签已生成: ${voiceId}`)
       load()
       getLabelStatus().then(setLabelStatus).catch(() => {})
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err))
+      toast.error(err instanceof Error ? err.message : String(err))
     }
+  }
+
+  if (forbidden) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 text-center">
+        <p className="text-lg font-semibold text-foreground">仅管理员可访问</p>
+        <p className="mt-2 text-sm text-muted-foreground">当前账号没有音色库管理权限</p>
+      </div>
+    )
   }
 
   return (
     <div className="space-y-6">
+      {confirmDialog}
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-foreground">音色库管理</h1>

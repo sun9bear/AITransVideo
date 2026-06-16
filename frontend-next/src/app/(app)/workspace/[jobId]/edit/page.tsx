@@ -15,6 +15,7 @@ import {
 
 import { Button } from "@/components/ui/button"
 import { useConfirmDialog } from "@/components/ui/confirm-dialog"
+import { sleep, useIsMountedRef } from "@/lib/react/useIsMountedRef"
 import {
   acceptSegmentDraft,
   cancelEditing,
@@ -36,7 +37,6 @@ import {
   revertUnsyncedTextSegments,
   getRegenerateAllStatus,
   cancelRegenerateAll,
-  splitEditingSegment,
   splitEditingSegmentMany,
   type CommitStrategy,
   type BulkReplacePreviewResponse,
@@ -117,6 +117,7 @@ export default function VideoEditPage() {
   const router = useRouter()
   const jobId = ((params.jobId as string) ?? "").trim()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const isMountedRef = useIsMountedRef()
 
   const [job, setJob] = useState<JobSummary | null>(null)
   const [resource, setResource] = useState<EditingSegmentsResponse | null>(null)
@@ -204,7 +205,7 @@ export default function VideoEditPage() {
   const stickyOffsetPx = isMobileLayout ? stickyVideoHeight + 56 : 0
 
   // Mirror stickyOffsetPx into a ref so imperative scroll callbacks
-  // (handleSplitSegment, scrollToSegment) always read the LATEST value
+  // (handleSplitSegmentMany, scrollToSegment) always read the LATEST value
   // without re-creating themselves on every mobile resize. Adding
   // stickyOffsetPx to those callbacks' deps would cascade re-renders
   // through every memoized child (Codex round-7 P2 #1).
@@ -495,67 +496,6 @@ export default function VideoEditPage() {
     [jobId],
   )
 
-  // ---- Split segment ----
-  // Plan §7.4: user chooses character positions in source_text + cn_text;
-  // backend computes new timestamps proportionally and returns both halves
-  // + refreshed status map for in-place splice into local state.
-  const handleSplitSegment = useCallback(
-    async (
-      segmentId: string,
-      body: {
-        split_source_index: number
-        split_cn_index: number
-        speaker_a: string
-        speaker_b: string
-      },
-    ) => {
-      setSavingSegmentIds((prev) => new Set(prev).add(segmentId))
-      try {
-        const result = await splitEditingSegment(jobId, segmentId, body)
-        const firstNewSegmentId = result.new_segments[0]?.segment_id
-        const revealFirstNewSegment = () => {
-          if (!firstNewSegmentId) return
-          window.requestAnimationFrame(() => {
-            virtualListRef.current?.scrollToId(firstNewSegmentId, { align: "start", stickyOffset: stickyOffsetRef.current })
-          })
-        }
-        setResource((prev) => {
-          if (!prev) return prev
-          const index = prev.segments.findIndex(
-            (s) => s.segment_id === segmentId,
-          )
-          if (index < 0) return prev
-          const nextSegments = [...prev.segments]
-          nextSegments.splice(index, 1, ...result.new_segments)
-          return {
-            ...prev,
-            segments: nextSegments,
-            segment_status: result.segment_status,
-            total: result.total_count,
-          }
-        })
-        revealFirstNewSegment()
-        try {
-          const refreshed = await getEditingSegments(jobId)
-          setResource(refreshed)
-          revealFirstNewSegment()
-        } catch {
-          // Keep the optimistic split visible; the next normal reload will resync.
-        }
-        toast.success(`拆分完成：${result.new_segments.length} 段，共 ${result.total_count} 段`)
-      } catch (error) {
-        toast.error(`拆分失败: ${getErrorMessage(error)}`)
-      } finally {
-        setSavingSegmentIds((prev) => {
-          const next = new Set(prev)
-          next.delete(segmentId)
-          return next
-        })
-      }
-    },
-    [jobId],
-  )
-
   // ---- Split segment (Phase 2a multi-cut) ----
   // Plan §5.6: atomic N-cut split via POST /split-many. Backend uses
   // write-ahead journal; cuts strictly increasing in both indices;
@@ -738,12 +678,22 @@ export default function VideoEditPage() {
       let lastDisplayedProgress = ""
 
       while (polls < MAX_POLLS) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        await sleep(POLL_INTERVAL_MS)
+        if (!isMountedRef.current) {
+          // Page left mid-batch: the backend task keeps running on its own;
+          // just stop tracking and drop the orphaned loading toast.
+          toast.dismiss(toastId)
+          return false
+        }
         if (typeof document !== "undefined" && document.hidden) {
           continue
         }
         polls += 1
         const status = await getRegenerateAllStatus(jobId, taskId)
+        if (!isMountedRef.current) {
+          toast.dismiss(toastId)
+          return false
+        }
 
         // Someone launched another batch — old task id orphaned.
         if (status.mismatch) {
@@ -820,11 +770,13 @@ export default function VideoEditPage() {
       toast.error(`批量合成失败: ${getErrorMessage(error)}`, { id: toastId })
       return false
     } finally {
-      setIsBatchRegenerating(false)
-      setBatchTaskId(null)
-      setIsCancellingBatch(false)
+      if (isMountedRef.current) {
+        setIsBatchRegenerating(false)
+        setBatchTaskId(null)
+        setIsCancellingBatch(false)
+      }
     }
-  }, [isBatchRegenerating, jobId, loadData])
+  }, [isBatchRegenerating, isMountedRef, jobId, loadData])
 
   // D39 user-initiated cancel of a running batch. Writes the
   // cancel_requested flag on the backend; the running polling loop
@@ -923,12 +875,20 @@ export default function VideoEditPage() {
       let polls = 0
       let lastDisplayedProgress = ""
       while (polls < MAX_POLLS) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        await sleep(POLL_INTERVAL_MS)
+        if (!isMountedRef.current) {
+          toast.dismiss(toastId)
+          return
+        }
         if (typeof document !== "undefined" && document.hidden) {
           continue
         }
         polls += 1
         const status = await getRegenerateAllStatus(jobId, taskId)
+        if (!isMountedRef.current) {
+          toast.dismiss(toastId)
+          return
+        }
         if (status.mismatch) {
           toast.warning("检测到新的合成任务，已停止跟踪当前进度", { id: toastId })
           break
@@ -978,15 +938,18 @@ export default function VideoEditPage() {
     } catch (error) {
       toast.error(`批量替换失败: ${getErrorMessage(error)}`, { id: toastId })
     } finally {
-      setIsBulkReplaceApplying(false)
-      setIsBatchRegenerating(false)
-      setBatchTaskId(null)
-      setIsCancellingBatch(false)
+      if (isMountedRef.current) {
+        setIsBulkReplaceApplying(false)
+        setIsBatchRegenerating(false)
+        setBatchTaskId(null)
+        setIsCancellingBatch(false)
+      }
     }
   }, [
     bulkReplacePreview,
     isBulkReplaceApplying,
     isBatchRegenerating,
+    isMountedRef,
     jobId,
     loadData,
   ])

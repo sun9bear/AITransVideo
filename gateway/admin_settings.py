@@ -64,6 +64,34 @@ _VALID_WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3"}
 # Phase 4.1 + Codex 2026-05-25 决策：flash 默认，plus 同时支持
 _VALID_CLONE_TARGET_MODELS = frozenset({"cosyvoice-v3.5-flash", "cosyvoice-v3.5-plus"})
 
+# APF 限制旋钮边界（2026-06-11）：{field: (min, max)}。
+# 下界 ≥1 防误设 0（等效误关停且难排查——紧急关停用 anonymous_free_preview_enabled
+# 主开关）；上界防天文数字。max_upload_mb 上界 2048 对齐登录用户 2GB 上限。
+_APF_LIMIT_BOUNDS = {
+    "anonymous_preview_max_upload_mb": (10, 2048),
+    "anonymous_preview_max_seconds": (30, 7200),
+    "anonymous_preview_cap_global_per_day": (1, 100000),
+    "anonymous_preview_cap_per_ip": (1, 1000),
+    "anonymous_preview_cap_per_device": (1, 100),
+    "anonymous_preview_cap_per_source": (1, 100),
+}
+
+# 分片上传旋钮边界（plan 2026-06-11 §3.7）：{field: (min, max)}。
+# chunk_mb 上界 80 是硬约束（CF 免费版单请求体 100MB，留余量）；
+# 其余下界 ≥1 防误设 0（等效误关停难排查——紧急关停用 chunked_upload_enabled
+# 主开关），上界防天文数字（磁盘 / 带宽失控）。
+_CHUNKED_UPLOAD_BOUNDS = {
+    "chunked_upload_max_file_mb": (100, 8192),
+    "chunked_upload_chunk_mb": (8, 80),
+    "chunked_upload_per_user_active": (1, 20),
+    "chunked_upload_per_user_inflight_gb": (1, 100),
+    "chunked_upload_global_inflight_gb": (1, 1000),
+    "chunked_upload_daily_per_user_gb": (1, 500),
+    "chunked_upload_disk_floor_gb": (1, 500),
+    "chunked_upload_ttl_hours": (1, 168),
+    "chunked_upload_ready_ttl_hours": (1, 72),
+}
+
 
 class AdminSettings(BaseModel):
     tts_provider: str = "minimax"          # "minimax" or "mimo"
@@ -322,6 +350,92 @@ class AdminSettings(BaseModel):
     # ≥ 此值 → 429（匿名不饿死付费任务）。admin 可在灰度期调大。
     # 默认 2：500/天 ÷ 2 并发槽位，灰度初期保守。
     anonymous_preview_max_in_flight: int = 2
+
+    # --- APF 限制旋钮（2026-06-11，原 env-only 限制搬进 admin 热配置）---
+    # 6 项与 GatewaySettings 同名 env 字段一一对应（默认值严格一致）；
+    # admin 改完即时生效（gateway 每请求经 anonymous_preview_limits.
+    # resolve_apf_limits() 重读），无需重启容器。env 字段保留作 fail-safe
+    # fallback：admin_settings.json 读取/解析任何异常 → resolver 回落 env 值。
+    #
+    # ⚠️ 单位差异：``anonymous_preview_max_upload_mb`` 存 **MB**（admin UI
+    # 友好），消费侧由 resolver 统一 ×1024×1024 转字节；env 对应字段是
+    # ``anonymous_preview_max_upload_bytes``（字节）。其余 5 项单位同 env。
+    anonymous_preview_max_upload_mb: int = 200
+    anonymous_preview_max_seconds: int = 180
+    anonymous_preview_cap_global_per_day: int = 500
+    anonymous_preview_cap_per_ip: int = 3
+    anonymous_preview_cap_per_device: int = 1
+    anonymous_preview_cap_per_source: int = 1
+
+    # --- 分片上传（plan 2026-06-11 §3.7，独立命名空间 chunked_upload_*）---
+    # 注册用户大文件（>95MB）经 CF Tunnel 的应用层分片上传通道。
+    # 主开关默认 False：部署后休眠，admin 账号灰度验证再打开。
+    #
+    # **类型用 StrictBool**（同 anonymous_free_preview_enabled 先例）：
+    # 普通 bool 下 "1" / "on" / "true" 字符串会被 Pydantic 宽松解析为 True，
+    # admin UI bug 可能意外打开大文件上传面。StrictBool 只接受 Python
+    # True / False。
+    #
+    # 消费侧：gateway chunked_upload_api.resolve_chunked_limits() 每请求
+    # 重读（热生效）；读取任何异常 → 整通道 fail-closed（enabled=False）。
+    chunked_upload_enabled: StrictBool = False
+    chunked_upload_max_file_mb: int = 2048      # 单文件上限（MB）
+    chunked_upload_chunk_mb: int = 64           # 建议切片大小（MB，硬上限 80）
+    chunked_upload_per_user_active: int = 2     # per-user 并发活跃 upload 数
+    chunked_upload_per_user_inflight_gb: int = 4   # per-user in-flight 声明字节
+    chunked_upload_global_inflight_gb: int = 20    # 全局 in-flight 声明字节
+    chunked_upload_daily_per_user_gb: int = 8      # 每日 per-user 声明 GB 配额
+    chunked_upload_disk_floor_gb: int = 20         # 磁盘保底（reserve 公式扣除项）
+    chunked_upload_ttl_hours: int = 24             # 未完成上传清扫 TTL
+    chunked_upload_ready_ttl_hours: int = 6        # ready 未被 job claim 的终文件 TTL
+
+    @field_validator(
+        "anonymous_preview_max_upload_mb",
+        "anonymous_preview_max_seconds",
+        "anonymous_preview_cap_global_per_day",
+        "anonymous_preview_cap_per_ip",
+        "anonymous_preview_cap_per_device",
+        "anonymous_preview_cap_per_source",
+    )
+    @classmethod
+    def validate_apf_limit_bounds(cls, v: int, info) -> int:
+        """APF 限制旋钮统一边界校验（同 reservation_ttl 5-120 validator 模式）。
+
+        下界防误设 0/负数（max_upload=0 → 所有上传 413；cap=0 → 全量 429，
+        等效误关停但比主开关难排查）；上界防天文数字（带宽/磁盘/成本失控）。
+        各字段边界见模块级 ``_APF_LIMIT_BOUNDS``。
+        """
+        low, high = _APF_LIMIT_BOUNDS[info.field_name]
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"{info.field_name} 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator(
+        "chunked_upload_max_file_mb",
+        "chunked_upload_chunk_mb",
+        "chunked_upload_per_user_active",
+        "chunked_upload_per_user_inflight_gb",
+        "chunked_upload_global_inflight_gb",
+        "chunked_upload_daily_per_user_gb",
+        "chunked_upload_disk_floor_gb",
+        "chunked_upload_ttl_hours",
+        "chunked_upload_ready_ttl_hours",
+    )
+    @classmethod
+    def validate_chunked_upload_bounds(cls, v: int, info) -> int:
+        """分片上传旋钮统一边界校验（plan 2026-06-11 §3.7）。
+
+        chunk_mb ≤ 80 是 CF 免费版单请求体 100MB 的硬性余量约束；其余
+        边界见模块级 ``_CHUNKED_UPLOAD_BOUNDS``。
+        """
+        low, high = _CHUNKED_UPLOAD_BOUNDS[info.field_name]
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"{info.field_name} 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
 
     @field_validator("whisper_alignment_trigger")
     @classmethod

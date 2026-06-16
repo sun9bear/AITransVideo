@@ -380,7 +380,8 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       {isPreviewingThis ? '加载中...' : '▶ 播放原文'}
                     </button>
                   </div>
-                  <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm leading-6 text-foreground/70">
+                  {/* 双色语义：源文=朱砂 / 译文=群青（plan 2026-06-11 Task 2，仅外层容器装饰边线） */}
+                  <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm leading-6 text-foreground/70" style={{ borderLeft: "3px solid var(--cinnabar)" }}>
                     {item.sourceText || '-'}
                   </div>
                 </div>
@@ -390,7 +391,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-muted-foreground">译文</span>
                   </div>
-                  <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5">
+                  <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5" style={{ borderLeft: "3px solid var(--ultramarine)" }}>
                     <textarea
                       className="w-full min-h-[2lh] resize-none rounded-xl bg-transparent px-4 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring overflow-hidden"
                       onChange={(event) => {

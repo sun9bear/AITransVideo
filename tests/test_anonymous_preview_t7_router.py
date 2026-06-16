@@ -422,12 +422,15 @@ class TestUploadEndpoint:
 
         app.include_router(api.router)
 
-        # audit 路径持久化（T8b）会查 record 行——给 None 让其跳过持久化，
-        # 不触发新的 fail-loud 503 语义（对抗审核修复后 persist 失败=503）。
+        # audit 路径持久化（T8b）会查 record 行——必须返回带 audit 的假行：
+        # 2026-06-11 P0 修复后行缺失 = 持久化断裂 → fail-loud 503，
+        # None 不再是合法的"跳过"路径。
         async def _db_for_upload():
             db = MagicMock()
+            _orm_row = MagicMock()
+            _orm_row.audit = {}
             _result = MagicMock()
-            _result.scalar_one_or_none = MagicMock(return_value=None)
+            _result.scalar_one_or_none = MagicMock(return_value=_orm_row)
             db.execute = AsyncMock(return_value=_result)
             db.commit = AsyncMock()
             yield db

@@ -14,8 +14,16 @@ from __future__ import annotations
 ANONYMOUS_PREVIEW_PAYLOAD_SPEC: frozenset[str] = frozenset(
     {
         "job_type",
-        "source_type",
-        "source_ref",
+        # Job API POST /jobs 的真实契约是嵌套 source 对象
+        # （payload["source"] = {"type":..., "value":...}，见
+        # src/services/jobs/api.py do_POST）。扁平 source_type/source_ref
+        # 会被 Job API 当作 source 缺失 → ValueError 400
+        # （2026-06-11 冒烟发现）。
+        "source",
+        # sentinel 系统用户 id —— 由 gateway 服务端注入（不是客户端输入）。
+        # 没有 user_id 时 Job API 不预填 project_dir，匿名 job 会走 legacy
+        # stdout 捕获 → project_dir 污染 → stream 400（2026-06-11 冒烟）。
+        "user_id",
         "output_target",
         "service_mode",
         "requires_review",

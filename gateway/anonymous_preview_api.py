@@ -46,10 +46,15 @@ from anonymous_preview_policy import (
 from anonymous_preview_probe import build_intake_probe_fn, teaser_dest_for
 from anonymous_preview_prescreen import prescreen_filename
 from anonymous_preview_quota import hash_scope_key, shanghai_today
-from src.services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
+from services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
 from anonymous_preview_record_store import RecordStoreError
 from anonymous_preview_upload import UploadRejected, UploadTooLarge, handle_anonymous_upload, extract_client_ip
-from anonymous_preview_intake_wiring import run_intake_and_save
+from anonymous_preview_intake_wiring import (
+    ANON_PREVIEW_COUNTER_SCOPE,
+    peek_counter_keys,
+    run_intake_and_save,
+)
+from anonymous_preview_limits import resolve_apf_limits
 from anonymous_session import (
     AnonymousSessionContext,
     get_or_create_anonymous_session,
@@ -107,11 +112,22 @@ async def _get_record_for_session(
     preview_id: str,
     session_id_hash: str,
 ) -> Optional[AnonymousPreviewRecord]:
-    """Fetch a record matching both preview_id and session_id (ownership check)."""
+    """Fetch a record matching both preview_id and session_id (ownership check).
+
+    存储侧的 ``session_id`` 不是 cookie 会话哈希本身：intake adapter 入库前
+    用 wiring 的 HMAC hasher 又做了一层 ``hash_scope_key("sess:" + 会话哈希)``
+    （privacy scope key，见 build_intake_config 的 hasher 包装）。查询侧必须
+    用同一函数推导，否则 create/status/stream 恒 404 not_found
+    （2026-06-11 冒烟发现）。
+    """
+    stored_session_key = hash_scope_key(
+        f"sess:{session_id_hash}",
+        secret=settings.anonymous_preview_hash_secret,
+    )
     result = await db.execute(
         select(AnonymousPreviewRecord).where(
             AnonymousPreviewRecord.preview_id == preview_id,
-            AnonymousPreviewRecord.session_id == session_id_hash,
+            AnonymousPreviewRecord.session_id == stored_session_key,
         )
     )
     return result.scalar_one_or_none()
@@ -189,6 +205,10 @@ async def anonymous_upload(
 
     admin_enabled = _get_admin_enabled()
 
+    # APF 限制旋钮（2026-06-11）：admin 热配置优先、env fallback。本次请求内
+    # 只 resolve 一次，peek / upload / admission 用同一份快照保证一致。
+    limits = resolve_apf_limits()
+
     # AD-8 body-before peek: non-authoritative global + per-IP rate-limit pre-check.
     # Performed BEFORE reading the request body so we can reject obviously-over-cap
     # callers without writing to disk (瞬时磁盘 = 并发数×200MB 防护).
@@ -201,42 +221,48 @@ async def anonymous_upload(
         # Use async db session directly for the peek SELECTs (avoids sync engine spin-up)
         from sqlalchemy import text as _sa_text
 
-        _global_key = "global"
+        # (scope, scope_key) 必须与权威计数器写入形状逐字节一致：scope 列恒为
+        # ANON_PREVIEW_COUNTER_SCOPE（wiring 单实例 store），scope_key 是
+        # adapter 复合键 "global:{day}" / "ip:{hmac('ip:'+ip)}:{day}"。
+        # 推导只许走 peek_counter_keys——此前 peek 自行用 scope='global'/'ip'
+        # + 裸值哈希，两个维度恒查 0 行、cap 预检恒放行（2026-06-11 bug ⑤）。
+        _global_key, _ip_key = peek_counter_keys(
+            client_ip_peek,
+            day_key_peek,
+            secret=settings.anonymous_preview_hash_secret,
+        )
         _global_row = await db.execute(
             _sa_text(
                 "SELECT count FROM anonymous_preview_daily_usage "
-                "WHERE scope = 'global' AND scope_key = :key "
+                "WHERE scope = :scope AND scope_key = :key "
                 "  AND mode = 'free' AND usage_date = :day"
             ),
-            {"key": _global_key, "day": day_key_peek},
+            {"scope": ANON_PREVIEW_COUNTER_SCOPE, "key": _global_key, "day": day_key_peek},
         )
         _global_count = int((_global_row.fetchone() or [0])[0])
-        if _global_count >= settings.anonymous_preview_cap_global_per_day:
+        if _global_count >= limits.anonymous_preview_cap_global_per_day:
             logger.info(
                 "anon_upload: AD-8 peek global cap reached count=%d cap=%d",
                 _global_count,
-                settings.anonymous_preview_cap_global_per_day,
+                limits.anonymous_preview_cap_global_per_day,
             )
             return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
 
-        _ip_hashed = hash_scope_key(
-            client_ip_peek, secret=settings.anonymous_preview_hash_secret
-        )
         _ip_row = await db.execute(
             _sa_text(
                 "SELECT count FROM anonymous_preview_daily_usage "
-                "WHERE scope = 'ip' AND scope_key = :key "
+                "WHERE scope = :scope AND scope_key = :key "
                 "  AND mode = 'free' AND usage_date = :day"
             ),
-            {"key": _ip_hashed, "day": day_key_peek},
+            {"scope": ANON_PREVIEW_COUNTER_SCOPE, "key": _ip_key, "day": day_key_peek},
         )
         _ip_count = int((_ip_row.fetchone() or [0])[0])
-        if _ip_count >= settings.anonymous_preview_cap_per_ip:
+        if _ip_count >= limits.anonymous_preview_cap_per_ip:
             logger.info(
-                "anon_upload: AD-8 peek ip cap reached count=%d cap=%d ip_hash=%.8s",
+                "anon_upload: AD-8 peek ip cap reached count=%d cap=%d ip_key=%.16s",
                 _ip_count,
-                settings.anonymous_preview_cap_per_ip,
-                _ip_hashed,
+                limits.anonymous_preview_cap_per_ip,
+                _ip_key,
             )
             return JSONResponse(status_code=429, content={"error": "rate_limited"})
     except RateLimitCounterUnavailable:
@@ -254,7 +280,7 @@ async def anonymous_upload(
             session_hash=session_ctx.session_id_hash,
             flag_enabled=settings.enable_anonymous_preview,
             admin_enabled=admin_enabled,
-            max_upload_bytes=settings.anonymous_preview_max_upload_bytes,
+            max_upload_bytes=limits.anonymous_preview_max_upload_bytes,
         )
     except UploadRejected as exc:
         logger.warning(
@@ -285,8 +311,8 @@ async def anonymous_upload(
 
     # Build adapter facts — field names from
     # src.services.anonymous_preview_backend_adapter.RequestFacts / UploadFacts
-    from src.services.anonymous_preview_backend_adapter import RequestFacts, UploadFacts
-    from src.services.anonymous_preview_intake import SourceType
+    from services.anonymous_preview_backend_adapter import RequestFacts, UploadFacts
+    from services.anonymous_preview_intake import SourceType
 
     client_ip = extract_client_ip(request) or ""
 
@@ -312,13 +338,22 @@ async def anonymous_upload(
         def _run_sync() -> object:
             sync_db = _make_sync_intake_session()
             try:
-                return run_intake_and_save(
+                rec = run_intake_and_save(
                     db_session=sync_db,
                     request_facts=request_facts,
                     upload_facts=upload_facts,
                     probe_fn=_probe_fn,
                     prescreen_fn=_prescreen_fn,
                 )
+                # run_intake_and_save 契约（wiring docstring）："the caller
+                # commits/rolls back"。store 内部只 flush；漏 commit → close()
+                # 时整个事务（record + 配额计数）静默回滚，upload 返回 200 但
+                # 记录不存在，/create 恒 404 not_found（2026-06-11 冒烟发现）。
+                sync_db.commit()
+                return rec
+            except BaseException:
+                sync_db.rollback()
+                raise
             finally:
                 sync_db.close()
 
@@ -343,6 +378,14 @@ async def anonymous_upload(
             )
         )
         _orm_row = _row_result.scalar_one_or_none()
+        if _orm_row is None:
+            # intake 刚返回了 record 却查不到行 = 持久化层断裂（如漏 commit）。
+            # 静默跳过会让 200 带着死 preview_id 出门 → /create 恒 404；
+            # 必须 fail-loud（与下方 except 分支同语义：503 + 清理媒体）。
+            raise RuntimeError(
+                f"anon_upload: record {record.record_id} not found in ORM "
+                "after intake save — persistence broken"
+            )
         if _orm_row is not None and upload_path is not None:
             _merged_audit = dict(_orm_row.audit or {})
             _merged_audit["stored_upload_path"] = str(upload_path)
@@ -372,7 +415,8 @@ async def anonymous_upload(
     admission: Optional[FreePreviewAdmissionResult] = None
     try:
         teaser_dur = float(getattr(record, "duration_seconds", 0.0) or 0.0)
-        admission = admit_for_free_preview(teaser_dur, settings)
+        # ApfLimits 字段与 settings 同名，policy 薄 adapter 直接消费
+        admission = admit_for_free_preview(teaser_dur, limits)
     except Exception as exc:
         logger.warning("anon_upload: admit_for_free_preview error: %s", exc)
 
@@ -384,7 +428,7 @@ async def anonymous_upload(
     record_status = record.status
     status_str = record_status.value if hasattr(record_status, "value") else str(record_status)
 
-    return JSONResponse(
+    out = JSONResponse(
         status_code=200,
         content={
             "preview_id": record.record_id,
@@ -392,6 +436,39 @@ async def anonymous_upload(
             "status_reason": _redact_reason(record.status_reason),
             "mode": "free",
             "admission_decision": admission_decision,
+        },
+    )
+    # FastAPI 不会把依赖注入 `response` 上的 header 合并进 handler 显式返回的
+    # Response —— get_or_create_anonymous_session 设置的 avt_anon Set-Cookie
+    # 必须手动搬运，否则匿名会话永远到不了客户端，/create 恒 401
+    # anonymous_session_required（2026-06-11 e2e 冒烟发现，漏斗级 P0）。
+    for _sc in response.headers.getlist("set-cookie"):
+        out.headers.append("set-cookie", _sc)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# GET /limits  (APF 限制旋钮，2026-06-11)
+# ---------------------------------------------------------------------------
+
+@router.get("/limits")
+async def anonymous_preview_limits() -> Response:
+    """公开只读端点：当前生效的匿名预览限制（前端试用面板动态文案用）。
+
+    无需 session / CSRF（GET 只读、只返回数字、无敏感信息）。仅 env flag
+    gate：flag 关 → 404（与其他匿名预览端点一致）；admin 热开关**不** gate
+    它——面板在 admin 临时熔断期间仍能渲染正确的提示文案。
+
+    注意必须注册在 ``/{preview_id}/*`` 动态路由之前（字面路径优先）。
+    """
+    if not settings.enable_anonymous_preview:
+        return JSONResponse(status_code=404, content={"error": "not_found"})
+    limits = resolve_apf_limits()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "max_upload_mb": limits.anonymous_preview_max_upload_bytes // (1024 * 1024),
+            "preview_seconds": limits.anonymous_preview_max_seconds,
         },
     )
 
@@ -569,7 +646,8 @@ async def anonymous_preview_stream(
     try:
         _audit = dict(getattr(record, "audit", None) or {})
         teaser_dur = float(_audit.get("teaser_duration_seconds", 0.0) or 0.0)
-        admission = admit_for_free_preview(teaser_dur, settings)
+        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）
+        admission = admit_for_free_preview(teaser_dur, resolve_apf_limits())
         gate: StreamGate = stream_gate_from_artifact_policy(admission.artifact_policy)
         if not gate.stream_only_required:
             logger.warning(
@@ -764,7 +842,8 @@ async def anonymous_preview_create(
     if not probe.get("ok") or not probe.get("duration_seconds"):
         return JSONResponse(status_code=409, content={"error": "teaser_unprobeable"})
     try:
-        admission = admit_for_free_preview(float(probe["duration_seconds"]), settings)
+        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）
+        admission = admit_for_free_preview(float(probe["duration_seconds"]), resolve_apf_limits())
         decision = admission.decision
         decision_str = decision.value if hasattr(decision, "value") else str(decision)
         if decision_str != "admitted":
@@ -828,8 +907,14 @@ async def anonymous_preview_create(
     # payload（白名单深度防御：违规字段=代码 bug，拒绝并回滚抢占）
     payload = {
         "job_type": "localize_video",
-        "source_type": "local_video",
-        "source_ref": str(teaser_path),
+        # Job API 契约：source 是嵌套对象（api.py do_POST 读 payload["source"]
+        # 的 type/value），扁平 source_type/source_ref 会 400（2026-06-11 冒烟）。
+        "source": {"type": "local_video", "value": str(teaser_path)},
+        # sentinel user_id（服务端注入，客户端不可达）：submit_job 只为带
+        # user_id 的任务预填 workspace_dir/project_dir；缺省会走 legacy
+        # stdout 捕获路径 → project_dir 被源路径污染（写一次门闩封死）→
+        # stream/video 撞 "outside projects root" 400（2026-06-11 冒烟）。
+        "user_id": str(sentinel.id),
         "output_target": "editor",
         "service_mode": "free",
         "requires_review": False,

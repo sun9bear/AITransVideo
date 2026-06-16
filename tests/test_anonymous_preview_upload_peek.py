@@ -38,6 +38,13 @@ for _p in (_GATEWAY, _SRC):
 
 import anonymous_preview_api as api  # noqa: E402
 import anonymous_session as anon_session_mod  # noqa: E402
+from anonymous_preview_intake_wiring import (  # noqa: E402
+    ANON_PREVIEW_COUNTER_SCOPE,
+    peek_counter_keys,
+    run_intake_and_save,
+)
+from anonymous_preview_quota import shanghai_today  # noqa: E402
+from anonymous_preview_record_store import RecordStoreError  # noqa: E402
 from anonymous_session import (  # noqa: E402
     AnonymousSessionContext,
     _COOKIE_NAME,
@@ -92,6 +99,23 @@ def _patch_settings(monkeypatch):
     monkeypatch.setattr(anon_session_mod, "AnonymousSession", _FakeSessionModel, raising=False)
     monkeypatch.setattr(api, "_get_admin_enabled", lambda: True)
     monkeypatch.setattr(anon_session_mod, "_get_admin_flag", lambda: True)
+    # 2026-06-11 APF 限制旋钮：peek/upload/admission 改读 resolve_apf_limits()
+    # （admin 热配置优先）。测试里把 resolver 钉死为上面 settings 同款数值，
+    # 隔离 admin_settings.json 文件状态对测试的影响。
+    from anonymous_preview_limits import ApfLimits
+
+    monkeypatch.setattr(
+        api,
+        "resolve_apf_limits",
+        lambda: ApfLimits(
+            anonymous_preview_max_upload_bytes=200 * 1024 * 1024,
+            anonymous_preview_max_seconds=180,
+            anonymous_preview_cap_global_per_day=500,
+            anonymous_preview_cap_per_ip=3,
+            anonymous_preview_cap_per_device=1,
+            anonymous_preview_cap_per_source=1,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -390,9 +414,12 @@ class TestPeekPassThrough:
                     row_mock.fetchone = MagicMock(return_value=[0])
                     return row_mock
                 else:
-                    # Later calls: ORM audit persist → return None (skip audit persist)
+                    # Later calls: ORM audit persist → return fake row with audit
+                    # (2026-06-11 P0 修复后行缺失 = fail-loud 503，None 不再合法)
+                    _orm_row = MagicMock()
+                    _orm_row.audit = {}
                     result_mock = MagicMock()
-                    result_mock.scalar_one_or_none = MagicMock(return_value=None)
+                    result_mock.scalar_one_or_none = MagicMock(return_value=_orm_row)
                     return result_mock
 
             db.execute = _execute
@@ -414,3 +441,188 @@ class TestPeekPassThrough:
 
         app.dependency_overrides.clear()
         monkeypatch.setattr(_asyncio, "to_thread", original_to_thread)
+
+
+# ---------------------------------------------------------------------------
+# P5: peek 与权威计数器 (scope, scope_key) 推导一致性
+#     （2026-06-11 e2e 冒烟同族 bug ⑤ 回归守卫）
+# ---------------------------------------------------------------------------
+
+class _RecordingCounterStore:
+    """try_acquire 全放行并记录 (key, cap)，供两侧推导一致性断言用。"""
+
+    def __init__(self) -> None:
+        self.acquired: list = []
+
+    def try_acquire(self, key: str, cap: int):
+        self.acquired.append((key, cap))
+        return (True, 1)
+
+    def get(self, key: str) -> int:
+        return 0
+
+    def increment(self, key: str) -> int:
+        return 1
+
+    def decrement(self, key: str) -> int:
+        return 0
+
+
+class TestPeekKeyDerivationConsistency:
+    """AD-8 peek 与权威计数器的 (scope, scope_key) 必须逐字节一致。
+
+    历史 bug：peek 曾用 scope='global'/'ip' + 裸值哈希查表，而权威侧
+    （wiring 单实例 store）实际写 scope='anon_preview' + adapter 复合键
+    "global:{day}" / "ip:{hmac('ip:'+ip)}:{day}" → peek 恒查 0 行、
+    cap 预检恒放行（body-before 瞬时磁盘防护失效）。
+    """
+
+    def test_authoritative_keys_match_peek_derivation(self, tmp_path):
+        """跑真实 wiring 路径（run_intake_and_save → adapter._enforce_rate_limits），
+        断言 try_acquire 收到的 global/ip 复合键 == peek_counter_keys 推导。
+
+        改任一侧的 key 形状（wiring hasher 前缀、adapter 键复合方式、
+        peek 推导）都会让本测试 red。
+        """
+        from services.anonymous_preview_backend_adapter import RequestFacts, UploadFacts
+        from services.anonymous_preview_intake import SourceType
+
+        secret = api.settings.anonymous_preview_hash_secret
+        raw_ip = "203.0.113.7"
+        day_key = "2026-06-11"
+
+        stored = tmp_path / "consistency.mp4"
+        stored.write_bytes(b"x" * 64)
+
+        recording = _RecordingCounterStore()
+        factory_scopes: list = []
+
+        def _factory(scope: str):
+            factory_scopes.append(scope)
+            return recording
+
+        request_facts = RequestFacts(
+            raw_session_id="sess_consistency",
+            raw_ip=raw_ip,
+            raw_device_cookie="dev_consistency",
+            source_type=SourceType.LOCAL_UPLOAD,
+            is_free_user=True,
+            day_key=day_key,
+        )
+        upload_facts = UploadFacts(
+            file_name="consistency.mp4",
+            byte_length=64,
+            duration_seconds=0.0,
+            source_hash="ab" * 32,
+            stored_path=stored,
+        )
+
+        # 默认 probe stub（NotImplementedError → FAILED record）足够：
+        # _enforce_rate_limits 在 probe 之前执行，try_acquire 已被记录。
+        # store 层用 MagicMock session；万一 save 失败也不影响断言对象。
+        try:
+            run_intake_and_save(
+                db_session=MagicMock(),
+                request_facts=request_facts,
+                upload_facts=upload_facts,
+                counter_store_factory=_factory,
+                upload_root=tmp_path,
+            )
+        except RecordStoreError:
+            pass
+
+        expected_global, expected_ip = peek_counter_keys(
+            raw_ip, day_key, secret=secret
+        )
+
+        assert factory_scopes == [ANON_PREVIEW_COUNTER_SCOPE], (
+            f"authoritative counter scope diverged: {factory_scopes}"
+        )
+        acquired_keys = [k for k, _cap in recording.acquired]
+        assert len(acquired_keys) >= 2, (
+            f"rate limits were not enforced before probe: {acquired_keys}"
+        )
+        assert acquired_keys[0] == expected_global, (
+            f"global key diverged: adapter={acquired_keys[0]!r} "
+            f"peek={expected_global!r}"
+        )
+        assert acquired_keys[1] == expected_ip, (
+            f"ip key diverged: adapter={acquired_keys[1]!r} peek={expected_ip!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_peek_sql_params_match_authoritative_shape(self, monkeypatch):
+        """peek SELECT 的 (scope, key, day) bind 参数必须等于共享推导输出。
+
+        守的是 api.py 这一侧：endpoint 必须真的把 peek_counter_keys /
+        ANON_PREVIEW_COUNTER_SCOPE 喂进 SQL，而不是自行拼 key。
+        """
+        from fastapi.testclient import TestClient
+        from fastapi import FastAPI
+        from anonymous_preview_upload import UploadRejected
+
+        captured: list = []
+
+        async def _fail_fast_upload(**kwargs):
+            # peek 之后立刻短路：本测试只关心 peek 的两条 SELECT
+            raise UploadRejected(415, "unsupported_media_type", "fail fast after peek")
+
+        monkeypatch.setattr(api, "get_or_create_anonymous_session", _fake_get_or_create)
+        monkeypatch.setattr(api, "handle_anonymous_upload", _fail_fast_upload)
+        monkeypatch.setattr(api, "require_same_origin_state_change", lambda r: None)
+
+        db = MagicMock()
+        db.commit = AsyncMock()
+
+        async def _execute(stmt, params=None):
+            captured.append(dict(params or {}))
+            row_mock = MagicMock()
+            row_mock.fetchone = MagicMock(return_value=[0])
+            return row_mock
+
+        db.execute = _execute
+
+        app = FastAPI()
+        app.include_router(api.router)
+
+        async def _override_db():
+            yield db
+
+        app.dependency_overrides[get_db] = _override_db
+
+        day_before = shanghai_today()
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/gateway/anonymous-preview/upload",
+            content=b"fake video",
+            headers={"content-type": "video/mp4", "origin": "http://localhost:3000"},
+        )
+        day_after = shanghai_today()
+
+        assert resp.status_code == 415  # peek 已放行，止于 fail-fast upload
+        assert len(captured) == 2, f"expected exactly 2 peek SELECTs, got {captured}"
+
+        secret = api.settings.anonymous_preview_hash_secret
+        g_params, ip_params = captured
+        assert g_params["scope"] == ANON_PREVIEW_COUNTER_SCOPE
+        assert ip_params["scope"] == ANON_PREVIEW_COUNTER_SCOPE
+
+        # TestClient 的 socket peer 固定为 "testclient"（非可信代理 →
+        # extract_client_ip 直接返回它）。day 用请求前后两个快照之一，
+        # 容忍跨午夜边界。
+        matched = False
+        for day in {day_before, day_after}:
+            exp_global, exp_ip = peek_counter_keys("testclient", day, secret=secret)
+            if (
+                g_params["key"] == exp_global
+                and g_params["day"] == day
+                and ip_params["key"] == exp_ip
+                and ip_params["day"] == day
+            ):
+                matched = True
+                break
+        assert matched, (
+            f"peek keys diverged from authoritative derivation: {captured}"
+        )
+
+        app.dependency_overrides.clear()

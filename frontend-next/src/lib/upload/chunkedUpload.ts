@@ -1,0 +1,273 @@
+/**
+ * 大文件分片上传客户端 — plan 2026-06-11 §3.9（P2 前端）。
+ *
+ * 选路阈值 / 切片大小 / 2GB 上限全部从 R6 limits 端点动态拉取（不硬编码，
+ * 沿用 APF limits 先例）。上传流程：
+ *
+ *   Web Worker 增量 SHA-256（整文件 + 每片，一遍读盘）
+ *     → POST init（命中四元组续传 → 按位图补传）
+ *     → 并发 3 片 PUT，片级失败指数退避重试 3 次
+ *     → POST complete → ready（或 202 轮询 status 至 ready，"正在合并校验…"）
+ *     → 返回 opaque upload ref（``chunked:{upload_id}``，不是文件路径）
+ *
+ * 失败不自动回退单请求路径——大文件回 CF 单请求必 413（plan §3.9）。
+ */
+
+export interface ChunkedUploadLimits {
+  enabled: boolean
+  threshold_mb: number
+  max_file_mb: number
+  chunk_mb: number
+}
+
+export type ChunkedUploadPhase = 'hashing' | 'uploading' | 'merging'
+
+export interface ChunkedUploadProgress {
+  phase: ChunkedUploadPhase
+  /** 0-100；merging 阶段无百分比语义，恒为 100（Q1 落定：只显示文案） */
+  percent: number
+}
+
+export interface ChunkedUploadResult {
+  /** opaque upload ref：job create 的 source.value 原样传它 */
+  uploadRef: string
+  fileName: string
+}
+
+const PART_CONCURRENCY = 3
+const PART_MAX_RETRIES = 3
+const STATUS_POLL_INTERVAL_MS = 2000
+/** complete 轮询保险丝：2GB 合并实测数十秒，10 分钟仍未 ready 视为异常 */
+const MERGE_POLL_TIMEOUT_MS = 10 * 60 * 1000
+
+/** limits 拉取失败 → null（调用方视为通道不可用，回单请求路径） */
+export async function getChunkedUploadLimits(): Promise<ChunkedUploadLimits | null> {
+  try {
+    const res = await fetch('/gateway/uploads/chunked/limits', {
+      credentials: 'include',
+    })
+    if (!res.ok) return null
+    const body = (await res.json()) as ChunkedUploadLimits
+    if (typeof body.enabled !== 'boolean' || typeof body.threshold_mb !== 'number') {
+      return null
+    }
+    return body
+  } catch {
+    return null
+  }
+}
+
+interface HashResult {
+  fileHash: string
+  chunkHashes: string[]
+}
+
+function hashFileInWorker(
+  file: File,
+  chunkSize: number,
+  onProgress: (bytesHashed: number) => void,
+): Promise<HashResult> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./sha256.worker.ts', import.meta.url))
+    worker.onmessage = (event: MessageEvent) => {
+      const msg = event.data as
+        | { type: 'progress'; bytesHashed: number }
+        | { type: 'done'; fileHash: string; chunkHashes: string[] }
+        | { type: 'error'; message: string }
+      if (msg.type === 'progress') {
+        onProgress(msg.bytesHashed)
+      } else if (msg.type === 'done') {
+        worker.terminate()
+        resolve({ fileHash: msg.fileHash, chunkHashes: msg.chunkHashes })
+      } else {
+        worker.terminate()
+        reject(new Error(msg.message))
+      }
+    }
+    worker.onerror = (event) => {
+      worker.terminate()
+      reject(new Error(event.message || '哈希 Worker 启动失败'))
+    }
+    worker.postMessage({ file, chunkSize })
+  })
+}
+
+async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json()
+    if (typeof body?.message === 'string' && body.message) return body.message
+    if (typeof body?.error === 'string' && body.error) return body.error
+  } catch {
+    // ignore — 非 JSON 错误体
+  }
+  return fallback
+}
+
+interface InitResponse {
+  upload_id: string
+  chunk_size: number
+  total_parts: number
+  received_parts: number[]
+  resumed: boolean
+}
+
+async function initUpload(
+  file: File,
+  fileHash: string,
+  chunkSize: number,
+): Promise<InitResponse> {
+  const res = await fetch('/gateway/uploads/chunked/init', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      size: file.size,
+      sha256: fileHash,
+      chunk_size: chunkSize,
+      file_name: file.name,
+    }),
+  })
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, `上传初始化失败（${res.status}）`))
+  }
+  return (await res.json()) as InitResponse
+}
+
+async function uploadPartWithRetry(
+  uploadId: string,
+  file: File,
+  chunkSize: number,
+  partIndex: number,
+  chunkHash: string,
+): Promise<void> {
+  const start = partIndex * chunkSize
+  const piece = file.slice(start, Math.min(start + chunkSize, file.size))
+  let lastError: Error | null = null
+  for (let attempt = 0; attempt <= PART_MAX_RETRIES; attempt += 1) {
+    if (attempt > 0) {
+      // 指数退避：1s / 2s / 4s
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)))
+    }
+    try {
+      const res = await fetch(
+        `/gateway/uploads/chunked/${uploadId}/part/${partIndex}`,
+        {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'x-chunk-sha256': chunkHash },
+          body: piece,
+        },
+      )
+      if (res.ok) return
+      // 429 / 5xx 可重试；4xx 协议错误（404/409/413/422）重试无意义，立即失败
+      if (res.status === 429 || res.status >= 500) {
+        lastError = new Error(await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`))
+        continue
+      }
+      throw new Error(await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`))
+    } catch (err) {
+      if (err instanceof TypeError) {
+        // 网络层失败（断网 / CF 瞬断）→ 重试
+        lastError = new Error(`分片 ${partIndex} 网络错误，已重试`)
+        continue
+      }
+      throw err
+    }
+  }
+  throw lastError ?? new Error(`分片 ${partIndex} 上传失败`)
+}
+
+async function completeAndWaitReady(
+  uploadId: string,
+  onProgress: (p: ChunkedUploadProgress) => void,
+): Promise<void> {
+  const res = await fetch(`/gateway/uploads/chunked/${uploadId}/complete`, {
+    method: 'POST',
+    credentials: 'include',
+  })
+  if (res.status === 200) return
+  if (res.status !== 202) {
+    throw new Error(await readErrorMessage(res, `合并校验失败（${res.status}）`))
+  }
+  // 202 in_progress：轮询 R4 至 ready（completing 期间 UI 显示"正在合并校验…"）
+  const deadline = Date.now() + MERGE_POLL_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, STATUS_POLL_INTERVAL_MS))
+    onProgress({ phase: 'merging', percent: 100 })
+    const statusRes = await fetch(`/gateway/uploads/chunked/${uploadId}/status`, {
+      credentials: 'include',
+    })
+    if (!statusRes.ok) {
+      throw new Error(await readErrorMessage(statusRes, '查询合并状态失败'))
+    }
+    const body = await statusRes.json()
+    if (body.state === 'ready') return
+    if (body.state !== 'completing') {
+      throw new Error(`合并校验失败（${body.failure_reason ?? body.state}）`)
+    }
+  }
+  throw new Error('合并校验超时，请稍后在任务页重试')
+}
+
+/**
+ * 分片上传入口。返回 opaque upload ref（``chunked:{upload_id}``）。
+ * 失败抛 Error（文案可直接展示）；**不**自动回退单请求路径。
+ */
+export async function uploadFileInChunks(
+  file: File,
+  limits: ChunkedUploadLimits,
+  onProgress: (p: ChunkedUploadProgress) => void,
+): Promise<ChunkedUploadResult> {
+  const chunkSize = limits.chunk_mb * 1024 * 1024
+  if (file.size > limits.max_file_mb * 1024 * 1024) {
+    throw new Error(`文件超过 ${limits.max_file_mb}MB 上限，请压缩后重试`)
+  }
+
+  // 1. 哈希（Web Worker 增量，2GB 约 10-20s，单独显示进度）
+  onProgress({ phase: 'hashing', percent: 0 })
+  const { fileHash, chunkHashes } = await hashFileInWorker(file, chunkSize, (bytes) => {
+    onProgress({ phase: 'hashing', percent: Math.floor((bytes / file.size) * 100) })
+  })
+
+  // 2. init（命中续传 → received_parts 位图补传）
+  const init = await initUpload(file, fileHash, chunkSize)
+  const received = new Set(init.received_parts)
+  const pending = Array.from({ length: init.total_parts }, (_, n) => n).filter(
+    (n) => !received.has(n),
+  )
+
+  // 3. 并发 3 片上传
+  let uploadedBytes = init.received_parts.reduce(
+    (acc, n) => acc + Math.min(chunkSize, file.size - n * chunkSize),
+    0,
+  )
+  onProgress({
+    phase: 'uploading',
+    percent: Math.floor((uploadedBytes / file.size) * 100),
+  })
+  let cursor = 0
+  const runWorker = async () => {
+    while (cursor < pending.length) {
+      const myIndex = cursor
+      cursor += 1
+      const partIndex = pending[myIndex]
+      await uploadPartWithRetry(
+        init.upload_id, file, chunkSize, partIndex, chunkHashes[partIndex],
+      )
+      uploadedBytes += Math.min(chunkSize, file.size - partIndex * chunkSize)
+      onProgress({
+        phase: 'uploading',
+        percent: Math.floor((uploadedBytes / file.size) * 100),
+      })
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(PART_CONCURRENCY, pending.length) }, runWorker),
+  )
+
+  // 4. complete（202 → 轮询至 ready）
+  onProgress({ phase: 'merging', percent: 100 })
+  await completeAndWaitReady(init.upload_id, onProgress)
+
+  return { uploadRef: `chunked:${init.upload_id}`, fileName: file.name }
+}

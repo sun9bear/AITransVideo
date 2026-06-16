@@ -216,8 +216,8 @@ class TestValidateCreatePayload:
         validate = self._get_validator()
         payload = {
             "job_type": "localize_video",
-            "source_type": "local_video",
-            "source_ref": "/tmp/teaser.mp4",
+            # Job API 真实契约：嵌套 source 对象（2026-06-11 冒烟修复）
+            "source": {"type": "local_video", "value": "/tmp/teaser.mp4"},
             "output_target": "editor",
             "service_mode": "free",
             "requires_review": False,

@@ -4,39 +4,34 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useConfirmDialog } from '@/components/ui/confirm-dialog'
 import { getErrorMessage } from '@/lib/api/errors'
-import { formatTimecode } from '@/lib/format'
 import { getJob } from '@/lib/api/jobs'
 import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import {
   approveVoiceSelection,
-  cloneVoiceForSelection,
   deleteUserVoice,
-  getSpeakerAudioSegments,
   getUserVoices,
   getVoiceCandidates,
-  matchVoiceForSelection,
   previewVoice,
-  reassignSpeakerAudioSegment,
-  type SpeakerAudioSegment,
   type SpeakerAudioReassignResult,
   type UserVoiceEntry,
   type VoiceCandidate,
   type VoiceCandidatesResponse,
   type VoiceMatchScope,
-  type VoiceReuseMatchResponse,
   type VoiceSelectionSpeakerApproval,
   getVoiceSelectionPricing,
   type VoiceSelectionPricingResponse,
-  updateSpeakerAudioDubbingMode,
 } from '@/lib/api/voiceSelection'
 import { apiClient } from '@/lib/api/client'
 // Phase 4.2 E.1 — CosyVoice clone wiring (file-upload only; source_segments
 // UI deferred to E.2). The button onClick below splits by provider:
-// MiniMax keeps using the legacy VoiceCloneModal in this file (function
-// body untouched, locked by G_MX.2 / G6.1.5 guards); CosyVoice routes to
-// the dedicated CosyVoiceCloneModal from voice-clone/ which talks to the
+// MiniMax keeps using the legacy VoiceCloneModal (extracted verbatim to
+// ./VoiceCloneModal.tsx 2026-06-11; function body untouched, locked by
+// G_MX.2 / G6.1.5 guards); CosyVoice routes to the dedicated
+// CosyVoiceCloneModal from voice-clone/ which talks to the
 // /api/voice/cosyvoice/clone endpoint via cosyvoiceClone.ts.
 import { CosyVoiceCloneModal } from '@/components/voice-clone/CosyVoiceCloneModal'
+import { SpeakerAudioAuditModal } from './SpeakerAudioAuditModal'
+import { VoiceCloneModal } from './VoiceCloneModal'
 import {
   getCosyvoiceCloneGate,
   type CosyvoiceCloneGateResponse,
@@ -144,18 +139,6 @@ function formatVoiceOptionLabel(v: AvailableVoice): string {
   if (cps < 3.5) tier = '慢'
   else if (cps >= 4.5) tier = '快'
   return `${base} · ${cps.toFixed(1)}字/秒(${tier})`
-}
-
-function formatReuseConfidence(confidence: VoiceReuseMatchResponse['confidence']): string {
-  if (confidence === 'strong') return '同一视频 / 同一说话人'
-  if (confidence === 'medium') return '同一视频 / 说话人名称相同'
-  if (confidence === 'weak') return '同一视频 / 说话人编号可能变化'
-  return '可复用候选'
-}
-
-function formatSeconds(value: number | null): string | null {
-  if (value == null || !Number.isFinite(value)) return null
-  return `${value.toFixed(1)}s`
 }
 
 /** Phase 2: short badge for personal-voice candidate match scope.
@@ -1182,8 +1165,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         </div>
       </section>
 
-      {/* Clone Modal — MiniMax legacy path (function body in this file at
-          line ≈1334, locked unchanged by G6.1.5 / G_MX.2 guards). */}
+      {/* Clone Modal — MiniMax legacy path (./VoiceCloneModal.tsx, locked
+          unchanged by G6.1.5 / G_MX.2 guards). */}
       {cloneModalSpeaker && selectedCloneSpeaker ? (
         <VoiceCloneModal
           cloneCostCredits={cloneCostCredits}
@@ -1235,435 +1218,5 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
 
       {confirmDialog}
     </>
-  )
-}
-
-/* ---------- SpeakerAudioAuditModal ---------- */
-
-// Exported so the editing-state voice Tab (VoiceModifyTab) can reuse the
-// audio-listening UX. Editing 模式 reassign + keep-original 后端端点
-// 要求 voice_selection_review 未 approved → editing 状态会 409。
-// readOnly=true 隐藏这两个控件,只保留播放 + 段信息显示。
-export interface SpeakerAudioAuditModalSpeakerRef {
-  speakerId: string
-  speakerName: string
-}
-
-export interface SpeakerAudioAuditModalProps {
-  jobId: string
-  speaker: SpeakerAudioAuditModalSpeakerRef
-  speakerOptions: Array<Pick<SpeakerPayload, 'speakerId' | 'speakerName'>>
-  onClose: () => void
-  onReassigned: (result: SpeakerAudioReassignResult) => void
-  /** 2026-05-09: editing 模式只读 — 隐藏 reassign / keep-original 控件,
-   * 只保留播放 + 段信息显示。reassign/keep-original 改动用 翻译修改 Tab。 */
-  readOnly?: boolean
-}
-
-export function SpeakerAudioAuditModal({
-  jobId,
-  speaker,
-  speakerOptions,
-  onClose,
-  onReassigned,
-  readOnly = false,
-}: SpeakerAudioAuditModalProps) {
-  const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [reassigningSegmentId, setReassigningSegmentId] = useState<number | null>(null)
-  const [updatingDubbingModeSegmentId, setUpdatingDubbingModeSegmentId] = useState<number | null>(null)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
-  const [playingSegmentId, setPlayingSegmentId] = useState<number | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    async function load() {
-      try {
-        setIsLoading(true)
-        setError(null)
-        const result = await getSpeakerAudioSegments(jobId, speaker.speakerId)
-        if (!cancelled) {
-          setSegments([...result.segments].sort((a, b) => a.startMs - b.startMs))
-        }
-      } catch (err) {
-        if (!cancelled) setError(getErrorMessage(err))
-      } finally {
-        if (!cancelled) setIsLoading(false)
-      }
-    }
-    load()
-    return () => { cancelled = true }
-  }, [jobId, speaker.speakerId])
-
-  const playSegment = useCallback((seg: SpeakerAudioSegment) => {
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
-    if (playingSegmentId === seg.segmentId) { setPlayingSegmentId(null); return }
-    const audio = new Audio(seg.audioUrl)
-    audio.onended = () => setPlayingSegmentId(null)
-    audio.onerror = () => setPlayingSegmentId(null)
-    audio.play().catch(() => setPlayingSegmentId(null))
-    audioRef.current = audio
-    setPlayingSegmentId(seg.segmentId)
-  }, [playingSegmentId])
-
-  const handleReassign = useCallback(async (seg: SpeakerAudioSegment, toSpeakerId: string) => {
-    if (!toSpeakerId || toSpeakerId === speaker.speakerId || reassigningSegmentId) return
-    setReassigningSegmentId(seg.segmentId)
-    setError(null)
-    try {
-      const result = await reassignSpeakerAudioSegment({
-        jobId,
-        segmentId: seg.segmentId,
-        fromSpeakerId: speaker.speakerId,
-        toSpeakerId,
-      })
-      onReassigned(result)
-      setSegments((prev) => prev.filter((item) => item.segmentId !== seg.segmentId))
-      if (audioRef.current && playingSegmentId === seg.segmentId) {
-        audioRef.current.pause()
-        audioRef.current = null
-        setPlayingSegmentId(null)
-      }
-    } catch (err) {
-      setError(getErrorMessage(err))
-    } finally {
-      setReassigningSegmentId(null)
-    }
-  }, [jobId, onReassigned, playingSegmentId, reassigningSegmentId, speaker.speakerId])
-
-  const handleDubbingModeChange = useCallback(async (seg: SpeakerAudioSegment, keepOriginal: boolean) => {
-    if (updatingDubbingModeSegmentId) return
-    const nextMode = keepOriginal ? 'keep_original' : 'dub'
-    if (seg.dubbingMode === nextMode) return
-    setUpdatingDubbingModeSegmentId(seg.segmentId)
-    setError(null)
-    setSegments((prev) => prev.map((item) => (
-      item.segmentId === seg.segmentId ? { ...item, dubbingMode: nextMode } : item
-    )))
-    try {
-      const result = await updateSpeakerAudioDubbingMode({
-        jobId,
-        segmentId: seg.segmentId,
-        speakerId: speaker.speakerId,
-        dubbingMode: nextMode,
-      })
-      setSegments((prev) => prev.map((item) => (
-        item.segmentId === result.segmentId
-          ? { ...item, dubbingMode: result.dubbingMode }
-          : item
-      )))
-    } catch (err) {
-      setSegments((prev) => prev.map((item) => (
-        item.segmentId === seg.segmentId ? { ...item, dubbingMode: seg.dubbingMode } : item
-      )))
-      setError(getErrorMessage(err))
-    } finally {
-      setUpdatingDubbingModeSegmentId(null)
-    }
-  }, [jobId, speaker.speakerId, updatingDubbingModeSegmentId])
-
-  useEffect(() => {
-    return () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null } }
-  }, [])
-
-  const totalDuration = useMemo(() => {
-    return segments.reduce((sum, seg) => sum + seg.durationS, 0)
-  }, [segments])
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl bg-card border border-border shadow-xl">
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <h3 className="text-base font-semibold text-foreground">核对原音 — {speaker.speakerName}</h3>
-          <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
-          </button>
-        </div>
-        <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
-          <span className="text-xs text-slate-500">共 <span className="font-medium text-foreground">{segments.length}</span> 段</span>
-          <span className="text-xs text-slate-500">总时长 <span className="font-medium text-foreground">{totalDuration.toFixed(1)}s</span></span>
-          <span className="text-xs text-slate-400">按时间排序，修改后会立即保存。</span>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-1">
-          {isLoading ? (
-            <div className="text-center py-8 text-sm text-slate-400">加载原音片段...</div>
-          ) : segments.length === 0 ? (
-            <div className="text-center py-8 text-sm text-slate-400">当前说话人没有待核对片段</div>
-          ) : segments.map((seg) => {
-            const isPlaying = playingSegmentId === seg.segmentId
-            const isReassigning = reassigningSegmentId === seg.segmentId
-            const isUpdatingMode = updatingDubbingModeSegmentId === seg.segmentId
-            return (
-              <div className="flex items-center gap-3 rounded-lg border border-transparent px-3 py-2 transition hover:bg-slate-50 dark:hover:bg-slate-800/40" key={seg.segmentId}>
-                <button className="h-7 w-7 rounded-full border border-border flex items-center justify-center shrink-0 hover:bg-muted transition" onClick={() => playSegment(seg)} type="button">
-                  {isPlaying ? <svg className="h-3 w-3 text-[color:var(--cinnabar)]" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
-                </button>
-                <span className="w-12 shrink-0 text-xs tabular-nums text-slate-400">{formatTimecode(seg.startMs)}</span>
-                <span className="min-w-0 flex-1 truncate text-xs text-foreground">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
-                <span className="w-12 shrink-0 text-right text-xs text-slate-400">{seg.durationS.toFixed(1)}s</span>
-                {readOnly ? null : (
-                  <>
-                    <label className="flex h-8 w-[102px] shrink-0 items-center justify-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 text-xs text-slate-600 dark:text-slate-300">
-                      <input
-                        checked={seg.dubbingMode === 'keep_original'}
-                        className="h-3.5 w-3.5 accent-[color:var(--cinnabar)]"
-                        disabled={isUpdatingMode || updatingDubbingModeSegmentId !== null}
-                        onChange={(event) => { void handleDubbingModeChange(seg, event.target.checked) }}
-                        type="checkbox"
-                      />
-                      保留原音
-                    </label>
-                    <select
-                      className="h-8 w-[150px] shrink-0 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-xs text-foreground disabled:opacity-50"
-                      disabled={isReassigning || reassigningSegmentId !== null}
-                      onChange={(event) => { void handleReassign(seg, event.target.value) }}
-                      value={speaker.speakerId}
-                    >
-                      {speakerOptions.map((option) => (
-                        <option key={option.speakerId} value={option.speakerId}>
-                          {option.speakerName || option.speakerId}
-                        </option>
-                      ))}
-                    </select>
-                  </>
-                )}
-              </div>
-            )
-          })}
-        </div>
-        <div className="flex items-center justify-between p-4 border-t border-border">
-          <span className="text-xs text-slate-400">
-            {readOnly
-              ? '试听原音以核对说话人归属。需修改归属或保留原音请到「翻译修改」Tab 在段落上操作。'
-              : '可修改说话人归属，也可让片段跳过翻译配音并保留原音。'}
-          </span>
-          <div className="flex items-center gap-2">
-            {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[280px] truncate">{error}</span> : null}
-            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" onClick={onClose} type="button">关闭</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* ---------- VoiceCloneModal ---------- */
-
-// Exported so the editing-state voice Tab (VoiceModifyTab) can reuse
-// the exact same clone UX — selecting source segments, paid-API
-// trigger, credit cost display. Editing consumers pass a minimal
-// speaker-shaped object (speakerId / speakerName) plus the cost.
-export interface VoiceCloneModalSpeakerRef {
-  speakerId: string
-  speakerName: string
-}
-
-interface VoiceCloneModalProps {
-  jobId: string
-  speaker: VoiceCloneModalSpeakerRef
-  cloneCostCredits: number
-  selectedProvider?: string
-  onClose: () => void
-  onComplete: (speakerId: string, voiceId: string, options?: { reused?: boolean }) => void
-}
-
-export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProvider, onClose, onComplete }: VoiceCloneModalProps) {
-  const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
-  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [isLoading, setIsLoading] = useState(true)
-  const [isCheckingReuse, setIsCheckingReuse] = useState(true)
-  const [reuseMatch, setReuseMatch] = useState<VoiceReuseMatchResponse | null>(null)
-  const [isCloning, setIsCloning] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
-  const [playingSegmentId, setPlayingSegmentId] = useState<number | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    async function load() {
-      try {
-        setIsLoading(true)
-        const result = await getSpeakerAudioSegments(jobId, speaker.speakerId)
-        if (!cancelled) setSegments(result.segments)
-      } catch (err) {
-        if (!cancelled) setError(getErrorMessage(err))
-      } finally {
-        if (!cancelled) setIsLoading(false)
-      }
-    }
-    load()
-    return () => { cancelled = true }
-  }, [jobId, speaker.speakerId])
-
-  useEffect(() => {
-    let cancelled = false
-    async function loadReuseMatch() {
-      try {
-        setIsCheckingReuse(true)
-        const result = await matchVoiceForSelection({
-          jobId,
-          speakerId: speaker.speakerId,
-          speakerName: speaker.speakerName,
-          selectedProvider,
-        })
-        if (!cancelled) setReuseMatch(result)
-      } catch {
-        if (!cancelled) setReuseMatch(null)
-      } finally {
-        if (!cancelled) setIsCheckingReuse(false)
-      }
-    }
-    loadReuseMatch()
-    return () => { cancelled = true }
-  }, [jobId, speaker.speakerId, speaker.speakerName, selectedProvider])
-
-  const selectedDuration = useMemo(() => {
-    return segments.filter((s) => selectedIds.has(s.segmentId)).reduce((sum, s) => sum + s.durationS, 0)
-  }, [segments, selectedIds])
-
-  const meetsMinDuration = selectedDuration >= 10
-  const exceedsMaxDuration = selectedDuration >= 300
-
-  const toggleSegment = useCallback((segmentId: number) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(segmentId)) next.delete(segmentId)
-      else next.add(segmentId)
-      return next
-    })
-  }, [])
-
-  const autoSelect = useCallback(() => {
-    const sorted = [...segments].sort((a, b) => b.durationS - a.durationS)
-    const selected = new Set<number>()
-    let total = 0
-    for (const seg of sorted) {
-      if (total + seg.durationS >= 300) break
-      selected.add(seg.segmentId)
-      total += seg.durationS
-    }
-    setSelectedIds(selected)
-  }, [segments])
-
-  const playSegment = useCallback((seg: SpeakerAudioSegment) => {
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
-    if (playingSegmentId === seg.segmentId) { setPlayingSegmentId(null); return }
-    const audio = new Audio(seg.audioUrl)
-    audio.onended = () => setPlayingSegmentId(null)
-    audio.onerror = () => setPlayingSegmentId(null)
-    audio.play().catch(() => setPlayingSegmentId(null))
-    audioRef.current = audio
-    setPlayingSegmentId(seg.segmentId)
-  }, [playingSegmentId])
-
-  const handleClone = useCallback(async () => {
-    if (isCloning || !meetsMinDuration || exceedsMaxDuration) return
-    setIsCloning(true)
-    setError(null)
-    try {
-      const result = await cloneVoiceForSelection({ jobId, speakerId: speaker.speakerId, segmentIds: Array.from(selectedIds) })
-      onComplete(speaker.speakerId, result.voiceId)
-    } catch (err) {
-      setError(getErrorMessage(err))
-    } finally {
-      setIsCloning(false)
-    }
-  }, [isCloning, meetsMinDuration, exceedsMaxDuration, jobId, speaker.speakerId, selectedIds, onComplete])
-
-  const handleReuse = useCallback(() => {
-    if (!reuseMatch?.voice?.voiceId) return
-    onComplete(speaker.speakerId, reuseMatch.voice.voiceId, { reused: true })
-  }, [onComplete, reuseMatch, speaker.speakerId])
-
-  useEffect(() => {
-    return () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null } }
-  }, [])
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl bg-card border border-border shadow-xl">
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <h3 className="text-base font-semibold text-foreground">克隆音色 — {speaker.speakerName}</h3>
-          <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
-          </button>
-        </div>
-        {isCheckingReuse || (reuseMatch?.matched && reuseMatch.voice) ? (
-          <div className="border-b border-border px-4 py-3">
-            {isCheckingReuse ? (
-              <p className="text-xs text-slate-500">正在检查个人音色库...</p>
-            ) : reuseMatch?.matched && reuseMatch.voice ? (
-              <div className="rounded-lg border border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/10 p-3">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1">
-                    <p className="text-sm font-medium text-foreground">发现可复用音色：{reuseMatch.voice.label || reuseMatch.voice.voiceId}</p>
-                    <p className="text-xs text-slate-500">
-                      {formatReuseConfidence(reuseMatch.confidence)}
-                      {reuseMatch.voice.sourceVideoTitle ? ` · ${reuseMatch.voice.sourceVideoTitle}` : ''}
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      复用不会消耗克隆点数
-                      {formatSeconds(reuseMatch.voice.cloneSampleSeconds) ? ` · 原样本 ${formatSeconds(reuseMatch.voice.cloneSampleSeconds)}` : ''}
-                      {reuseMatch.voice.provider ? ` · ${reuseMatch.voice.provider}` : ''}
-                    </p>
-                  </div>
-                  <button
-                    className="h-8 rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition hover:bg-primary/85"
-                    onClick={handleReuse}
-                    type="button"
-                  >
-                    复用此音色
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        <div className="flex items-center gap-3 p-4 border-b border-slate-100 dark:border-slate-800">
-          <button className="h-7 rounded px-3 text-xs font-medium transition border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20" onClick={autoSelect} type="button">自动选择</button>
-          <span className="text-xs text-slate-400">从最长片段开始自动勾选，总时长 &lt; 300s</span>
-        </div>
-        <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
-          <span className="text-xs text-slate-500">已选 <span className="font-medium text-foreground">{selectedIds.size}</span> 段</span>
-          <span className="text-xs text-slate-500">总时长 <span className={`font-medium ${exceedsMaxDuration ? 'text-[color:var(--cinnabar)]' : meetsMinDuration ? 'text-[color:var(--bamboo)]' : 'text-[color:var(--ochre)]'}`}>{selectedDuration.toFixed(1)}s</span></span>
-          {!meetsMinDuration ? <span className="text-xs text-[color:var(--ochre)]">至少需要 10s</span> : exceedsMaxDuration ? <span className="text-xs text-[color:var(--cinnabar)]">不能超过 300s</span> : <span className="text-xs text-[color:var(--bamboo)]">满足要求</span>}
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-1">
-          {isLoading ? (
-            <div className="text-center py-8 text-sm text-slate-400">加载音频片段...</div>
-          ) : segments.length === 0 ? (
-            <div className="text-center py-8 text-sm text-slate-400">没有可用的音频片段</div>
-          ) : segments.map((seg) => {
-            const isSelected = selectedIds.has(seg.segmentId)
-            const isPlaying = playingSegmentId === seg.segmentId
-            return (
-              <div className={`flex items-center gap-3 rounded-lg px-3 py-2 transition cursor-pointer ${isSelected ? 'border bg-[color:var(--cinnabar)]/10 border-[color:var(--cinnabar)]/40' : 'border border-transparent hover:bg-muted/40'}`} key={seg.segmentId} onClick={() => toggleSegment(seg.segmentId)}>
-                <div className={`h-4 w-4 rounded border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-teal-500 bg-teal-500' : 'border-slate-300 dark:border-slate-600'}`}>
-                  {isSelected ? <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} /></svg> : null}
-                </div>
-                <button className="h-7 w-7 rounded-full border border-border flex items-center justify-center shrink-0 hover:bg-muted transition" onClick={(e) => { e.stopPropagation(); playSegment(seg) }} type="button">
-                  {isPlaying ? <svg className="h-3 w-3 text-[color:var(--cinnabar)]" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
-                </button>
-                <span className="flex-1 text-xs text-foreground truncate">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
-                <span className="text-xs text-slate-400 shrink-0">{seg.durationS.toFixed(1)}s</span>
-              </div>
-            )
-          })}
-        </div>
-        <div className="flex items-center justify-between p-4 border-t border-border">
-          <span className="text-xs text-slate-400">
-            {reuseMatch?.matched
-              ? cloneCostCredits > 0 ? `重新克隆会消耗 ${cloneCostCredits} 点` : '重新克隆会消耗克隆点数'
-              : cloneCostCredits > 0 ? `克隆费用：${cloneCostCredits} 点` : '扣点信息暂不可用'}
-          </span>
-          <div className="flex items-center gap-2">
-            {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[200px] truncate">{error}</span> : null}
-            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" disabled={isCloning} onClick={onClose} type="button">取消</button>
-            <button className="h-8 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? '克隆中...' : reuseMatch?.matched ? '重新克隆' : '开始克隆'}</button>
-          </div>
-        </div>
-      </div>
-    </div>
   )
 }

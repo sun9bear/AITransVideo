@@ -40,6 +40,42 @@ export interface StatusResponse {
   mode: PreviewMode | null
 }
 
+// 当前生效的匿名预览限制（gateway GET /gateway/anonymous-preview/limits，
+// 管理员后台热配置）。拉取失败时面板用 DEFAULT_PREVIEW_LIMITS 兜底。
+export interface PreviewLimits {
+  max_upload_mb: number
+  preview_seconds: number
+}
+
+// 兜底值与后端出厂默认严格一致（gateway/admin_settings.py APF 限制旋钮段）。
+export const DEFAULT_PREVIEW_LIMITS: PreviewLimits = {
+  max_upload_mb: 200,
+  preview_seconds: 180,
+}
+
+/** Fetch the currently effective anonymous-preview limits（只读，无需会话）. */
+export async function getPreviewLimits(): Promise<PreviewLimits> {
+  const resp = await fetch('/gateway/anonymous-preview/limits', { credentials: 'include' })
+  if (!resp.ok) {
+    throw new Error(`限制查询失败（HTTP ${resp.status}）`)
+  }
+  const body = (await resp.json()) as Partial<PreviewLimits>
+  const maxUploadMb = Number(body.max_upload_mb)
+  const previewSeconds = Number(body.preview_seconds)
+  if (!Number.isFinite(maxUploadMb) || maxUploadMb <= 0 || !Number.isFinite(previewSeconds) || previewSeconds <= 0) {
+    throw new Error('限制响应格式无效')
+  }
+  return { max_upload_mb: maxUploadMb, preview_seconds: previewSeconds }
+}
+
+/** 把预览秒数格式化成提示文案用的时长（180 → "3 分钟"，90 → "90 秒"）. */
+export function formatPreviewDuration(seconds: number): string {
+  if (seconds > 0 && seconds % 60 === 0) {
+    return `${seconds / 60} 分钟`
+  }
+  return `${seconds} 秒`
+}
+
 /** Upload a raw video file. Returns the upload response with admission info. */
 export async function uploadPreviewVideo(
   file: File,
@@ -155,7 +191,8 @@ export function mapStatusReason(reason: string | null): string {
   const MAP: Record<string, string> = {
     rate_limited: '今日预览次数已用完，请明天再来',
     content_blocked: '内容未通过合规检查，无法预览',
-    file_too_large: '文件超过 200MB 限制',
+    // 上限是 admin 热配置（limits 端点），此处不硬编码具体数值
+    file_too_large: '文件超过大小限制，请压缩后重试',
     unsupported_format: '不支持的视频格式，请上传 mp4、mov、m4v 或 webm',
     quota_exceeded: '系统预览配额已满，请稍后再试',
     service_unavailable: '预览服务暂不可用，请稍后再试',

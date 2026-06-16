@@ -117,6 +117,30 @@ interface AdminSettings {
   // - ``anonymous_preview_max_in_flight``：全局同时处理的匿名预览上限。
   anonymous_free_preview_enabled: boolean
   anonymous_preview_max_in_flight: number
+  // --- APF 限制旋钮（2026-06-11，原 env-only 限制搬进 admin 热配置）---
+  // 6 项数字限制，改完即时生效（gateway 每请求重读）。边界与后端
+  // _APF_LIMIT_BOUNDS validator 一致。注意 max_upload_mb 存 MB（后端
+  // resolver 转字节）。
+  anonymous_preview_max_upload_mb: number
+  anonymous_preview_max_seconds: number
+  anonymous_preview_cap_global_per_day: number
+  anonymous_preview_cap_per_ip: number
+  anonymous_preview_cap_per_device: number
+  anonymous_preview_cap_per_source: number
+  // --- 分片上传（plan 2026-06-11 §3.7，chunked_upload_* 独立命名空间）---
+  // 注册用户大文件（>95MB）经 CF Tunnel 的应用层分片上传。full-body POST
+  // 语义同上——10 个字段全部进 state，否则保存其它设置会把后端这些字段
+  // 静默重置为 Pydantic 默认。守卫：tests/test_chunked_upload_admin_sync_guard.py。
+  chunked_upload_enabled: boolean
+  chunked_upload_max_file_mb: number
+  chunked_upload_chunk_mb: number
+  chunked_upload_per_user_active: number
+  chunked_upload_per_user_inflight_gb: number
+  chunked_upload_global_inflight_gb: number
+  chunked_upload_daily_per_user_gb: number
+  chunked_upload_disk_floor_gb: number
+  chunked_upload_ttl_hours: number
+  chunked_upload_ready_ttl_hours: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -190,7 +214,176 @@ const DEFAULT_SETTINGS: AdminSettings = {
   // CodeX P1 修复：曾误写 10，把匿名并发门从计划值放大 5×。
   anonymous_free_preview_enabled: false,
   anonymous_preview_max_in_flight: 2,
+  // --- APF 限制旋钮默认值（2026-06-11）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致。
+  anonymous_preview_max_upload_mb: 200,
+  anonymous_preview_max_seconds: 180,
+  anonymous_preview_cap_global_per_day: 500,
+  anonymous_preview_cap_per_ip: 3,
+  anonymous_preview_cap_per_device: 1,
+  anonymous_preview_cap_per_source: 1,
+  // --- 分片上传默认值（plan 2026-06-11 §3.7）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致；
+  // enabled 默认 false（部署后休眠，admin 灰度验证再打开）。
+  chunked_upload_enabled: false,
+  chunked_upload_max_file_mb: 2048,
+  chunked_upload_chunk_mb: 64,
+  chunked_upload_per_user_active: 2,
+  chunked_upload_per_user_inflight_gb: 4,
+  chunked_upload_global_inflight_gb: 20,
+  chunked_upload_daily_per_user_gb: 8,
+  chunked_upload_disk_floor_gb: 20,
+  chunked_upload_ttl_hours: 24,
+  chunked_upload_ready_ttl_hours: 6,
 }
+
+// 分片上传数字旋钮元数据：边界与 gateway _CHUNKED_UPLOAD_BOUNDS 一致。
+const CHUNKED_UPLOAD_FIELDS: Array<{
+  key: 'chunked_upload_max_file_mb' | 'chunked_upload_chunk_mb'
+    | 'chunked_upload_per_user_active' | 'chunked_upload_per_user_inflight_gb'
+    | 'chunked_upload_global_inflight_gb' | 'chunked_upload_daily_per_user_gb'
+    | 'chunked_upload_disk_floor_gb' | 'chunked_upload_ttl_hours'
+    | 'chunked_upload_ready_ttl_hours'
+  label: string
+  unit: string
+  min: number
+  max: number
+  description: string
+}> = [
+  {
+    key: 'chunked_upload_max_file_mb',
+    label: '单文件大小上限',
+    unit: 'MB',
+    min: 100,
+    max: 8192,
+    description: '分片上传支持的单文件上限。注意 2GB 文件上传层峰值占用 ~4GB 磁盘（分片 + 合并并存）。',
+  },
+  {
+    key: 'chunked_upload_chunk_mb',
+    label: '切片大小',
+    unit: 'MB',
+    min: 8,
+    max: 80,
+    description: '前端切片大小建议值（init 返回为准）。硬上限 80MB——CF 免费版单请求体 100MB 的安全余量。',
+  },
+  {
+    key: 'chunked_upload_per_user_active',
+    label: '单用户并发上传数',
+    unit: '个',
+    min: 1,
+    max: 20,
+    description: '同一用户同时进行中（receiving/completing）的分片上传数量上限，超出返回 429。',
+  },
+  {
+    key: 'chunked_upload_per_user_inflight_gb',
+    label: '单用户进行中总量',
+    unit: 'GB',
+    min: 1,
+    max: 100,
+    description: '同一用户全部进行中上传的声明字节总和上限。',
+  },
+  {
+    key: 'chunked_upload_global_inflight_gb',
+    label: '全局进行中总量',
+    unit: 'GB',
+    min: 1,
+    max: 1000,
+    description: '全站进行中上传的声明字节总和上限，超出后新 init 返回 429。',
+  },
+  {
+    key: 'chunked_upload_daily_per_user_gb',
+    label: '单用户每日配额',
+    unit: 'GB/天',
+    min: 1,
+    max: 500,
+    description: '按声明大小计（init 即记账，放弃不退），自然日（北京时间）滚动。',
+  },
+  {
+    key: 'chunked_upload_disk_floor_gb',
+    label: '磁盘保底',
+    unit: 'GB',
+    min: 1,
+    max: 500,
+    description: '磁盘可用空间低于「保底 + 2×声明大小 + 在途余量」时拒绝新上传（507），保护其它任务。',
+  },
+  {
+    key: 'chunked_upload_ttl_hours',
+    label: '未完成上传 TTL',
+    unit: '小时',
+    min: 1,
+    max: 168,
+    description: '超时未完成（含失败）的上传由后台清扫器清盘，断点续传须在此窗口内完成。',
+  },
+  {
+    key: 'chunked_upload_ready_ttl_hours',
+    label: '已合并未建任务 TTL',
+    unit: '小时',
+    min: 1,
+    max: 72,
+    description: '合并完成但用户未据此创建任务的终文件，超时由清扫器删除（防 2GB 文件长期滞留）。',
+  },
+]
+
+// APF 限制旋钮的输入框元数据：边界与 gateway _APF_LIMIT_BOUNDS 一致。
+const APF_LIMIT_FIELDS: Array<{
+  key: 'anonymous_preview_max_upload_mb' | 'anonymous_preview_max_seconds'
+    | 'anonymous_preview_cap_global_per_day' | 'anonymous_preview_cap_per_ip'
+    | 'anonymous_preview_cap_per_device' | 'anonymous_preview_cap_per_source'
+  label: string
+  unit: string
+  min: number
+  max: number
+  description: string
+}> = [
+  {
+    key: 'anonymous_preview_max_upload_mb',
+    label: '上传文件大小上限',
+    unit: 'MB',
+    min: 10,
+    max: 2048,
+    description: '超过此大小的匿名上传直接拒绝（413）。登录用户上限 2GB，此处上界与之对齐。',
+  },
+  {
+    key: 'anonymous_preview_max_seconds',
+    label: '预览时长上限',
+    unit: '秒',
+    min: 30,
+    max: 7200,
+    description: '生成的预览只取视频前 N 秒（180 = 前 3 分钟）。同时影响前端面板提示文案。',
+  },
+  {
+    key: 'anonymous_preview_cap_global_per_day',
+    label: '全局每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 100000,
+    description: '全站匿名预览每日总次数，超出后新上传返回 429。',
+  },
+  {
+    key: 'anonymous_preview_cap_per_ip',
+    label: '单 IP 每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 1000,
+    description: '同一 IP（受信代理提取）每日可发起的预览次数。',
+  },
+  {
+    key: 'anonymous_preview_cap_per_device',
+    label: '单设备每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 100,
+    description: '同一匿名会话 token（≈ 设备）每日可发起的预览次数。',
+  },
+  {
+    key: 'anonymous_preview_cap_per_source',
+    label: '同源文件每日上限',
+    unit: '次/天',
+    min: 1,
+    max: 100,
+    description: '相同内容哈希的文件每日可重复提交的次数（防重复刷量）。',
+  },
+]
 
 const WHISPER_TRIGGER_OPTIONS = [
   {
@@ -1007,6 +1200,106 @@ export default function AdminSettingsPage() {
             className="w-24 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
           />
         </label>
+
+        {/* APF 限制旋钮（2026-06-11）：6 项原 env-only 限制，保存后即时生效
+            （gateway 每请求重读 admin_settings，无 mtime poll 延迟）。
+            边界与后端 _APF_LIMIT_BOUNDS validator 一致，越界输入不进 state。 */}
+        <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">预览限制</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              保存后对新请求立即生效，无需重启服务。前端试用面板的大小校验与提示文案会自动跟随
+              （上传大小 / 预览时长两项）。紧急关停请用上方「开启匿名预览」总开关，不要把数值调到下界。
+            </p>
+          </div>
+          {APF_LIMIT_FIELDS.map((f) => (
+            <label key={f.key} className="flex flex-col gap-1.5 border-t border-border pt-3 first:border-t-0">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-medium text-foreground whitespace-nowrap">{f.label}</span>
+                <input
+                  type="number"
+                  min={f.min}
+                  max={f.max}
+                  step={1}
+                  value={settings[f.key]}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10)
+                    if (Number.isFinite(v) && v >= f.min && v <= f.max) {
+                      setSettings((s) => ({ ...s, [f.key]: v }))
+                    }
+                  }}
+                  className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+                />
+                <span className="text-xs text-muted-foreground">{f.unit}（{f.min}–{f.max}）</span>
+              </div>
+              <p className="text-xs text-muted-foreground">{f.description}</p>
+            </label>
+          ))}
+        </div>
+      </SettingSection>
+
+      {/* 大文件分片上传（plan 2026-06-11 §3.7）
+          ⚠️ 总开关默认关闭。开启后注册用户 >95MB 的本地视频自动走分片通道
+          （绕过 CF 免费版单请求体 100MB 限制）；前端入口由 R6 limits 端点
+          动态下发，无需改前端 env。全部 10 个字段均渲染为可见控件，
+          「恢复默认」时经 ...DEFAULT_SETTINGS spread 回出厂默认。 */}
+      <SettingSection
+        title="大文件分片上传"
+        description="注册用户大文件（>95MB）经 Cloudflare Tunnel 的应用层分片上传通道。每片独立请求（≤80MB）绕过 CF 免费版 100MB 单请求体限制，服务端合并校验后接入现有任务创建流。"
+      >
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.chunked_upload_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, chunked_upload_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              启用分片上传
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                默认关闭 · 灰度开启
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              关闭时前端隐藏大文件入口（&gt;95MB 仍走单请求路径，会被 CF 边缘 413 拒绝）；
+              开启前请确认磁盘余量充足（2GB 文件任务全程峰值 ~6GB）。
+              进行中上传的清理由后台清扫器负责，不受本开关影响。
+            </p>
+          </div>
+        </label>
+
+        <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">分片上传限制</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              保存后对新请求立即生效（gateway 每请求重读）。紧急关停请用上方总开关，不要把数值调到下界。
+            </p>
+          </div>
+          {CHUNKED_UPLOAD_FIELDS.map((f) => (
+            <label key={f.key} className="flex flex-col gap-1.5 border-t border-border pt-3 first:border-t-0">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-medium text-foreground whitespace-nowrap">{f.label}</span>
+                <input
+                  type="number"
+                  min={f.min}
+                  max={f.max}
+                  step={1}
+                  value={settings[f.key]}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10)
+                    if (Number.isFinite(v) && v >= f.min && v <= f.max) {
+                      setSettings((s) => ({ ...s, [f.key]: v }))
+                    }
+                  }}
+                  className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+                />
+                <span className="text-xs text-muted-foreground">{f.unit}（{f.min}–{f.max}）</span>
+              </div>
+              <p className="text-xs text-muted-foreground">{f.description}</p>
+            </label>
+          ))}
+        </div>
       </SettingSection>
 
       {/* Save button */}
@@ -1083,10 +1376,17 @@ export default function AdminSettingsPage() {
             // --- APF reset 规则（2026-06-10）---
             // visible toggle (anonymous_free_preview_enabled) 显式回 DEFAULT (false)；
             // max_in_flight 是纯数字配置，回 DEFAULT 语义明确，也显式回默认值。
+            // 2026-06-11 新增的 6 个限制旋钮（max_upload_mb / max_seconds /
+            // 四个 cap）同为可见数字输入，经 ...DEFAULT_SETTINGS spread 回
+            // 出厂默认（200MB / 180s / 500 / 3 / 1 / 1），不透传 current state。
             anonymous_free_preview_enabled:
               DEFAULT_SETTINGS.anonymous_free_preview_enabled,
             anonymous_preview_max_in_flight:
               DEFAULT_SETTINGS.anonymous_preview_max_in_flight,
+            // --- 分片上传 reset 规则（2026-06-11）---
+            // 10 个 chunked_upload_* 字段全部渲染为可见控件（toggle + 9 个
+            // 数字输入），「恢复默认」语义就是全部回出厂默认——经
+            // ...DEFAULT_SETTINGS spread 隐式覆盖，无需透传 current state。
           }))}
           type="button"
         >

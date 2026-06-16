@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, FrozenSet, NamedTuple
 
-from src.services.anonymous_preview_admission import (
+from services.anonymous_preview_admission import (
     AdmissionDecision,
     AnonymousPreviewAdmissionConfig,
     AnonymousPreviewArtifactPolicy,

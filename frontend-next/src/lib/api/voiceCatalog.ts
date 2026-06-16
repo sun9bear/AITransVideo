@@ -30,11 +30,21 @@ export interface VoiceCatalogListParams {
   pageSize?: number
 }
 
+/** Error carrying the HTTP status so pages can branch on 401/403 (权限守卫). */
+export class AdminApiError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'AdminApiError'
+    this.status = status
+  }
+}
+
 async function adminFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, { credentials: 'include', ...init })
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({ error: '请求失败' }))
-    throw new Error(body.error || body.detail || `请求失败 (${resp.status})`)
+    throw new AdminApiError(resp.status, body.error || body.detail || `请求失败 (${resp.status})`)
   }
   return resp.json() as Promise<T>
 }

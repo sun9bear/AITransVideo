@@ -4,6 +4,22 @@ type RequestBody = BodyInit | Record<string, unknown> | undefined
 
 type RequestOptions = Omit<RequestInit, 'body'> & {
   body?: RequestBody
+  /**
+   * 请求超时（毫秒），传 0 禁用。
+   * 默认 DEFAULT_TIMEOUT_MS；body 为 FormData / Blob / ArrayBuffer（上传）
+   * 时默认不超时——大文件上传耗时无法预估，由调用方显式设定。
+   */
+  timeoutMs?: number
+}
+
+const DEFAULT_TIMEOUT_MS = 30_000
+
+function isUploadBody(body: RequestBody): boolean {
+  return (
+    body instanceof FormData ||
+    body instanceof Blob ||
+    body instanceof ArrayBuffer
+  )
 }
 
 export class ApiError extends Error {
@@ -44,13 +60,36 @@ export class ApiClient {
   }
 
   async request<T>(path: string, init: RequestOptions = {}): Promise<T> {
-    const headers = new Headers(init.headers)
-    const body = this.serializeBody(init.body, headers)
-    const response = await fetch(this.buildUrl(path), {
-      ...init,
-      body,
-      headers,
-    })
+    const { timeoutMs, ...rest } = init
+    const headers = new Headers(rest.headers)
+    const body = this.serializeBody(rest.body, headers)
+
+    const effectiveTimeout =
+      timeoutMs ?? (isUploadBody(rest.body) ? 0 : DEFAULT_TIMEOUT_MS)
+    let signal = rest.signal ?? null
+    if (effectiveTimeout > 0) {
+      const timeoutSignal = AbortSignal.timeout(effectiveTimeout)
+      signal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    }
+
+    let response: Response
+    try {
+      response = await fetch(this.buildUrl(path), {
+        ...rest,
+        body,
+        headers,
+        signal,
+      })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'TimeoutError') {
+        throw new ApiError(
+          `请求超时（${Math.round(effectiveTimeout / 1000)} 秒无响应），请检查网络后重试`,
+          0,
+          null,
+        )
+      }
+      throw error
+    }
     const payload = await this.parsePayload(response)
 
     if (!response.ok) {
