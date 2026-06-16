@@ -237,3 +237,47 @@ def validate_pan_backup_config(settings) -> None:
             f"Generate one with: python -c \"from cryptography.fernet import Fernet; "
             f"print(Fernet.generate_key().decode())\""
         )
+
+
+def validate_anonymous_preview_config(settings) -> None:
+    """Validate anonymous preview config and downgrade flag if secret is missing/short.
+
+    Plan 2026-06-10 APF T1. Mirrors validate_mainland_voice_worker_config pattern:
+    degrading, not raising — gateway must keep serving other requests.
+
+    Contract:
+      - enable_anonymous_preview=False (default): no-op.
+      - enable_anonymous_preview=True AND hash_secret >= 32 bytes: no-op (valid).
+      - enable_anonymous_preview=True but hash_secret missing or < 32 bytes:
+        log CRITICAL and FORCE settings.enable_anonymous_preview = False.
+        Rationale: without a server-side HMAC key, scope_key hashes are trivially
+        reversible (no secret = deterministic hash = IP enumerable from hash).
+        The feature must not run without proper key hygiene.
+
+    Side effect: mutates settings.enable_anonymous_preview on downgrade.
+    Caller (gateway/main.py lifespan) should call this after loading settings.
+    """
+    if not settings.enable_anonymous_preview:
+        return
+
+    secret = settings.anonymous_preview_hash_secret or ""
+    if len(secret) < 32:
+        logger.critical(
+            "AVT_ENABLE_ANONYMOUS_PREVIEW=true but AVT_ANONYMOUS_PREVIEW_HASH_SECRET "
+            "is missing or too short (got %d bytes, need ≥32). "
+            "Downgrading enable_anonymous_preview to False. "
+            "Generate a secret with: python -c \"import secrets; print(secrets.token_urlsafe(32))\"",
+            len(secret),
+        )
+        settings.enable_anonymous_preview = False
+        return
+
+    logger.info(
+        "Anonymous preview ENABLED (max_seconds=%d, cap_global=%d/day, "
+        "cap_ip=%d/day, cap_device=%d/day, cap_source=%d/day)",
+        settings.anonymous_preview_max_seconds,
+        settings.anonymous_preview_cap_global_per_day,
+        settings.anonymous_preview_cap_per_ip,
+        settings.anonymous_preview_cap_per_device,
+        settings.anonymous_preview_cap_per_source,
+    )

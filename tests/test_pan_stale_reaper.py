@@ -62,6 +62,18 @@ async def _set_completed_at(engine, br_id, when):
         )
 
 
+async def _set_job_updated_at(engine, job_id, when):
+    """Backdate Job.updated_at. Explicit values() wins over the column's
+    onupdate hook, so the backdated value sticks."""
+    from models import Job
+    async with engine.begin() as conn:
+        await conn.execute(
+            update(Job)
+            .where(Job.job_id == job_id)
+            .values(updated_at=when)
+        )
+
+
 # =========================================================================
 # Pass 1: in-flight reap (uploading / restoring with stale heartbeat)
 # =========================================================================
@@ -679,3 +691,329 @@ def test_reaper_releases_lock_before_enqueueing_residue_cleanup(monkeypatch):
         f"lock must be released BEFORE enqueue to avoid handoff race. "
         f"Full call order: {call_order}"
     )
+
+
+# =========================================================================
+# Pass 3: orphaned archiving (jobs.archiving + no live backup_record)
+# 2026-06-10 production incident regression
+# =========================================================================
+
+
+def test_reaper_pass3_rescues_archiving_with_all_failed_records(monkeypatch):
+    """Regression for the 2026-06-10 production deadlock
+    (job_c31bd38126fd47ed8c2d3c1749c15ccf, stuck 'archiving' 7 days).
+
+    2026-06-02 deploy abort marked all backup_records 'failed' by hand but
+    never flipped Job.status back. Pass 1 wants BR uploading/restoring,
+    Pass 2 wants BR uploaded — neither matched Job='archiving' + all BRs
+    'failed', and admin_api.create_backup refuses non-'succeeded' jobs →
+    deadlock. Pass 3 must rescue: flip Job → 'succeeded', leave the
+    terminal BRs untouched."""
+    from models import BackupRecord, Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='deadlocked',
+                status='archiving', edit_generation=0,
+            )
+            br = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='deadlocked',
+                status='failed', job_edit_generation=0,
+            )
+            await _set_job_updated_at(
+                engine, 'deadlocked',
+                datetime.now(timezone.utc) - timedelta(days=7),
+            )
+
+            stats = await run_stale_reaper_tick(engine)
+            assert stats['orphaned_archiving_reaped'] == 1, stats
+            # Not double-counted by the other passes.
+            assert stats['in_flight_reaped'] == 0
+            assert stats['post_commit_forwarded'] == 0
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status).where(Job.job_id == 'deadlocked')
+                )).scalar_one()
+                br_status = (await db.execute(
+                    select(BackupRecord.status)
+                    .where(BackupRecord.id == br['id'])
+                )).scalar_one()
+            assert job_status == 'succeeded'
+            # BR already terminal — Pass 3 must not touch it.
+            assert br_status == 'failed'
+
+    run_async(_go())
+
+
+def test_reaper_pass3_rescues_archiving_with_no_records(monkeypatch):
+    """Job='archiving' with NO backup_record at all (executor died between
+    the status flip and the BR insert, or rows were deleted) → same
+    deadlock shape, same rescue."""
+    from models import Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='no_br',
+                status='archiving', edit_generation=0,
+            )
+            await _set_job_updated_at(
+                engine, 'no_br',
+                datetime.now(timezone.utc) - timedelta(hours=5),
+            )
+
+            stats = await run_stale_reaper_tick(engine)
+            assert stats['orphaned_archiving_reaped'] == 1, stats
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status).where(Job.job_id == 'no_br')
+                )).scalar_one()
+            assert job_status == 'succeeded'
+
+    run_async(_go())
+
+
+def test_reaper_pass3_skips_fresh_archiving(monkeypatch):
+    """updated_at refreshed < 4h ago → NOT orphaned yet. Protects the
+    executor-start window (status flipped to 'archiving' but the BR row
+    not inserted yet) from a premature rollback."""
+    from models import Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='fresh_arch',
+                status='archiving', edit_generation=0,
+            )
+            await _set_job_updated_at(
+                engine, 'fresh_arch',
+                datetime.now(timezone.utc) - timedelta(minutes=30),
+            )
+
+            stats = await run_stale_reaper_tick(engine)
+            assert stats['orphaned_archiving_reaped'] == 0, stats
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status).where(Job.job_id == 'fresh_arch')
+                )).scalar_one()
+            assert job_status == 'archiving'
+
+    run_async(_go())
+
+
+def test_reaper_pass3_skips_when_current_gen_has_live_record(monkeypatch):
+    """Any BR at the CURRENT generation in (uploading / restoring /
+    uploaded) disqualifies Pass 3 — those states are owned by Pass 1
+    (in-flight) or Pass 2 (post-commit). Two jobs:
+
+      - 'pc_owned': BR uploaded, completed_at fresh → Pass 2 waits,
+        Pass 3 must NOT roll it back to 'succeeded' (commit point passed,
+        residue_cleanup owns the 'archived' flip).
+      - 'live_upload': BR uploading, heartbeat fresh → executor alive,
+        Pass 1 waits, Pass 3 must not steal it either."""
+    from models import Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    stale = datetime.now(timezone.utc) - timedelta(hours=6)
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='pc_owned',
+                status='archiving', edit_generation=0,
+            )
+            br1 = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='pc_owned',
+                status='uploaded', job_edit_generation=0,
+            )
+            # completed_at fresh so Pass 2 also stays quiet in this test.
+            await _set_completed_at(
+                engine, br1['id'],
+                datetime.now(timezone.utc) - timedelta(minutes=30),
+            )
+
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='live_upload',
+                status='archiving', edit_generation=0,
+            )
+            br2 = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='live_upload',
+                status='uploading', job_edit_generation=0,
+            )
+            await _set_heartbeat(
+                engine, br2['id'],
+                datetime.now(timezone.utc) - timedelta(minutes=5),
+            )
+
+            # Both jobs' updated_at stale — only the BR state shields them.
+            await _set_job_updated_at(engine, 'pc_owned', stale)
+            await _set_job_updated_at(engine, 'live_upload', stale)
+
+            stats = await run_stale_reaper_tick(engine)
+            assert stats['orphaned_archiving_reaped'] == 0, stats
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                statuses = dict((await db.execute(
+                    select(Job.job_id, Job.status)
+                    .where(Job.job_id.in_(['pc_owned', 'live_upload']))
+                )).all())
+            assert statuses == {
+                'pc_owned': 'archiving',
+                'live_upload': 'archiving',
+            }
+
+    run_async(_go())
+
+
+def test_reaper_pass3_generation_scoped_ignores_stale_gen_records(monkeypatch):
+    """A stale-generation 'uploaded' BR is history, not a live attempt.
+    Job at gen 2 with all-current-gen-failed must still be rescued, and
+    the old gen-0 'uploaded' BR must stay untouched (it remains a valid
+    restore source for the old generation)."""
+    from models import BackupRecord, Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='gen2_dead',
+                status='archiving', edit_generation=2,
+            )
+            br_old = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='gen2_dead',
+                status='uploaded', job_edit_generation=0,
+            )
+            br_cur = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='gen2_dead',
+                status='failed', job_edit_generation=2,
+            )
+            await _set_job_updated_at(
+                engine, 'gen2_dead',
+                datetime.now(timezone.utc) - timedelta(hours=5),
+            )
+
+            stats = await run_stale_reaper_tick(engine)
+            assert stats['orphaned_archiving_reaped'] == 1, stats
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status).where(Job.job_id == 'gen2_dead')
+                )).scalar_one()
+                old_status = (await db.execute(
+                    select(BackupRecord.status)
+                    .where(BackupRecord.id == br_old['id'])
+                )).scalar_one()
+                cur_status = (await db.execute(
+                    select(BackupRecord.status)
+                    .where(BackupRecord.id == br_cur['id'])
+                )).scalar_one()
+            assert job_status == 'succeeded'
+            assert old_status == 'uploaded'
+            assert cur_status == 'failed'
+
+    run_async(_go())
+
+
+def test_reaper_pass3_skips_when_lock_held(monkeypatch):
+    """Lock probe fails → a live executor owns this (user, job) — skip and
+    count, exactly like Pass 1/2. SQLite can't simulate a held PG advisory
+    lock, so we monkeypatch the probe."""
+    from models import Job
+    from pan import stale_reaper as mod
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def deny_lock(conn, key):
+        return False
+
+    monkeypatch.setattr(mod, '_try_advisory_lock', deny_lock)
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='locked_orphan',
+                status='archiving', edit_generation=0,
+            )
+            await _set_job_updated_at(
+                engine, 'locked_orphan',
+                datetime.now(timezone.utc) - timedelta(hours=5),
+            )
+
+            stats = await mod.run_stale_reaper_tick(engine)
+            assert stats['orphaned_archiving_skipped_locked'] == 1, stats
+            assert stats['orphaned_archiving_reaped'] == 0
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status).where(Job.job_id == 'locked_orphan')
+                )).scalar_one()
+            assert job_status == 'archiving'
+
+    run_async(_go())
+
+
+def test_reaper_pass3_dry_run_counts_without_modifying(monkeypatch):
+    from models import Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='dry_orphan',
+                status='archiving', edit_generation=0,
+            )
+            await _set_job_updated_at(
+                engine, 'dry_orphan',
+                datetime.now(timezone.utc) - timedelta(hours=5),
+            )
+
+            stats = await run_stale_reaper_tick(engine, dry_run=True)
+            assert stats['orphaned_archiving_reaped'] == 1
+            assert stats['dry_run'] is True
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status).where(Job.job_id == 'dry_orphan')
+                )).scalar_one()
+            assert job_status == 'archiving'
+
+    run_async(_go())

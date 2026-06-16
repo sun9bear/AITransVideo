@@ -143,6 +143,8 @@ services:
         # server API key / webhook secret are NOT build args.
         NEXT_PUBLIC_PADDLE_CLIENT_TOKEN: "${NEXT_PUBLIC_PADDLE_CLIENT_TOKEN:-}"
         NEXT_PUBLIC_PADDLE_ENV: "${NEXT_PUBLIC_PADDLE_ENV:-sandbox}"
+        # APF 匿名 Free 预览 (plan 2026-06-10 T1) — 构建期烘焙到 client bundle
+        NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW: "${NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW:-0}"
     image: aivideotrans-next:latest
     container_name: aivideotrans-next
     network_mode: host
@@ -223,11 +225,14 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/jobs
         target: /opt/aivideotrans/app/jobs
-      # Caddy public access logs for admin traffic analytics (read-only).
+      # Caddy public access logs for admin traffic analytics, plus
+      # gateway-side audit JSONL writers (express_voice_cleanup.jsonl,
+      # support_handoff_email.log). Was read_only until 2026-06-10 — that
+      # silently dropped every gateway audit append (OSError EROFS, swallowed
+      # as non-fatal by design). Gateway now has legitimate write needs here.
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
         target: /opt/aivideotrans/data/runtime_logs
-        read_only: true
       # 2026-05-26 postmortem P0c. Pan backup tar staging directory.
       # MUST be a bind mount on the data partition rather than the
       # container overlay so multi-GB tar.gz builds during pan backups
@@ -392,6 +397,11 @@ services:
       AVT_BAIDU_PAN_APPSECRET: "${AVT_BAIDU_PAN_APPSECRET:-}"
       AVT_BAIDU_PAN_REDIRECT_URI: "${AVT_BAIDU_PAN_REDIRECT_URI:-}"
       AVT_PAN_TOKEN_ENCRYPTION_KEY: "${AVT_PAN_TOKEN_ENCRYPTION_KEY:-}"
+      # --- APF 匿名 Free 预览 (plan 2026-06-10 T1) ---
+      # 默认关。开启需同时配齐 HMAC secret（≥32字节）否则 startup_checks 降级。
+      # 公网开启前置条件：T1–T9 全部合并 + secret 已配 + §5 成本确认。
+      AVT_ENABLE_ANONYMOUS_PREVIEW: "${AVT_ENABLE_ANONYMOUS_PREVIEW:-false}"
+      AVT_ANONYMOUS_PREVIEW_HASH_SECRET: "${AVT_ANONYMOUS_PREVIEW_HASH_SECRET:-}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s

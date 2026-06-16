@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { RefreshCw } from 'lucide-react'
 
 import { EmptyState } from '@/components/empty-state'
+import { useConfirmDialog } from '@/components/ui/confirm-dialog'
 import { StatusBadge } from '@/components/status-badge'
 import { StageProgress } from '@/components/stage-progress'
 import { LogViewer } from '@/components/log-viewer'
@@ -65,6 +66,7 @@ export default function WorkspacePage() {
   const [isLoading, setIsLoading] = useState(true)
   const [pageError, setPageError] = useState<string | null>(null)
   const [isCancelling, setIsCancelling] = useState(false)
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [webUiStage, setWebUiStage] = useState<string | null>(null)
   // Plan §10.3: "关键进展" log panel + raw progressMessage text are admin-only.
   // Non-admin users see only the stage label + a generic "处理中" fallback so
@@ -155,7 +157,12 @@ export default function WorkspacePage() {
   }
 
   const handleCancel = async () => {
-    if (!window.confirm('确定要取消当前任务吗？取消后可以创建新的翻译任务。')) return
+    const confirmed = await confirm({
+      title: '取消任务',
+      description: '确定要取消当前任务吗？取消后可以创建新的翻译任务。',
+      destructive: true,
+    })
+    if (!confirmed) return
     setIsCancelling(true)
     try {
       await cancelJob(jobId)
@@ -401,6 +408,8 @@ export default function WorkspacePage() {
           title="关键进展"
         />
       ) : null}
+
+      {confirmDialog}
     </div>
   )
 }

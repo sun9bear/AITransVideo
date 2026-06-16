@@ -34,13 +34,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { buildDraftAudioUrl } from "@/lib/api/downloads"
 import type { EditingSegment, SegmentStatus } from "@/lib/api/editing"
-
-function formatMs(ms: number): string {
-  const total = Math.floor(ms / 1000)
-  const m = Math.floor(total / 60).toString().padStart(2, "0")
-  const s = (total % 60).toString().padStart(2, "0")
-  return `${m}:${s}`
-}
+import { formatMs } from "@/lib/format"
 
 export interface CurrentSegmentOpsPanelProps {
   jobId: string

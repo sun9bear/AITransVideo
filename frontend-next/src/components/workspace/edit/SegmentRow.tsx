@@ -33,20 +33,9 @@ import { Check, ChevronDown, Loader2, Pause, Play, RefreshCw, Scissors, Trash2 }
 import { Button } from "@/components/ui/button"
 import { buildDraftAudioUrl } from "@/lib/api/downloads"
 import type { EditingSegment, EditingSpeaker, SegmentStatus } from "@/lib/api/editing"
+import { formatDurationSeconds, formatMs } from "@/lib/format"
 
 // ---------- helpers ----------
-
-function formatMs(ms: number): string {
-  const totalSec = Math.floor(ms / 1000)
-  const m = Math.floor(totalSec / 60)
-  const s = totalSec % 60
-  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
-}
-
-function formatDurationSeconds(ms: number | null | undefined): string {
-  if (typeof ms !== "number") return ""
-  return `${(ms / 1000).toFixed(1)}s`
-}
 
 function isPreTtsLengthWarningStatus(status: SegmentStatus): boolean {
   return status === "text_dirty" || status === "voice_dirty" || status === "tts_failed"

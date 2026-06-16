@@ -299,6 +299,87 @@ def test_local_upload_happy_path_returns_ready_for_mode(
     )
 
 
+def test_same_source_hash_different_sessions_produce_distinct_record_ids(
+    tmp_path, temp_upload_dir
+):
+    """PK collision regression (APF P0 backlog).
+
+    Before the fix, ``record_id`` was ``prv_{source_hash[:12]}``.  Two
+    different anonymous users uploading the same video within the same
+    24-h TTL window produced identical PKs; the second ``save_record``
+    hit a UNIQUE-constraint violation and returned 503.
+
+    After the fix the adapter injects ``prv_{hash[:8]}_{token_urlsafe(6)}``
+    — a unique ID per upload attempt regardless of ``source_hash``.
+
+    This test uses a dedicated adapter with ``rate_limit_per_source_hash_per_day=10``
+    so both Alice and Bob clear all rate gates and reach ``READY_FOR_MODE``.
+    The default fixture cap is 1/day which would block the second request.
+    """
+    import re
+    _PRV_RE = re.compile(r"^prv_[A-Za-z0-9]{1,8}_[A-Za-z0-9_-]{6,}$")
+
+    # Fresh counter store + config with enough source-hash headroom for 2 users.
+    _store = FakeCounterStore(tmp_path / "pk_collision_counters.json")
+    _config = IntakeConfig(
+        temp_upload_dir=temp_upload_dir,
+        temp_storage_available=True,
+        rate_limit_per_source_hash_per_day=10,  # allow multiple sessions same hash
+    )
+    _adapter = AnonymousPreviewBackendAdapter(
+        config=_config,
+        counter_store=_store,
+        probe_fn=_passing_probe,
+        compliance_fn=_passing_compliance,
+        hasher=_hash_token,
+        now_fn=_frozen_now,
+    )
+
+    request_alice = _make_request(
+        raw_session_id="session-alice",
+        raw_ip="198.51.100.1",
+        raw_device_cookie="cookie-alice",
+        day_key="2026-06-11",
+    )
+    request_bob = _make_request(
+        raw_session_id="session-bob",
+        raw_ip="198.51.100.2",
+        raw_device_cookie="cookie-bob",
+        day_key="2026-06-11",
+    )
+    # Same video — same source_hash.
+    upload = _make_upload(temp_upload_dir, source_hash="shared_video_abc123")
+
+    record_alice = _adapter.handle_intake(request_alice, upload)
+    record_bob = _adapter.handle_intake(request_bob, upload)
+
+    # Both uploads succeed.
+    assert record_alice.status is PreviewStatus.READY_FOR_MODE
+    assert record_bob.status is PreviewStatus.READY_FOR_MODE
+
+    # Same video — source_hash is equal.
+    assert record_alice.source_hash == record_bob.source_hash == "shared_video_abc123"
+
+    # PKs must differ — no collision.
+    assert record_alice.record_id != record_bob.record_id, (
+        f"PK collision: both got record_id={record_alice.record_id!r}; "
+        "two sessions uploading the same file must receive distinct PKs"
+    )
+
+    # Format: prv_{hash prefix}_{url-safe token}.
+    assert _PRV_RE.match(record_alice.record_id), (
+        f"record_id format unexpected: {record_alice.record_id!r}"
+    )
+    assert _PRV_RE.match(record_bob.record_id), (
+        f"record_id format unexpected: {record_bob.record_id!r}"
+    )
+
+    # Readable hash prefix is preserved for log correlation.
+    # source_hash[:8] of "shared_video_abc123" == "shared_v".
+    assert record_alice.record_id.startswith("prv_shared_v")
+    assert record_bob.record_id.startswith("prv_shared_v")
+
+
 def test_happy_path_normalizes_wire_string_pass_compliance_status(
     adapter, temp_upload_dir
 ):

@@ -303,6 +303,47 @@ curl -k https://aitrans.video/api/admin/pan/status -b "avt_session=..." # 应该
 | `/admin/pan/dashboard` 显示 "未连接" 但实际有 PanCredentials 行 | `docker exec aivideotrans-postgres psql -U avt -d aivideotrans -c "SELECT id, status, last_refreshed_at FROM pan_credentials"` 看 status 是否被标 `revoked` |
 | OAuth callback 返 400 "Invalid state" | `pan_oauth_states` 表的 state token TTL=5min,可能用户卡在中间页太久;让用户重新点 "连接" |
 | backup 卡在 `archiving` 不动 | 看 `backup_records.heartbeat_at`;若 > 4h 没更新,等下一次 stale_reaper (每 30min) 自动 reap |
+| 任务卡 `archiving` 且当前代 backup_records 全是 `failed`(或无记录) | 2026-06-10 事故形态(运维手工中止备份只标了 BR failed,没翻 Job.status)。stale_reaper **Pass 3** 会在 `Job.updated_at` 超过 stale 阈值后自动翻回 `succeeded`;要立即处理/主动中止备份,用下方"受控状态恢复",**禁止裸 UPDATE** |
 | backup 显示 succeeded 但 `pan.backup.succeeded` 事件没出现 | 检查 `settings.jobs_dir` 是否可写 + gateway 容器是否 mount 了 `/opt/aivideotrans/data/jobs` (rw) |
 | 通知 body 显示 `{display_name}` / `{reason}` 原文 | `_PAYLOAD_ALLOWLIST` 漏了对应 key;最新版本 (commit 842b66d 之后) 已修 |
 | `r2_observability.py --since 24h` 显示 pan 总数 0 但确实 backup 过 | gateway 容器没 mount `jobs/` bind volume,或者 stage 字段写错;先 `cat /opt/aivideotrans/data/jobs/<job_id>.events.jsonl` 看有没有行 |
+
+## 受控状态恢复 (postmortem P2b)
+
+**运维需要中止一个进行中的 pan 备份、或修复中止后的错位状态时,唯一许可入口是
+`pan.status_mutator.rollback_archive_attempt`。禁止对 `jobs` / `backup_records`
+做裸 `UPDATE` 或只改一半状态** —— 2026-06-02 的手工中止只把 backup_records 标了
+`failed`、没把 Job.status 翻回 `succeeded`,结果三个 stale_reaper pass 都不命中、
+`create_backup` 又要求 `succeeded`,任务在 `archiving` 死锁 7 天
+(job_c31bd38126fd47ed8c2d3c1749c15ccf,2026-06-10 才发现)。
+
+`rollback_archive_attempt(user_id, job_id, conn=conn, reason=...)` 做的事:
+
+1. `pg_try_advisory_lock` 探测 —— executor 还活着就拒绝(不绕锁);
+2. Job 状态不在 `('archiving', 'succeeded')` 时拒绝(restore 归 Pass 1 管);
+3. 当前 `edit_generation` 下存在 `uploaded` BR 时拒绝(已过 COMMIT POINT,
+   归 Pass 2 / residue_cleanup 收尾成 `archived`,不能回滚成 `succeeded`);
+4. 单事务内:`uploading` BR → `failed`(带 reason + completed_at),
+   Job `archiving` → `succeeded`(PG + JSON mirror 同步)。幂等,重复调用安全。
+
+```bash
+docker exec -i aivideotrans-gateway python - <<'PY'
+import asyncio, uuid
+from database import engine
+from pan.status_mutator import rollback_archive_attempt
+
+async def main():
+    async with engine.connect() as conn:
+        summary = await rollback_archive_attempt(
+            uuid.UUID('<user_id>'), '<job_id>', conn=conn,
+            reason='ops abort: <为什么中止,写进 backup_records.error_message>',
+        )
+    print(summary)
+
+asyncio.run(main())
+PY
+```
+
+不归它管的形态:`uploaded` 卡 `archiving`(等 Pass 2 + residue_cleanup)、
+`restoring` 卡死(等 Pass 1 按 project_dir 存在性 forward/rollback)。
+这两类**等 stale_reaper**,不要手工介入。

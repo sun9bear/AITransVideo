@@ -40,6 +40,7 @@ import {
   type EditingSegment,
   type SuggestSplitQuota,
 } from "@/lib/api/editing"
+import { formatMs } from "@/lib/format"
 
 export interface SplitSegmentDialogProps {
   open: boolean
@@ -116,14 +117,6 @@ function snapSourceCutToWord(text: string, cutPos: number): number {
   const rightDist = right - cutPos
   // Tie → right (after the word reads more naturally as next piece's start).
   return leftDist < rightDist ? left : right
-}
-
-function formatMs(ms: number | undefined): string {
-  if (ms === undefined) return ""
-  const total = Math.floor(ms / 1000)
-  const m = Math.floor(total / 60).toString().padStart(2, "0")
-  const s = (total % 60).toString().padStart(2, "0")
-  return `${m}:${s}`
 }
 
 function durationLabel(startMs: number | undefined, endMs: number | undefined): string {

@@ -644,6 +644,7 @@ def build_preview_record(
     compliance_result: ComplianceResult,
     source_type: SourceType = SourceType.LOCAL_UPLOAD,
     now: datetime,
+    record_id: Optional[str] = None,
 ) -> PreviewRecord:
     """Assemble a status-only ``PreviewRecord`` (C10 / C11 / C22 / C24).
 
@@ -651,10 +652,24 @@ def build_preview_record(
     id, pricing or payment fields; the class definition is the source of
     truth and ``FORBIDDEN_PREVIEW_RECORD_FIELDS`` documents the deny list
     for downstream contract tests.
+
+    ``record_id`` is the PK written to ``anonymous_preview_records``.
+    Callers (typically the adapter) should inject a per-upload unique ID
+    (e.g. ``prv_{hash[:8]}_{secrets.token_urlsafe(6)}``) so that two
+    different anonymous sessions uploading the *same* file — same
+    ``source_hash`` — never collide on the primary key.  When omitted the
+    hash-only fallback ``prv_{source_hash[:12]}`` is used, which is safe
+    for deterministic unit tests but **must not** be used in production
+    paths where concurrent uploads of the same video are possible.
     """
 
+    # Fallback keeps deterministic behaviour for tests that do not inject
+    # a unique id; production callers MUST inject one (see adapter).
+    effective_record_id = (
+        record_id if record_id is not None else f"prv_{upload.source_hash[:12]}"
+    )
     return PreviewRecord(
-        record_id=f"prv_{upload.source_hash[:12]}",
+        record_id=effective_record_id,
         session_id_hash=session.session_id_hash,
         source_hash=upload.source_hash,
         upload_hash=upload.source_hash,

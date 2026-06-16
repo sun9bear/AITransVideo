@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { useConfirmDialog } from '@/components/ui/confirm-dialog'
 import { getErrorMessage } from '@/lib/api/errors'
+import { formatTimecode } from '@/lib/format'
 import { getJob } from '@/lib/api/jobs'
 import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import {
@@ -144,13 +146,6 @@ function formatVoiceOptionLabel(v: AvailableVoice): string {
   return `${base} · ${cps.toFixed(1)}字/秒(${tier})`
 }
 
-function formatTimecode(ms: number): string {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`
-}
-
 function formatReuseConfidence(confidence: VoiceReuseMatchResponse['confidence']): string {
   if (confidence === 'strong') return '同一视频 / 同一说话人'
   if (confidence === 'medium') return '同一视频 / 说话人名称相同'
@@ -230,6 +225,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   const [previewError, setPreviewError] = useState<Record<string, string | null>>({})
   const [expiredVoiceIds, setExpiredVoiceIds] = useState<string[]>([])
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   // Load review payload
   useEffect(() => {
@@ -727,7 +723,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       const msg = '以下说话人的音色语速和原视频差异较大：\n\n' +
         mismatchWarnings.join('\n') +
         '\n\n这可能导致配音听感不自然。是否继续？'
-      if (!window.confirm(msg)) return
+      const confirmed = await confirm({ title: '语速差异提醒', description: msg })
+      if (!confirmed) return
     }
 
     setIsSubmitting(true)
@@ -755,7 +752,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       setIsSubmitting(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced, fallbackVoices, providerMap, hasMultiProvider])
+  }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced, fallbackVoices, providerMap, hasMultiProvider, confirm])
 
   // Helper: get available voices for a speaker's currently selected provider
   function getVoicesForSpeaker(speakerId: string): AvailableVoice[] {
@@ -1235,6 +1232,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           }))}
         />
       ) : null}
+
+      {confirmDialog}
     </>
   )
 }

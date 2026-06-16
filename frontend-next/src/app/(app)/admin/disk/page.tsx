@@ -12,6 +12,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { useConfirmDialog } from "@/components/ui/confirm-dialog"
 
 type DiskCandidate = {
   category: string
@@ -222,6 +223,7 @@ export default function AdminDiskPage() {
   const [acting, setActing] = useState<string | null>(null)
   const [forbidden, setForbidden] = useState(false)
   const [selectedOrphans, setSelectedOrphans] = useState<Set<string>>(new Set())
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const loadOverview = useCallback(async () => {
     setLoading(true)
@@ -264,9 +266,12 @@ export default function AdminDiskPage() {
 
   const cleanupOrphans = useCallback(async () => {
     if (selectedOrphanIds.length === 0) return
-    if (!window.confirm(`确认清理 ${selectedOrphanIds.length} 个孤儿任务目录？`)) {
-      return
-    }
+    const confirmed = await confirm({
+      title: "清理孤儿目录",
+      description: `确认清理 ${selectedOrphanIds.length} 个孤儿任务目录？`,
+      destructive: true,
+    })
+    if (!confirmed) return
     setActing("orphans")
     try {
       const res = await fetch("/api/admin/disk/cleanup-orphans", {
@@ -284,13 +289,16 @@ export default function AdminDiskPage() {
     } finally {
       setActing(null)
     }
-  }, [loadOverview, selectedOrphanIds])
+  }, [confirm, loadOverview, selectedOrphanIds])
 
   const cleanupExpired = useCallback(async () => {
     if (!overview?.categories.expired_dirs.length) return
-    if (!window.confirm("确认执行过期任务清理？该操作会按后台保留策略更新 DB 并删除项目目录。")) {
-      return
-    }
+    const confirmed = await confirm({
+      title: "执行过期清理",
+      description: "确认执行过期任务清理？该操作会按后台保留策略更新 DB 并删除项目目录。",
+      destructive: true,
+    })
+    if (!confirmed) return
     setActing("expired")
     try {
       const res = await fetch("/api/admin/disk/cleanup-expired", {
@@ -308,18 +316,16 @@ export default function AdminDiskPage() {
     } finally {
       setActing(null)
     }
-  }, [loadOverview, overview?.categories.expired_dirs.length])
+  }, [confirm, loadOverview, overview?.categories.expired_dirs.length])
 
   const resizeFilesystem = useCallback(async () => {
     if (!overview?.resize_hint.enabled) return
     const device = overview.resize_hint.device || "/dev/sdb"
-    if (
-      !window.confirm(
-        `确认对 ${device} 执行 resize2fs？该操作只会在检测到块设备大于 ext4 文件系统时执行。`,
-      )
-    ) {
-      return
-    }
+    const confirmed = await confirm({
+      title: "扩展文件系统",
+      description: `确认对 ${device} 执行 resize2fs？该操作只会在检测到块设备大于 ext4 文件系统时执行。`,
+    })
+    if (!confirmed) return
     setActing("resize")
     try {
       const res = await fetch("/api/admin/disk/resize-filesystem", {
@@ -337,7 +343,7 @@ export default function AdminDiskPage() {
     } finally {
       setActing(null)
     }
-  }, [loadOverview, overview?.resize_hint.device, overview?.resize_hint.enabled])
+  }, [confirm, loadOverview, overview?.resize_hint.device, overview?.resize_hint.enabled])
 
   if (forbidden) {
     return (
@@ -535,6 +541,8 @@ export default function AdminDiskPage() {
           </section>
         </>
       )}
+
+      {confirmDialog}
     </main>
   )
 }

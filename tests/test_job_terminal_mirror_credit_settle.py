@@ -32,6 +32,7 @@ def test_terminal_mirror_settles_credit_ledger_on_r2_sweeper_path(monkeypatch):
         project_dir="/tmp/project",
         completed_at=None,
         edit_generation=0,
+        smart_state=None,
     )
     upstream = SimpleNamespace(
         status="succeeded",
@@ -39,6 +40,7 @@ def test_terminal_mirror_settles_credit_ledger_on_r2_sweeper_path(monkeypatch):
         project_dir="/tmp/project",
         completed_at=None,
         edit_generation=0,
+        smart_state=None,
     )
     quota_settle = AsyncMock()
     credit_settle = AsyncMock()
@@ -69,6 +71,7 @@ def test_terminal_mirror_does_not_resettle_already_terminal(monkeypatch):
         project_dir="/tmp/project",
         completed_at=None,
         edit_generation=0,
+        smart_state=None,
     )
     quota_settle = AsyncMock()
     credit_settle = AsyncMock()
@@ -100,6 +103,7 @@ def test_terminal_mirror_compensates_already_terminal_reserved_job(monkeypatch):
         project_dir="/tmp/project",
         completed_at=None,
         edit_generation=0,
+        smart_state=None,
     )
 
     async def quota_settle(_db, _job, _status):

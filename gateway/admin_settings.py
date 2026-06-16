@@ -306,6 +306,23 @@ class AdminSettings(BaseModel):
     # 误设 7 天 = 崩溃的 reserved 名额长期占 cap）。
     express_cosyvoice_auto_clone_reservation_ttl_minutes: int = 30
 
+    # --- APF 匿名 Free 预览 (plan 2026-06-10 T1) ---
+    # 运行时可调开关（admin 热翻，不重启 gateway）。
+    # 与 GatewaySettings.enable_anonymous_preview 的关系：
+    #   两者必须同时为 True 才放行匿名预览（双门）。
+    #   env flag 是部署级开关，此字段是运行时熔断开关。
+    #
+    # **类型用 StrictBool**（同 cosyvoice_clone_general_availability_enabled）：
+    # 普通 bool 下 "1" / "on" / "true" 字符串会被 Pydantic 宽松解析为 True，
+    # admin UI bug 或 JSON marshalling 问题可能意外开启匿名预览面。
+    # StrictBool 只接受 Python True / False。
+    anonymous_free_preview_enabled: StrictBool = False
+
+    # 非终态匿名预览任务的最大并发数（AD-8 in-flight gate）。
+    # ≥ 此值 → 429（匿名不饿死付费任务）。admin 可在灰度期调大。
+    # 默认 2：500/天 ÷ 2 并发槽位，灰度初期保守。
+    anonymous_preview_max_in_flight: int = 2
+
     @field_validator("whisper_alignment_trigger")
     @classmethod
     def validate_whisper_alignment_trigger(cls, v: str) -> str:

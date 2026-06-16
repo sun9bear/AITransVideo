@@ -14,6 +14,7 @@ import {
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { useConfirmDialog } from "@/components/ui/confirm-dialog"
 import {
   acceptSegmentDraft,
   cancelEditing,
@@ -115,6 +116,7 @@ export default function VideoEditPage() {
   const params = useParams()
   const router = useRouter()
   const jobId = ((params.jobId as string) ?? "").trim()
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const [job, setJob] = useState<JobSummary | null>(null)
   const [resource, setResource] = useState<EditingSegmentsResponse | null>(null)
@@ -992,7 +994,12 @@ export default function VideoEditPage() {
   // ---- Abandon / Commit ----
 
   const handleAbandon = useCallback(async () => {
-    if (!window.confirm("确定要放弃本次修改吗？所有编辑将丢失，已消耗的点数不退。")) return
+    const confirmed = await confirm({
+      title: "放弃修改",
+      description: "确定要放弃本次修改吗？所有编辑将丢失，已消耗的点数不退。",
+      destructive: true,
+    })
+    if (!confirmed) return
     try {
       await cancelEditing(jobId)
       toast.success("已放弃本次修改")
@@ -1000,7 +1007,7 @@ export default function VideoEditPage() {
     } catch (error) {
       toast.error(`放弃失败: ${getErrorMessage(error)}`)
     }
-  }, [jobId, router])
+  }, [confirm, jobId, router])
 
   const handleOpenCommitModal = useCallback(() => {
     setCommitStrategy("overwrite")
@@ -1675,6 +1682,8 @@ export default function VideoEditPage() {
         onClose={() => setCreateSpeakerDialogOpen(false)}
         onCreated={handleSpeakerCreated}
       />
+
+      {confirmDialog}
     </div>
   )
 }

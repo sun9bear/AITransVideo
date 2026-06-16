@@ -313,6 +313,14 @@ class Job(Base):
     # --- LIVE (V3-6: from compute_job_policy, current value: "standard") ---
     #   "quality_tier": str          # from policy at create time; "standard" | "high" | "flagship"
 
+    # --- APF P0 anonymous preview (migration 035, 2026-06-10) ---
+    # True for jobs spawned via the anonymous preview funnel; used by the
+    # partial index ix_jobs_anon_preview_status for fast status queries on
+    # preview jobs without touching the main jobs index.
+    is_anonymous_preview: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
     # --- Smart MVP P2 skeleton (plan 2026-05-13 §4.2 / §4.3) ---
     # Mirrors JobRecord.smart_state from Job API (synced via metering callback,
     # see job_intercept.update_job_metering allowed_keys whitelist). Read by
@@ -1542,4 +1550,120 @@ class PanOauthState(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# APF P0 anonymous preview tables (migration 035, 2026-06-10)
+# ---------------------------------------------------------------------------
+
+
+class AnonymousPreviewDailyUsage(Base):
+    """Per-(scope, scope_key, mode, usage_date) rate-limit counter.
+
+    scope ∈ 'global' | 'ip' | 'device' | 'source'. scope_key holds the
+    HMAC-SHA256 hex of the raw value — no raw IP / device / source text is
+    persisted. The unique index ``uq_anon_preview_daily_usage`` is the
+    ON CONFLICT target for PgRateLimitCounterStore's atomic upsert.
+    """
+
+    __tablename__ = "anonymous_preview_daily_usage"
+    __table_args__ = (
+        Index(
+            "uq_anon_preview_daily_usage",
+            "scope",
+            "scope_key",
+            "mode",
+            "usage_date",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="free"
+    )
+    usage_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AnonymousSession(Base):
+    """Anonymous visitor session identified by HMAC token hash.
+
+    claim_user_id is left NULL until Phase 4 when a user registers after
+    a preview and claims their anonymous session.
+    """
+
+    __tablename__ = "anonymous_sessions"
+    __table_args__ = (
+        Index("ix_anonymous_sessions_expires_at", "expires_at"),
+    )
+
+    session_id_hash: Mapped[str] = mapped_column(String(128), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    # Phase 4 留行
+    claim_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+
+
+class AnonymousPreviewRecord(Base):
+    """Status-only intake record for an anonymous preview request.
+
+    Column names mirror src.services.anonymous_preview_intake.PreviewRecord
+    field names. audit is JSONB (matching project-wide JSONB convention).
+    job_id is a string FK to jobs.job_id (not UUID) — nullable until a
+    preview job is actually spawned (APF Phase 3+).
+    """
+
+    __tablename__ = "anonymous_preview_records"
+    __table_args__ = (
+        Index("ix_anon_preview_records_session_id", "session_id"),
+        Index("ix_anon_preview_records_expires_at", "expires_at"),
+    )
+
+    preview_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    status_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="free"
+    )
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase 4 留行
+    claim_token_placeholder: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
+    audit: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
     )

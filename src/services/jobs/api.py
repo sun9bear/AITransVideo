@@ -946,6 +946,10 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                             if payload.get("express_consent_parse_error")
                             else None
                         ),
+                        # APF P0 T5：匿名预览标记 passthrough（严格 is True，
+                        # 拒 "true"/1 coercion）。Gateway 匿名 surface 写入，
+                        # 登录路径不带此字段 → 恒 False。
+                        anonymous_preview=payload.get("anonymous_preview") is True,
                     )
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return

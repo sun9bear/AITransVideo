@@ -108,11 +108,19 @@ def download_keys_for(service_mode: str | None) -> frozenset[str]:
     Default (unknown / None) = Studio. Express and free are the restrictive
     branches (free = Phase 2a gate #5); express matches
     src/services/jobs/api.py:_is_express_job (literal ``"express"``).
+
+    ``anonymous_preview`` (APF P0): stream-only, no download keys — the
+    anonymous preview funnel is explicitly stream-only (AD-6).  Kept as an
+    explicit branch (never the Studio default) so a future configuration
+    change cannot accidentally grant download access via a mode fallthrough.
     """
     if service_mode == "express":
         return EXPRESS_ALLOWED_DOWNLOAD_KEYS
     if service_mode == "free":
         return FREE_ALLOWED_DOWNLOAD_KEYS
+    if service_mode == "anonymous_preview":
+        # AD-6: anonymous previews are stream-only; no download permitted.
+        return frozenset()
     return STUDIO_ALLOWED_DOWNLOAD_KEYS
 
 
@@ -129,11 +137,18 @@ def stream_kinds_for(service_mode: str | None) -> frozenset[str]:
     Mirrors ``download_keys_for`` semantics — Gateway uses this BEFORE
     issuing a 302 to R2 so an Express user can't smuggle ``/stream/audio``
     past the Job API allowlist by reaching Gateway directly.
+
+    ``anonymous_preview`` (APF P0): only ``video`` — no audio, no poster
+    download.  Explicit branch (not aliased to free) so future per-mode
+    unlock can open them independently.
     """
     if service_mode == "express":
         return EXPRESS_ALLOWED_STREAM_KINDS
     if service_mode == "free":
         return FREE_ALLOWED_STREAM_KINDS
+    if service_mode == "anonymous_preview":
+        # AD-6 / AD-9: anonymous preview allows streaming video only.
+        return frozenset({"video"})
     return STUDIO_ALLOWED_STREAM_KINDS
 
 
@@ -161,11 +176,19 @@ def eager_push_keys_for(service_mode: str | None) -> frozenset[str]:
 
     Caller adds ``editor.jianying_draft_zip`` separately when
     ``JobRecord.jianying_draft_zip_path`` is non-null.
+
+    ``anonymous_preview`` (APF P0): empty set — preview artifacts are
+    served stream-only via Job API proxy (AD-6); no eager R2 push.
+    Explicit branch so the sweeper never silently applies the Studio
+    default to anonymous jobs.
     """
     if service_mode == "express":
         return EAGER_PUSH_TO_R2_KEYS_EXPRESS
     if service_mode == "free":
         return EAGER_PUSH_TO_R2_KEYS_FREE
+    if service_mode == "anonymous_preview":
+        # AD-6: no R2 push for anonymous preview — local stream-only.
+        return frozenset()
     return EAGER_PUSH_TO_R2_KEYS_STUDIO
 
 
