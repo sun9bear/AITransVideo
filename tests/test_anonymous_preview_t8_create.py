@@ -7,6 +7,7 @@ probe/admin）注入 fake，逐门断言 fail-closed 矩阵与零结算所有权
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -70,6 +71,7 @@ class _FakeRecordModel(_Base):
     __tablename__ = "records_fake_t8"
     preview_id = Column(String, primary_key=True)
     job_id = Column(String)
+    claim_token_placeholder = Column(String)
     expires_at = Column(DateTime(timezone=True))
 
 
@@ -418,3 +420,31 @@ async def test_create_capacity_lock_uses_postgresql_transaction_advisory_lock() 
     assert len(statements) == 1
     assert "pg_advisory_xact_lock" in str(statements[0][0])
     assert isinstance(statements[0][1]["lock_key"], int)
+
+
+def test_create_reservation_claim_marker_uses_short_ttl() -> None:
+    now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+
+    fresh = api._create_reservation_claim_token(now=now)
+    expired = api._create_reservation_claim_token(now=now - timedelta(minutes=6))
+    cutoff = api._create_reservation_cutoff_token(now=now)
+
+    assert fresh.startswith("creating_until:")
+    assert expired.startswith("creating_until:")
+    assert fresh > cutoff
+    assert expired < cutoff
+
+
+def test_create_reservation_count_uses_marker_ttl_not_preview_ttl() -> None:
+    src = inspect.getsource(api._reserve_create_capacity)
+
+    assert "_create_reservation_cutoff_token" in src
+    assert "_create_reservation_claim_token" in src
+    assert "claim_token_placeholder" in src
+    assert "AnonymousPreviewRecord.expires_at" not in src
+
+
+def test_reset_create_claim_clears_reservation_marker() -> None:
+    src = inspect.getsource(api._reset_create_claim).replace(" ", "")
+
+    assert "claim_token_placeholder=None" in src
