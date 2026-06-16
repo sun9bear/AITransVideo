@@ -120,6 +120,13 @@ class _FakeStreamRequest(_FakeRequest):
             await asyncio.sleep(0)
 
 
+class _BodyForbiddenStreamRequest(_FakeStreamRequest):
+    """Real Starlette-style request: stream() exists, body() must not be used."""
+
+    async def body(self) -> bytes:
+        raise AssertionError("handle_anonymous_upload must consume stream(), not body()")
+
+
 def _make_fake_orm_row(preview_id: str = "prv_test001") -> Any:
     """Return a minimal AnonymousPreviewRecord-like object for ORM tests."""
     row = MagicMock()
@@ -385,6 +392,23 @@ class TestSha256:
         )
         assert actual_hash == expected_hash
         assert size == len(body)
+
+    @pytest.mark.asyncio
+    async def test_stream_request_never_falls_back_to_body(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AIVIDEOTRANS_PROJECTS_DIR", str(tmp_path))
+        body = b"starlette streaming body " * 100
+        expected_hash = hashlib.sha256(body).hexdigest()
+        req = _BodyForbiddenStreamRequest(body=body)
+        path, actual_hash, size = await handle_anonymous_upload(
+            request=req,
+            session_hash="sess_hash_stream_only",
+            flag_enabled=True,
+            admin_enabled=True,
+            max_upload_bytes=200 * 1024 * 1024,
+        )
+        assert actual_hash == expected_hash
+        assert size == len(body)
+        assert path.read_bytes() == body
 
 
 # ---------------------------------------------------------------------------
