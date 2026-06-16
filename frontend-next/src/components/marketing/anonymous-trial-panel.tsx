@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { UploadCloud, CheckCircle2, AlertCircle, Loader2, Film } from "lucide-react"
+import { UploadCloud, CheckCircle2, AlertCircle, Loader2, Film, Minus, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -10,6 +10,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 import { buttonVariants } from "@/components/ui/button"
+import { useConfirmDialog } from "@/components/ui/confirm-dialog"
 import { cn } from "@/lib/utils"
 import {
   uploadPreviewVideo,
@@ -218,7 +219,9 @@ function ErrorBlock({ message, onRetry }: { message: string; onRetry: () => void
 
 export function AnonymousTrialPanel({ className }: { className?: string }) {
   const [open, setOpen] = useState(false)
+  const [minimized, setMinimized] = useState(false)
   const [state, setState] = useState<PanelState>(INITIAL_STATE)
+  const { confirm, confirmDialog } = useConfirmDialog()
   // 服务端热配置的大小/时长限制；拉取失败保持出厂默认（200MB / 180s）。
   const [limits, setLimits] = useState<PreviewLimits>(DEFAULT_PREVIEW_LIMITS)
   // 匿名分片通道（plan §9.5）：A6 limits 拉不到/enabled=false → null，
@@ -286,22 +289,48 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     pollGenRef.current += 1
     pollErrorsRef.current = 0
     speedRef.current = null
+    setMinimized(false)
     setState(INITIAL_STATE)
   }
 
-  function handleOpenChange(next: boolean, eventDetails?: { reason?: string }) {
-    // 上传/处理中误触弹窗外区域或 Esc 不关闭（2026-06-12 用户反馈：桌面点
-    // 空白处弹窗关闭、上传作废；手机点遮罩同源）——关闭会 resetPanel 丢掉
-    // 进行中的上传/轮询。右上角 X（close-press）保留为显式退出通道。
-    if (
-      !next &&
-      (state.step === 'uploading' || state.step === 'processing') &&
-      (eventDetails?.reason === 'outside-press' || eventDetails?.reason === 'escape-key')
-    ) {
+  const panelBusy = state.step === 'uploading' || state.step === 'processing'
+  const canMinimize = panelBusy
+
+  function handleOpenChange(next: boolean) {
+    if (next) {
+      setMinimized(false)
+      setOpen(true)
       return
     }
-    setOpen(next)
-    if (!next) resetPanel()
+    // Ignore backdrop clicks and Escape. The explicit X button handles
+    // confirmation before clearing upload/polling state.
+  }
+
+  async function requestClose() {
+    if (panelBusy) {
+      const confirmed = await confirm({
+        title: "确认关闭上传窗口？",
+        description: "当前视频仍在上传或处理中。关闭后会清空这个窗口的进度，可能需要重新上传或重新发起预览。",
+        confirmLabel: "确认关闭",
+        cancelLabel: "继续等待",
+        destructive: true,
+      })
+      if (!confirmed) return
+    }
+    setOpen(false)
+    setMinimized(false)
+    resetPanel()
+  }
+
+  function minimizePanel() {
+    if (!canMinimize) return
+    setOpen(false)
+    setMinimized(true)
+  }
+
+  function restorePanel() {
+    setMinimized(false)
+    setOpen(true)
   }
 
   // ── File selected ──
@@ -803,31 +832,122 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     return null
   }
 
-  return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogTrigger
-        className={cn(
-          buttonVariants({ variant: "default", size: "lg" }),
-          "h-11 px-6 text-base",
-          className,
-        )}
+  function renderMinimizedWidget() {
+    if (!minimized) return null
+
+    const isUpload = state.step === 'uploading'
+    const isProcessing = state.step === 'processing'
+    const isConsent = state.step === 'consent'
+    const isReady = state.step === 'ready'
+    const pct = isUpload ? state.uploadPct : (state.progress ?? (isConsent || isReady ? 100 : null))
+    const title = isUpload
+      ? '视频上传中'
+      : isProcessing
+        ? '预览生成中'
+        : isConsent
+          ? '上传已完成'
+          : isReady
+            ? '预览已完成'
+            : state.step === 'failed'
+              ? '预览生成失败'
+              : '上传试用'
+    const detail = isUpload
+      ? `${state.uploadSpeed ? `${state.uploadSpeed} · ` : ''}${state.uploadPct}%`
+      : isProcessing
+        ? (state.stageLabel || '处理中')
+        : isConsent
+          ? '点击确认授权并生成预览'
+          : isReady
+            ? '点击查看预览结果'
+            : '点击展开窗口'
+
+    const Icon = isConsent || isReady ? CheckCircle2 : state.step === 'failed' || state.step === 'error' ? AlertCircle : Loader2
+
+    return (
+      <button
+        type="button"
+        className="fixed bottom-5 right-5 z-[70] w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border bg-background p-3 text-left text-sm shadow-xl ring-1 ring-foreground/10 transition hover:border-primary/40 hover:shadow-2xl"
+        onClick={restorePanel}
+        aria-label="展开上传试用窗口"
       >
-        立即试用
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="text-lg">免注册上传试用</DialogTitle>
-        </DialogHeader>
-
-        <div className="mt-1">
-          {renderBody()}
+        <div className="flex items-start gap-3">
+          <Icon
+            className={cn(
+              "mt-0.5 h-5 w-5 shrink-0",
+              isConsent || isReady ? "text-emerald-500" : state.step === 'failed' || state.step === 'error' ? "text-destructive" : "animate-spin text-primary",
+            )}
+            aria-hidden="true"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-medium text-foreground">{title}</span>
+              <span className="text-xs text-primary">展开</span>
+            </div>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">{detail}</p>
+            {pct !== null && (
+              <div className="mt-2">
+                <ProgressBar pct={Math.max(0, Math.min(100, pct))} />
+              </div>
+            )}
+          </div>
         </div>
+      </button>
+    )
+  }
 
-        <p className="text-center text-xs text-muted-foreground">
-          本地视频 · 前 {formatPreviewDuration(limits.preview_seconds)}预览 · 带水印
-          {limits.active_lane === 'express' ? ' · 快捷版真实管线' : ''}
-        </p>
-      </DialogContent>
-    </Dialog>
+  return (
+    <>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogTrigger
+          className={cn(
+            buttonVariants({ variant: "default", size: "lg" }),
+            "h-11 px-6 text-base",
+            className,
+          )}
+        >
+          立即试用
+        </DialogTrigger>
+        <DialogContent className="sm:max-w-lg" showCloseButton={false}>
+          <DialogHeader>
+            <div className="flex items-center justify-between gap-3">
+              <DialogTitle className="text-lg">免注册上传试用</DialogTitle>
+              <div className="flex items-center gap-1">
+                {canMinimize && (
+                  <button
+                    type="button"
+                    className={cn(buttonVariants({ variant: "ghost", size: "icon-sm" }))}
+                    onClick={minimizePanel}
+                    aria-label="最小化上传窗口"
+                    title="最小化"
+                  >
+                    <Minus className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={cn(buttonVariants({ variant: "ghost", size: "icon-sm" }))}
+                  onClick={() => void requestClose()}
+                  aria-label="关闭上传窗口"
+                  title="关闭"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div className="mt-1">
+            {renderBody()}
+          </div>
+
+          <p className="text-center text-xs text-muted-foreground">
+            本地视频 · 前 {formatPreviewDuration(limits.preview_seconds)}预览 · 带水印
+            {limits.active_lane === 'express' ? ' · 快捷版真实管线' : ''}
+          </p>
+        </DialogContent>
+      </Dialog>
+      {renderMinimizedWidget()}
+      {confirmDialog}
+    </>
   )
 }
