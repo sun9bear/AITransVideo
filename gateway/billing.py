@@ -1139,7 +1139,16 @@ async def _process_payment_event(
     _is_refund_transition = (
         order.status in ("paid", "partial_refunded") and new_status == "refunded"
     )
-    if order.status in ("paid", "partial_refunded", "refunded", "cancelled") and not _is_refund_transition:
+    _is_paid_after_early_partial_refund = (
+        order.status == "partial_refunded"
+        and new_status == "paid"
+        and order.paid_at is None
+    )
+    if (
+        order.status in ("paid", "partial_refunded", "refunded", "cancelled")
+        and not _is_refund_transition
+        and not _is_paid_after_early_partial_refund
+    ):
         event.processed = True
         event.error_message = f"Order already in terminal state: {order.status}"
         event.processed_at = now
@@ -1162,7 +1171,10 @@ async def _process_payment_event(
         and refund_amount_fen is not None
         and refund_amount_fen < order.amount_cny
     )
-    settlement_status = "partial_refunded" if is_known_partial_refund else new_status
+    if _is_paid_after_early_partial_refund:
+        settlement_status = "partial_refunded"
+    else:
+        settlement_status = "partial_refunded" if is_known_partial_refund else new_status
 
     # Update order status
     order.status = settlement_status
