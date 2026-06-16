@@ -215,6 +215,28 @@ async def test_reconcile_once_rolls_back_failed_refresh_before_final_commit():
 
 
 @pytest.mark.asyncio
+async def test_reconcile_once_commits_attempt_marker_before_later_rollback():
+    """A later failed order must not roll back earlier retry markers in the batch."""
+    first = _order("pending")
+    second = _order("created")
+    session = _FakeSession([[first, second]])
+
+    async def refresh(*, db, order):
+        if order is second:
+            raise RuntimeError("provider failure after first marker")
+
+    stats = await recon.reconcile_once(
+        session_factory=lambda: session,
+        refresh_fn=refresh,
+    )
+
+    assert stats == {"scanned": 2, "settled": 0, "errors": 1}
+    assert first.last_reconciled_at is not None
+    assert second.last_reconciled_at is not None
+    assert session.events == ["commit", "rollback", "commit"]
+
+
+@pytest.mark.asyncio
 async def test_sweeper_loop_survives_tick_failure(monkeypatch):
     monkeypatch.setattr(recon, "INITIAL_DELAY_S", 0)
     monkeypatch.setattr(recon, "SWEEP_INTERVAL_S", 0)
