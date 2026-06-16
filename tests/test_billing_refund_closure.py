@@ -13,7 +13,7 @@ from __future__ import annotations
 import inspect
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +27,7 @@ if _GATEWAY_DIR not in sys.path:
 import billing  # noqa: E402
 import payment_provider_paddle as paddle  # noqa: E402
 import payment_provider_wechat as wechat  # noqa: E402
+import subscriptions  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,9 @@ class _FakeSession:
         self.added.append(obj)
 
     async def commit(self):
+        pass
+
+    async def flush(self):
         pass
 
 
@@ -416,16 +420,21 @@ async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatc
 
 @pytest.mark.asyncio
 async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch):
+    plus_paid_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pro_period_end = datetime(2027, 1, 1, tzinfo=timezone.utc)
     user = SimpleNamespace(id="u1", plan_code="pro")
     sub = SimpleNamespace(
         user_id="u1", plan_code="pro", billing_period="monthly",
         provider="wechatpay", status="active", cancelled_at=None, updated_at=None,
+        current_period_start=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        current_period_end=pro_period_end,
     )
     lower_paid_order = _order(
         id="ord-plus",
         target_plan_code="plus",
         status="paid",
         billing_period="monthly",
+        paid_at=plus_paid_at,
     )
     session = _FakeSession([[user], [sub], [lower_paid_order]])
 
@@ -447,9 +456,88 @@ async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch
     assert sub.plan_code == "plus"
     assert sub.cancelled_at is None
     assert sub.updated_at == now
+    assert sub.current_period_start == plus_paid_at
+    assert sub.current_period_end == plus_paid_at + timedelta(days=30)
     audit = [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"]
     assert len(audit) == 1
     assert audit[0].old_value == "pro" and audit[0].new_value == "plus"
+
+
+@pytest.mark.asyncio
+async def test_refund_recall_locks_user_and_subscription_before_mutation(monkeypatch):
+    user = SimpleNamespace(id="u1", plan_code="plus")
+    sub = SimpleNamespace(
+        user_id="u1", plan_code="plus", status="active",
+        cancelled_at=None, updated_at=None,
+    )
+    session = _FakeSession([[user], [sub], []])
+
+    async def fake_revoke(db, *, user_id, related_order_id, reason_code="refund_revoke"):
+        return 1
+
+    import credits_service
+    monkeypatch.setattr(credits_service, "revoke_buckets_for_order", fake_revoke)
+
+    await billing._recall_entitlements_for_refund(
+        session, order=_order(target_plan_code="plus"),
+        now=datetime.now(timezone.utc),
+    )
+
+    user_stmt = session.executed[0]
+    sub_stmt = session.executed[1]
+    assert getattr(user_stmt, "_for_update_arg", None) is not None
+    assert user_stmt.get_execution_options().get("populate_existing") is True
+    assert getattr(sub_stmt, "_for_update_arg", None) is not None
+    assert sub_stmt.get_execution_options().get("populate_existing") is True
+
+
+@pytest.mark.asyncio
+async def test_paid_settlement_locks_user_row_before_subscription_upsert(monkeypatch):
+    order = _order(id="ord-paid", status="pending", target_plan_code="plus")
+    user = SimpleNamespace(id="u1", plan_code="free")
+    event = SimpleNamespace(processed=False, error_message=None, processed_at=None)
+    session = _FakeSession([["evt-row-1"], [event], [order], [user]])
+
+    async def fake_record_invoice_for_order(db, *, order, settled_at, status):
+        return SimpleNamespace(subscription_id=None)
+
+    async def fake_upsert_active_subscription(db, *, user, order, paid_at):
+        return SimpleNamespace(id="sub-1", current_period_end=None)
+
+    async def fake_ensure_subscription_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        billing, "record_invoice_for_order", fake_record_invoice_for_order
+    )
+    monkeypatch.setattr(
+        billing, "upsert_active_subscription", fake_upsert_active_subscription
+    )
+    import credits_service
+    monkeypatch.setattr(
+        credits_service, "ensure_subscription_bucket", fake_ensure_subscription_bucket
+    )
+
+    await billing._process_payment_event(
+        db=session,
+        provider="wechatpay",
+        provider_event_id="evt-paid-lock",
+        event_type="PAY.SUCCESS",
+        order_id=order.id,
+        new_status="paid",
+        signature_valid=True,
+        raw_payload={},
+    )
+
+    user_stmt = session.executed[3]
+    assert getattr(user_stmt, "_for_update_arg", None) is not None
+    assert user_stmt.get_execution_options().get("populate_existing") is True
+
+
+def test_upsert_active_subscription_locks_active_subscription_row():
+    src = inspect.getsource(subscriptions.upsert_active_subscription)
+    assert ".with_for_update()" in src
+    assert "populate_existing=True" in src
 
 
 @pytest.mark.asyncio
