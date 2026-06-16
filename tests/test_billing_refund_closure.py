@@ -334,6 +334,22 @@ def test_extract_refund_amount_fen():
     assert billing._extract_refund_amount_fen("alipay", {}) is None
 
 
+def test_extract_paddle_refund_amount_prefers_subtotal_before_tax():
+    assert billing._extract_refund_amount_fen(
+        "paddle",
+        {
+            "data": {
+                "totals": {
+                    "subtotal": "600",
+                    "tax": "480",
+                    "total": "1080",
+                    "currency_code": "CNY",
+                }
+            }
+        },
+    ) == 600
+
+
 # ---------------------------------------------------------------------------
 # 权益回收
 # ---------------------------------------------------------------------------
