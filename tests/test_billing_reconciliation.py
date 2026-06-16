@@ -237,6 +237,49 @@ async def test_reconcile_once_commits_attempt_marker_before_later_rollback():
 
 
 @pytest.mark.asyncio
+async def test_reconcile_once_default_refresh_surfaces_provider_failures(monkeypatch):
+    order = _order("pending")
+    session = _FakeSession([[order]])
+    seen_raise_flags = []
+
+    import billing
+
+    async def fake_default_refresh(*, db, order, raise_on_error=False):
+        seen_raise_flags.append(raise_on_error)
+        if raise_on_error:
+            raise RuntimeError("provider query boom")
+
+    monkeypatch.setattr(billing, "_refresh_order_from_provider", fake_default_refresh)
+
+    stats = await recon.reconcile_once(session_factory=lambda: session)
+
+    assert stats == {"scanned": 1, "settled": 0, "errors": 1}
+    assert seen_raise_flags == [True]
+    assert session.events == ["rollback", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_order_from_provider_can_raise_provider_query_failures(monkeypatch):
+    import billing
+
+    order = _order("pending", provider="paddle")
+
+    class _Provider:
+        async def query_order(self, *, order_id, provider_order_id=None):
+            raise RuntimeError("provider timeout")
+
+    monkeypatch.setattr(billing, "get_provider", lambda provider_name: _Provider())
+
+    await billing._refresh_order_from_provider(db=SimpleNamespace(), order=order)
+    with pytest.raises(RuntimeError, match="provider timeout"):
+        await billing._refresh_order_from_provider(
+            db=SimpleNamespace(),
+            order=order,
+            raise_on_error=True,
+        )
+
+
+@pytest.mark.asyncio
 async def test_sweeper_loop_survives_tick_failure(monkeypatch):
     monkeypatch.setattr(recon, "INITIAL_DELAY_S", 0)
     monkeypatch.setattr(recon, "SWEEP_INTERVAL_S", 0)
