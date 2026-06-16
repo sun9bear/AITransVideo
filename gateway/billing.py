@@ -281,6 +281,7 @@ async def _refresh_order_from_provider(
     *,
     db: AsyncSession,
     order: PaymentOrder,
+    raise_on_error: bool = False,
 ) -> None:
     try:
         provider = get_provider(order.provider)
@@ -296,6 +297,8 @@ async def _refresh_order_from_provider(
         return
     except Exception as exc:
         logger.warning("Provider %s order query failed for %s: %s", order.provider, order.id, exc)
+        if raise_on_error:
+            raise
         return
 
     if query_result is None:
@@ -311,6 +314,8 @@ async def _refresh_order_from_provider(
             )
         except ValueError as exc:
             logger.warning("Ignoring alipay query result for %s: %s", order.id, exc)
+            if raise_on_error:
+                raise
             return
 
     if order.provider == "paddle":
@@ -327,6 +332,8 @@ async def _refresh_order_from_provider(
             )
         except ValueError as exc:
             logger.warning("Ignoring paddle query result for %s: %s", order.id, exc)
+            if raise_on_error:
+                raise
             return
 
     if order.provider == "wechatpay":
@@ -351,6 +358,8 @@ async def _refresh_order_from_provider(
                 )
             except ValueError as exc:
                 logger.warning("Ignoring wechat query result for %s: %s", order.id, exc)
+                if raise_on_error:
+                    raise
                 return
 
     if query_result.provider_order_id and order.provider_order_id != query_result.provider_order_id:

@@ -103,10 +103,12 @@ async def reconcile_once(
     ``database.async_session`` 与 ``billing._refresh_order_from_provider``。
     单笔订单的 provider 查询异常只记 errors 计数，不中断其余订单。
     """
+    refresh_kwargs = {}
     if refresh_fn is None:
         # 延迟 import：避免模块加载期与 billing 的依赖链耦合（billing 不
         # import 本模块，方向是安全的，但 lifespan try/except 兜底更稳）。
         from billing import _refresh_order_from_provider as refresh_fn
+        refresh_kwargs = {"raise_on_error": True}
 
     factory = session_factory or async_session
     stats = {"scanned": 0, "settled": 0, "errors": 0}
@@ -120,7 +122,7 @@ async def reconcile_once(
             status_before = order.status
             attempt_failed = False
             try:
-                await refresh_fn(db=db, order=order)
+                await refresh_fn(db=db, order=order, **refresh_kwargs)
             except Exception:
                 attempt_failed = True
                 stats["errors"] += 1
