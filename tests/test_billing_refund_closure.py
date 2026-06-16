@@ -738,6 +738,65 @@ async def test_paid_event_after_early_partial_refund_grants_remaining_entitlemen
     assert invoice_statuses == ["partial_refunded", "paid"]
 
 
+@pytest.mark.asyncio
+async def test_cumulative_partial_refunds_recall_when_total_reaches_order_amount(monkeypatch):
+    order = _order(status="paid", amount_cny=990, metadata_json={})
+    invoice_statuses: list[str] = []
+    recalls: list[str] = []
+
+    async def fake_record_invoice_for_order(db, *, order, settled_at, status):
+        invoice_statuses.append(status)
+        return SimpleNamespace(status=status)
+
+    async def fake_recall_entitlements(db, *, order, now):
+        recalls.append(order.id)
+
+    monkeypatch.setattr(
+        billing, "record_invoice_for_order", fake_record_invoice_for_order
+    )
+    monkeypatch.setattr(
+        billing, "_recall_entitlements_for_refund", fake_recall_entitlements
+    )
+
+    first_event = SimpleNamespace(processed=False, error_message=None, processed_at=None)
+    first_session = _FakeSession([["evt-row-first"], [first_event], [order]])
+    await billing._process_payment_event(
+        db=first_session,
+        provider="wechatpay",
+        provider_event_id="evt-refund-500",
+        event_type="REFUND.SUCCESS",
+        order_id=order.id,
+        new_status="refunded",
+        signature_valid=True,
+        raw_payload={},
+        refund_amount_fen=500,
+    )
+
+    assert order.status == "partial_refunded"
+    assert order.metadata_json["refund_amount_fen_total"] == 500
+    assert invoice_statuses == ["partial_refunded"]
+    assert recalls == []
+
+    second_event = SimpleNamespace(processed=False, error_message=None, processed_at=None)
+    second_session = _FakeSession([["evt-row-second"], [second_event], [order]])
+    await billing._process_payment_event(
+        db=second_session,
+        provider="wechatpay",
+        provider_event_id="evt-refund-490",
+        event_type="REFUND.SUCCESS",
+        order_id=order.id,
+        new_status="refunded",
+        signature_valid=True,
+        raw_payload={},
+        refund_amount_fen=490,
+    )
+
+    assert order.status == "refunded"
+    assert order.metadata_json["refund_amount_fen_total"] == 990
+    assert invoice_statuses == ["partial_refunded", "refunded"]
+    assert recalls == [order.id]
+
+
 def test_receive_webhook_wires_refund_binding_and_amount():
     src = inspect.getsource(billing.receive_webhook)
     assert "_resolve_refund_order_id" in src, "退款绑定未接入 receive_webhook"

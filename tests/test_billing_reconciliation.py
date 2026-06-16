@@ -158,6 +158,16 @@ def test_candidate_stmt_retries_use_last_reconciled_at_not_updated_at():
     assert "payment_orders.updated_at <=" not in sql
 
 
+def test_candidate_stmt_includes_early_partial_refunds_without_paid_at():
+    sql = str(
+        recon._candidate_orders_stmt(datetime.now(timezone.utc)).compile(
+            compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "partial_refunded" in sql
+    assert "payment_orders.paid_at IS NULL" in sql
+
+
 @pytest.mark.asyncio
 async def test_reconcile_once_bumps_last_reconciled_at_even_on_error():
     """每次尝试后无条件 bump last_reconciled_at——失败的单也要让位。"""
