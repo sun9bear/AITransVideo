@@ -147,7 +147,7 @@ async def reconcile_once(
                     order.provider,
                     status_before,
                 )
-        await db.commit()
+            await db.commit()
     return stats
 
 
