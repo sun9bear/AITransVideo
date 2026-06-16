@@ -269,19 +269,31 @@ def test_reconcile_endpoint_runs_reconcile_once(monkeypatch):
     from fastapi.testclient import TestClient
     import admin_billing_api  # noqa: F401
 
+    calls = {"n": 0}
+
     async def fake_reconcile_once(**kwargs):
+        calls["n"] += 1
         return {"scanned": 2, "settled": 1, "errors": 0}
 
     monkeypatch.setattr(recon, "reconcile_once", fake_reconcile_once)
     client = TestClient(
         _build_admin_app(SimpleNamespace(role="admin", id="a1"), [])
     )
-    resp = client.post("/api/admin/billing/reconcile")
+
+    rejected = client.post("/api/admin/billing/reconcile")
+    assert rejected.status_code == 403
+    assert calls["n"] == 0
+
+    resp = client.post(
+        "/api/admin/billing/reconcile",
+        headers={"origin": "http://testserver"},
+    )
     assert resp.status_code == 200
     assert resp.json() == {
         "ok": True,
         "stats": {"scanned": 2, "settled": 1, "errors": 0},
     }
+    assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +310,11 @@ def test_main_wiring_guards():
     )
     assert "from admin_billing_api import router as admin_billing_router" in src
     assert "app.include_router(admin_billing_router)" in src
+
+
+def test_admin_billing_recent_refunds_includes_partial_refunds():
+    src = (Path(_GATEWAY_DIR) / "admin_billing_api.py").read_text(encoding="utf-8")
+    assert 'PaymentOrder.status.in_(("refunded", "partial_refunded"))' in src
 
 
 def test_reconciliation_uses_single_settlement_entry():

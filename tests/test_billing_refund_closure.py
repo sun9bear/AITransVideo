@@ -37,6 +37,9 @@ class _FakeResult:
     def __init__(self, rows):
         self._rows = rows
 
+    def scalar_one(self):
+        return self._rows[0]
+
     def scalar_one_or_none(self):
         return self._rows[0] if self._rows else None
 
@@ -62,6 +65,9 @@ class _FakeSession:
 
     def add(self, obj):
         self.added.append(obj)
+
+    async def commit(self):
+        pass
 
 
 def _order(**overrides):
@@ -389,6 +395,47 @@ async def test_recall_keeps_newer_plan(monkeypatch):
     assert session.added == []
 
 
+@pytest.mark.asyncio
+async def test_partial_refund_keeps_order_non_terminal_for_later_full_refund(monkeypatch):
+    order = _order(status="paid", amount_cny=990)
+    event = SimpleNamespace(processed=False, error_message=None, processed_at=None)
+    session = _FakeSession([["evt-row-1"], [event], [order]])
+    invoice_statuses: list[str] = []
+    recalls: list[str] = []
+
+    async def fake_record_invoice_for_order(db, *, order, settled_at, status):
+        invoice_statuses.append(status)
+        return SimpleNamespace(status=status)
+
+    async def fake_recall_entitlements(db, *, order, now):
+        recalls.append(order.id)
+
+    monkeypatch.setattr(
+        billing, "record_invoice_for_order", fake_record_invoice_for_order
+    )
+    monkeypatch.setattr(
+        billing, "_recall_entitlements_for_refund", fake_recall_entitlements
+    )
+
+    settled = await billing._process_payment_event(
+        db=session,
+        provider="wechatpay",
+        provider_event_id="evt-partial-refund",
+        event_type="REFUND.SUCCESS",
+        order_id=order.id,
+        new_status="refunded",
+        signature_valid=True,
+        raw_payload={},
+        refund_amount_fen=500,
+    )
+
+    assert settled is False
+    assert order.status == "partial_refunded"
+    assert invoice_statuses == ["partial_refunded"]
+    assert recalls == []
+    assert event.processed is True
+
+
 # ---------------------------------------------------------------------------
 # 接线守卫
 # ---------------------------------------------------------------------------
@@ -406,4 +453,5 @@ def test_process_payment_event_partial_refund_guard():
     assert "refund_amount_fen is not None and refund_amount_fen < order.amount_cny" in src, (
         "部分退款守卫缺失：已知退款金额小于订单金额时不得自动回收权益"
     )
+    assert "partial_refunded" in src
     assert "_recall_entitlements_for_refund" in src
