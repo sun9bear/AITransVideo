@@ -154,10 +154,13 @@ async def upsert_active_subscription(
       handled by the caller so audit-log writes stay localized there.
     """
     result = await db.execute(
-        select(Subscription).where(
+        select(Subscription)
+        .where(
             Subscription.user_id == user.id,
             Subscription.status == "active",
         )
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     existing = result.scalar_one_or_none()
 

@@ -58,6 +58,7 @@ from plan_catalog import (
     valid_target_plan_codes,
 )
 from subscriptions import (
+    _period_end as _subscription_period_end,
     record_invoice_for_order,
     upsert_active_subscription,
 )
@@ -1180,7 +1181,12 @@ async def _process_payment_event(
         #    current gates still rely on. `subscriptions` is the canonical
         #    paid-state record; `user.plan_code` mirrors it so
         #    `entitlements.py` and `job_intercept.py` don't need to change.
-        user_result = await db.execute(select(User).where(User.id == order.user_id))
+        user_result = await db.execute(
+            select(User)
+            .where(User.id == order.user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         user = user_result.scalar_one_or_none()
 
         invoice = await record_invoice_for_order(
@@ -1271,7 +1277,12 @@ async def _recall_entitlements_for_refund(
       退款结算本身——发票/订单真值优先落库）
     """
     user = (
-        await db.execute(select(User).where(User.id == order.user_id))
+        await db.execute(
+            select(User)
+            .where(User.id == order.user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if user is None:
         logger.warning("Refund recall: user %s not found for order %s",
@@ -1280,10 +1291,13 @@ async def _recall_entitlements_for_refund(
 
     subscription = (
         await db.execute(
-            select(Subscription).where(
+            select(Subscription)
+            .where(
                 Subscription.user_id == user.id,
                 Subscription.status == "active",
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
 
@@ -1323,8 +1337,13 @@ async def _recall_entitlements_for_refund(
                 subscription.billing_period = remaining_paid_order.billing_period
             if getattr(remaining_paid_order, "provider", None):
                 subscription.provider = remaining_paid_order.provider
-            if getattr(remaining_paid_order, "paid_at", None):
-                subscription.current_period_start = remaining_paid_order.paid_at
+            fallback_paid_at = getattr(remaining_paid_order, "paid_at", None)
+            if isinstance(fallback_paid_at, datetime):
+                subscription.current_period_start = fallback_paid_at
+                subscription.current_period_end = _subscription_period_end(
+                    fallback_paid_at,
+                    getattr(remaining_paid_order, "billing_period", ""),
+                )
             subscription.updated_at = now
             subscription_restored = True
 
