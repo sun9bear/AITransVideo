@@ -30,6 +30,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -735,6 +736,8 @@ async def anonymous_preview_stream(
 # ---------------------------------------------------------------------------
 
 _CREATING_SENTINEL = "__creating__"
+_CREATE_RESERVATION_PREFIX = "creating_until:"
+_CREATE_RESERVATION_TTL_SECONDS = 5 * 60
 _SENTINEL_USER_EMAIL = "anonymous-preview@system"
 _READY_STATUS = "ready_for_mode"  # PreviewStatus.READY_FOR_MODE.value（契约钉死）
 _CREATE_CAPACITY_LOCK_KEY = int.from_bytes(
@@ -742,6 +745,17 @@ _CREATE_CAPACITY_LOCK_KEY = int.from_bytes(
     byteorder="big",
     signed=True,
 )
+
+
+def _create_reservation_claim_token(*, now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    expires_epoch = int(now.timestamp()) + _CREATE_RESERVATION_TTL_SECONDS
+    return f"{_CREATE_RESERVATION_PREFIX}{expires_epoch:010d}:{secrets.token_urlsafe(16)}"
+
+
+def _create_reservation_cutoff_token(*, now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return f"{_CREATE_RESERVATION_PREFIX}{int(now.timestamp()):010d}:"
 
 
 def _session_dialect_name(db: AsyncSession) -> Optional[str]:
@@ -812,6 +826,8 @@ async def _reserve_create_capacity(
 
     try:
         await _acquire_create_capacity_transaction_lock(db)
+        now = datetime.now(timezone.utc)
+        reservation_cutoff = _create_reservation_cutoff_token(now=now)
 
         job_count_result = await db.execute(
             select(func.count())
@@ -828,7 +844,10 @@ async def _reserve_create_capacity(
             .select_from(AnonymousPreviewRecord)
             .where(
                 AnonymousPreviewRecord.job_id == _CREATING_SENTINEL,
-                AnonymousPreviewRecord.expires_at > datetime.now(timezone.utc),
+                AnonymousPreviewRecord.claim_token_placeholder.like(
+                    f"{_CREATE_RESERVATION_PREFIX}%"
+                ),
+                AnonymousPreviewRecord.claim_token_placeholder >= reservation_cutoff,
             )
         )
         active_reservations = int(creating_count_result.scalar() or 0)
@@ -843,7 +862,10 @@ async def _reserve_create_capacity(
                 AnonymousPreviewRecord.preview_id == preview_id,
                 AnonymousPreviewRecord.job_id.is_(None),
             )
-            .values(job_id=_CREATING_SENTINEL)
+            .values(
+                job_id=_CREATING_SENTINEL,
+                claim_token_placeholder=_create_reservation_claim_token(now=now),
+            )
             .returning(AnonymousPreviewRecord.preview_id)
         )
         won_claim = claim.first() is not None
@@ -872,7 +894,7 @@ async def _reset_create_claim(db: "AsyncSession", preview_id: str) -> None:
                 AnonymousPreviewRecord.preview_id == preview_id,
                 AnonymousPreviewRecord.job_id == _CREATING_SENTINEL,
             )
-            .values(job_id=None)
+            .values(job_id=None, claim_token_placeholder=None)
         )
         await db.commit()
     except Exception as exc:
