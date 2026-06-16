@@ -1309,7 +1309,7 @@ async def _recall_entitlements_for_refund(
     fallback_plan_code = None
     if affected_current_access:
         remaining_paid_order = await _highest_remaining_paid_order_for_user(
-            db, order=order
+            db, order=order, at=now
         )
         fallback_plan_code = (
             getattr(remaining_paid_order, "target_plan_code", None)
@@ -1402,22 +1402,26 @@ async def _has_other_paid_order_for_plan(
     order: PaymentOrder,
 ) -> bool:
     result = await db.execute(
-        select(PaymentOrder.id)
+        select(PaymentOrder)
         .where(
             PaymentOrder.user_id == order.user_id,
             PaymentOrder.id != order.id,
             PaymentOrder.target_plan_code == order.target_plan_code,
             PaymentOrder.status.in_(("paid", "partial_refunded")),
         )
-        .limit(1)
     )
-    return result.scalar_one_or_none() is not None
+    now = datetime.now(timezone.utc)
+    return any(
+        _paid_order_active_at(paid_order, now)
+        for paid_order in result.scalars().all()
+    )
 
 
 async def _highest_remaining_paid_order_for_user(
     db: AsyncSession,
     *,
     order: PaymentOrder,
+    at: datetime,
 ) -> PaymentOrder | None:
     result = await db.execute(
         select(PaymentOrder)
@@ -1427,7 +1431,10 @@ async def _highest_remaining_paid_order_for_user(
             PaymentOrder.status.in_(("paid", "partial_refunded")),
         )
     )
-    paid_orders = list(result.scalars().all())
+    paid_orders = [
+        paid_order for paid_order in result.scalars().all()
+        if _paid_order_active_at(paid_order, at)
+    ]
     if not paid_orders:
         return None
     return max(
@@ -1460,3 +1467,26 @@ def _order_paid_sort_key(order: PaymentOrder) -> float:
     if paid_at.tzinfo is None:
         paid_at = paid_at.replace(tzinfo=timezone.utc)
     return paid_at.timestamp()
+
+
+def _paid_order_active_at(order: PaymentOrder, at: datetime) -> bool:
+    period_end = _paid_order_period_end(order)
+    if period_end is None:
+        return False
+    if period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return period_end > at
+
+
+def _paid_order_period_end(order: PaymentOrder) -> datetime | None:
+    paid_at = getattr(order, "paid_at", None)
+    if not isinstance(paid_at, datetime):
+        return None
+    if paid_at.tzinfo is None:
+        paid_at = paid_at.replace(tzinfo=timezone.utc)
+    return _subscription_period_end(
+        paid_at,
+        getattr(order, "billing_period", ""),
+    )
