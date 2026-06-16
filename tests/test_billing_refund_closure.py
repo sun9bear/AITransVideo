@@ -390,12 +390,18 @@ async def test_recall_downgrades_matching_plan(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatch):
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
     user = SimpleNamespace(id="u1", plan_code="plus")
     sub = SimpleNamespace(
         user_id="u1", plan_code="plus", status="active",
         cancelled_at=None, updated_at=None,
     )
-    other_paid_order = SimpleNamespace(id="ord-2", target_plan_code="plus")
+    other_paid_order = SimpleNamespace(
+        id="ord-2",
+        target_plan_code="plus",
+        billing_period="monthly",
+        paid_at=now - timedelta(days=1),
+    )
     session = _FakeSession([[user], [sub], [other_paid_order]])
     revoke_calls = {}
 
@@ -408,7 +414,7 @@ async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatc
 
     await billing._recall_entitlements_for_refund(
         session, order=_order(id="ord-1", target_plan_code="plus"),
-        now=datetime.now(timezone.utc),
+        now=now,
     )
 
     assert user.plan_code == "plus"
@@ -421,6 +427,7 @@ async def test_recall_keeps_same_plan_when_another_paid_order_remains(monkeypatc
 @pytest.mark.asyncio
 async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch):
     plus_paid_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 15, tzinfo=timezone.utc)
     pro_period_end = datetime(2027, 1, 1, tzinfo=timezone.utc)
     user = SimpleNamespace(id="u1", plan_code="pro")
     sub = SimpleNamespace(
@@ -444,7 +451,6 @@ async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch
     import credits_service
     monkeypatch.setattr(credits_service, "revoke_buckets_for_order", fake_revoke)
 
-    now = datetime.now(timezone.utc)
     await billing._recall_entitlements_for_refund(
         session,
         order=_order(id="ord-pro", target_plan_code="pro"),
@@ -461,6 +467,46 @@ async def test_recall_restores_lower_paid_plan_when_refunded_upgrade(monkeypatch
     audit = [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"]
     assert len(audit) == 1
     assert audit[0].old_value == "pro" and audit[0].new_value == "plus"
+
+
+@pytest.mark.asyncio
+async def test_recall_ignores_expired_lower_paid_plan_when_refunded_upgrade(monkeypatch):
+    now = datetime(2026, 3, 15, tzinfo=timezone.utc)
+    expired_paid_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    user = SimpleNamespace(id="u1", plan_code="pro")
+    sub = SimpleNamespace(
+        user_id="u1", plan_code="pro", billing_period="annual",
+        provider="wechatpay", status="active", cancelled_at=None, updated_at=None,
+        current_period_start=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        current_period_end=datetime(2027, 2, 1, tzinfo=timezone.utc),
+    )
+    expired_order = _order(
+        id="ord-plus-expired",
+        target_plan_code="plus",
+        status="paid",
+        billing_period="monthly",
+        paid_at=expired_paid_at,
+    )
+    session = _FakeSession([[user], [sub], [expired_order]])
+
+    async def fake_revoke(db, *, user_id, related_order_id, reason_code="refund_revoke"):
+        return 1
+
+    import credits_service
+    monkeypatch.setattr(credits_service, "revoke_buckets_for_order", fake_revoke)
+
+    await billing._recall_entitlements_for_refund(
+        session,
+        order=_order(id="ord-pro", target_plan_code="pro"),
+        now=now,
+    )
+
+    assert user.plan_code == "free"
+    assert sub.status == "cancelled"
+    assert sub.cancelled_at == now
+    audit = [a for a in session.added if getattr(a, "action", "") == "payment_refund_downgrade"]
+    assert len(audit) == 1
+    assert audit[0].old_value == "pro" and audit[0].new_value == "free"
 
 
 @pytest.mark.asyncio
