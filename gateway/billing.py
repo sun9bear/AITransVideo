@@ -832,15 +832,31 @@ async def _resolve_refund_order_id(
 def _extract_refund_amount_fen(provider_name: str, raw_payload: dict | None) -> int | None:
     """从退款事件里提取退款金额（分）。取不到返回 None（按全额处理）。"""
     payload = raw_payload or {}
+
+    def _int_or_none(value: object) -> int | None:
+        return int(str(value)) if value not in (None, "") else None
+
     try:
         if provider_name == "wechatpay":
             amount = ((payload.get("transaction") or {}).get("amount")) or {}
             refund = amount.get("refund")
-            return int(refund) if refund is not None else None
+            return _int_or_none(refund)
         if provider_name == "paddle":
-            totals = ((payload.get("data") or {}).get("totals")) or {}
-            total = totals.get("total")
-            return int(str(total)) if total not in (None, "") else None
+            data = (payload.get("data") or {})
+            totals = data.get("totals") or {}
+            subtotal = _int_or_none(totals.get("subtotal"))
+            if subtotal is not None:
+                return subtotal
+
+            item_subtotals: list[int] = []
+            for item in data.get("items") or []:
+                item_totals = (item or {}).get("totals") or {}
+                item_subtotal = _int_or_none(item_totals.get("subtotal"))
+                if item_subtotal is not None:
+                    item_subtotals.append(item_subtotal)
+            if item_subtotals:
+                return sum(item_subtotals)
+            return None
     except (TypeError, ValueError):
         return None
     return None

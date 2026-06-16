@@ -326,7 +326,7 @@ def test_extract_refund_amount_fen():
     ) == 500
     assert billing._extract_refund_amount_fen(
         "paddle", {"data": {"totals": {"total": "990"}}}
-    ) == 990
+    ) is None
     assert billing._extract_refund_amount_fen("wechatpay", {"transaction": {}}) is None
     assert billing._extract_refund_amount_fen(
         "paddle", {"data": {"totals": {"total": "abc"}}}
