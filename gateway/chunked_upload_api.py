@@ -224,6 +224,25 @@ async def chunked_upload_part(
     limits = resolve_chunked_limits()
     if not limits.enabled:
         return _not_found()
+    return await receive_part(
+        request, identity=user_id, upload_id=upload_id, part_index=part_index,
+    )
+
+
+async def receive_part(
+    request: Request,
+    *,
+    identity: str,
+    upload_id: str,
+    part_index: int,
+) -> JSONResponse:
+    """共享分片接收路径（注册档 R2 / 匿名档 A2 复用，plan §9.1）。
+
+    调用方负责 auth / feature gate / CSRF；这里只做协议校验 + 流式落盘 +
+    commit。``identity`` 是 store 的身份字符串键（注册档 user_id、匿名档
+    ``anon:{session_id_hash}``）。
+    """
+    user_id = identity
     if not store.UPLOAD_ID_RE.match(upload_id or ""):
         return _not_found()
 

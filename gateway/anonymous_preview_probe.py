@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -293,6 +294,96 @@ def cut_teaser(
 
 
 # ---------------------------------------------------------------------------
+# 软上限切点选择（产品裁定 2026-06-12：预览尾部保段落完整，180s 上下可冗余）
+# ---------------------------------------------------------------------------
+
+# teaser 目标 180s 不再是硬剪线：在 ±grace 窗口内优先选自然停顿
+# （silencedetect）收尾，保住最后一句话/段落的完整性；"多出十几秒可以
+# 接受"（项目主 2026-06-12）。硬拒线 = target + grace + 编码噪声容差。
+_TEASER_GRACE_SECONDS = 15.0
+
+# ffmpeg -t 重编码切割会因帧边界/音频 priming 轻微越界切点（2026-06-12 现网
+# 实测 180.014s——严格 >180s 比较曾把所有 >3min 源一刀切成 FAILED "probe
+# failure"；短视频 teaser=源时长 ≤180s 故从未暴露）。本容差叠加在硬拒线上，
+# 给编码噪声留余量；真实时长如实上报（admission 层自身 min(duration, max)
+# 钳制预览时长，不会二次误判）。
+_TEASER_OVERSHOOT_TOLERANCE_S = 0.5
+
+
+def _detect_silence_starts(
+    source_path: Path, window_lo: float, window_hi: float
+) -> list[float]:
+    """ffmpeg silencedetect 扫源视频 [window_lo, window_hi]，返回绝对时间的
+    silence_start 升序列表。任何失败 → []（调用方回落 target 硬剪——静音
+    对齐是优化项，不是 gate，绝不因它 fail）。"""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats",
+        "-ss", str(window_lo),
+        "-i", str(source_path),
+        "-t", str(max(0.0, window_hi - window_lo)),
+        "-vn",
+        "-af", "silencedetect=noise=-35dB:d=0.4",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[silence_scan] silencedetect failed", exc_info=True)
+        return []
+    points: list[float] = []
+    # silencedetect 输出在 stderr；-ss 在 -i 之前 → 时间戳相对 window_lo。
+    for m in re.finditer(r"silence_start:\s*([0-9.]+)", proc.stderr or ""):
+        try:
+            points.append(window_lo + float(m.group(1)))
+        except ValueError:
+            continue
+    return sorted(points)
+
+
+def choose_teaser_cut_seconds(
+    source_path: Path,
+    source_duration_s: Optional[float],
+    target_s: float,
+) -> float:
+    """选 teaser 切点（软上限语义）：
+
+    * 源时长未知（probe 异常/测试桩）→ target 硬剪（legacy 行为）。
+    * 源 ≤ target+grace → 返回 target+grace（-t 超过源时长 = 整段保留，
+      不在 target 处把 183s 的视频腰斩）。
+    * 否则取 ±grace 窗口内最靠近 target 的静音起点（= 上一句刚说完）；
+      窗口内无停顿（连续讲话/音乐）→ target 硬剪。
+    """
+    hi = target_s + _TEASER_GRACE_SECONDS
+    try:
+        src_dur = float(source_duration_s)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return target_s
+    if not math.isfinite(src_dur) or src_dur <= 0:
+        return target_s
+    if src_dur <= hi:
+        return hi
+    lo = max(0.0, target_s - _TEASER_GRACE_SECONDS)
+    candidates = [
+        p for p in _detect_silence_starts(source_path, lo, hi) if lo <= p <= hi
+    ]
+    if not candidates:
+        return target_s
+    best = min(candidates, key=lambda p: abs(p - target_s))
+    logger.info(
+        "[choose_teaser_cut] silence-aligned cut at %.2fs (target %.1fs)",
+        best,
+        target_s,
+    )
+    return best
+
+
+# ---------------------------------------------------------------------------
 # build_probe_fn — assemble the adapter-compatible probe callable
 # ---------------------------------------------------------------------------
 
@@ -348,9 +439,14 @@ def build_probe_fn(
                 failure_reason=src_probe["failure_reason"],
             )
 
-        # Step 2 — cut teaser
+        # Step 2 — cut teaser（软上限：静音对齐切点，产品裁定 2026-06-12）
+        cut_at = choose_teaser_cut_seconds(
+            source_path,
+            src_probe.get("duration_seconds"),
+            float(max_teaser_seconds),
+        )
         dest_path = teaser_dest_for(source_path)
-        teaser = cut_teaser(source_path, dest_path, max_seconds=max_teaser_seconds)
+        teaser = cut_teaser(source_path, dest_path, max_seconds=cut_at)
         if teaser.failure_reason is not None:
             return ProbeResult(
                 duration_seconds=0.0,
@@ -364,10 +460,16 @@ def build_probe_fn(
 
         teaser_dur = teaser.duration_seconds  # already validated by cut_teaser
 
-        # Step 3 — evaluate duration cap on teaser
-        # teaser_dur is guaranteed finite positive by cut_teaser / probe_source
+        # Step 3 — 软上限 gate：target + grace + 编码噪声容差。真实时长如实
+        # 上报（admission 层自身 min(duration, max) 钳制预览时长，超 180 的
+        # 冗余部分不会被二次误判）。
         teaser_ms = teaser_dur * 1000.0  # type: ignore[operator]
-        cap_reason = evaluate_free_duration_cap(teaser_ms, max_minutes=3)
+        hard_cap_minutes = (
+            float(max_teaser_seconds)
+            + _TEASER_GRACE_SECONDS
+            + _TEASER_OVERSHOOT_TOLERANCE_S
+        ) / 60.0
+        cap_reason = evaluate_free_duration_cap(teaser_ms, max_minutes=hard_cap_minutes)
         if cap_reason is not None:
             logger.warning(
                 "[build_probe_fn] teaser duration %.3fs failed cap gate: %s",

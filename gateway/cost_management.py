@@ -24,6 +24,13 @@ from models import CreditsLedger, Job, User
 
 logger = logging.getLogger(__name__)
 
+# PR-A part 2 §6 (CodeX 2026-06-14 自洽化): cost-per-minute by language pair.
+# Lockstep 副本 == services.language_registry.DEFAULT_LANGUAGE_PAIR。本模块刻意
+# 不 `from services... import`——它单独以 gateway path 导入时 src/ 未必在 sys.path
+# （运行时靠 main.py 先 import admin_settings 注入 path，依赖 import 顺序太脆）。
+# 此 fallback 几乎不触发：jobs.language_pair 是 NOT NULL server_default。
+_DEFAULT_LANGUAGE_PAIR_FALLBACK = "en->zh-CN"
+
 router = APIRouter(prefix="/api/admin/costs", tags=["admin-costs"])
 
 JOB_TTS_BUCKETS = {
@@ -1124,6 +1131,9 @@ async def cost_jobs(
     jobs_with_usage_events = 0
     jobs_with_missing_rates = 0
     total_missing_rate_rows = 0
+    # PR-A part 2 §6: per-language-pair cost/minutes accumulators.
+    by_pair_minutes: dict[str, float] = {}
+    by_pair_cost: dict[str, float] = {}
     point_price_rmb, point_price_source = _point_price_from_runtime()
     server_cost_per_min_rmb, server_cost_source = _server_cost_from_runtime()
 
@@ -1151,6 +1161,17 @@ async def cost_jobs(
             ledger_voice_clone_capture_credits=ledger_voice_clone_capture_by_job.get(job.job_id, 0),
         )
         jobs.append(payload)
+        # PR-A part 2 §6: tag each job with its language pair + accumulate the
+        # by-pair cost/minutes rollup (job.language_pair from the PG row — NOT
+        # NULL server_default en->zh-CN, so always populated).
+        _pair = str(getattr(job, "language_pair", "") or "") or _DEFAULT_LANGUAGE_PAIR_FALLBACK
+        payload["language_pair"] = _pair
+        by_pair_minutes[_pair] = by_pair_minutes.get(_pair, 0.0) + float(payload["minutes"] or 0.0)
+        by_pair_cost[_pair] = by_pair_cost.get(_pair, 0.0) + (
+            float(payload["llm_cost_rmb"] or 0.0)
+            + float(payload["tts_cost_rmb"] or 0.0)
+            + float(payload["voice_clone_cost_rmb"] or 0.0)
+        )
         total_llm += float(payload["llm_cost_rmb"] or 0.0)
         total_tts += float(payload["tts_cost_rmb"] or 0.0)
         total_voice_clone += float(payload["voice_clone_cost_rmb"] or 0.0)
@@ -1197,6 +1218,21 @@ async def cost_jobs(
             "cost_per_minute_rmb": _round_money(total_cost / total_minutes)
             if total_minutes > 0
             else None,
+            # PR-A part 2 §6: cost-per-minute broken down by language pair
+            # (Phase 8 observability — plan §11.7). Keyed by canonical pair.
+            "cost_per_minute_by_pair": [
+                {
+                    "language_pair": _lp,
+                    "minutes": round(by_pair_minutes[_lp], 3),
+                    "total_cost_rmb": _round_money(by_pair_cost[_lp]),
+                    "cost_per_minute_rmb": _round_money(
+                        by_pair_cost[_lp] / by_pair_minutes[_lp]
+                    )
+                    if by_pair_minutes[_lp] > 0
+                    else None,
+                }
+                for _lp in sorted(by_pair_minutes)
+            ],
         },
         "jobs": jobs,
     }

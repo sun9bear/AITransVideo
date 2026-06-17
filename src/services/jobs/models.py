@@ -231,6 +231,15 @@ class JobRecord:
     # gate（匹配 smart_consent / express_consent 风格），登录任务恒 False。
     anonymous_preview: bool = False
 
+    # --- Multilingual language fields (plan 2026-06-13 v3 PR-A, migration 036) ---
+    # Canonical source/target language + derived pair key. Defaults are the GA
+    # zero-regression baseline (en->zh-CN). Kept in lockstep with the gateway
+    # ``Job`` model + alembic 036 (NOT NULL server_default en / zh-CN /
+    # en->zh-CN). Canonical codes + pair profiles: services.language_registry.
+    source_language: str = "en"
+    target_language: str = "zh-CN"
+    language_pair: str = "en->zh-CN"
+
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
         self.job_type = str(self.job_type).strip()
@@ -288,6 +297,11 @@ class JobRecord:
         self.jianying_draft_fingerprint = _normalize_optional_text(self.jianying_draft_fingerprint)
         self.jianying_draft_attempt_id = _normalize_optional_text(self.jianying_draft_attempt_id)
         self.jianying_draft_substep = _normalize_optional_text(self.jianying_draft_substep)
+
+        # --- Multilingual language fields normalize (fail-safe to GA default) ---
+        self.source_language = str(self.source_language).strip() or "en"
+        self.target_language = str(self.target_language).strip() or "zh-CN"
+        self.language_pair = str(self.language_pair).strip() or "en->zh-CN"
 
         if not self.job_id:
             raise ValueError("job_id is required")
@@ -380,6 +394,10 @@ class JobRecord:
             "express_consent_parse_error": self.express_consent_parse_error,
             # --- APF P0 匿名预览标记 ---
             "anonymous_preview": self.anonymous_preview is True,
+            # --- Multilingual language fields ---
+            "source_language": self.source_language,
+            "target_language": self.target_language,
+            "language_pair": self.language_pair,
         }
 
     @classmethod
@@ -453,6 +471,10 @@ class JobRecord:
             express_consent_parse_error=payload.get("express_consent_parse_error"),
             # --- APF P0 匿名预览标记（严格 is True，拒 "true"/1 coercion） ---
             anonymous_preview=payload.get("anonymous_preview") is True,
+            # --- Multilingual language fields (default to GA baseline) ---
+            source_language=payload.get("source_language") or "en",
+            target_language=payload.get("target_language") or "zh-CN",
+            language_pair=payload.get("language_pair") or "en->zh-CN",
         )
 
 

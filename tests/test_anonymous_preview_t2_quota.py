@@ -39,8 +39,10 @@ from anonymous_preview_quota import (
     hash_scope_key,
     shanghai_today,
 )
-from src.services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
-from src.services.anonymous_preview_backend_adapter import CounterStore
+# 用与 gateway 模块同款的 `services.*` 规范名导入（src/ 已在 sys.path 上），
+# 避免 `src.services.*` 双路径导入产生第二份同名类导致 isinstance/== 失配。
+from services.anonymous_preview_rate_limit import RateLimitCounterUnavailable
+from services.anonymous_preview_backend_adapter import CounterStore
 
 
 # ---------------------------------------------------------------------------
@@ -367,23 +369,26 @@ class TestDecrementCallerGuard:
         """Scan gateway/ Python files for calls to .decrement( that are
         not inside tests/ or this file itself.
 
-        At v1 the only legitimate caller is backend_adapter._rollback_admitted
-        (src/services/) — gateway wiring to that path does not exist yet.
-        This assertion should be relaxed (or removed) when T3 wires the
-        adapter into a gateway endpoint. Left as a tripwire with an
-        explanatory comment.
+        At v1 the only legitimate caller was backend_adapter._rollback_admitted
+        (src/services/). 按原注释预告的放宽路径：plan 2026-06-12 §B 的
+        ``LaneAwareCounterStore``（anonymous_preview_intake_wiring.py）是
+        counter store 协议的三层叠加实现，其 decrement 调用与 adapter
+        回滚同语义（拒绝不落计数 / 多 key 回滚 / T5 配额退还），列入
+        allowlist。其余 gateway 业务代码仍必须零调用（配额操纵 tripwire）。
         """
         gateway_dir = _REPO_ROOT / "gateway"
+        allowed_files = {"anonymous_preview_intake_wiring.py"}
         call_sites = []
         for py_file in gateway_dir.rglob("*.py"):
+            if py_file.name in allowed_files:
+                continue
             src = py_file.read_text(encoding="utf-8", errors="replace")
             for lineno, line in enumerate(src.splitlines(), 1):
                 if ".decrement(" in line:
                     call_sites.append(f"{py_file.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
         assert call_sites == [], (
-            "gateway/ code should have zero .decrement() call sites at v1. "
-            "If T3 has wired the adapter, update this test to allow the "
-            "backend_adapter rollback path. Found:\n" + "\n".join(call_sites)
+            "gateway/ code should have zero .decrement() call sites outside "
+            "the LaneAwareCounterStore allowlist. Found:\n" + "\n".join(call_sites)
         )
 
     def test_decrement_method_has_docstring_noting_rollback_only(self) -> None:

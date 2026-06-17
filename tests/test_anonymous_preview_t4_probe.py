@@ -44,6 +44,7 @@ import pytest
 from gateway.anonymous_preview_probe import (
     TeaserResult,
     build_probe_fn,
+    choose_teaser_cut_seconds,
     cut_teaser,
     probe_source,
 )
@@ -213,6 +214,37 @@ class TestCutTeaserUnit:
 # ---------------------------------------------------------------------------
 
 
+class TestChooseTeaserCutSeconds:
+    """软上限切点选择（产品裁定 2026-06-12）：静音对齐 / 整段保留 / 回落。"""
+
+    def test_unknown_duration_falls_back_to_target(self):
+        assert choose_teaser_cut_seconds(Path("x.mp4"), None, 180.0) == 180.0
+
+    def test_source_within_soft_cap_keeps_whole_video(self):
+        # 183s 源不该在 180s 处腰斩——返回 195（-t 超源时长 = 整段保留）
+        assert choose_teaser_cut_seconds(Path("x.mp4"), 183.0, 180.0) == 195.0
+
+    def test_silence_aligned_pick_closest_to_target(self):
+        stderr = (
+            "[silencedetect @ 0x1] silence_start: 10.2\n"
+            "[silencedetect @ 0x1] silence_start: 22.9\n"
+        )
+        proc = _make_completed(stderr=stderr, returncode=0)
+        with patch("subprocess.run", return_value=proc):
+            cut = choose_teaser_cut_seconds(Path("x.mp4"), 300.0, 180.0)
+        # 窗口 lo=165 → 候选绝对时间 175.2 / 187.9；离 180 最近 = 175.2
+        assert abs(cut - 175.2) < 1e-6
+
+    def test_no_silence_falls_back_to_target(self):
+        proc = _make_completed(stderr="", returncode=0)
+        with patch("subprocess.run", return_value=proc):
+            assert choose_teaser_cut_seconds(Path("x.mp4"), 300.0, 180.0) == 180.0
+
+    def test_scan_failure_falls_back_to_target(self):
+        with patch("subprocess.run", side_effect=OSError("boom")):
+            assert choose_teaser_cut_seconds(Path("x.mp4"), 300.0, 180.0) == 180.0
+
+
 class TestBuildProbeFnUnit:
     """Tests for the assembled probe callable returned by build_probe_fn."""
 
@@ -228,6 +260,9 @@ class TestBuildProbeFnUnit:
         source_ffprobe = _make_completed(
             stdout=source_json, returncode=0 if source_probe_ok else 1
         )
+        # 软上限切点（2026-06-12）：源 >195s 会先跑一次 silencedetect；
+        # 空 stderr = 窗口内无静音 → 回落 180s 硬剪（legacy 行为）。
+        silence_scan = _make_completed(stderr="", returncode=0)
         ffmpeg_proc = _make_completed(returncode=ffmpeg_rc)
         teaser_json = _ffprobe_json(teaser_dur_str)
         teaser_ffprobe = _make_completed(stdout=teaser_json, returncode=0)
@@ -238,7 +273,7 @@ class TestBuildProbeFnUnit:
         with tempfile.TemporaryDirectory() as td:
             src = Path(td) / "video.mp4"
             src.touch()
-            with patch("subprocess.run", side_effect=[source_ffprobe, ffmpeg_proc, teaser_ffprobe]):
+            with patch("subprocess.run", side_effect=[source_ffprobe, silence_scan, ffmpeg_proc, teaser_ffprobe]):
                 return probe_fn(src, source_hash), source_hash
 
     def test_source_hash_is_echoed_back(self):
@@ -259,11 +294,12 @@ class TestBuildProbeFnUnit:
         settings = self._settings()
         probe_fn = build_probe_fn(settings)
         src_ok = _make_completed(stdout=_ffprobe_json("300.0"), returncode=0)
+        silence_scan = _make_completed(stderr="", returncode=0)
         ffmpeg_fail = _make_completed(returncode=1)
         with tempfile.TemporaryDirectory() as td:
             src = Path(td) / "video.mp4"
             src.touch()
-            with patch("subprocess.run", side_effect=[src_ok, ffmpeg_fail]):
+            with patch("subprocess.run", side_effect=[src_ok, silence_scan, ffmpeg_fail]):
                 result = probe_fn(src, "deadbeef")
         assert result.failure_reason is not None
 
@@ -274,13 +310,33 @@ class TestBuildProbeFnUnit:
         settings = self._settings()
         probe_fn = build_probe_fn(settings)
         src_ok = _make_completed(stdout=_ffprobe_json("300.0"), returncode=0)
+        silence_scan = _make_completed(stderr="", returncode=0)
         ffmpeg_ok = _make_completed(returncode=0)
         teaser_ok = _make_completed(stdout=_ffprobe_json(str(teaser_dur_s)), returncode=0)
         with tempfile.TemporaryDirectory() as td:
             src = Path(td) / "video.mp4"
             src.touch()
-            with patch("subprocess.run", side_effect=[src_ok, ffmpeg_ok, teaser_ok]):
+            with patch("subprocess.run", side_effect=[src_ok, silence_scan, ffmpeg_ok, teaser_ok]):
                 return probe_fn(src, "aabbccdd")
+
+    def test_180_014s_encode_overshoot_passes(self):
+        """ffmpeg 重编码切割实测越界（2026-06-12 现网）：180.014s 通过软上限
+        gate 且时长如实上报——严格 >180s 比较曾把所有 >3min 源拒成 probe
+        failure。admission 层自身 min(duration, max) 钳制，不需要这里撒谎。"""
+        result = self._probe_with_teaser_duration(180.014)
+        assert result.failure_reason is None
+        assert abs(result.duration_seconds - 180.014) < 1e-6
+
+    def test_grace_window_195s_passes(self):
+        """软上限（产品裁定 2026-06-12）：target 180 + grace 15 内的静音
+        对齐切点合法——195.0s ≤ 195.5s 硬拒线 → 通过。"""
+        result = self._probe_with_teaser_duration(195.0)
+        assert result.failure_reason is None
+
+    def test_beyond_hard_cap_196s_fails(self):
+        """硬拒线 = 180 + 15 + 0.5 = 195.5s：196s 不是冗余而是切割故障。"""
+        result = self._probe_with_teaser_duration(196.0)
+        assert result.failure_reason is not None
 
     def test_179s_teaser_passes_cap_gate(self):
         """179 s → 179000 ms / 60000 = 2.983... ≤ 3.0 → None → pass."""
@@ -294,21 +350,21 @@ class TestBuildProbeFnUnit:
         assert result.failure_reason is None
         assert abs(result.duration_seconds - 180.0) < 1e-6
 
-    def test_180_04s_teaser_fails_cap_gate(self):
-        """180.04 s → 180040 ms / 60000 = 3.0006... > 3.0 → REJECT_OVER_CAP → failure.
+    def test_180_04s_teaser_clamped_passes(self):
+        """180.04 s → 软上限窗口内 → 通过，时长如实上报 180.04。
 
-        Conclusion: 180.04s teaser FAILS the cap gate.  In practice the
-        ffmpeg re-encode at -t 180 produces a teaser slightly *below* 180s
-        due to frame-boundary rounding, so this edge case is unlikely in
-        production.  The test pins the pure-gate behavior.
+        本测试原断言"180.04s FAILS"并注释"实践中 ffmpeg 会切出略低于
+        180s，此边界不太可能发生"——2026-06-12 现网恰好证伪（实测
+        180.014s，把所有 >3min 源拒成 probe failure）。现在钉死钳制行为。
         """
         result = self._probe_with_teaser_duration(180.04)
-        assert result.failure_reason is not None
+        assert result.failure_reason is None
+        assert abs(result.duration_seconds - 180.04) < 1e-6
 
-    def test_181s_teaser_fails_cap_gate(self):
-        """181 s → 181000 ms / 60000 = 3.016... > 3.0 → REJECT_OVER_CAP → failure."""
+    def test_181s_within_grace_passes(self):
+        """181 s → 软上限冗余窗口内（≤195.5s）→ 通过（2026-06-12 起）。"""
         result = self._probe_with_teaser_duration(181.0)
-        assert result.failure_reason is not None
+        assert result.failure_reason is None
 
     def test_happy_path_returns_probe_result_with_correct_fields(self):
         result, source_hash = self._run_probe(True, 300.0, 0, "179.5")
@@ -390,12 +446,13 @@ class TestFailureReasonRedaction:
                 if t.failure_reason:
                     reasons.append(t.failure_reason)
 
-            # build_probe_fn cap failure
+            # build_probe_fn cap failure（软上限后硬拒线 195.5s → 用 196.0）
             probe_fn = build_probe_fn(None)
             src_ok = _make_completed(stdout=_ffprobe_json("300.0"), returncode=0)
+            silence_scan = _make_completed(stderr="", returncode=0)
             ffmpeg_ok = _make_completed(returncode=0)
-            teaser_over = _make_completed(stdout=_ffprobe_json("181.0"), returncode=0)
-            with patch("subprocess.run", side_effect=[src_ok, ffmpeg_ok, teaser_over]):
+            teaser_over = _make_completed(stdout=_ffprobe_json("196.0"), returncode=0)
+            with patch("subprocess.run", side_effect=[src_ok, silence_scan, ffmpeg_ok, teaser_over]):
                 pr = probe_fn(src, "abc123")
                 if pr.failure_reason:
                     reasons.append(pr.failure_reason)

@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 _gateway_dir = str(Path(__file__).resolve().parent.parent / "gateway")
 if _gateway_dir not in sys.path:
     sys.path.insert(0, _gateway_dir)
+
+# Stub database before importing gateway modules (matches other gateway tests).
+# This file is collected alphabetically before the stub-installing gateway test
+# modules; importing the real `database` here would cache it in sys.modules and
+# turn every later `sys.modules.setdefault("database", fake)` into a no-op —
+# those tests then hit the real lazy proxies and fail with "Database not
+# initialized" (order-dependent pollution).
+_fake_database = types.ModuleType("database")
+_fake_database.get_db = MagicMock()
+_fake_database.engine = MagicMock()
+_fake_database.async_session = MagicMock()
+_fake_database.init_db = MagicMock()
+sys.modules.setdefault("database", _fake_database)
 
 import admin_cost_api  # noqa: E402
 import admin_cosyvoice_control_api  # noqa: E402

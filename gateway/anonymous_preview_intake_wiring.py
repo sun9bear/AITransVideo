@@ -38,7 +38,7 @@ from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 
-from anonymous_preview_quota import PgRateLimitCounterStore, hash_scope_key
+from anonymous_preview_quota import PgRateLimitCounterStore, hash_scope_key, shanghai_today
 from anonymous_preview_record_store import PgPreviewRecordStore, RecordStoreError
 from config import settings
 
@@ -62,10 +62,33 @@ __all__ = [
     "build_intake_config",
     "build_scope_hasher",
     "peek_counter_keys",
+    "peek_mode_counter_keys",
+    "mode_scope_key",
+    "express_subgate_key",
+    "resolve_express_global_cap",
+    "resolve_per_mode_caps",
+    "per_mode_cap_for_scope_key",
+    "LaneAwareCounterStore",
     "ANON_PREVIEW_COUNTER_SCOPE",
+    "PER_SCOPE_PER_MODE_DAILY_CAP",
+    "PER_MODE_CAP_DIMENSIONS",
 ]
 
 logger = logging.getLogger(__name__)
+
+# plan 2026-06-12 §B 第 2 层（D3）：per-scope per-mode 配额 = ip/device/
+# source × {free,express}。原为硬编码常量；2026-06-13 项目主裁定改为
+# 三个 admin 旋钮（anonymous_preview_cap_per_{ip,device,source}_per_mode），
+# 本常量降级为 admin 读取失败时的 fail-safe 默认值（保持原 1 次/日行为）。
+PER_SCOPE_PER_MODE_DAILY_CAP = 1
+
+# per-mode 层的三个维度——scope_key 前缀 → admin 字段名。维度判定靠
+# scope_key 第一段（'ip'/'device'/'source'），与 adapter 复合键前缀一致。
+PER_MODE_CAP_DIMENSIONS = {
+    "ip": "anonymous_preview_cap_per_ip_per_mode",
+    "device": "anonymous_preview_cap_per_device_per_mode",
+    "source": "anonymous_preview_cap_per_source_per_mode",
+}
 
 # anonymous_preview_daily_usage.scope 列的唯一合法值——权威计数器
 # （run_intake_and_save → PgRateLimitCounterStore）和 AD-8 peek SELECT
@@ -105,6 +128,216 @@ def peek_counter_keys(raw_ip: str, day_key: str, *, secret: str) -> tuple[str, s
         f"global:{day_key}",
         f"ip:{hasher('ip', raw_ip)}:{day_key}",
     )
+
+
+def mode_scope_key(base_key: str, lane: str) -> str:
+    """per-mode 计数行的 scope_key（plan 2026-06-12 §B 第 2 层）。
+
+    形状 = 既有复合键 + ``:mode:{lane}`` 后缀；同时该行的 mode 列落 lane
+    （belt & suspenders——unique index (scope, scope_key, mode, usage_date)
+    单凭 mode 列已可区分，但 AD-8 bug ⑤ 的教训是 key 必须自描述、单点推导）。
+    本函数是唯一推导落点：LaneAwareCounterStore 与 AD-8 peek
+    （peek_mode_counter_keys）都必须经它，不得自行拼接。
+    """
+    return f"{base_key}:mode:{lane}"
+
+
+def express_subgate_key(day_key: str) -> str:
+    """express 全局子闸计数行的 scope_key（plan §B 第 3 层）。"""
+    return mode_scope_key(f"global:{day_key}", "express")
+
+
+def peek_mode_counter_keys(
+    raw_ip: str, day_key: str, lane: str, *, secret: str
+) -> tuple[str, str]:
+    """AD-8 peek 的 lane 维度键：``(express 子闸 key, per-mode ip key)``。
+
+    与权威侧（LaneAwareCounterStore._companion）共用 mode_scope_key 推导，
+    保证两侧逐字节一致。回归守卫：tests/test_anonymous_express_t2_quota_layers
+    ::TestKeyShapes::test_peek_mode_counter_keys_match_wrapper_derivation。
+    """
+    _global_key, ip_key = peek_counter_keys(raw_ip, day_key, secret=secret)
+    return (express_subgate_key(day_key), mode_scope_key(ip_key, lane))
+
+
+def resolve_express_global_cap() -> int:
+    """express 全局子闸 cap（admin anonymous_express_daily_global_cap）。
+
+    读取任何异常 → fail-closed 0（子闸恒拒）。正常情况下到不了这里：
+    admin 不可读时 lane resolver 已 fail-closed None，根本不会有 express
+    intake；这是防御纵深。
+    """
+    try:
+        from admin_settings import load_settings
+
+        return int(load_settings().anonymous_express_daily_global_cap)
+    except Exception as exc:  # noqa: BLE001 — fail-closed
+        logger.warning(
+            "anon_intake: failed to read anonymous_express_daily_global_cap "
+            "— fail-closed cap=0: %s", exc,
+        )
+        return 0
+
+
+def resolve_per_mode_caps() -> dict[str, int]:
+    """per-mode 三维度 cap（admin 旋钮，2026-06-13）。
+
+    返回 ``{"ip": int, "device": int, "source": int}``。读取任何异常 →
+    **fail-safe** 回落 ``PER_SCOPE_PER_MODE_DAILY_CAP``（1，保持原行为）——
+    注意与 express 子闸的 fail-closed=0 不同：per-mode cap 读失败若回 0
+    会把**所有** intake 拒死（count>=0 恒真），所以这里 fail-safe（数值边界
+    故障不能让漏斗整体不可用，同 resolve_apf_limits 语义）。
+    """
+    try:
+        from admin_settings import load_settings
+
+        adm = load_settings()
+        return {
+            dim: int(getattr(adm, field))
+            for dim, field in PER_MODE_CAP_DIMENSIONS.items()
+        }
+    except Exception as exc:  # noqa: BLE001 — fail-safe（非 fail-closed）
+        logger.warning(
+            "anon_intake: failed to read per-mode caps — fail-safe default %d: %s",
+            PER_SCOPE_PER_MODE_DAILY_CAP, exc,
+        )
+        return {dim: PER_SCOPE_PER_MODE_DAILY_CAP for dim in PER_MODE_CAP_DIMENSIONS}
+
+
+def per_mode_cap_for_scope_key(scope_key: str, caps: dict[str, int]) -> int:
+    """按 scope_key 第一段（ip/device/source）选对应 per-mode cap。
+
+    未知维度回落 PER_SCOPE_PER_MODE_DAILY_CAP（防御：理论上只会是三维度之一）。
+    AD-8 peek、LaneAwareCounterStore._companion、retry recharge 共用本映射，
+    保证三处取的 cap 一致。
+    """
+    dim = scope_key.split(":", 1)[0]
+    return int(caps.get(dim, PER_SCOPE_PER_MODE_DAILY_CAP))
+
+
+class LaneAwareCounterStore:
+    """配额三层叠加 store（plan 2026-06-12 §B v4：既有不动、叠加新增）。
+
+    包装两个 ``CounterStore``：
+
+    * ``legacy_store`` — 既有计数器。所有 key/cap **原样透传**（key 形状、
+      写入路径逐字节不变），每次 intake 无论 lane 照常累加 = 天然跨 lane
+      总闸（global 500 / per-ip 3 / per-device 1 / per-source 1）。
+    * ``mode_store`` — per-mode 并行计数行（scope 相同、mode 列 = lane、
+      scope_key 带 ``:mode:{lane}`` 后缀）。
+
+    叠加规则（adapter 对每个 key 调 try_acquire 时）：
+
+    * ``global:{day}``：legacy 先过（总闸）；lane=express 再过 express
+      全局子闸（cap=anonymous_express_daily_global_cap）。free 无子闸。
+    * ``ip:/device:/source:``：legacy 先过（既有 per-scope cap）；再过
+      per-mode 行（cap=admin 旋钮 anonymous_preview_cap_per_{维度}_per_mode，
+      默认 1；2026-06-13 起可热调）。
+    * 任一层拒 → 本次已 acquire 的行回滚（拒绝不落计数）；adapter 的
+      多 key 回滚（decrement）双行同步回退。
+
+    零 SUM：每层都是独立行上的 increment-and-check（复用
+    PgRateLimitCounterStore 的原子 upsert），无跨行聚合。
+    """
+
+    def __init__(
+        self,
+        legacy_store,
+        mode_store,
+        *,
+        lane: str,
+        express_global_cap: int,
+        per_mode_caps: dict[str, int] | None = None,
+    ) -> None:
+        self._legacy = legacy_store
+        self._mode = mode_store
+        self._lane = lane
+        self._express_cap = int(express_global_cap)
+        # per-mode 三维度 cap（admin 旋钮，2026-06-13）。None → fail-safe
+        # 默认 1（保持原行为）。
+        self._per_mode_caps = per_mode_caps or {
+            dim: PER_SCOPE_PER_MODE_DAILY_CAP for dim in PER_MODE_CAP_DIMENSIONS
+        }
+        # plan §E 配额退还需要的可退行清单：本次 intake 实际持有的
+        # per-scope per-mode 行（ip/device/source × lane）。**刻意不含**
+        # express 全局子闸与 legacy 总闸行（失败不退，防刷失败穿透成本闸）。
+        # decrement 回滚时同步移除——清单始终反映"仍被占用"的行。
+        self.acquired_mode_scope_keys: list[str] = []
+
+    def _companion(self, key: str):
+        """返回 (companion_key, cap) 或 None（无叠加层）。"""
+        if key.startswith("global:"):
+            if self._lane == "express":
+                return (mode_scope_key(key, "express"), self._express_cap)
+            return None
+        cap = per_mode_cap_for_scope_key(key, self._per_mode_caps)
+        return (mode_scope_key(key, self._lane), cap)
+
+    def _safe_legacy_decrement(self, key: str) -> None:
+        try:
+            self._legacy.decrement(key)
+        except Exception:  # noqa: BLE001 — 回滚是 best-effort（同 adapter 语义）
+            logger.warning(
+                "anon_quota: legacy decrement failed during companion "
+                "rollback key=%.32s", key,
+            )
+
+    def try_acquire(self, key: str, cap: int):
+        ok, count = self._legacy.try_acquire(key, cap)
+        if not ok:
+            return (False, count)
+        comp = self._companion(key)
+        if comp is None:
+            return (True, count)
+        comp_key, comp_cap = comp
+        try:
+            comp_ok, comp_count = self._mode.try_acquire(comp_key, comp_cap)
+        except BaseException:
+            # mode 行异常：回滚 legacy（拒绝不落计数），异常原样抛给
+            # adapter → fail-closed FAILED record。
+            self._safe_legacy_decrement(key)
+            raise
+        if not comp_ok:
+            self._safe_legacy_decrement(key)
+            return (False, comp_count)
+        if not key.startswith("global:"):
+            # 仅 per-scope per-mode 行可退（§E）；global 子闸不进清单。
+            self.acquired_mode_scope_keys.append(comp_key)
+        return (True, count)
+
+    def get(self, key: str) -> int:
+        return self._legacy.get(key)
+
+    def peek(self, key: str) -> int:
+        return self._legacy.get(key)
+
+    def increment(self, key: str) -> int:
+        # adapter admission 路径不走 increment（只 try_acquire）；保留协议
+        # 完整性：双行同步加。
+        n = self._legacy.increment(key)
+        comp = self._companion(key)
+        if comp is not None:
+            try:
+                self._mode.increment(comp[0])
+            except Exception:  # noqa: BLE001
+                pass
+        return n
+
+    def decrement(self, key: str) -> int:
+        """adapter 多 key 回滚 / T5 配额退还路径：双行同步回退。"""
+        try:
+            n = self._legacy.decrement(key)
+        except Exception:  # noqa: BLE001 — adapter 对 decrement 本就吞错
+            n = 0
+        comp = self._companion(key)
+        if comp is not None:
+            try:
+                self._mode.decrement(comp[0])
+            except Exception:  # noqa: BLE001
+                pass
+            if comp[0] in self.acquired_mode_scope_keys:
+                self.acquired_mode_scope_keys.remove(comp[0])
+        return n
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +443,12 @@ def _default_counter_store_factory(
     session: Session,
     scope: str,
     now: Optional[datetime] = None,
+    mode: str = "free",
 ) -> PgRateLimitCounterStore:
-    return PgRateLimitCounterStore(session, scope=scope, mode="free", now=now)
+    """mode 默认 "free"：既有（legacy/总闸）计数行的 mode 列恒为 'free'
+    ——这是历史 key 形状的一部分（§B 第 1 层"逐字节不变"），express
+    intake 也照常写这些行。per-mode 行才用 mode=lane（§B 第 2/3 层）。"""
+    return PgRateLimitCounterStore(session, scope=scope, mode=mode, now=now)
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +465,7 @@ def run_intake_and_save(
     counter_store_factory: Optional[Callable] = None,
     upload_root: Optional[Path] = None,
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    mode: str = "free",
 ) -> PreviewRecord:
     """Assemble and run the adapter, then persist the resulting record.
 
@@ -258,6 +496,12 @@ def run_intake_and_save(
         Override for the project root (for tests).
     now_fn:
         Clock override (for tests).
+    mode:
+        lane 锁定值（plan 2026-06-12 §A）："free" / "express"。调用方在
+        intake 时由 ``resolve_anonymous_lane()`` 解析（普通上传）或从
+        chunked upload state 读取（init 时锁定）。持久化前经
+        ``dataclasses.replace`` 写进契约 record → ``_to_orm`` 落 mode 列。
+        默认 "free" 保持既有调用点行为不变。
 
     Returns
     -------
@@ -271,6 +515,7 @@ def run_intake_and_save(
     hasher = build_scope_hasher(settings.anonymous_preview_hash_secret)
 
     # Build single counter store (adapter uses all four scopes via key prefix).
+    _injected_factory = counter_store_factory is not None
     if counter_store_factory is None:
         _factory = partial(
             _default_counter_store_factory,
@@ -295,7 +540,29 @@ def run_intake_and_save(
     # stores them in scope_key column while scope column = our constructor arg.
     # Using scope=ANON_PREVIEW_COUNTER_SCOPE and letting the adapter key carry
     # the discriminator is exactly right.
-    counter_store = _factory(ANON_PREVIEW_COUNTER_SCOPE)
+    legacy_store = _factory(ANON_PREVIEW_COUNTER_SCOPE)
+
+    # plan 2026-06-12 §B：legacy 层之上叠加 per-mode 层。
+    # * 生产默认路径：mode 行用独立 PgRateLimitCounterStore（mode 列 = lane，
+    #   scope 同值；行靠 scope_key 的 :mode: 后缀 + mode 列双重区分）。
+    # * 注入 factory（测试）：同一 store 实例承载双行（factory 只调一次，
+    #   保住 TestPeekKeyDerivationConsistency 的 scope 断言；key 后缀已足够
+    #   区分行）。
+    if _injected_factory:
+        lane_mode_store = legacy_store
+    else:
+        lane_mode_store = _default_counter_store_factory(
+            db_session, ANON_PREVIEW_COUNTER_SCOPE, now=now_fn(), mode=mode
+        )
+    counter_store = LaneAwareCounterStore(
+        legacy_store,
+        lane_mode_store,
+        lane=mode,
+        express_global_cap=(
+            resolve_express_global_cap() if mode == "express" else 0
+        ),
+        per_mode_caps=resolve_per_mode_caps(),
+    )
 
     # Build config.
     intake_config = build_intake_config(upload_root=upload_root)
@@ -312,12 +579,32 @@ def run_intake_and_save(
     # Run intake — adapter NEVER raises; failure → status-only record.
     record = adapter.handle_intake(request_facts, upload_facts)
 
+    # lane 落盘（plan 2026-06-12 §A）：纯 intake/adapter 不感知 lane，
+    # 在持久化边界统一盖上 mode。失败 record 也盖——审计/监控按 lane 维度
+    # 统计需要拒绝行也带 mode。
+    import dataclasses as _dc
+
+    record = _dc.replace(record, mode=mode)
+
+    # plan §E 配额退还锚点：把本次 intake 实际持有的 per-scope per-mode
+    # 行（HMAC 复合键，无原始 PII）落进 record audit——Pass 3 诚实失败时
+    # gateway 终态镜像凭它精确退还（global 总闸与 express 子闸不在清单）。
+    if counter_store.acquired_mode_scope_keys:
+        _day_key = shanghai_today(now_fn())
+        _meta = dict(record.compliance_audit_metadata or {})
+        _meta["quota_mode_rows"] = [
+            {"scope_key": k, "mode": mode, "day": _day_key}
+            for k in counter_store.acquired_mode_scope_keys
+        ]
+        record = _dc.replace(record, compliance_audit_metadata=_meta)
+
     # Persist record — RecordStoreError propagates to caller.
     store = PgPreviewRecordStore(db_session)
     store.save_record(record)
     logger.info(
-        "anon_intake_saved preview_id=%s status=%s",
+        "anon_intake_saved preview_id=%s status=%s mode=%s",
         record.record_id,
         record.status.value,
+        mode,
     )
     return record

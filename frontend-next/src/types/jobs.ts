@@ -62,6 +62,11 @@ export interface JobSummary {
   speakers: string
   voiceA: string | null
   voiceB: string | null
+  /** Language direction (PR-A part 2 §5). Nullable — pre-migration-036 jobs and
+   *  upstream records without the fields fall back to the GA default pair. */
+  sourceLanguage?: string | null
+  targetLanguage?: string | null
+  languagePair?: string | null
   status: JobStatus
   currentStage: PublicStage | null
   progressMessage: string | null
@@ -161,6 +166,14 @@ export interface CreateTranslationJobInput {
   speakers: string
   voiceA?: string
   voiceB?: string
+  /**
+   * Language direction (PR-A part 2 §3/§7). Optional canonical codes
+   * (e.g. 'en' / 'zh-CN'); omitted → GA default en->zh-CN. Only the default +
+   * admin-enabled allowlisted pairs are accepted by the gateway (others 403).
+   * The submit layer sends these only when a non-default pair is chosen.
+   */
+  sourceLanguage?: string
+  targetLanguage?: string
   transcriptionMethod?: 'assemblyai' | 'gemini'
   sourceType?: 'youtube_url' | 'local_video'
   localFilePath?: string

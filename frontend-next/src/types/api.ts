@@ -25,6 +25,11 @@ export interface ApiJobRecord {
   speakers: string
   voice_a: string | null
   voice_b: string | null
+  /** Language direction (PR-A part 2 §5). Nullable — pre-migration-036 /
+   *  upstream records without the fields default to the GA pair. */
+  source_language?: string | null
+  target_language?: string | null
+  language_pair?: string | null
   status: ApiJobStatus
   current_stage: string | null
   progress_message: string | null

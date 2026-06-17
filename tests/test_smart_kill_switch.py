@@ -42,12 +42,18 @@ if str(_GATEWAY) not in sys.path:
 
 
 def _fake_settings(*, enable_smart_mode: bool = False):
-    """Build a minimal stand-in for gateway/config.py Settings.
+    """Copy of the real GatewaySettings with enable_smart_mode overridden.
 
-    Only the `enable_smart_mode` attribute is exercised by the helper, so
-    we don't have to construct a full pydantic Settings instance.
+    Must stay a FULL settings object: this gets patched into
+    ``config.settings``, and intercept_create_job reads fields beyond
+    enable_smart_mode off that binding (e.g. enable_free_tier at the
+    service_mode gate). A partial SimpleNamespace drifts into
+    AttributeError every time the create path grows a new settings read.
     """
-    return SimpleNamespace(enable_smart_mode=enable_smart_mode)
+    from config import settings as _real_settings
+    return _real_settings.model_copy(
+        update={"enable_smart_mode": enable_smart_mode}
+    )
 
 
 def _fake_admin_settings(*, smart_mode_enabled: bool = False):
@@ -343,16 +349,34 @@ _VALID_SMART_CONSENT = {
 
 def _stub_database_module():
     """Install a stub `database` module before importing job_intercept.
-    Mirrors test_gateway_create_job.py's pattern."""
-    if "database" not in sys.modules or not hasattr(
-        sys.modules["database"], "_kill_switch_stub"
-    ):
+    Mirrors test_gateway_create_job.py's pattern.
+
+    NEVER replace an existing sys.modules["database"] entry. Swapping the
+    module object mid-run changes the identity of `database.get_db`, so
+    FastAPI tests that resolve `from database import get_db` at fixture
+    time (e.g. test_voice_catalog_api) key their dependency_overrides on
+    a different object than their routers bound at import time — the
+    override silently stops matching and requests 422 (order-dependent
+    pollution). job_intercept only needs `get_db` to exist at import
+    time, so whatever module is already installed (shared fake or the
+    real lazy-proxy module) is sufficient."""
+    if "database" not in sys.modules:
         fake = types.ModuleType("database")
         fake.get_db = _MagicMock()
         fake.engine = _MagicMock()
         fake.async_session = _MagicMock()
         fake._kill_switch_stub = True  # marker
         sys.modules["database"] = fake
+
+
+# Import job_intercept at module level — OUTSIDE any patch context — so its
+# `from config import settings` binds the real settings object. In the full
+# suite other files import it first and the binding is always real; when this
+# file ran standalone, the first import used to happen inside
+# patch("config.settings", ...) and captured the fake instead
+# (order-dependent failure). Database stub must be installed first.
+_stub_database_module()
+import job_intercept  # noqa: E402,F401
 
 
 def _create_job_user(*, role="user", plan_code="plus"):

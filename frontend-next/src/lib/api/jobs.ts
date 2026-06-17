@@ -144,6 +144,15 @@ export async function submitTranslationJob(
       client_confirmed_at: confirmed ? new Date().toISOString() : null,
     }
   }
+  // PR-A part 2 §7: language direction. Send canonical codes ONLY when the user
+  // explicitly chose a non-default direction; omitting them locks the GA default
+  // (en->zh-CN) and keeps the request byte-identical to pre-i18n submissions
+  // (zero-regression). The gateway 403s a direction the account isn't entitled
+  // to (内测 allowlist).
+  if (input.sourceLanguage && input.targetLanguage) {
+    requestBody.source_language = input.sourceLanguage
+    requestBody.target_language = input.targetLanguage
+  }
   const payload = await apiClient.post<ApiJobRecord>('/jobs', {
     body: requestBody,
   })

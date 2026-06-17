@@ -76,6 +76,16 @@ _APF_LIMIT_BOUNDS = {
     "anonymous_preview_cap_per_source": (1, 100),
 }
 
+# APF 匿名 Express lane 子闸边界（plan 2026-06-12 anonymous-express-preview T0）。
+# 刻意不进 _APF_LIMIT_BOUNDS——那张表被 test_anonymous_preview_limits_knobs
+# 钉死为 free 6 旋钮契约（dict 整表相等断言），扩表会破坏既有契约。
+_ANON_EXPRESS_CAP_BOUNDS = (1, 100000)
+
+# APF per-mode 三维度配额旋钮边界（2026-06-13 项目主裁定，原硬编码常量改旋钮）。
+# 同样不进 _APF_LIMIT_BOUNDS（保持那张表的 free 6 旋钮契约不破）。上界 1000：
+# 高于此对单 IP/设备/视频已无防滥用意义，且 express 另有 50/日全局子闸兜底。
+_ANON_PER_MODE_CAP_BOUNDS = (1, 1000)
+
 # 分片上传旋钮边界（plan 2026-06-11 §3.7）：{field: (min, max)}。
 # chunk_mb 上界 80 是硬约束（CF 免费版单请求体 100MB，留余量）；
 # 其余下界 ≥1 防误设 0（等效误关停难排查——紧急关停用 chunked_upload_enabled
@@ -90,6 +100,12 @@ _CHUNKED_UPLOAD_BOUNDS = {
     "chunked_upload_disk_floor_gb": (1, 500),
     "chunked_upload_ttl_hours": (1, 168),
     "chunked_upload_ready_ttl_hours": (1, 72),
+    # 匿名档分片 TTL（plan §9 r1 评审裁定默认 6h）：上界 24 = 不得长于注册档
+    # 默认——匿名身份可重置，TTL 是 init-abandon 滥用的资源占用窗口。
+    "chunked_upload_anonymous_ttl_hours": (1, 24),
+    # 匿名档每日声明配额（2026-06-12 项目主裁定）：声明即计+放弃不退的语义
+    # 下收太紧会被失败重试烧完锁死一天；对滥用者本就无效（清 cookie 重置）。
+    "chunked_upload_anonymous_daily_gb": (1, 100),
 }
 
 
@@ -367,6 +383,41 @@ class AdminSettings(BaseModel):
     anonymous_preview_cap_per_device: int = 1
     anonymous_preview_cap_per_source: int = 1
 
+    # --- APF per-mode 三维度配额旋钮（2026-06-13 项目主裁定）---
+    # 原为硬编码常量 PER_SCOPE_PER_MODE_DAILY_CAP=1（T2），现改 admin 旋钮，
+    # 可热调。语义：在既有 legacy per-scope cap 之上，对 {free,express} 每个
+    # lane 各自再限 ip/device/source 每日次数。判定顺序：总闸 → express 子闸
+    # → legacy per-scope → 本 per-mode 层（任一拒即拒）。
+    #
+    # 默认全 1 = 保持 T2 上线后的现行为（不静默改 prod 行为）。调参指引：
+    #   - per_ip_per_mode 是免费档"同 IP 每日次数"的实际绑定闸——调高即放宽
+    #     免费试用（如设 3 ≈ 恢复 T2 前的 1/cookie+3/IP 体验）。注意它同时
+    #     作用于 express（贵 lane），express 另有 anonymous_express_daily_global_cap
+    #     50/日全局子闸兜底成本。
+    #   - per_device / per_source 默认 1 防同 cookie / 同视频刷量。
+    # 消费侧：resolve_per_mode_caps()（wiring）每请求重读，热生效。
+    anonymous_preview_cap_per_ip_per_mode: int = 1
+    anonymous_preview_cap_per_device_per_mode: int = 1
+    anonymous_preview_cap_per_source_per_mode: int = 1
+
+    # --- APF 匿名 Express 预览 lane（plan 2026-06-12 anonymous-express-preview T0）---
+    # express lane 主开关：lane resolver express 优先于 free。开启后匿名预览
+    # 走真实快捷版管线（Pass 1-3 + CosyVoice TTS），单次成本远高于 free lane。
+    #
+    # **类型用 StrictBool**（同 anonymous_free_preview_enabled）：宽松 bool 下
+    # "1" / "on" / "true" 字符串会被解析为 True，admin UI bug 可能意外打开
+    # 匿名 express 面（Gemini + CosyVoice 真实成本）。
+    #
+    # 与 express_tts_provider="mimo" 互斥：保存时 422
+    # （validate_anonymous_express_tts_exclusion，POST /settings 调用）；
+    # 手改 admin_settings.json 绕过保存校验的情形由 runtime lane resolver
+    # 防御纵深兜底（解析到 express 时若 provider=mimo → 拒绝 express lane）。
+    anonymous_express_enabled: StrictBool = False
+    # express lane 每日全局子闸：独立于 anonymous_preview_cap_global_per_day
+    # 总闸（500，跨 lane）。判定顺序：总闸 → 本子闸 → per-scope per-mode。
+    # 默认 50 控制灰度期日成本敞口。
+    anonymous_express_daily_global_cap: int = 50
+
     # --- 分片上传（plan 2026-06-11 §3.7，独立命名空间 chunked_upload_*）---
     # 注册用户大文件（>95MB）经 CF Tunnel 的应用层分片上传通道。
     # 主开关默认 False：部署后休眠，admin 账号灰度验证再打开。
@@ -388,6 +439,37 @@ class AdminSettings(BaseModel):
     chunked_upload_disk_floor_gb: int = 20         # 磁盘保底（reserve 公式扣除项）
     chunked_upload_ttl_hours: int = 24             # 未完成上传清扫 TTL
     chunked_upload_ready_ttl_hours: int = 6        # ready 未被 job claim 的终文件 TTL
+
+    # --- 匿名档分片扩展（plan §9 r1，2026-06-12）---
+    # 独立熔断：与注册档 chunked_upload_enabled 互不影响；三与门之一
+    # （env enable_anonymous_preview AND anonymous_free_preview_enabled AND
+    # 本开关）。StrictBool 理由同上。默认 False 休眠上线，项目主自行灰度。
+    chunked_upload_anonymous_enabled: StrictBool = False
+    # 匿名未 complete 分片 TTL（小时）。注册档维持 chunked_upload_ttl_hours。
+    chunked_upload_anonymous_ttl_hours: int = 6
+    # 匿名档 per-session 每日声明配额（GB/天）。弱约束（session 可重置），
+    # 主要防单会话 init-spam；真正滥用锚点是 per-IP in-flight gate。
+    chunked_upload_anonymous_daily_gb: int = 5
+
+    # --- 多语言互翻 language pairs（plan 2026-06-13 v3 PR-A part 2 / §5 Phase 1）---
+    # 非默认 language pair（首发 zh-CN->en）的运行时灰度闸。默认 pair en->zh-CN
+    # **恒可用**（零回归），不受这些开关影响——判定见
+    # entitlements.get_effective_allowed_language_pairs。
+    #
+    # 授权规则（镜像 express_cosyvoice_auto_clone_* 三件套）：
+    #   非默认 pair 可用 = language_pairs_enabled（主开关）
+    #     AND (language_pairs_user_allowlist_enabled=False → 所有登录用户
+    #          OR user 是 admin
+    #          OR user.id ∈ language_pairs_allowlist)
+    #
+    # **类型用 StrictBool**（同 cosyvoice_clone_general_availability_enabled）：
+    # 宽松 bool 下 "1"/"on"/"true" 字符串会被 Pydantic 解析为 True，admin UI
+    # bug 可能意外开启非默认 pair（付费 LLM/TTS 真实成本）。StrictBool 只接受
+    # Python True/False。空 allowlist + enabled=True + allowlist_enabled=True
+    # = 仅 admin 可用（与 enabled=False 在普通用户视角等效，双保险）。
+    language_pairs_enabled: StrictBool = False
+    language_pairs_user_allowlist_enabled: StrictBool = True
+    language_pairs_allowlist: list[str] = []  # user_id 字符串数组（beta 灰度）
 
     @field_validator(
         "anonymous_preview_max_upload_mb",
@@ -412,6 +494,41 @@ class AdminSettings(BaseModel):
             )
         return int(v)
 
+    @field_validator("anonymous_express_daily_global_cap")
+    @classmethod
+    def validate_anonymous_express_cap_bounds(cls, v: int) -> int:
+        """express 子闸边界（plan 2026-06-12 T0）：[1, 100000]。
+
+        下界 ≥1 防误设 0（等效误关停且难排查——紧急关停用
+        anonymous_express_enabled 主开关）；上界防天文数字（成本敞口失控）。
+        """
+        low, high = _ANON_EXPRESS_CAP_BOUNDS
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"anonymous_express_daily_global_cap 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
+
+    @field_validator(
+        "anonymous_preview_cap_per_ip_per_mode",
+        "anonymous_preview_cap_per_device_per_mode",
+        "anonymous_preview_cap_per_source_per_mode",
+    )
+    @classmethod
+    def validate_anonymous_per_mode_cap_bounds(cls, v: int, info) -> int:
+        """per-mode 三维度旋钮边界（2026-06-13）：[1, 1000]。
+
+        下界 ≥1 防误设 0（cap=0 → count>=0 恒真 → 该维度拒死所有 intake，
+        等效误关停且极难排查——要关 lane 用主开关）；上界 1000 见
+        ``_ANON_PER_MODE_CAP_BOUNDS`` 注释。
+        """
+        low, high = _ANON_PER_MODE_CAP_BOUNDS
+        if not (low <= int(v) <= high):
+            raise ValueError(
+                f"{info.field_name} 必须在 [{low}, {high}]，收到 {v!r}"
+            )
+        return int(v)
+
     @field_validator(
         "chunked_upload_max_file_mb",
         "chunked_upload_chunk_mb",
@@ -422,6 +539,8 @@ class AdminSettings(BaseModel):
         "chunked_upload_disk_floor_gb",
         "chunked_upload_ttl_hours",
         "chunked_upload_ready_ttl_hours",
+        "chunked_upload_anonymous_ttl_hours",
+        "chunked_upload_anonymous_daily_gb",
     )
     @classmethod
     def validate_chunked_upload_bounds(cls, v: int, info) -> int:
@@ -602,6 +721,31 @@ def _require_admin(user: User | None) -> User:
     return user
 
 
+def validate_anonymous_express_tts_exclusion(s: AdminSettings) -> None:
+    """MiMo 组合硬拒（plan 2026-06-12 §E 双层之一：admin 保存校验 422）。
+
+    ``anonymous_express_enabled=True`` ⇄ ``express_tts_provider="mimo"``
+    互斥。POST /settings 是 full-body 语义，本检查看终态——无论本次保存
+    翻的是哪个字段，组合命中即拒，天然覆盖双向。
+
+    背景：MiMo 海外端点恒定 mia 音色（gender 不参与选音），匿名 express
+    用它必然音色错配，违背"免费触点必须体验真实管线效果"最高指导原则
+    （US prod 实证 job_0d71b65d594e410d9716a77507619d45 全员女声错配）。
+
+    手改 admin_settings.json 绕过本校验的情形由 runtime lane resolver
+    防御纵深兜底（plan §E②）。
+    """
+    if s.anonymous_express_enabled and s.express_tts_provider.strip().lower() == "mimo":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "匿名 Express 预览与 MiMo TTS 互斥（MiMo 恒定单音色会导致"
+                "预览音色错配）：请先切换 express TTS provider（如 cosyvoice）"
+                "再开启匿名 Express lane。"
+            ),
+        )
+
+
 def load_settings() -> AdminSettings:
     """Load settings from JSON file, returning defaults if missing."""
     if SETTINGS_FILE.exists():
@@ -677,6 +821,9 @@ async def update_admin_settings(
     for the contract-lock regression.
     """
     _require_admin(user)
+    # plan 2026-06-12 T0：匿名 express lane 与 MiMo provider 互斥（双向 422，
+    # 命中即拒、不落盘）。详见 validate_anonymous_express_tts_exclusion docstring。
+    validate_anonymous_express_tts_exclusion(body)
     save_settings(body)
     return {"settings": body.model_dump()}
 

@@ -56,6 +56,8 @@ from services.r2_publisher_lib.downloadable_keys import (
     EXPRESS_ALLOWED_ARTIFACT_KEYS,
     EXPRESS_ALLOWED_DOWNLOAD_KEYS,
     EXPRESS_ALLOWED_STREAM_KINDS,
+    effective_policy_mode,
+    stream_kinds_for,
 )
 
 
@@ -82,6 +84,19 @@ def _parse_list_pagination(query: str) -> tuple[int | None, int]:
 def _is_express_job(record) -> bool:
     """Check if a JobRecord is in Express mode. Safe for missing attribute."""
     return getattr(record, "service_mode", None) == "express"
+
+
+def _policy_mode_for(record) -> str | None:
+    """JobRecord → 策略档（plan 2026-06-12 §C）。
+
+    匿名预览任务（record.anonymous_preview 真值）恒为 "anonymous_preview"
+    最严档——匿名 express 任务的 service_mode=="express" 不得直接拿去查
+    策略表（会放行下载/poster stream）。
+    """
+    return effective_policy_mode(
+        getattr(record, "service_mode", None),
+        getattr(record, "anonymous_preview", False),
+    )
 
 
 # 2026-04-21: stdlib ThreadingHTTPServer's BufferedIOBase wfile enters a
@@ -229,8 +244,22 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     artifacts_payload = service.get_artifacts(path_parts[1])
                     # Express 过滤：只暴露 publish.dubbed_video + publish.dubbed_video_poster
                     # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
+                    # plan 2026-06-12 §C ⑦：匿名预览任务按零下载档过滤——
+                    # artifacts 列表不暴露任何 key（stream-only，AD-6/R3）。
                     record = service.require_job(path_parts[1])
-                    if _is_express_job(record):
+                    if effective_policy_mode(
+                        getattr(record, "service_mode", None),
+                        getattr(record, "anonymous_preview", False),
+                    ) == "anonymous_preview":
+                        artifacts_payload = {
+                            **artifacts_payload,
+                            "artifacts": [],
+                            "manifest": {
+                                **artifacts_payload.get("manifest", {}),
+                                "artifact_count": 0,
+                            },
+                        }
+                    elif _is_express_job(record):
                         items = artifacts_payload.get("artifacts") or []
                         filtered = [
                             it for it in items
@@ -522,6 +551,15 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     job_id = path_parts[1]
                     download_key = path_parts[3]
                     record = service.require_job(job_id)
+                    # plan 2026-06-12 §C ④：匿名预览任务零下载（stream-only，
+                    # AD-6）。先于 express 白名单——匿名 express 任务的
+                    # service_mode=="express" 不得落进下载放行分支。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "匿名预览任务不提供下载（仅在线预览）"},
+                        )
+                        return
                     # Express 白名单：只允许 publish.dubbed_video
                     # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
                     if _is_express_job(record) and download_key not in EXPRESS_ALLOWED_DOWNLOAD_KEYS:
@@ -556,6 +594,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "tts-segments-zip":
                     job_id = path_parts[1]
                     record = service.require_job(job_id)
+                    # §C 深度防御：匿名预览任务（含匿名 free）一律禁
+                    # tts-segments-zip（零下载档；express 分支在下面单独拦）。
+                    if _policy_mode_for(record) == "anonymous_preview":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "匿名预览任务不提供下载（仅在线预览）"},
+                        )
+                        return
                     # Express 禁 tts-segments-zip（editor-only 产物）
                     if _is_express_job(record):
                         self._write_json(
@@ -636,6 +682,19 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     job_id = path_parts[1]
                     kind = path_parts[3]
                     record = service.require_job(job_id)
+                    # plan 2026-06-12 §C ⑤：匿名预览任务仅允许 stream video
+                    # （stream_kinds_for("anonymous_preview") = {"video"}）。
+                    # 先于 express 白名单——匿名 express 的 poster/audio 也拦。
+                    _policy_mode = _policy_mode_for(record)
+                    if (
+                        _policy_mode == "anonymous_preview"
+                        and kind not in stream_kinds_for(_policy_mode)
+                    ):
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": f"该媒体流对匿名预览任务不可访问: {kind}"},
+                        )
+                        return
                     # Express 禁 stream/audio（只允许 video + poster）
                     # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
                     if _is_express_job(record) and kind not in EXPRESS_ALLOWED_STREAM_KINDS:
@@ -894,6 +953,10 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         speakers=str(payload.get("speakers") or "auto"),
                         voice_a=str(payload.get("voice_a") or "").strip() or None,
                         voice_b=str(payload.get("voice_b") or "").strip() or None,
+                        # PR-A part 2 §3: Gateway forwards the canonical pair; submit_job
+                        # re-resolves via the registry and persists it (None → GA default).
+                        source_language=str(payload.get("source_language") or "").strip() or None,
+                        target_language=str(payload.get("target_language") or "").strip() or None,
                         transcription_method=str(payload.get("transcription_method") or "assemblyai").strip() or None,
                         service_mode=str(payload["service_mode"]).strip() if payload.get("service_mode") else None,
                         tts_provider=str(payload["tts_provider"]).strip() if payload.get("tts_provider") else None,
@@ -1009,6 +1072,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # POST /jobs/{id}/enter-edit — succeeded → editing (studio only)
                 if (len(path_parts) == 3 and path_parts[0] == "jobs"
                         and path_parts[2] == "enter-edit"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     job = service.enter_editing(path_parts[1])
                     self._write_json(HTTPStatus.OK, {"success": True, "job": job.to_dict()})
                     return
@@ -1062,6 +1126,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         and path_parts[2] == "segments" and path_parts[4] == "update"):
                     job_id = path_parts[1]
                     segment_id = path_parts[3]
+                    _gate_pair_post_edit(service, job_id)
                     patch = self._read_json_payload()
                     result = service.patch_editing_segment(job_id, segment_id, patch)
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
@@ -1088,6 +1153,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         and path_parts[2] == "segments" and path_parts[4] == "split"):
                     job_id = path_parts[1]
                     segment_id = path_parts[3]
+                    _gate_pair_post_edit(service, job_id)
                     payload = self._read_json_payload()
                     try:
                         split_source_index = int(payload.get("split_source_index"))
@@ -1124,6 +1190,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     )
                     job_id = path_parts[1]
                     segment_id = path_parts[3]
+                    _gate_pair_suggest_split(service, job_id)
                     payload = self._read_json_payload()
                     speaker_name_map_raw = payload.get("speaker_name_map") or {}
                     if not isinstance(speaker_name_map_raw, dict):
@@ -1182,6 +1249,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         and path_parts[2] == "segments" and path_parts[4] == "split-many"):
                     job_id = path_parts[1]
                     segment_id = path_parts[3]
+                    _gate_pair_post_edit(service, job_id)
                     payload = self._read_json_payload()
                     cuts_raw = payload.get("cuts")
                     speaker_ids_raw = payload.get("speaker_ids")
@@ -1219,6 +1287,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         and path_parts[2] == "segments" and path_parts[4] == "status"):
                     job_id = path_parts[1]
                     segment_id = path_parts[3]
+                    _gate_pair_post_edit(service, job_id)
                     payload = self._read_json_payload()
                     status = str(payload.get("status", "")).strip()
                     if not status:
@@ -1231,6 +1300,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         and path_parts[2] == "segments" and path_parts[4] == "regenerate-tts"):
                     job_id = path_parts[1]
                     segment_id = path_parts[3]
+                    _gate_pair_post_edit(service, job_id)
                     # payload is accepted but currently unused; reserved for
                     # future provider override (voice_id, model, sample_rate).
                     self._read_json_payload()
@@ -1240,12 +1310,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # POST /jobs/{id}/segments/{sid}/accept-draft — keep draft wav (T1-5)
                 if (len(path_parts) == 5 and path_parts[0] == "jobs"
                         and path_parts[2] == "segments" and path_parts[4] == "accept-draft"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     result = service.accept_segment_draft_tts(path_parts[1], path_parts[3])
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
                 # POST /jobs/{id}/segments/{sid}/discard-draft — delete draft (T1-5)
                 if (len(path_parts) == 5 and path_parts[0] == "jobs"
                         and path_parts[2] == "segments" and path_parts[4] == "discard-draft"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     result = service.discard_segment_draft_tts(path_parts[1], path_parts[3])
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
@@ -1254,6 +1326,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # read via GET /regenerate-all-tts/status?task_id=XXX.
                 if (len(path_parts) == 3 and path_parts[0] == "jobs"
                         and path_parts[2] == "regenerate-all-tts"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     self._read_json_payload()  # body currently unused
                     result = service.regenerate_all_dirty_segments_async(
                         path_parts[1],
@@ -1268,6 +1341,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # next tick; False means no matching live batch.
                 if (len(path_parts) == 3 and path_parts[0] == "jobs"
                         and path_parts[2] == "regenerate-selected-tts"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     payload = self._read_json_payload()
                     raw_segment_ids = payload.get("segment_ids")
                     if not isinstance(raw_segment_ids, list):
@@ -1300,6 +1374,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # POST /jobs/{id}/editing/voice-map — set per-segment voice override (T1-6)
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "voice-map"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     payload = self._read_json_payload()
                     segment_id = str(payload.get("segment_id", "")).strip()
                     if not segment_id:
@@ -1353,6 +1428,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # EditingConflictError → JobConflictError handler.
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "speakers"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     from dataclasses import asdict as _asdict
                     from services.jobs.editing import EditingConflictError
                     from services.jobs.editing_speakers import (
@@ -1406,6 +1482,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 if (len(path_parts) == 6 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "speakers"
                         and path_parts[5] == "retry-profile"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     import re as _re_speaker
                     from services.jobs.editing import EditingConflictError
                     from services.jobs.models import JOB_STATUS_EDITING
@@ -1468,6 +1545,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # that do not have matching regenerated TTS.
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "revert-unsynced-text"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     payload = self._read_json_payload()
                     raw_segment_ids = payload.get("segment_ids")
                     if not isinstance(raw_segment_ids, list):
@@ -1486,6 +1564,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                 # POST /jobs/{id}/editing/commit — overwrite or copy_as_new (T1-9)
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "commit"):
+                    _gate_pair_post_edit(service, path_parts[1])
                     payload = self._read_json_payload()
                     raw_strategy = payload.get("strategy")
                     strategy = str(raw_strategy or "").strip()
@@ -2278,6 +2357,49 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
 # ---------------------------------------------------------------------------
 # Phase 1 helper functions (handler-level, not in JobService)
 # ---------------------------------------------------------------------------
+
+def _require_language_pair_capability(record: object, capability: str) -> None:
+    """Second-layer (Job API service) paid-capability gate — PR-A part 2 §4 / D4.
+
+    A job's language pair (``record.language_pair``) declares which PAID
+    capabilities have been language-adapted (registry
+    ``adapted_paid_capabilities``). The GA pair en->zh-CN supports the full set;
+    zh-CN->en ships with an EMPTY set, so post-edit / suggest-split fail closed
+    HERE even though the Gateway create-gate already restricts who may create
+    the pair (defense in depth — D4).
+
+    Raises ``JobConflictError`` (→ 409, this file's lifecycle-conflict mapping)
+    when the pair has not adapted ``capability``. An unknown / empty pair_key
+    falls back to the GA default profile (fully adapted) so legacy en->zh-CN
+    jobs — which is every pre-existing job — are never gated.
+    """
+    from services.language_registry import (
+        DEFAULT_LANGUAGE_PAIR_PROFILE,
+        SUPPORTED_LANGUAGE_PAIRS,
+    )
+
+    pair_key = str(getattr(record, "language_pair", "") or "").strip()
+    profile = SUPPORTED_LANGUAGE_PAIRS.get(pair_key, DEFAULT_LANGUAGE_PAIR_PROFILE)
+    if not profile.supports_paid_capability(capability):
+        raise JobConflictError(
+            f"语言方向 {pair_key or DEFAULT_LANGUAGE_PAIR_PROFILE.language_pair} "
+            f"暂不支持该操作（{capability}）。"
+        )
+
+
+def _gate_pair_post_edit(service, job_id: str) -> None:
+    """Reject post-edit on a pair whose paid set lacks post_edit (§4 / D4)."""
+    from services.language_registry import CAPABILITY_POST_EDIT
+
+    _require_language_pair_capability(service.require_job(job_id), CAPABILITY_POST_EDIT)
+
+
+def _gate_pair_suggest_split(service, job_id: str) -> None:
+    """Reject suggest-split on a pair whose paid set lacks suggest_split (§4 / D4)."""
+    from services.language_registry import CAPABILITY_SUGGEST_SPLIT
+
+    _require_language_pair_capability(service.require_job(job_id), CAPABILITY_SUGGEST_SPLIT)
+
 
 def _require_waiting_for_review(record: object) -> None:
     """Verify that the job is in waiting_for_review status. Raises JobConflictError if not."""

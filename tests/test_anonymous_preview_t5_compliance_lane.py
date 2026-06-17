@@ -201,8 +201,10 @@ def test_should_run_pass3_truth_table() -> None:
 
 
 def test_pass3_call_site_uses_gate_helper() -> None:
+    # plan 2026-06-12 §E：gate helper 增 service_mode 入参（匿名按 lane
+    # 分流——free 跳过不变 / express 必跑）。
     assert (
-        "_should_run_pass3(_review_speaker_styles, job_anonymous_preview)"
+        "_should_run_pass3(_review_speaker_styles, job_anonymous_preview, job_service_mode)"
         in _PROCESS_SOURCE
     )
 

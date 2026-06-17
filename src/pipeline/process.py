@@ -2262,15 +2262,70 @@ def _resolve_projects_root() -> Path:
 
 ANONYMOUS_PREVIEW_MIN_TRANSCRIPT_CHARS = 20
 
+# plan 2026-06-12 anonymous-express-preview §E：匿名 express 的 Pass 3
+# 调用预算（秒）。超时按失败处理（诚实失败 → 任务 terminal failed），
+# 超时机制落在 pipeline 调用点（concurrent.futures 包裹），不改
+# review_pass3_voice_profiles 内部。
+ANON_EXPRESS_PASS3_TIMEOUT_SECONDS = 120
 
-def _should_run_pass3(review_speaker_styles: object, anonymous_preview: bool) -> bool:
-    """S2.5 Pass 3 gate（APF P0 T5）。
 
-    匿名预览 lane 跳过 Pass 3：音色画像是付费多模态调用，对 3 分钟
-    预设音色预览不必要（MiMo style 回落 Pass 1/2 已有字段或默认音色）。
-    登录任务行为不变。
+class AnonymousExpressPass3Failed(RuntimeError):
+    """匿名 express 任务 Pass 3 诚实失败（plan 2026-06-12 §E）。
+
+    artifact 判定不过（s2_pass3_result.json 缺失 / profiles 为空）或
+    120s 超时 → 抛出本异常使任务 terminal failed。**不降级出片**：
+    Pass 3 失败时 CosyVoice 无 gender 全员回落 longanyang，把坏预览
+    交给用户违背"免费触点必须真实管线效果"最高指导原则。
     """
-    return bool(review_speaker_styles) and not anonymous_preview
+
+
+def _should_run_pass3(
+    review_speaker_styles: object,
+    anonymous_preview: bool,
+    service_mode: str = "",
+) -> bool:
+    """S2.5 Pass 3 gate（APF P0 T5 + plan 2026-06-12 §E 按 lane 分流）。
+
+    * 登录任务：行为不变（有 speaker styles 即跑）。
+    * 匿名 free：跳过不变——音色画像是付费多模态调用，对预设音色预览
+      不必要（MiMo style 回落 Pass 1/2 已有字段或默认音色）。
+    * 匿名 express（D6 必选）：必须跑——CosyVoice 选音依赖 gender，
+      无画像会全员回落 longanyang（US prod 实证音色错配）。
+    """
+    if not review_speaker_styles:
+        return False
+    if not anonymous_preview:
+        return True
+    return str(service_mode or "").strip() == "express"
+
+
+def _anon_express_pass3_artifact_ok(
+    pass3_cache_path: Path,
+    expected_speaker_ids=(),
+) -> bool:
+    """匿名 express Pass 3 的 artifact 判定（plan §E 唯一可信信号）。
+
+    ``review_pass3_voice_profiles()`` 内部 retry+fallback 会吞错
+    （transcript_reviewer.py:2161/:2208），成功 artifact 只在 :2189 写——
+    所以只认 ``s2_pass3_result.json`` 存在且 ``speaker_profiles`` 非空。
+
+    CodeX 第三轮 P2 收紧：多说话人任务的**部分**产物（如只有 speaker_a）
+    也必须判失败——merge 只更新产物里有的说话人，缺失者无 gender/style
+    进音色匹配会回落错误默认音色（正是本计划要消灭的坏预览路径）。
+    ``expected_speaker_ids`` 全部出现在 profiles 中才算成功。
+
+    任何读取/解析异常 → False（fail-closed）。
+    """
+    try:
+        if not pass3_cache_path.is_file():
+            return False
+        data = json.loads(pass3_cache_path.read_text(encoding="utf-8"))
+        profiles = data.get("speaker_profiles")
+        if not isinstance(profiles, dict) or len(profiles) == 0:
+            return False
+        return set(expected_speaker_ids).issubset(profiles.keys())
+    except Exception:  # noqa: BLE001 — fail-closed
+        return False
 
 
 def _anonymous_compliance_fail_closed_result(
@@ -3243,6 +3298,7 @@ class ProcessPipeline:
                         source_audio_path=source_audio_path,
                         video_title=download_result.video_title,
                         video_url=normalized_url,
+                        cached_segments=translation_result.segments,
                     )
                     self._apply_review_speaker_styles_to_segments(
                         translation_result.segments,
@@ -3323,9 +3379,20 @@ class ProcessPipeline:
 
             # --- Pass 3: voice profiling (before voice selection, before translation) ---
             _pass3_cache_path = (final_project_dir / "transcript" / "s2_pass3_result.json").resolve(strict=False)
-            if _review_speaker_styles and job_anonymous_preview:
+            # plan 2026-06-12 §E：匿名按 lane 分流——free 跳过不变；express
+            # 必跑 + artifact 判定 + 120s 超时 + 诚实失败（不降级出片）。
+            _anon_express_pass3 = (
+                job_anonymous_preview
+                and str(job_service_mode or "").strip() == "express"
+            )
+            # CodeX 第四轮 P2：超时是硬失败信号（plan §E"超时按失败处理"
+            # 的字面语义）。daemon 线程超时后仍可能在 artifact 判定前恰好
+            # 写出 s2_pass3_result.json——但 profiles 没有 merge 回
+            # _review_speaker_styles，放行会出错误音色预览。
+            _anon_express_pass3_timed_out = False
+            if _review_speaker_styles and job_anonymous_preview and not _anon_express_pass3:
                 print("[S2.5] 匿名预览任务：跳过 Pass 3 音色画像（付费多模态调用，APF P0 T5）", flush=True)
-            if _should_run_pass3(_review_speaker_styles, job_anonymous_preview):
+            if _should_run_pass3(_review_speaker_styles, job_anonymous_preview, job_service_mode):
                 _pass3_profiles: dict | None = None
                 if _pass3_cache_path.exists():
                     try:
@@ -3340,8 +3407,7 @@ class ProcessPipeline:
                         from services.transcript_reviewer import review_pass3_voice_profiles
 
                         print("[S2.5] Running Pass 3: voice profiling...", flush=True)
-                        _pass3_profiles = review_pass3_voice_profiles(
-                            transcript_result.lines,
+                        _pass3_kwargs = dict(
                             source_audio_path=source_audio_path if source_audio_path.exists() else None,
                             speakers=_review_speaker_styles,
                             video_title=download_result.video_title,
@@ -3349,7 +3415,56 @@ class ProcessPipeline:
                             mode=job_service_mode,
                             usage_meter=usage_meter,
                         )
+                        if _anon_express_pass3:
+                            # §E：超时落在调用点（不改 review_pass3 内部签名
+                            # transcript_reviewer.py:1945）。CodeX 复审 P2：
+                            # 不用 ThreadPoolExecutor——超时后其非 daemon
+                            # worker 既停不下来，进程退出时 concurrent.futures
+                            # 的 atexit 钩子还会 join 它，挂死的 Pass 3 调用
+                            # 会拖住整个 pipeline 进程不退出。改用 daemon
+                            # 线程 + join(timeout)：超时即放弃，任务失败后
+                            # 进程退出时 daemon 线程随进程终止，挂死的付费
+                            # 调用不再延命（残余窗口=失败到进程退出的秒级
+                            # 间隙，成本上界为单次调用）。
+                            import threading as _threading
+
+                            _pass3_box: dict = {}
+
+                            def _pass3_worker(_box=_pass3_box, _kwargs=_pass3_kwargs):
+                                try:
+                                    _box["profiles"] = review_pass3_voice_profiles(
+                                        transcript_result.lines, **_kwargs
+                                    )
+                                except BaseException as _exc:  # noqa: BLE001
+                                    _box["error"] = _exc
+                            _t = _threading.Thread(
+                                target=_pass3_worker,
+                                daemon=True,
+                                name="anon-express-pass3",
+                            )
+                            _t.start()
+                            _t.join(timeout=ANON_EXPRESS_PASS3_TIMEOUT_SECONDS)
+                            if _t.is_alive():
+                                _anon_express_pass3_timed_out = True
+                                print(
+                                    "[S2.5] 匿名 express Pass 3 超时"
+                                    f"（>{ANON_EXPRESS_PASS3_TIMEOUT_SECONDS}s）"
+                                    "——放弃等待，按失败处理",
+                                    flush=True,
+                                )
+                            elif "error" in _pass3_box:
+                                raise _pass3_box["error"]
+                            else:
+                                _pass3_profiles = _pass3_box.get("profiles")
+                        else:
+                            _pass3_profiles = review_pass3_voice_profiles(
+                                transcript_result.lines,
+                                **_pass3_kwargs,
+                            )
                     except Exception as exc:
+                        # 匿名 express 不在此处抛——成功与否统一由下方
+                        # artifact 判定裁决（内部 retry+fallback 会吞错，
+                        # 异常缺席不等于成功，artifact 才是唯一可信信号）。
                         print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
                 if _pass3_profiles:
                     for spk_id, profile in _pass3_profiles.items():
@@ -3375,6 +3490,39 @@ class ProcessPipeline:
                     self._log_speaker_structure_profiles(_speaker_structure_profiles)
                     print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
 
+            # --- 匿名 express Pass 3 诚实失败判定（plan 2026-06-12 §E）---
+            # 失败条件（任一命中 → terminal failed，绝不降级出片）：
+            # ① 120s 超时（CodeX 第四轮 P2：硬失败——超时后 daemon 线程
+            #    可能在本判定前恰好写出 artifact，但 profiles 没有 merge 回
+            #    _review_speaker_styles，放行会出错误音色预览）；
+            # ② artifact 缺失 / profiles 为空（含 speaker styles 为空导致
+            #    根本没跑 Pass 3 的情形）；
+            # ③ 未覆盖全部说话人（CodeX 第三轮 P2：部分产物=部分说话人无
+            #    gender 进音色匹配，全员回落 longanyang）。
+            if _anon_express_pass3 and (
+                _anon_express_pass3_timed_out
+                or not _anon_express_pass3_artifact_ok(
+                    _pass3_cache_path,
+                    expected_speaker_ids=(
+                        _review_speaker_styles.keys() if _review_speaker_styles else ()
+                    ),
+                )
+            ):
+                from services.smart.state import emit_smart_state_marker
+
+                # gateway 终态镜像（mirror_job_terminal_state 单一结算入口）
+                # 凭此 marker 退还 per-scope per-mode 配额（global 总闸与
+                # express 子闸不退，防刷失败穿透成本闸）。
+                emit_smart_state_marker({"anon_pass3_failed": True})
+                print(
+                    "[S2.5] 匿名 express Pass 3 诚实失败：artifact 判定不过"
+                    "（s2_pass3_result.json 缺失/为空或 120s 超时）——任务终止",
+                    flush=True,
+                )
+                raise AnonymousExpressPass3Failed(
+                    "预览生成失败：声音画像分析未完成，请稍后点击「重试」"
+                )
+
             # --- S4-probe Phase 1: 预翻译（音色确认前） ---
             _probe_segments: list[DubbingSegment] = []
             if not s3_cache_hit:
@@ -3395,6 +3543,26 @@ class ProcessPipeline:
                 except Exception as exc:
                     print(f"[S4-probe] 探针翻译异常（非致命）：{exc}")
                     # logger removed — process.py uses print() for logging
+
+            # B': probe 段补说话人画像（gender/age_group/persona_style/energy_level +
+            # voice_description + structure 角色）。translator.translate_probe 创建的、以及
+            # probe cache 加载回来的 DubbingSegment 这些字段默认空，导致 probe TTS 校准用空
+            # 画像匹配音色并反复刷 "[CosyVoice] empty gender" 警告，cps 估计失真。
+            # 此处套用与正式段相同的两个 apply（在 _run_probe_translation 返回后、probe TTS
+            # 之前），同时覆盖 fresh 与 cache-restore 两条路径，无需再改 probe cache schema。
+            # 两个 apply 对空 dict 都是安全 no-op：Pass 3 未跑 / styles 为空时自动跳过；
+            # _review_speaker_styles 在 :3086 初始化、_speaker_structure_profiles 在 :3276
+            # 无条件赋值（Pass 3 enrichment 在 :3485 之前已 merge），故此处二者必已定义。
+            # 仅影响 probe 字/秒校准准确度——不改最终音色 / 克隆 / 人工审核语义。
+            if _probe_segments:
+                self._apply_review_speaker_styles_to_segments(
+                    _probe_segments,
+                    _review_speaker_styles,
+                )
+                self._apply_speaker_structure_profiles_to_segments(
+                    _probe_segments,
+                    _speaker_structure_profiles,
+                )
 
             # --- voice_selection_review gate (Studio mode, BEFORE translation) ---
             approved_voice_selection = self._get_approved_review_payload(
@@ -6142,11 +6310,16 @@ class ProcessPipeline:
             )
             # Phase 2a Task 8 (gate #8): free service-mode jobs get a burned-in
             # watermark on publish.dubbed_video (paid modes ship clean).
+            # plan 2026-06-12 §C ①：策略档经 effective_policy_mode——匿名
+            # 预览（含匿名 express）恒水印，不看 service_mode 字面量。
+            from services.r2_publisher_lib.downloadable_keys import effective_policy_mode
             from utils.free_watermark import free_watermark_text_for
             output_bundle = self._dispatch_process_output_bundle(
                 project_dir=final_project_dir,
                 build_result=build_result,
-                watermark_text=free_watermark_text_for(job_service_mode),
+                watermark_text=free_watermark_text_for(
+                    effective_policy_mode(job_service_mode, job_anonymous_preview)
+                ),
             )
             assert output_bundle.editor_result is not None
             output_result = output_bundle.editor_result
@@ -8128,22 +8301,34 @@ class ProcessPipeline:
 
         for segment in segments:
             speaker_info = speaker_styles.get(segment.speaker_id, {})
-            voice_description = str(speaker_info.get("voice_description", "") or "")
-            segment.voice_description = voice_description
-            segment.gender = str(speaker_info.get("gender", "") or "")
-            segment.age_group = str(speaker_info.get("age_group", "") or "")
+            if not isinstance(speaker_info, dict) or not speaker_info:
+                continue
+            voice_description = str(speaker_info.get("voice_description", "") or "").strip()
+            if voice_description:
+                segment.voice_description = voice_description
+            effective_voice_description = voice_description or str(segment.voice_description or "")
+            gender = str(speaker_info.get("gender", "") or "").strip()
+            if gender:
+                segment.gender = gender
+            age_group = str(speaker_info.get("age_group", "") or "").strip()
+            if age_group:
+                segment.age_group = age_group
             # Propagate reviewer name to display_name for all speakers (including c+).
             # Overwrite default placeholders ("Speaker B", "Speaker C", etc.) but
             # do NOT overwrite a user-confirmed custom name.
-            speaker_name = str(speaker_info.get("name", "") or "")
+            speaker_name = str(speaker_info.get("name", "") or "").strip()
             if speaker_name and self._is_placeholder_display_name(segment.display_name, segment.speaker_id):
                 segment.display_name = speaker_name
-            segment.persona_style = str(
-                speaker_info.get("persona_style", "") or infer_persona_style(voice_description)
-            )
-            segment.energy_level = str(
-                speaker_info.get("energy_level", "") or infer_energy_level(voice_description)
-            )
+            persona_style = str(
+                speaker_info.get("persona_style", "") or infer_persona_style(effective_voice_description)
+            ).strip()
+            if persona_style:
+                segment.persona_style = persona_style
+            energy_level = str(
+                speaker_info.get("energy_level", "") or infer_energy_level(effective_voice_description)
+            ).strip()
+            if energy_level:
+                segment.energy_level = energy_level
 
     def _log_review_speaker_styles(
         self,
@@ -8195,23 +8380,88 @@ class ProcessPipeline:
         source_audio_path: Path,
         video_title: str,
         video_url: str,
+        cached_segments: list[DubbingSegment] | None = None,
     ) -> dict[str, dict[str, object]]:
-        # Try loading from cached s2_review_result.json first (avoids expensive LLM re-call).
-        # Voice fields (gender/age_group/persona/energy) are filled by Pass 3 later,
-        # so it's fine if they're empty here — no need to re-run S2 to get them.
-        s2_cache = Path(transcript_result.structured_transcript_path).parent / "s2_review_result.json"
+        # Restore persisted review facts without re-running S2.
+        # On translation cache hits Pass 3 may not run again, so merge Pass 3
+        # artifacts and existing segment metadata before falling back to names.
+        del source_audio_path, video_title, video_url
+
+        def _merge_non_empty(
+            target: dict[str, dict[str, object]],
+            speaker_id: str,
+            values: dict[str, object],
+            *,
+            overwrite: bool = True,
+        ) -> None:
+            if not speaker_id:
+                return
+            entry = target.setdefault(speaker_id, {})
+            for key, value in values.items():
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    value = value.strip()
+                if value == "":
+                    continue
+                if not overwrite and entry.get(key):
+                    continue
+                entry[key] = value
+
+        transcript_dir = Path(transcript_result.structured_transcript_path).parent
+        styles: dict[str, dict[str, object]] = {}
+
+        s2_cache = transcript_dir / "s2_review_result.json"
         if s2_cache.exists():
             try:
                 cached = json.loads(s2_cache.read_text(encoding="utf-8"))
                 speakers = cached.get("speakers", {})
-                if speakers:
-                    print(f"[S2] Restored speaker styles from cache ({len(speakers)} speakers).", flush=True)
-                    return speakers
+                if isinstance(speakers, dict):
+                    for speaker_id, speaker_info in speakers.items():
+                        if isinstance(speaker_info, dict):
+                            _merge_non_empty(styles, str(speaker_id), speaker_info)
             except Exception as exc:
                 print(f"[S2] Failed to load cached s2_review_result.json: {exc}", flush=True)
 
-        # Fallback: build minimal styles from transcript speaker IDs
-        print("[S2] No cached S2 result; using minimal speaker styles (Pass 3 will enrich later).", flush=True)
+        pass3_cache = transcript_dir / "s2_pass3_result.json"
+        if pass3_cache.exists():
+            try:
+                cached = json.loads(pass3_cache.read_text(encoding="utf-8"))
+                profiles = cached.get("speaker_profiles", {})
+                if isinstance(profiles, dict):
+                    for speaker_id, profile in profiles.items():
+                        if isinstance(profile, dict):
+                            _merge_non_empty(styles, str(speaker_id), profile)
+            except Exception as exc:
+                print(f"[S2] Failed to load cached s2_pass3_result.json: {exc}", flush=True)
+
+        for segment in cached_segments or []:
+            segment_values = {
+                "name": getattr(segment, "display_name", ""),
+                "voice_description": getattr(segment, "voice_description", ""),
+                "gender": getattr(segment, "gender", ""),
+                "age_group": getattr(segment, "age_group", ""),
+                "persona_style": getattr(segment, "persona_style", ""),
+                "energy_level": getattr(segment, "energy_level", ""),
+            }
+            if self._is_placeholder_display_name(
+                str(segment_values["name"] or ""),
+                getattr(segment, "speaker_id", ""),
+            ):
+                segment_values.pop("name", None)
+            _merge_non_empty(
+                styles,
+                getattr(segment, "speaker_id", ""),
+                segment_values,
+                overwrite=False,
+            )
+
+        if styles:
+            print(f"[S2] Restored speaker styles from persisted cache ({len(styles)} speakers).", flush=True)
+            return styles
+
+        # Fallback: build minimal styles from transcript speaker IDs.
+        print("[S2] No cached speaker style result; using minimal speaker names.", flush=True)
         speaker_ids = list({line.speaker_id for line in transcript_result.lines if line.speaker_id})
         return {
             sid: {"name": sid.replace("speaker_", "Speaker ").replace("_", " ").title()}

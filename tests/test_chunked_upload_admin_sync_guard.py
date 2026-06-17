@@ -33,7 +33,14 @@ CHUNKED_FIELDS: dict[str, tuple[str, str, object]] = {
     "chunked_upload_disk_floor_gb": (r"number", r"20", 20),
     "chunked_upload_ttl_hours": (r"number", r"24", 24),
     "chunked_upload_ready_ttl_hours": (r"number", r"6", 6),
+    # --- 匿名档分片扩展（plan §9 r1，2026-06-12）---
+    "chunked_upload_anonymous_enabled": (r"boolean", r"false", False),
+    "chunked_upload_anonymous_ttl_hours": (r"number", r"6", 6),
+    "chunked_upload_anonymous_daily_gb": (r"number", r"5", 5),
 }
+
+# 布尔主开关集合：StrictBool 语义 + 不参与数字下界测试。
+_BOOL_FIELDS = {"chunked_upload_enabled", "chunked_upload_anonymous_enabled"}
 
 
 def _read_page() -> str:
@@ -68,9 +75,10 @@ def test_backend_has_all_chunked_fields_with_expected_defaults():
 def test_backend_enabled_is_strict_bool():
     """主开关必须 StrictBool：字符串 '1'/'on'/'true' 不得被宽松解析为 True。"""
     cls = _backend_settings_cls()
-    for bad in ("1", "on", "true", 1):
-        with pytest.raises(Exception):
-            cls(chunked_upload_enabled=bad)
+    for field in _BOOL_FIELDS:
+        for bad in ("1", "on", "true", 1):
+            with pytest.raises(Exception):
+                cls(**{field: bad})
 
 
 def test_backend_chunk_mb_hard_cap_80():
@@ -85,7 +93,7 @@ def test_backend_bounds_reject_zero():
     """数字旋钮下界 ≥1：0 等效误关停且难排查，必须被拒。"""
     cls = _backend_settings_cls()
     for field_name in CHUNKED_FIELDS:
-        if field_name == "chunked_upload_enabled":
+        if field_name in _BOOL_FIELDS:
             continue
         with pytest.raises(Exception):
             cls(**{field_name: 0})
@@ -126,19 +134,23 @@ def test_frontend_defaults_match_backend_defaults():
     assert not re.search(r"chunked_upload_enabled\s*:\s*true", body), (
         "DEFAULT_SETTINGS 不应把 chunked_upload_enabled 默认设为 true"
     )
+    assert not re.search(r"chunked_upload_anonymous_enabled\s*:\s*true", body), (
+        "DEFAULT_SETTINGS 不应把 chunked_upload_anonymous_enabled 默认设为 true"
+    )
 
 
 def test_frontend_toggle_uses_spread():
     """toggle onChange 必须 spread 保留其它字段（full-body save 不丢字段）。"""
     src = _read_page()
-    pattern = re.compile(
-        r"setSettings\s*\(\s*\(s\)\s*=>\s*\(\s*\{\s*\.\.\.s\s*,"
-        r"[^}]*chunked_upload_enabled"
-    )
-    assert pattern.search(src), (
-        "chunked_upload_enabled toggle 的 onChange 必须用 "
-        "setSettings((s) => ({ ...s, chunked_upload_enabled: ... })) spread 模式"
-    )
+    for field in ("chunked_upload_enabled", "chunked_upload_anonymous_enabled"):
+        pattern = re.compile(
+            r"setSettings\s*\(\s*\(s\)\s*=>\s*\(\s*\{\s*\.\.\.s\s*,"
+            rf"[^}}]*{field}"
+        )
+        assert pattern.search(src), (
+            f"{field} toggle 的 onChange 必须用 "
+            f"setSettings((s) => ({{ ...s, {field}: ... }})) spread 模式"
+        )
 
 
 # ---------------------------------------------------------------------------

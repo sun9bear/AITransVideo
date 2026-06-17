@@ -328,6 +328,23 @@ class Job(Base):
     # express/studio jobs.
     smart_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # --- Multilingual language fields (migration 036, plan 2026-06-13 v3 PR-A) ---
+    # Canonical source/target language + derived pair key. NOT NULL with
+    # server_default for the GA zero-regression baseline (en->zh-CN). New jobs
+    # write these explicitly (default pair in this slice; create-path pair
+    # selection is PR-A part 2); copy_as_new copies them verbatim from the
+    # source row. Job API JobRecord mirrors the same field names + defaults.
+    # Canonical codes + pair profiles live in services.language_registry.
+    source_language: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="en"
+    )
+    target_language: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="zh-CN"
+    )
+    language_pair: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="en->zh-CN"
+    )
+
 
 class AdminAuditLog(Base):
     """Audit trail for admin actions on user entitlements."""

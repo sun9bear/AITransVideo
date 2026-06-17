@@ -207,7 +207,7 @@ function ProjectsContent() {
         return next
       })
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "鍔犺浇鏇村椤圭洰澶辫触")
+      setLoadError(err instanceof Error ? err.message : "加载更多项目失败")
     } finally {
       loadingMoreRef.current = false
       setIsLoadingMore(false)

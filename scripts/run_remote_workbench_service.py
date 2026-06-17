@@ -64,6 +64,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_job_api(runtime_config) -> int:
+    # Attach persistent rotating file log early so all job-api log lines
+    # land in runtime_logs/jobapi.app.log (survives container recreate).
+    # Same fail-safe wrap as ``main.run_job_api_command`` — the two job-api
+    # entry paths must stay in lock-step (attach_rotating_file_log itself is
+    # idempotent, so a double call is harmless).
+    try:
+        from utils.rotating_log import attach_rotating_file_log
+        attach_rotating_file_log("jobapi.app.log")
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[job-api] WARNING: rotating log attach failed: {_exc}", flush=True)
+
     service = build_default_job_service(project_root=PROJECT_ROOT)
 
     # Post-build wiring — idle-cancel callback, segment TTS caller,

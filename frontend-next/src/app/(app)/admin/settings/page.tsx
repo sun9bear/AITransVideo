@@ -127,6 +127,20 @@ interface AdminSettings {
   anonymous_preview_cap_per_ip: number
   anonymous_preview_cap_per_device: number
   anonymous_preview_cap_per_source: number
+  // --- APF 匿名 Express 预览 lane（plan 2026-06-12 T0）---
+  // express lane 主开关 + 每日全局子闸。full-body POST 语义同上——必须进
+  // state 才不会被静默覆盖。守卫：tests/test_anonymous_express_t0_admin_sync_guard.py。
+  // 注意：anonymous_express_enabled=true 与 express_tts_provider='mimo'
+  // 互斥，后端保存校验 422（文案提示先切换 provider）。
+  anonymous_express_enabled: boolean
+  anonymous_express_daily_global_cap: number
+  // per-mode 三维度配额旋钮（2026-06-13）：legacy per-scope cap 之上，对每个
+  // lane 各自再限 ip/device/source 每日次数。per_ip_per_mode 是免费档"同 IP
+  // 每日次数"的实际绑定闸。full-body POST 同步必需（否则保存别的设置会把
+  // 这三个字段静默打回后端默认 1）。
+  anonymous_preview_cap_per_ip_per_mode: number
+  anonymous_preview_cap_per_device_per_mode: number
+  anonymous_preview_cap_per_source_per_mode: number
   // --- 分片上传（plan 2026-06-11 §3.7，chunked_upload_* 独立命名空间）---
   // 注册用户大文件（>95MB）经 CF Tunnel 的应用层分片上传。full-body POST
   // 语义同上——10 个字段全部进 state，否则保存其它设置会把后端这些字段
@@ -141,6 +155,17 @@ interface AdminSettings {
   chunked_upload_disk_floor_gb: number
   chunked_upload_ttl_hours: number
   chunked_upload_ready_ttl_hours: number
+  // --- 匿名档分片扩展（plan §9 r1，2026-06-12）---
+  // 独立熔断 + 匿名专用 TTL；同属 full-body POST 契约，守卫测试同文件。
+  chunked_upload_anonymous_enabled: boolean
+  chunked_upload_anonymous_ttl_hours: number
+  chunked_upload_anonymous_daily_gb: number
+  // --- 多语言互翻 language pairs（plan 2026-06-13 v3 PR-A part 2 §1/§7）---
+  // 全量 POST 契约：三字段必须同时进 interface + DEFAULT_SETTINGS + state，
+  // 否则保存时会被后端 Pydantic 默认静默覆盖（关掉非默认 pair）。
+  language_pairs_enabled: boolean
+  language_pairs_user_allowlist_enabled: boolean
+  language_pairs_allowlist: string[]
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -222,6 +247,16 @@ const DEFAULT_SETTINGS: AdminSettings = {
   anonymous_preview_cap_per_ip: 3,
   anonymous_preview_cap_per_device: 1,
   anonymous_preview_cap_per_source: 1,
+  // --- APF 匿名 Express lane 默认值（plan 2026-06-12 T0）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致：
+  //   anonymous_express_enabled          = False（休眠上线，项目主自行灰度）
+  //   anonymous_express_daily_global_cap = 50
+  anonymous_express_enabled: false,
+  anonymous_express_daily_global_cap: 50,
+  // per-mode 三维度旋钮默认值必须与 gateway/admin_settings.py 严格一致（全 1）：
+  anonymous_preview_cap_per_ip_per_mode: 1,
+  anonymous_preview_cap_per_device_per_mode: 1,
+  anonymous_preview_cap_per_source_per_mode: 1,
   // --- 分片上传默认值（plan 2026-06-11 §3.7）---
   // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致；
   // enabled 默认 false（部署后休眠，admin 灰度验证再打开）。
@@ -235,6 +270,16 @@ const DEFAULT_SETTINGS: AdminSettings = {
   chunked_upload_disk_floor_gb: 20,
   chunked_upload_ttl_hours: 24,
   chunked_upload_ready_ttl_hours: 6,
+  // --- 匿名档分片默认值（plan §9 r1）---
+  // 必须与 gateway/admin_settings.py Pydantic 默认严格一致；
+  // enabled 默认 false（休眠上线，项目主自行灰度）。
+  chunked_upload_anonymous_enabled: false,
+  chunked_upload_anonymous_ttl_hours: 6,
+  chunked_upload_anonymous_daily_gb: 5,
+  // --- 多语言互翻 language pairs 默认值（必须与 gateway/admin_settings.py 严格一致）---
+  language_pairs_enabled: false,
+  language_pairs_user_allowlist_enabled: true,
+  language_pairs_allowlist: [],
 }
 
 // 分片上传数字旋钮元数据：边界与 gateway _CHUNKED_UPLOAD_BOUNDS 一致。
@@ -243,7 +288,8 @@ const CHUNKED_UPLOAD_FIELDS: Array<{
     | 'chunked_upload_per_user_active' | 'chunked_upload_per_user_inflight_gb'
     | 'chunked_upload_global_inflight_gb' | 'chunked_upload_daily_per_user_gb'
     | 'chunked_upload_disk_floor_gb' | 'chunked_upload_ttl_hours'
-    | 'chunked_upload_ready_ttl_hours'
+    | 'chunked_upload_ready_ttl_hours' | 'chunked_upload_anonymous_ttl_hours'
+    | 'chunked_upload_anonymous_daily_gb'
   label: string
   unit: string
   min: number
@@ -321,6 +367,22 @@ const CHUNKED_UPLOAD_FIELDS: Array<{
     min: 1,
     max: 72,
     description: '合并完成但用户未据此创建任务的终文件，超时由清扫器删除（防 2GB 文件长期滞留）。',
+  },
+  {
+    key: 'chunked_upload_anonymous_ttl_hours',
+    label: '匿名档未完成上传 TTL',
+    unit: '小时',
+    min: 1,
+    max: 24,
+    description: '匿名试用分片上传的未完成清扫窗口（plan §9 r1 评审默认 6h）。匿名身份可重置，过长会拉长 init 占盘窗口；注册档维持上方独立 TTL。',
+  },
+  {
+    key: 'chunked_upload_anonymous_daily_gb',
+    label: '匿名档每日声明配额',
+    unit: 'GB/天',
+    min: 1,
+    max: 100,
+    description: '匿名试用分片的单会话每日配额（声明即计、放弃不退）。收太紧会被失败重试烧完锁死一天；对滥用者本就无效（清 cookie 即新会话），真正的滥用约束是 per-IP 在途 gate。',
   },
 ]
 
@@ -899,6 +961,72 @@ export default function AdminSettingsPage() {
         </label>
       </SettingSection>
 
+      {/* 多语言互翻 language pairs（PR-A part 2 §1/§7） */}
+      <SettingSection
+        title="多语言支持（内测 · 管线未就绪，勿在生产开启）"
+        description="控制非默认语言方向（首发：中文 → 英文）在前端入口的可见性。默认方向「英文 → 中文」永远可用，不受这些开关影响。⚠️ 端到端管线尚未适配非默认方向（翻译方向 / 音色池去中文 / 字幕 per-script 在后续 PR-W/CD/F）——开启主开关只会让该方向在创建页显示为「即将上线」（不可选），创建仍被后端 409 拦截（pipeline_ready 代码硬闸，翻开关绕不过）。真正放行须等管线 PR 上线并改 registry 常量。"
+      >
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.language_pairs_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, language_pairs_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              启用非默认语言方向
+              <span className="ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] bg-[color:var(--ochre)]/20 text-[color:var(--ochre)]">
+                内测 · 受控启用
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              主开关。关闭时只有「英文 → 中文」可用（零回归）。开启后，非默认方向按下方白名单规则授权。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.language_pairs_user_allowlist_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, language_pairs_user_allowlist_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">白名单模式</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启时仅白名单内的 user_id（及管理员）可用非默认方向；关闭时所有登录用户都可用。
+              <strong className="text-[color:var(--ochre)]">空白名单 + 开启 = 仅管理员可用</strong>（双保险）。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">白名单 user_id（每行一个）</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              仅在「白名单模式」开启时生效。填入允许使用非默认方向的用户 ID（与 CosyVoice 克隆白名单同口径，用 user_id 而非邮箱）。
+            </p>
+          </div>
+          <textarea
+            rows={4}
+            value={settings.language_pairs_allowlist.join('\n')}
+            onChange={(e) =>
+              setSettings((s) => ({
+                ...s,
+                language_pairs_allowlist: e.target.value
+                  .split('\n')
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+              }))
+            }
+            placeholder="00000000-0000-0000-0000-000000000001"
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+          />
+        </label>
+      </SettingSection>
+
       {/* Phase D — Whisper 字幕时间对齐 */}
       <SettingSection
         title="Whisper 字幕时间对齐"
@@ -1177,6 +1305,94 @@ export default function AdminSettingsPage() {
           </div>
         </label>
 
+        {/* APF Express lane（plan 2026-06-12 T0）：express 优先于 free，
+            开启后匿名预览走真实快捷版管线（Pass 3 + CosyVoice TTS）。
+            与 express TTS provider = MiMo 互斥，后端保存校验 422。 */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.anonymous_express_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, anonymous_express_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              开启匿名 Express 快捷版 lane
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                APF Express · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后匿名预览走真实快捷版管线（Pass 3 音色画像 + 快捷版 TTS），优先级高于免费 lane
+              （free 开关保持开也会走 express）。单次成本高于免费 lane，请配合下方每日子闸控制敞口。
+              与 express TTS provider = MiMo 互斥：保存会被拒绝（先切换 provider）。
+            </p>
+          </div>
+        </label>
+
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">Express lane 每日全局上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              express lane 独立每日子闸（在全局总闸之内再限 express 次数），控制真实管线成本敞口。
+              默认 50（范围 1–100000）。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={100000}
+            step={1}
+            value={settings.anonymous_express_daily_global_cap}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 100000) {
+                setSettings((s) => ({ ...s, anonymous_express_daily_global_cap: v }))
+              }
+            }}
+            className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
+        </label>
+
+        {/* per-mode 三维度配额旋钮（2026-06-13）：在 legacy per-scope cap 之上，
+            对每个 lane（free/express）各自再限 ip/device/source 每日次数。
+            per_ip_per_mode 是免费档"同 IP 每日次数"的实际绑定闸——调高放宽
+            免费试用（注意它同时作用于 express，express 另有 50/日全局子闸兜底）。 */}
+        <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-3">
+          <div>
+            <p className="text-sm font-medium text-foreground">每模式每日次数上限（per-mode）</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              免费 / 快捷各 lane 独立计数。<strong>每 IP</strong> 是免费档“同 IP 每天能试几次”的实际限制——
+              想让用户多试就调高（如 3）；<strong>每设备 / 每视频</strong>防同一浏览器 / 同一视频刷量，默认 1。
+              范围 1–1000，保存即时生效。
+            </p>
+          </div>
+          {([
+            { key: 'anonymous_preview_cap_per_ip_per_mode', label: '每 IP' },
+            { key: 'anonymous_preview_cap_per_device_per_mode', label: '每设备' },
+            { key: 'anonymous_preview_cap_per_source_per_mode', label: '每视频' },
+          ] as const).map((f) => (
+            <label key={f.key} className="flex items-center gap-3">
+              <span className="text-sm text-foreground w-20">{f.label}</span>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                step={1}
+                value={settings[f.key]}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10)
+                  if (Number.isFinite(v) && v >= 1 && v <= 1000) {
+                    setSettings((s) => ({ ...s, [f.key]: v }))
+                  }
+                }}
+                className="w-24 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+              />
+              <span className="text-xs text-muted-foreground">次 / 天</span>
+            </label>
+          ))}
+        </div>
+
         <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
           <div>
             <p className="text-sm font-medium text-foreground">全局同时处理上限</p>
@@ -1265,6 +1481,29 @@ export default function AdminSettingsPage() {
               关闭时前端隐藏大文件入口（&gt;95MB 仍走单请求路径，会被 CF 边缘 413 拒绝）；
               开启前请确认磁盘余量充足（2GB 文件任务全程峰值 ~6GB）。
               进行中上传的清理由后台清扫器负责，不受本开关影响。
+            </p>
+          </div>
+        </label>
+
+        {/* 匿名档分片独立熔断（plan §9 r1）：三与门之一，与上方注册档开关互不影响 */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.chunked_upload_anonymous_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, chunked_upload_anonymous_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              启用匿名试用分片上传
+              <span className="ml-2 inline-block rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary">
+                默认关闭 · 灰度开启
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              试用弹窗 &gt;95MB 文件走分片通道的独立熔断（还需「匿名免费预览」与前端 env flag 同时开启）。
+              单文件上限沿用上方匿名预览的 max_upload_mb（默认 200MB）；
+              并发滥用由 per-IP 在途会话数（复用每 IP 每日预览上限旋钮）+ 单会话 1 路在途约束。
             </p>
           </div>
         </label>
@@ -1383,6 +1622,19 @@ export default function AdminSettingsPage() {
               DEFAULT_SETTINGS.anonymous_free_preview_enabled,
             anonymous_preview_max_in_flight:
               DEFAULT_SETTINGS.anonymous_preview_max_in_flight,
+            // --- APF Express lane reset 规则（plan 2026-06-12 T0）---
+            // visible toggle 显式回 DEFAULT（false），让 admin 在 UI 上看到
+            // 复位生效 + fail-safe-off；cap 数字显式回出厂默认 50。
+            anonymous_express_enabled:
+              DEFAULT_SETTINGS.anonymous_express_enabled,
+            anonymous_express_daily_global_cap:
+              DEFAULT_SETTINGS.anonymous_express_daily_global_cap,
+            anonymous_preview_cap_per_ip_per_mode:
+              DEFAULT_SETTINGS.anonymous_preview_cap_per_ip_per_mode,
+            anonymous_preview_cap_per_device_per_mode:
+              DEFAULT_SETTINGS.anonymous_preview_cap_per_device_per_mode,
+            anonymous_preview_cap_per_source_per_mode:
+              DEFAULT_SETTINGS.anonymous_preview_cap_per_source_per_mode,
             // --- 分片上传 reset 规则（2026-06-11）---
             // 10 个 chunked_upload_* 字段全部渲染为可见控件（toggle + 9 个
             // 数字输入），「恢复默认」语义就是全部回出厂默认——经

@@ -8,8 +8,11 @@ Available voices: mimo_default, default_zh, default_en
 Default model is ``mimo-v2.5-tts`` (plan 2026-05-27 Phase 3, smoke-verified
 2026-05-29: voice ``mimo_default`` + the existing payload format work on V2.5).
 Override / rollback at runtime via the ``MIMO_TTS_MODEL`` env var
-(e.g. ``MIMO_TTS_MODEL=mimo-v2-tts`` reverts to V2 without a code change —
-V2 TTS has no official deprecation date).
+(e.g. ``MIMO_TTS_MODEL=mimo-v2-tts`` reverts to V2 without a code change).
+⚠️ The V2 rollback channel is only valid until 2026-06-30: per the official
+deprecation notice (2026-06, https://platform.xiaomimimo.com/docs/zh-CN/updates/deprecate),
+``mimo-v2-tts`` requests are auto-forwarded to ``mimo-v2.5-tts`` from
+2026-06-18, and the original model name stops working at 2026-06-30 00:00.
 """
 
 from __future__ import annotations

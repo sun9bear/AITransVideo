@@ -377,9 +377,13 @@ def test_unauthenticated_user_gets_401(uploads_env, monkeypatch):
 
 def test_content_length_required(client_a):
     """Content-Length 缺失拒绝（411）。TestClient 总会带 CL，直接调 handler 难——
-    改为断言 handler 源码契约：缺头走 411 分支。"""
+    改为断言源码契约：缺头走 411 分支。分片接收逻辑自 plan §9 起抽到共享
+    helper ``receive_part``（注册档 R2 / 匿名档 A2 复用），契约断言跟随。"""
     import inspect
 
-    src = inspect.getsource(api.chunked_upload_part)
+    src = inspect.getsource(api.receive_part)
     assert 'headers.get("content-length")' in src
     assert "411" in src
+    # R2 handler 必须经由共享 helper（防止未来再分叉出第二份流式接收实现）
+    handler_src = inspect.getsource(api.chunked_upload_part)
+    assert "receive_part(" in handler_src

@@ -232,6 +232,9 @@ class TestLimitsEndpoint:
                 anonymous_preview_cap_per_source=1,
             )
         monkeypatch.setattr(api, "resolve_apf_limits", lambda: limits)
+        # plan 2026-06-12 §G：/limits 增返 active_lane / master_open，
+        # 测试钉死 resolver 隔离 admin_settings.json 文件状态。
+        monkeypatch.setattr(api, "_resolve_active_lane", lambda: "free")
 
         app = FastAPI()
         app.include_router(api.router)
@@ -247,7 +250,13 @@ class TestLimitsEndpoint:
         client = self._client(monkeypatch, flag_enabled=True)
         resp = client.get("/gateway/anonymous-preview/limits")
         assert resp.status_code == 200
-        assert resp.json() == {"max_upload_mb": 512, "preview_seconds": 240}
+        # plan 2026-06-12 §G：增返 lane 三态字段（前端面板渲染依据）
+        assert resp.json() == {
+            "max_upload_mb": 512,
+            "preview_seconds": 240,
+            "active_lane": "free",
+            "master_open": True,
+        }
 
     def test_no_session_or_csrf_required(self, monkeypatch):
         """GET 只读端点：无 cookie、无 Origin header 也必须可访问。"""

@@ -82,6 +82,11 @@ class _FakeJobRow:
     root_job_id: str | None = None
     edit_generation: int = 0
     source_content_hash: str | None = None
+    # Multilingual language fields (migration 036) — mirror the real Job row so
+    # copy_as_new can read them off the source row.
+    source_language: str = "en"
+    target_language: str = "zh-CN"
+    language_pair: str = "en->zh-CN"
     metering_snapshot: dict | None = None
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)

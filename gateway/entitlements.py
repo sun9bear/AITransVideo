@@ -105,6 +105,84 @@ def get_effective_allowed_service_modes(
     return base
 
 
+def get_effective_allowed_language_pairs(
+    user: User | None, *, admin=None
+) -> list[str]:
+    """Compute the user's effective allowed language pairs (plan 2026-06-13 v3
+    PR-A part 2 / §5 Phase 1).
+
+    The DEFAULT pair (``en->zh-CN``) is ALWAYS allowed — zero regression for
+    the existing GA path, regardless of admin config / user / anonymity.
+
+    A non-default supported pair (currently ``zh-CN->en``) is allowed only when
+    BOTH hold:
+      1. admin ``language_pairs_enabled`` master switch is True, AND
+      2. one of:
+         - ``language_pairs_user_allowlist_enabled`` is False (every logged-in
+           user), OR
+         - the user is admin (auto-bypass), OR
+         - ``user.id`` ∈ ``language_pairs_allowlist``.
+
+    Inputs:
+      user: the User row (None → anonymous → only the default pair).
+      admin: optional AdminSettings override for tests. Defaults to live
+        ``load_settings()``.
+
+    Returns a NEW list of canonical pair keys (caller may mutate). The default
+    pair is always first.
+
+    Fail-closed: if admin_settings is unreadable, only the default pair is
+    returned — a broken admin store must never accidentally open a paid pair
+    (mirrors the smart kill-switch + express auto-clone availability contracts).
+    """
+    from services.language_registry import (
+        DEFAULT_LANGUAGE_PAIR,
+        SUPPORTED_LANGUAGE_PAIRS,
+    )
+
+    allowed = [DEFAULT_LANGUAGE_PAIR]
+
+    if user is None:
+        return allowed
+
+    if admin is None:
+        try:
+            from admin_settings import load_settings as _load_admin_settings
+            admin = _load_admin_settings()
+        except Exception as exc:
+            logger.warning(
+                "language pairs gate: admin_settings unreadable, only default "
+                "pair allowed. cause=%s", exc,
+            )
+            return allowed
+
+    if not bool(getattr(admin, "language_pairs_enabled", False)):
+        return allowed
+
+    role = (getattr(user, "role", "user") or "user").strip().lower()
+    is_admin = role == "admin"
+    allowlist_enabled = (
+        getattr(admin, "language_pairs_user_allowlist_enabled", True) is not False
+    )
+    allowlist = list(getattr(admin, "language_pairs_allowlist", []) or [])
+    user_id_str = str(getattr(user, "id", "") or "").strip()
+
+    authorized = (
+        is_admin
+        or not allowlist_enabled
+        or (user_id_str != "" and user_id_str in allowlist)
+    )
+    if not authorized:
+        return allowed
+
+    # Authorized → add every non-default supported pair (future pairs flow
+    # through automatically; today that is just zh-CN->en).
+    for pair_key in SUPPORTED_LANGUAGE_PAIRS:
+        if pair_key != DEFAULT_LANGUAGE_PAIR and pair_key not in allowed:
+            allowed.append(pair_key)
+    return allowed
+
+
 @router.get("/api/me/entitlements")
 async def get_entitlements(
     user: User | None = Depends(get_current_user),
