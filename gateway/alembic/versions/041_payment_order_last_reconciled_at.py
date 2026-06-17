@@ -1,7 +1,7 @@
 """Add payment order reconciliation marker.
 
-Revision ID: 036_payment_order_reconcile
-Revises: 035_anonymous_preview
+Revision ID: 041_payment_order_reconcile
+Revises: 040_anon_claim_owner
 Create Date: 2026-06-17
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "036_payment_order_reconcile"
-down_revision: Union[str, None] = "035_anonymous_preview"
+revision: str = "041_payment_order_reconcile"
+down_revision: Union[str, None] = "040_anon_claim_owner"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
