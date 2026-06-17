@@ -90,20 +90,6 @@ def _attach_rotating_file_log() -> None:
         log_dir = Path(log_dir_str)
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "gateway.app.log"
-        root_logger = logging.getLogger()
-        # Idempotent attach: this module executes twice in production — once
-        # as __main__ (`python main.py`, Dockerfile CMD) and once as `main`
-        # when uvicorn.run("main:app") re-imports it. Without this guard the
-        # root logger ends up with two handlers on the same file and every
-        # log line is written twice (US prod, 2026-06-13). baseFilename is
-        # the abspath FileHandler stores at construction time.
-        target = os.path.abspath(str(log_path))
-        for existing in root_logger.handlers:
-            if (
-                isinstance(existing, RotatingFileHandler)
-                and getattr(existing, "baseFilename", None) == target
-            ):
-                return
         handler = RotatingFileHandler(
             str(log_path),
             maxBytes=50 * 1024 * 1024,
@@ -113,6 +99,10 @@ def _attach_rotating_file_log() -> None:
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
+        handler.setLevel(logging.INFO)
+        root_logger = logging.getLogger()
+        if root_logger.level > logging.INFO:
+            root_logger.setLevel(logging.INFO)
         root_logger.addHandler(handler)
     except Exception as exc:  # noqa: BLE001
         print(
@@ -650,6 +640,8 @@ app.include_router(user_voice_internal_router)
 # APF P0 anonymous preview (plan 2026-06-10 T7) — must be before catch-all.
 from anonymous_preview_api import router as anonymous_preview_router  # noqa: E402
 app.include_router(anonymous_preview_router)
+from anonymous_preview_chunked_api import router as anonymous_preview_chunked_router  # noqa: E402
+app.include_router(anonymous_preview_chunked_router)
 
 # Customer support API + notification center (plan 2026-05-08)
 from notifications_api import internal_router as notifications_internal_router
@@ -681,12 +673,6 @@ app.post(
 from chunked_upload_api import router as chunked_upload_router  # noqa: E402
 app.include_router(chunked_upload_router)
 
-# 匿名档分片 A1-A6 (plan 2026-06-11 §9 r1) — 试用弹窗 >95MB 文件的分片通道。
-# 三与门 gate（env + admin 匿名预览 + admin 匿名分片）在各 handler 内显式
-# 检查；CSRF 手动 try/except（/upload 同款）。
-from anonymous_preview_chunked_api import router as anonymous_chunked_router  # noqa: E402
-app.include_router(anonymous_chunked_router)
-
 # Rename a job's user-visible display_name (plan §6.5 / D16). Lives on
 # the /gateway/* namespace, not /job-api/*, because the collision +
 # ownership logic is gateway-level rather than a transparent proxy.
@@ -698,10 +684,6 @@ app.patch(
 # Suggested "save as new copy" name for the edit-page modal (plan §6.4 / D17).
 # Pure read; the user may edit the suggestion before committing.
 app.get("/gateway/jobs/{job_id}/suggested-copy-name")(intercept_suggested_copy_name)
-
-# Language directions the caller may pick (PR-A part 2 §5). Gateway-owned
-# (entitlement-filtered + display labels), not a Job API proxy. Read-only.
-app.get("/api/language-facts")(intercept_language_facts)
 
 
 # --- Job API routes ---
@@ -743,6 +725,7 @@ app.post(
     dependencies=[Depends(require_same_origin_state_change)],
 )(voice_candidates_for_selection)
 app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
+app.get("/api/language-facts")(intercept_language_facts)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.
 app.api_route(

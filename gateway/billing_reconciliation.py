@@ -28,7 +28,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
 from database import async_session
 from models import PaymentOrder
@@ -58,9 +58,9 @@ _UNSETTLED_STATUSES = ("created", "pending")
 def _candidate_orders_stmt(now: datetime):
     """滞留订单的选单语句：created/pending、非 fake、落在对账窗口内。
 
-    轮转语义：按 ``updated_at`` 升序（最久未检查的优先；NULL 视为从未检查
-    排最前），且距上次检查至少 ``RETRY_INTERVAL_S``——reconcile_once 在每次
-    尝试后无条件 bump ``updated_at``，保证失败/无结果的单也会让位。
+    轮转语义：按 ``last_reconciled_at`` 升序（最久未检查的优先；NULL 视为
+    从未检查排最前），且距上次检查至少 ``RETRY_INTERVAL_S``——reconcile_once
+    在每次尝试后无条件 bump ``last_reconciled_at``，保证失败/无结果的单也会让位。
     """
     newest_allowed = now - timedelta(seconds=MIN_AGE_S)
     oldest_allowed = now - timedelta(seconds=MAX_AGE_S)
@@ -68,17 +68,23 @@ def _candidate_orders_stmt(now: datetime):
     return (
         select(PaymentOrder)
         .where(
-            PaymentOrder.status.in_(_UNSETTLED_STATUSES),
+            or_(
+                PaymentOrder.status.in_(_UNSETTLED_STATUSES),
+                and_(
+                    PaymentOrder.status == "partial_refunded",
+                    PaymentOrder.paid_at.is_(None),
+                ),
+            ),
             PaymentOrder.provider != "fake",
             PaymentOrder.created_at <= newest_allowed,
             PaymentOrder.created_at >= oldest_allowed,
             or_(
-                PaymentOrder.updated_at.is_(None),
-                PaymentOrder.updated_at <= retry_cutoff,
+                PaymentOrder.last_reconciled_at.is_(None),
+                PaymentOrder.last_reconciled_at <= retry_cutoff,
             ),
         )
         .order_by(
-            PaymentOrder.updated_at.asc().nulls_first(),
+            PaymentOrder.last_reconciled_at.asc().nulls_first(),
             PaymentOrder.created_at.asc(),
         )
         .limit(SWEEP_BATCH_SIZE)
@@ -97,10 +103,12 @@ async def reconcile_once(
     ``database.async_session`` 与 ``billing._refresh_order_from_provider``。
     单笔订单的 provider 查询异常只记 errors 计数，不中断其余订单。
     """
+    refresh_kwargs = {}
     if refresh_fn is None:
         # 延迟 import：避免模块加载期与 billing 的依赖链耦合（billing 不
         # import 本模块，方向是安全的，但 lifespan try/except 兜底更稳）。
         from billing import _refresh_order_from_provider as refresh_fn
+        refresh_kwargs = {"raise_on_error": True}
 
     factory = session_factory or async_session
     stats = {"scanned": 0, "settled": 0, "errors": 0}
@@ -108,26 +116,38 @@ async def reconcile_once(
 
     async with factory() as db:
         result = await db.execute(_candidate_orders_stmt(current))
-        orders = list(result.scalars().all())
-        for order in orders:
+        order_ids = [order.id for order in result.scalars().all()]
+        for order_id in order_ids:
+            order_result = await db.execute(
+                select(PaymentOrder).where(PaymentOrder.id == order_id)
+            )
+            order_rows = list(order_result.scalars().all())
+            if not order_rows:
+                continue
+            order = order_rows[0]
             stats["scanned"] += 1
             status_before = order.status
+            attempt_failed = False
             try:
-                await refresh_fn(db=db, order=order)
+                await refresh_fn(db=db, order=order, **refresh_kwargs)
             except Exception:
+                attempt_failed = True
                 stats["errors"] += 1
                 logger.exception(
                     "billing_reconciliation: refresh failed for order %s (provider=%s)",
                     order.id,
                     order.provider,
                 )
+                await db.rollback()
             finally:
                 # 无条件 bump：让本单在 RETRY_INTERVAL_S 内不再被选中——
                 # refresh 内部只有 pending 结果会 commit updated_at，
                 # 早退（provider 无结果 / NotImplementedError / 异常）不会，
                 # 不补这里就会出现「最老一批永远霸占批次」（Codex P2）。
-                order.updated_at = datetime.now(timezone.utc)
-            if order.status == "paid" and status_before != "paid":
+                attempted_at = datetime.now(timezone.utc)
+                order.last_reconciled_at = attempted_at
+                order.updated_at = attempted_at
+            if not attempt_failed and order.status == "paid" and status_before != "paid":
                 stats["settled"] += 1
                 logger.warning(
                     "billing_reconciliation: order %s settled via reconcile "
@@ -136,7 +156,7 @@ async def reconcile_once(
                     order.provider,
                     status_before,
                 )
-        await db.commit()
+            await db.commit()
     return stats
 
 

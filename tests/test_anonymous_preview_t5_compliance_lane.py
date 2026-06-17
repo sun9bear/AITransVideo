@@ -261,7 +261,7 @@ def test_prescreen_clean_filename_passes() -> None:
     from src.services.anonymous_preview_intake import ComplianceStatus
 
     result = prescreen_filename("家常菜教程.mp4")
-    assert result.status is ComplianceStatus.PASS
+    assert result.status == ComplianceStatus.PASS
     assert result.blocked_media_retained is False
 
 
@@ -270,7 +270,7 @@ def test_prescreen_blocked_filename_blocks() -> None:
     from src.services.anonymous_preview_intake import ComplianceStatus
 
     result = prescreen_filename("online casino promo.mp4")
-    assert result.status is ComplianceStatus.BLOCK
+    assert result.status == ComplianceStatus.BLOCK
     # reason 固定文案，不回显文件名
     assert "casino" not in result.reason
 

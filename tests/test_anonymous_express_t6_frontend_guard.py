@@ -40,6 +40,7 @@ def test_api_limits_carries_lane_fields():
     src = _api_src()
     assert "active_lane: ActiveLane" in src
     assert "master_open: boolean" in src
+    assert "express_clone_available: boolean" in src
     # 三态解析：express / free / 关闭（null）
     assert "'express'" in src and "'free'" in src
 
@@ -51,6 +52,7 @@ def test_api_default_limits_fail_open():
     default_block = src.split("export const DEFAULT_PREVIEW_LIMITS")[1].split("}")[0]
     assert "active_lane: 'free'" in default_block
     assert "master_open: true" in default_block
+    assert "express_clone_available: false" in default_block
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +70,19 @@ def test_panel_renders_express_lane_copy():
     src = _panel_src()
     assert "active_lane === 'express'" in src
     assert "快捷版真实管线" in src
+
+
+def test_panel_gates_clone_opt_in_on_backend_availability():
+    src = _panel_src()
+    assert "limits.active_lane === 'express' && limits.express_clone_available" in src
+    for marker in (
+        "async function handleCreate",
+        "async function handleRetry",
+    ):
+        body = src.split(marker)[1].split(
+            "setState((s) => ({ ...s, step: 'processing'"
+        )[0]
+        assert "limits.express_clone_available" in body
 
 
 def test_panel_failed_step_retries_with_same_preview_id():

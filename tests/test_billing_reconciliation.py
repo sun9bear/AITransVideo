@@ -53,13 +53,17 @@ class _FakeSession:
     def __init__(self, results):
         self._results = list(results)
         self.executed = []
+        self.events = []
 
     async def execute(self, stmt):
         self.executed.append(stmt)
         return _FakeResult(self._results.pop(0))
 
     async def commit(self):
-        pass
+        self.events.append("commit")
+
+    async def rollback(self):
+        self.events.append("rollback")
 
     async def __aenter__(self):
         return self
@@ -70,7 +74,7 @@ class _FakeSession:
 
 def _fake_factory(rows):
     def factory():
-        return _FakeSession([rows])
+        return _FakeSession([rows, *[[row] for row in rows]])
 
     return factory
 
@@ -87,6 +91,7 @@ def _order(status="pending", provider="wechatpay"):
         billing_period="monthly",
         created_at=datetime.now(timezone.utc) - timedelta(hours=1),
         updated_at=None,
+        last_reconciled_at=None,
         paid_at=None,
     )
 
@@ -144,17 +149,34 @@ def test_candidate_stmt_window_and_exclusions():
     assert "payment_orders.created_at <=" in sql
     assert "payment_orders.created_at >=" in sql
     # 单单重试节流 + 最久未检查优先的轮转排序
-    assert "payment_orders.updated_at IS NULL" in sql
-    assert "payment_orders.updated_at <=" in sql
-    assert "ORDER BY payment_orders.updated_at ASC NULLS FIRST" in sql
+    assert "payment_orders.last_reconciled_at IS NULL" in sql
+    assert "payment_orders.last_reconciled_at <=" in sql
+    assert "ORDER BY payment_orders.last_reconciled_at ASC NULLS FIRST" in sql
     assert "LIMIT" in sql
 
 
+def test_candidate_stmt_retries_use_last_reconciled_at_not_updated_at():
+    sql = str(recon._candidate_orders_stmt(datetime.now(timezone.utc)))
+    assert "payment_orders.last_reconciled_at IS NULL" in sql
+    assert "payment_orders.last_reconciled_at <=" in sql
+    assert "payment_orders.updated_at <=" not in sql
+
+
+def test_candidate_stmt_includes_early_partial_refunds_without_paid_at():
+    sql = str(
+        recon._candidate_orders_stmt(datetime.now(timezone.utc)).compile(
+            compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "partial_refunded" in sql
+    assert "payment_orders.paid_at IS NULL" in sql
+
+
 @pytest.mark.asyncio
-async def test_reconcile_once_bumps_updated_at_even_on_error():
-    """每次尝试后无条件 bump updated_at——失败的单也要让位（轮转语义）。"""
+async def test_reconcile_once_bumps_last_reconciled_at_even_on_error():
+    """每次尝试后无条件 bump last_reconciled_at——失败的单也要让位。"""
     explodes = _order("pending")
-    explodes.updated_at = None
+    explodes.last_reconciled_at = None
 
     async def boom(*, db, order):
         raise RuntimeError("provider down")
@@ -163,12 +185,119 @@ async def test_reconcile_once_bumps_updated_at_even_on_error():
         session_factory=_fake_factory([explodes]),
         refresh_fn=boom,
     )
-    assert explodes.updated_at is not None
+    assert explodes.last_reconciled_at is not None
+    assert explodes.updated_at == explodes.last_reconciled_at
 
 
 # ---------------------------------------------------------------------------
 # sweeper_loop 续命
 # ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_reconcile_once_rolls_back_failed_refresh_before_final_commit():
+    """A refresh exception after session mutation must not commit partial settlement."""
+    order = _order("pending")
+    session = _FakeSession([[order], [order]])
+
+    async def partial_settle_then_boom(*, db, order):
+        order.status = "paid"
+        raise RuntimeError("settlement failed mid-transaction")
+
+    stats = await recon.reconcile_once(
+        session_factory=lambda: session,
+        refresh_fn=partial_settle_then_boom,
+    )
+
+    assert stats == {"scanned": 1, "settled": 0, "errors": 1}
+    assert session.events == ["rollback", "commit"]
+    assert order.last_reconciled_at is not None
+    assert order.updated_at == order.last_reconciled_at
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_commits_attempt_marker_before_later_rollback():
+    """A later failed order must not roll back earlier retry markers in the batch."""
+    first = _order("pending")
+    second = _order("created")
+    session = _FakeSession([[first, second], [first], [second]])
+
+    async def refresh(*, db, order):
+        if order is second:
+            raise RuntimeError("provider failure after first marker")
+
+    stats = await recon.reconcile_once(
+        session_factory=lambda: session,
+        refresh_fn=refresh,
+    )
+
+    assert stats == {"scanned": 2, "settled": 0, "errors": 1}
+    assert first.last_reconciled_at is not None
+    assert second.last_reconciled_at is not None
+    assert session.events == ["commit", "rollback", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_requeries_each_candidate_before_processing():
+    first = _order("pending")
+    second = _order("created")
+    session = _FakeSession([[first, second], [first], [second]])
+
+    async def refresh(*, db, order):
+        if order is first:
+            raise RuntimeError("first provider failed")
+
+    stats = await recon.reconcile_once(
+        session_factory=lambda: session,
+        refresh_fn=refresh,
+    )
+
+    assert stats == {"scanned": 2, "settled": 0, "errors": 1}
+    assert len(session.executed) == 3
+    assert session.events == ["rollback", "commit", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_default_refresh_surfaces_provider_failures(monkeypatch):
+    order = _order("pending")
+    session = _FakeSession([[order], [order]])
+    seen_raise_flags = []
+
+    import billing
+
+    async def fake_default_refresh(*, db, order, raise_on_error=False):
+        seen_raise_flags.append(raise_on_error)
+        if raise_on_error:
+            raise RuntimeError("provider query boom")
+
+    monkeypatch.setattr(billing, "_refresh_order_from_provider", fake_default_refresh)
+
+    stats = await recon.reconcile_once(session_factory=lambda: session)
+
+    assert stats == {"scanned": 1, "settled": 0, "errors": 1}
+    assert seen_raise_flags == [True]
+    assert session.events == ["rollback", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_order_from_provider_can_raise_provider_query_failures(monkeypatch):
+    import billing
+
+    order = _order("pending", provider="paddle")
+
+    class _Provider:
+        async def query_order(self, *, order_id, provider_order_id=None):
+            raise RuntimeError("provider timeout")
+
+    monkeypatch.setattr(billing, "get_provider", lambda provider_name: _Provider())
+
+    await billing._refresh_order_from_provider(db=SimpleNamespace(), order=order)
+    with pytest.raises(RuntimeError, match="provider timeout"):
+        await billing._refresh_order_from_provider(
+            db=SimpleNamespace(),
+            order=order,
+            raise_on_error=True,
+        )
+
 
 @pytest.mark.asyncio
 async def test_sweeper_loop_survives_tick_failure(monkeypatch):
@@ -269,19 +398,31 @@ def test_reconcile_endpoint_runs_reconcile_once(monkeypatch):
     from fastapi.testclient import TestClient
     import admin_billing_api  # noqa: F401
 
+    calls = {"n": 0}
+
     async def fake_reconcile_once(**kwargs):
+        calls["n"] += 1
         return {"scanned": 2, "settled": 1, "errors": 0}
 
     monkeypatch.setattr(recon, "reconcile_once", fake_reconcile_once)
     client = TestClient(
         _build_admin_app(SimpleNamespace(role="admin", id="a1"), [])
     )
-    resp = client.post("/api/admin/billing/reconcile")
+
+    rejected = client.post("/api/admin/billing/reconcile")
+    assert rejected.status_code == 403
+    assert calls["n"] == 0
+
+    resp = client.post(
+        "/api/admin/billing/reconcile",
+        headers={"origin": "http://testserver"},
+    )
     assert resp.status_code == 200
     assert resp.json() == {
         "ok": True,
         "stats": {"scanned": 2, "settled": 1, "errors": 0},
     }
+    assert calls["n"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +439,11 @@ def test_main_wiring_guards():
     )
     assert "from admin_billing_api import router as admin_billing_router" in src
     assert "app.include_router(admin_billing_router)" in src
+
+
+def test_admin_billing_recent_refunds_includes_partial_refunds():
+    src = (Path(_GATEWAY_DIR) / "admin_billing_api.py").read_text(encoding="utf-8")
+    assert 'PaymentOrder.status.in_(("refunded", "partial_refunded"))' in src
 
 
 def test_reconciliation_uses_single_settlement_entry():

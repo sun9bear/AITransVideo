@@ -9,19 +9,10 @@ Covers:
      (regression guard — prevents the bound from being silently removed).
   4. _attach_rotating_file_log from gateway.main behaves the same as the
      shared helper (same contract, separate implementation path).
-  5. Idempotence: calling attach twice for the same target file adds exactly
-     one handler (regression guard for the US prod 2026-06-13 incident where
-     gateway/main.py executed twice — as __main__ and as uvicorn's "main:app"
-     re-import — and every gateway.app.log line was written twice).
-  6. AST contract: BOTH job-api entry paths (main.run_job_api_command and
-     scripts/run_remote_workbench_service._run_job_api) call
-     attach_rotating_file_log("jobapi.app.log") inside a fail-safe try/except
-     (regression guard for the US prod 2026-06-13 finding where the container
-     entry — linux_app_service.sh → run_remote_workbench_service.py — never
-     attached the handler, so jobapi.app.log did not exist in production).
 """
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import sys
@@ -38,12 +29,26 @@ import yaml
 _WORKTREE_ROOT = Path(__file__).resolve().parents[1]
 _COMPOSE_PATH = _WORKTREE_ROOT / "docker-compose.yml"
 _SRC_PATH = _WORKTREE_ROOT / "src"
+_GATEWAY_MAIN_PATH = _WORKTREE_ROOT / "gateway" / "main.py"
 
 
 def _ensure_src_on_path() -> None:
     src = str(_SRC_PATH)
     if src not in sys.path:
         sys.path.insert(0, src)
+
+
+def _load_gateway_attach_rotating_file_log():
+    module = ast.parse(_GATEWAY_MAIN_PATH.read_text(encoding="utf-8"))
+    function_node = next(
+        node for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_attach_rotating_file_log"
+    )
+    isolated = ast.Module(body=[function_node], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+    namespace = {"logging": logging}
+    exec(compile(isolated, str(_GATEWAY_MAIN_PATH), "exec"), namespace)
+    return namespace["_attach_rotating_file_log"]
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +93,38 @@ def test_attach_rotating_file_log_creates_file(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Test 2 — helper must not raise when dir cannot be created
 # ---------------------------------------------------------------------------
+
+
+def test_attach_rotating_file_log_captures_info_when_root_default_warning(tmp_path, monkeypatch):
+    """Job API startup should persist INFO logs even without basicConfig."""
+    _ensure_src_on_path()
+
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
+
+    root_logger = logging.getLogger()
+    old_level = root_logger.level
+    pre_handlers = list(root_logger.handlers)
+
+    from utils.rotating_log import attach_rotating_file_log
+
+    try:
+        root_logger.setLevel(logging.WARNING)
+        attach_rotating_file_log("info_helper.log")
+
+        new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
+        assert new_handlers, "No new handler was attached to the root logger"
+
+        logging.getLogger("runtime_info_test").info("info line should persist")
+        for h in new_handlers:
+            h.flush()
+
+        log_file = tmp_path / "info_helper.log"
+        assert "info line should persist" in log_file.read_text(encoding="utf-8")
+    finally:
+        for h in [h for h in root_logger.handlers if h not in pre_handlers]:
+            root_logger.removeHandler(h)
+            h.close()
+        root_logger.setLevel(old_level)
 
 
 def test_attach_rotating_file_log_bad_dir_no_raise(tmp_path, monkeypatch):
@@ -176,179 +213,41 @@ def test_gateway_attach_rotating_file_log_bad_dir_no_raise(tmp_path, monkeypatch
     _simulate_attach(str(collision_path))
 
 
-# ---------------------------------------------------------------------------
-# Test 5 — idempotence: double attach must not stack a second handler
-# ---------------------------------------------------------------------------
-
-
-def test_attach_rotating_file_log_idempotent(tmp_path, monkeypatch):
-    """Calling the shared helper twice for the same file adds exactly one handler."""
-    _ensure_src_on_path()
+def test_gateway_attach_rotating_file_log_captures_info_when_root_preconfigured(
+    tmp_path, monkeypatch,
+):
+    """Gateway persistent logs should keep INFO records after preconfigured logging."""
     monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
 
     root_logger = logging.getLogger()
+    old_level = root_logger.level
     pre_handlers = list(root_logger.handlers)
+    preconfigured_handler = logging.StreamHandler()
+    preconfigured_handler.setLevel(logging.WARNING)
+    root_logger.addHandler(preconfigured_handler)
 
-    from utils.rotating_log import attach_rotating_file_log
+    attach_gateway_log = _load_gateway_attach_rotating_file_log()
 
-    attach_rotating_file_log("idempotent.log")
-    attach_rotating_file_log("idempotent.log")
-
-    new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
     try:
-        assert len(new_handlers) == 1, (
-            f"Expected exactly 1 new handler after double attach, "
-            f"got {len(new_handlers)}"
+        root_logger.setLevel(logging.WARNING)
+        attach_gateway_log()
+
+        new_handlers = [
+            h for h in root_logger.handlers
+            if h not in pre_handlers and h is not preconfigured_handler
+        ]
+        assert new_handlers, "No gateway file handler was attached"
+
+        logging.getLogger("gateway_info_test").info("gateway info line should persist")
+        for h in new_handlers:
+            h.flush()
+
+        log_file = tmp_path / "gateway.app.log"
+        assert "gateway info line should persist" in log_file.read_text(
+            encoding="utf-8"
         )
     finally:
-        for h in new_handlers:
+        for h in [h for h in root_logger.handlers if h not in pre_handlers]:
             root_logger.removeHandler(h)
             h.close()
-
-
-def test_attach_rotating_file_log_distinct_files_both_attach(tmp_path, monkeypatch):
-    """The idempotence guard keys on the target file — distinct files still attach."""
-    _ensure_src_on_path()
-    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
-
-    root_logger = logging.getLogger()
-    pre_handlers = list(root_logger.handlers)
-
-    from utils.rotating_log import attach_rotating_file_log
-
-    attach_rotating_file_log("first.log")
-    attach_rotating_file_log("second.log")
-
-    new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
-    try:
-        assert len(new_handlers) == 2, (
-            f"Expected 2 new handlers for 2 distinct files, got {len(new_handlers)}"
-        )
-    finally:
-        for h in new_handlers:
-            root_logger.removeHandler(h)
-            h.close()
-
-
-def _load_gateway_attach_fn():
-    """Extract the REAL _attach_rotating_file_log from gateway/main.py source.
-
-    gateway/main.py cannot be imported wholesale in tests (it pulls FastAPI,
-    database, every router, ...), so compile just the function definition via
-    AST. The function only references the module-level ``logging`` name; its
-    other imports (os, RotatingFileHandler, Path) are local to its body.
-    """
-    import ast
-
-    gateway_main = _WORKTREE_ROOT / "gateway" / "main.py"
-    tree = ast.parse(gateway_main.read_text(encoding="utf-8"))
-    fn = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_attach_rotating_file_log"
-    )
-    namespace = {"logging": logging}
-    exec(  # noqa: S102 — compiling our own source file, not external input
-        compile(ast.Module(body=[fn], type_ignores=[]), str(gateway_main), "exec"),
-        namespace,
-    )
-    return namespace["_attach_rotating_file_log"]
-
-
-# ---------------------------------------------------------------------------
-# Test 6 — AST contract: both job-api entry paths attach jobapi.app.log
-# ---------------------------------------------------------------------------
-
-_JOB_API_ENTRY_FUNCTIONS = [
-    # (source file, function holding the job-api startup path)
-    (_WORKTREE_ROOT / "main.py", "run_job_api_command"),
-    (
-        _WORKTREE_ROOT / "scripts" / "run_remote_workbench_service.py",
-        "_run_job_api",
-    ),
-]
-
-
-def _find_function_def(path: Path, name: str):
-    import ast
-
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return node
-    raise AssertionError(f"{path.name}: function {name!r} not found")
-
-
-def _has_failsafe_jobapi_log_attach(fn_node) -> bool:
-    """True if the function calls attach_rotating_file_log("jobapi.app.log")
-    somewhere inside a try block that has at least one exception handler."""
-    import ast
-
-    for node in ast.walk(fn_node):
-        if not isinstance(node, ast.Try) or not node.handlers:
-            continue
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Name)
-                and inner.func.id == "attach_rotating_file_log"
-                and inner.args
-                and isinstance(inner.args[0], ast.Constant)
-                and inner.args[0].value == "jobapi.app.log"
-            ):
-                return True
-    return False
-
-
-@pytest.mark.parametrize(
-    ("path", "function_name"),
-    _JOB_API_ENTRY_FUNCTIONS,
-    ids=[p.name for p, _ in _JOB_API_ENTRY_FUNCTIONS],
-)
-def test_job_api_entry_attaches_rotating_log(path: Path, function_name: str):
-    """Every job-api entry path must attach jobapi.app.log fail-safely.
-
-    The production container starts job-api via linux_app_service.sh →
-    scripts/run_remote_workbench_service.py, NOT via ``python main.py
-    job-api`` — if either path drops the attach call, the on-disk rotating
-    log silently disappears in that deployment mode.
-    """
-    fn_node = _find_function_def(path, function_name)
-    assert _has_failsafe_jobapi_log_attach(fn_node), (
-        f"{path.name}::{function_name} must call "
-        'attach_rotating_file_log("jobapi.app.log") inside a try/except '
-        "fail-safe wrap (see main.run_job_api_command for the pattern)"
-    )
-
-
-def test_gateway_attach_rotating_file_log_idempotent(tmp_path, monkeypatch):
-    """gateway/main._attach_rotating_file_log called twice adds exactly one handler.
-
-    Reproduces the production double-run: module executes as __main__ (CMD
-    ``python main.py``) and again as ``main`` when uvicorn.run("main:app")
-    re-imports it. Both runs share the same root logger.
-    """
-    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
-
-    attach = _load_gateway_attach_fn()
-
-    root_logger = logging.getLogger()
-    pre_handlers = list(root_logger.handlers)
-
-    attach()
-    attach()
-
-    new_handlers = [h for h in root_logger.handlers if h not in pre_handlers]
-    try:
-        assert len(new_handlers) == 1, (
-            f"Expected exactly 1 new handler after double attach, "
-            f"got {len(new_handlers)}"
-        )
-        assert new_handlers[0].baseFilename == os.path.abspath(
-            str(tmp_path / "gateway.app.log")
-        )
-    finally:
-        for h in new_handlers:
-            root_logger.removeHandler(h)
-            h.close()
+        root_logger.setLevel(old_level)

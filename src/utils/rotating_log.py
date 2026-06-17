@@ -39,20 +39,6 @@ def attach_rotating_file_log(filename: str) -> None:
         log_dir = Path(log_dir_str)
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / filename
-        root_logger = logging.getLogger()
-        # Idempotent attach: the caller's module may execute twice in one
-        # process (e.g. loaded as both __main__ and its dotted name under a
-        # uvicorn import string). A second handler on the shared root logger
-        # writes every record to the file twice, so skip if one is already
-        # pointed at this exact file. baseFilename is the abspath FileHandler
-        # stores at construction time.
-        target = os.path.abspath(str(log_path))
-        for existing in root_logger.handlers:
-            if (
-                isinstance(existing, RotatingFileHandler)
-                and getattr(existing, "baseFilename", None) == target
-            ):
-                return
         handler = RotatingFileHandler(
             str(log_path),
             maxBytes=_MAX_BYTES,
@@ -60,6 +46,10 @@ def attach_rotating_file_log(filename: str) -> None:
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter(_FORMAT))
+        handler.setLevel(logging.INFO)
+        root_logger = logging.getLogger()
+        if root_logger.level > logging.INFO:
+            root_logger.setLevel(logging.INFO)
         root_logger.addHandler(handler)
     except Exception as exc:  # noqa: BLE001
         # Never crash the process — just warn on stderr.

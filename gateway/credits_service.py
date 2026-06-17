@@ -489,11 +489,13 @@ async def revoke_buckets_for_order(
     """
     try:
         result = await db.execute(
-            select(CreditsBucket).where(
+            select(CreditsBucket)
+            .where(
                 CreditsBucket.user_id == user_id,
                 CreditsBucket.related_order_id == related_order_id,
                 CreditsBucket.remaining > 0,
             )
+            .with_for_update()
         )
         buckets = list(result.scalars().all())
         revoked = 0

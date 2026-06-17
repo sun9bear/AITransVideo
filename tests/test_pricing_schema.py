@@ -70,6 +70,7 @@ def test_default_payload_matches_current_frozen_values():
     # 2026-05-13-smart-mvp-p2-implementation-plan §5.3.
     assert p.credits.debit_rates == {
         "express.standard": 10,
+        "free.standard": 0,
         "studio.standard": 15,
         "studio.high": 30,
         "studio.flagship": 50,

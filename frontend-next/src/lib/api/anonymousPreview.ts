@@ -53,6 +53,7 @@ export interface PreviewLimits {
   // lane 切换无需重建前端镜像。
   active_lane: ActiveLane
   master_open: boolean
+  express_clone_available: boolean
 }
 
 // 兜底值与后端出厂默认严格一致（gateway/admin_settings.py APF 限制旋钮段）。
@@ -63,6 +64,7 @@ export const DEFAULT_PREVIEW_LIMITS: PreviewLimits = {
   preview_seconds: 180,
   active_lane: 'free',
   master_open: true,
+  express_clone_available: false,
 }
 
 /** Fetch the currently effective anonymous-preview limits（只读，无需会话）. */
@@ -85,11 +87,14 @@ export async function getPreviewLimits(): Promise<PreviewLimits> {
     : rawLane === undefined ? 'free'
     : null
   const masterOpen = body.master_open === undefined ? activeLane !== null : body.master_open === true
+  const expressCloneAvailable =
+    activeLane === 'express' && body.express_clone_available === true
   return {
     max_upload_mb: maxUploadMb,
     preview_seconds: previewSeconds,
     active_lane: activeLane,
     master_open: masterOpen,
+    express_clone_available: expressCloneAvailable,
   }
 }
 
