@@ -471,6 +471,61 @@ async def _has_existing_settlement(
 # ---------------------------------------------------------------------------
 
 
+async def revoke_buckets_for_order(
+    db: AsyncSession,
+    *,
+    user_id,
+    related_order_id,
+    reason_code: str = "refund_revoke",
+) -> int:
+    """退款回收（R7）：把与某订单关联的 bucket 可用余额清零。
+
+    只动 ``remaining``——``reserved`` 留给在途任务既有的 capture/release
+    闭环自行收敛，不在这里抢状态。每个被回收的 bucket 写一条
+    ``direction='revoke'`` 负值 ledger 保审计可追。
+
+    Shadow 语义（与 shadow_grant 同风格）：任何异常自吞返回 0，绝不让
+    credits 回收失败阻断退款结算主流程（发票/订单真值优先落库）。
+    """
+    try:
+        result = await db.execute(
+            select(CreditsBucket)
+            .where(
+                CreditsBucket.user_id == user_id,
+                CreditsBucket.related_order_id == related_order_id,
+                CreditsBucket.remaining > 0,
+            )
+            .with_for_update()
+        )
+        buckets = list(result.scalars().all())
+        revoked = 0
+        for bucket in buckets:
+            delta = -int(bucket.remaining)
+            bucket.remaining = 0
+            db.add(CreditsLedger(
+                user_id=user_id,
+                bucket_id=bucket.id,
+                direction="revoke",
+                credits_delta=delta,
+                balance_after=0,
+                related_order_id=related_order_id,
+                reason_code=reason_code,
+            ))
+            revoked += 1
+        if revoked:
+            logger.info(
+                "revoke_buckets_for_order: user=%s order=%s buckets=%d",
+                user_id, related_order_id, revoked,
+            )
+        return revoked
+    except Exception:
+        logger.warning(
+            "revoke_buckets_for_order failed (user=%s order=%s)",
+            user_id, related_order_id, exc_info=True,
+        )
+        return 0
+
+
 async def shadow_grant(
     db: AsyncSession,
     *,
@@ -1331,14 +1386,27 @@ async def ensure_subscription_bucket(
 ) -> CreditsBucket | None:
     """Create a subscription credits bucket for a new billing period.
 
-    Unlike free/trial, subscription buckets are created per billing period,
-    so this is NOT idempotent in the same way — it creates a new bucket each
-    time a new subscription period starts. Callers must guard against
-    duplicate calls (e.g. via idempotent webhook processing).
+    Unlike free/trial, subscription buckets are created per billing period —
+    each new period gets a new bucket. 同一结算（同一 ``related_order_id``）
+    则幂等：webhook / 对账 sweeper / 用户轮询 refresh 三个并发入口都可能
+    触发同一订单的 paid 结算，订单行锁是主防线，这里按 related_order_id
+    查重是纵深防御（Codex review 2026-06-13 P1）。
 
     Shadow mode: failures are logged, never block subscription settlement.
     """
     try:
+        if related_order_id is not None:
+            existing = (
+                await db.execute(
+                    select(CreditsBucket).where(
+                        CreditsBucket.user_id == user_id,
+                        CreditsBucket.bucket_type == "subscription",
+                        CreditsBucket.related_order_id == related_order_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing
         grants = _get_runtime_grant_amounts()
         amount = grants.get(plan_code, grants.get("plus", GRANT_AMOUNTS.get("plus", 3500)))
         return await shadow_grant(

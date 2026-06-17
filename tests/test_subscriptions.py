@@ -741,6 +741,42 @@ class TestRefundInvoiceTransition:
         assert existing_invoice.status == "refunded"
         assert existing_invoice.updated_at == original_updated_at
 
+    def test_record_invoice_sets_paid_at_after_early_partial_refund(self):
+        """Out-of-order partial refund then paid must keep invoice payment truth."""
+        user = _make_user()
+        order = _make_order(user_id=user.id)
+        existing_invoice = SimpleNamespace(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            payment_order_id=order.id,
+            provider="fake",
+            provider_order_id=None,
+            plan_code="plus",
+            billing_period="monthly",
+            amount_cny=6900,
+            currency="CNY",
+            status="partial_refunded",
+            issued_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            paid_at=None,
+            updated_at=None,
+            subscription_id=None,
+        )
+        db = _make_db()
+        found = MagicMock(); found.scalar_one_or_none.return_value = existing_invoice
+        db.execute = AsyncMock(return_value=found)
+
+        paid_at = datetime.now(timezone.utc)
+        result = _run(
+            record_invoice_for_order(
+                db, order=order, settled_at=paid_at, status="paid"
+            )
+        )
+
+        assert result is existing_invoice
+        assert existing_invoice.status == "partial_refunded"
+        assert existing_invoice.paid_at == paid_at
+        assert existing_invoice.updated_at == paid_at
+
     def test_refund_webhook_does_not_touch_subscription_or_plan_code(self):
         """Refund truth update must stay scoped to billing history.
 

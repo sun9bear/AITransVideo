@@ -355,21 +355,37 @@ def parse_wechat_webhook(
     except Exception as exc:
         raise ValueError(f"wechatpay resource decrypt failed: {type(exc).__name__}") from exc
 
-    trade_state = str(transaction.get("trade_state") or "").strip()
     out_trade_no = str(transaction.get("out_trade_no") or "").strip()
-    # transaction_id (WeChat's platform-unique id) is the idempotency key for
-    # settlement events (plan §8.3); fall back to the envelope id for events
-    # that carry no transaction (e.g. future refund notifications).
-    provider_event_id = (
-        str(transaction.get("transaction_id") or "").strip()
-        or str(envelope.get("id") or "").strip()
-    )
+    if event_type.upper().startswith("REFUND."):
+        # R7 退款通知：resource 是 refund 对象（refund_id / out_refund_no /
+        # refund_status / amount.refund），没有 trade_state，也没有 attach——
+        # order 绑定由 billing 层用 out_trade_no 反查 provider_order_id。
+        refund_status = str(transaction.get("refund_status") or "").strip().upper()
+        new_status = "refunded" if refund_status == "SUCCESS" else "pending"
+        # 幂等键不能用 transaction_id：refund 对象携带与原支付相同的
+        # transaction_id，会与已记录的支付结算事件撞 (provider,
+        # provider_event_id) 唯一键，退款事件会被当成重复投递丢弃。
+        provider_event_id = (
+            str(transaction.get("refund_id") or "").strip()
+            or str(transaction.get("out_refund_no") or "").strip()
+            or str(envelope.get("id") or "").strip()
+        )
+    else:
+        trade_state = str(transaction.get("trade_state") or "").strip()
+        new_status = map_wechat_trade_state(trade_state)
+        # transaction_id (WeChat's platform-unique id) is the idempotency key
+        # for settlement events (plan §8.3); fall back to the envelope id for
+        # events that carry no transaction.
+        provider_event_id = (
+            str(transaction.get("transaction_id") or "").strip()
+            or str(envelope.get("id") or "").strip()
+        )
     return ParsedWechatWebhook(
         provider_event_id=provider_event_id,
         event_type=event_type or "unknown",
         order_id=str(transaction.get("attach") or "").strip(),
         out_trade_no=out_trade_no,
-        new_status=map_wechat_trade_state(trade_state),
+        new_status=new_status,
         transaction=transaction,
         raw={
             "id": envelope.get("id"),
@@ -427,6 +443,49 @@ def validate_wechat_webhook_payload(
     total = ((txn.get("amount") or {}).get("total"))
     if total is None or int(total) != int(amount_cny):
         raise ValueError(f"amount mismatch: {total}")
+
+
+def validate_wechat_refund_payload(
+    config: WechatPayConfig | None,
+    refund: dict | None,
+    *,
+    amount_cny: int,
+    provider_order_id: str | None = None,
+) -> None:
+    """Raise ``ValueError`` unless the refund notification matches our order.
+
+    R7 退款 fact-gate（Codex review 2026-06-13 P2：不得比支付 gate 松）。
+    refund 对象的官方 schema 没有 attach / appid 字段，可用的 gates：
+
+    - ``mchid`` 硬门——与支付 gate 同因：商户号与 AiPlay.video 共用，
+      转发的 AiPlay 回调能过验签+解密，必须靠 mchid 拒掉
+    - ``out_trade_no`` == 本单 provider_order_id（绑定即事实）
+    - ``refund_status`` 必须 SUCCESS
+    - 原单总额 ``amount.total`` 必须等于订单金额，缺失即拒（fail-closed）
+    """
+    if config is None:
+        raise ValueError("wechatpay config missing")
+    r = refund or {}
+
+    mchid = str(r.get("mchid") or "").strip()
+    if mchid != config.mchid:
+        raise ValueError("mchid mismatch")
+
+    if not provider_order_id or str(r.get("out_trade_no") or "").strip() != str(provider_order_id):
+        raise ValueError("out_trade_no mismatch")
+
+    if str(r.get("refund_status") or "").strip().upper() != "SUCCESS":
+        raise ValueError("refund_status not SUCCESS")
+
+    total = (r.get("amount") or {}).get("total")
+    if total is None:
+        raise ValueError("amount.total missing")
+    try:
+        total_int = int(total)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"amount unparsable: {total}") from exc
+    if total_int != int(amount_cny):
+        raise ValueError(f"original amount mismatch: {total_int}")
 
 
 # --- order query (async — billing awaits provider.query_order) ---

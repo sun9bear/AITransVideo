@@ -252,12 +252,21 @@ class TestWebhookParsing:
         assert parsed.new_status == "paid"
 
     def test_parse_adjustment_has_no_order_id(self):
-        # adjustment.created carries no custom_data.order_id -> order_id "".
+        # adjustment.created carries no custom_data.order_id -> order_id ""
+        # （绑定由 billing._resolve_refund_order_id 反查 transaction_id）。
+        # R7：只有 approved 的 refund/chargeback 才映射 refunded；未带
+        # status / pending_approval 一律 pending（详见
+        # tests/test_billing_refund_closure.py 的参数化覆盖）。
         env = {"event_id": "evt_adj", "event_type": "adjustment.created",
-               "data": {"id": "adj_1", "transaction_id": "txn_1", "action": "refund"}}
+               "data": {"id": "adj_1", "transaction_id": "txn_1",
+                        "action": "refund", "status": "approved"}}
         parsed = parse_paddle_webhook(json.dumps(env).encode())
         assert parsed.order_id == ""
         assert parsed.new_status == "refunded"
+
+        env["data"]["status"] = "pending_approval"
+        parsed = parse_paddle_webhook(json.dumps(env).encode())
+        assert parsed.new_status == "pending"
 
     def test_empty_body_raises(self):
         with pytest.raises(ValueError):

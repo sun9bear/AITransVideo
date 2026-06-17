@@ -397,12 +397,27 @@ def parse_paddle_webhook(raw_body: bytes) -> ParsedPaddleWebhook:
     event_type = str(payload.get("event_type") or "").strip()
     data = payload.get("data") or {}
     custom = data.get("custom_data") or {}
+    new_status = map_paddle_event_type(event_type)
+    if event_type in ("adjustment.created", "adjustment.updated"):
+        # R7：adjustment 只有 action=refund/chargeback 且 status=approved 才有
+        # 退款语义；pending_approval / rejected / credit 一律按 pending 记录、
+        # 不结算。live 环境人工审批的退款先发 created(pending_approval)、
+        # 审批通过后由 adjustment.updated 携带 approved——两个 event type
+        # 必须走同一门控（Codex review 2026-06-13 P1）。order 绑定由 billing
+        # 层用 data.transaction_id 反查 provider_order_id（adjustment 不携带
+        # custom_data.order_id）。
+        action = str(data.get("action") or "").strip().lower()
+        adj_status = str(data.get("status") or "").strip().lower()
+        if action in ("refund", "chargeback") and adj_status == "approved":
+            new_status = "refunded"
+        else:
+            new_status = "pending"
     return ParsedPaddleWebhook(
         provider_event_id=event_id,
         event_type=event_type,
         order_id=str(custom.get("order_id") or "").strip(),
         transaction_id=str(data.get("id") or "").strip(),
-        new_status=map_paddle_event_type(event_type),
+        new_status=new_status,
         raw=payload,
     )
 

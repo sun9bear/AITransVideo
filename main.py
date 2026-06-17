@@ -936,6 +936,14 @@ def run_control_panel_command(argv: list[str]) -> None:
 
 def run_job_api_command(argv: list[str]) -> None:
     parsed_args = parse_job_api_args(argv)
+    # Attach persistent rotating file log early so all job-api log lines
+    # land in runtime_logs/jobapi.app.log (survives container recreate).
+    # Fail-safe: missing/unwritable directory is printed and ignored.
+    try:
+        from utils.rotating_log import attach_rotating_file_log
+        attach_rotating_file_log("jobapi.app.log")
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[job-api] WARNING: rotating log attach failed: {_exc}", flush=True)
     try:
         service = build_default_job_service(project_root=PROJECT_ROOT)
 

@@ -13,10 +13,12 @@ import type { Plan } from "@/lib/billing/types"
  * Server Component (so prices land in the initial HTML for SEO / first-paint).
  * This is the only reactive surface inside the pricing card.
  *
- * Routing rules (mirrors the previous monolithic PricingGrid logic):
+ * Routing rules:
  *   - Guest: every tier → `/auth` (phone-first registration)
- *   - Logged-in: every tier → `/translations/new` (workspace), regardless of
- *     plan code. Upgrade flows are a later milestone (Task 4).
+ *   - Logged-in free tier → `/translations/new` (workspace)
+ *   - Logged-in self-serve paid tier → `/settings/billing?plan={code}` —
+ *     CheckoutCard reads `?plan=` to preselect. Server-side create_order
+ *     still owns the same/lower-tier guard.
  */
 function planCtaHref(
   plan: Plan,
@@ -32,8 +34,12 @@ function planCtaHref(
   }
   if (plan.self_serve) {
     return {
-      href: isAuthenticated ? authedHref : guestHref,
-      label: isAuthenticated ? "进入工作台" : `选择 ${plan.display_name}`,
+      href: isAuthenticated
+        ? `/settings/billing?plan=${encodeURIComponent(plan.code)}`
+        : guestHref,
+      label: isAuthenticated
+        ? `升级到 ${plan.display_name}`
+        : `选择 ${plan.display_name}`,
     }
   }
   return {
