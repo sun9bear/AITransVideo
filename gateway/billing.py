@@ -1450,6 +1450,39 @@ async def _recall_entitlements_for_refund(
             fallback_plan_code,
         )
 
+    if remaining_paid_order is not None:
+        try:
+            from credits_service import ensure_subscription_bucket
+
+            bucket_plan_code = getattr(remaining_paid_order, "target_plan_code", None)
+            bucket_expires_at = None
+            if subscription is not None and subscription_restored:
+                bucket_expires_at = getattr(subscription, "current_period_end", None)
+            if bucket_expires_at is None:
+                fallback_paid_at = getattr(remaining_paid_order, "paid_at", None)
+                if isinstance(fallback_paid_at, datetime):
+                    bucket_expires_at = _subscription_period_end(
+                        fallback_paid_at,
+                        getattr(remaining_paid_order, "billing_period", ""),
+                    )
+            if bucket_plan_code:
+                await ensure_subscription_bucket(
+                    db,
+                    user_id=user.id,
+                    plan_code=bucket_plan_code,
+                    related_order_id=getattr(remaining_paid_order, "id", None),
+                    related_subscription_id=getattr(subscription, "id", None),
+                    expires_at=bucket_expires_at,
+                )
+        except Exception:
+            logger.warning(
+                "Refund fallback credits restore failed for order %s "
+                "(fallback order %s; non-fatal)",
+                order.id,
+                getattr(remaining_paid_order, "id", None),
+                exc_info=True,
+            )
+
     try:
         from credits_service import revoke_buckets_for_order
         await revoke_buckets_for_order(

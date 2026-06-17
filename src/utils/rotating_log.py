@@ -46,7 +46,11 @@ def attach_rotating_file_log(filename: str) -> None:
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter(_FORMAT))
-        logging.getLogger().addHandler(handler)
+        handler.setLevel(logging.INFO)
+        root_logger = logging.getLogger()
+        if root_logger.level > logging.INFO:
+            root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(handler)
     except Exception as exc:  # noqa: BLE001
         # Never crash the process — just warn on stderr.
         print(
