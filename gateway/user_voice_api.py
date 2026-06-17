@@ -1580,6 +1580,13 @@ async def internal_smart_clone_register_billed(
     if not voice_id or len(voice_id) > 200:
         return _json(400, {"ok": False, "error": "invalid_voice_id"})
 
+    try:
+        from admin_settings import load_settings
+
+        library_cap = int(getattr(load_settings(), "smart_user_voice_clone_cap", 30))
+    except Exception:
+        return _json(503, {"ok": False, "error": "admin_settings_unavailable"})
+
     from smart_clone_reservation_service import register_smart_clone_with_billing
 
     outcome = await register_smart_clone_with_billing(
@@ -1594,9 +1601,12 @@ async def internal_smart_clone_register_billed(
         ),
         source_job_id=task_id,
         target_model=(str(body.get("target_model")) if body.get("target_model") else None),
+        library_cap=library_cap,
     )
     if outcome.status == "no_active_reservation":
         return _json(409, {"ok": False, "error": "no_active_reservation"})
+    if outcome.status == "voice_library_full":
+        return _json(409, {"ok": False, "error": "voice_library_full"})
     return _json(200, {
         "ok": True,
         "status": outcome.status,  # "billed" | "idempotent"

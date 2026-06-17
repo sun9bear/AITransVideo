@@ -261,6 +261,7 @@ async def register_smart_clone_with_billing(
     source_speaker_id: str | None = None,
     source_job_id: str | None = None,
     target_model: str | None = None,
+    library_cap: int = 30,
 ) -> RegisterBillOutcome:
     """P3b — MiniMax 克隆成功后**单一事务**写 durable billing event + 入库
     （CodeX 钱-正确性 #2）。
@@ -315,7 +316,37 @@ async def register_smart_clone_with_billing(
         await db.rollback()
         return RegisterBillOutcome(status="idempotent", reservation_id=str(res_pk))
 
-    # 3. 写 durable billing event（chargeable=true）= 唯一权威计费信号
+    # 3. Re-lock the same user quota domain before consuming the reserved slot.
+    # Another clone path may have filled the library after reserve completed.
+    # Count other active smart reservations, but exclude this reservation
+    # because it is the slot this callback is trying to consume.
+    user_pk = (
+        await db.execute(select(User.id).where(User.id == user_id).with_for_update())
+    ).scalar_one_or_none()
+    if user_pk is None:
+        await db.rollback()
+        return RegisterBillOutcome(status="no_active_reservation")
+    other_reserved = (
+        await db.execute(
+            select(func.count())
+            .select_from(SmartCloneReservation)
+            .where(
+                SmartCloneReservation.user_id == user_id,
+                SmartCloneReservation.status == RESERVED,
+                SmartCloneReservation.id != res_pk,
+            )
+        )
+    ).scalar()
+    active_library_load = await count_active_library_voices(db, user_id) + int(
+        other_reserved or 0
+    )
+    if active_library_load >= int(library_cap):
+        await db.rollback()
+        return RegisterBillOutcome(
+            status="voice_library_full", reservation_id=str(res_pk)
+        )
+
+    # 4. 写 durable billing event（chargeable=true）= 唯一权威计费信号
     db.add(
         CloneBillingEvent(
             id=uuid.uuid4(),
