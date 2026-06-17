@@ -229,6 +229,8 @@ def _retry_db(*, charges=([2],)):
     db = t8._db()
     count_result = MagicMock()
     count_result.scalar.return_value = 0
+    creating_count_result = MagicMock()
+    creating_count_result.scalar.return_value = 0
     sentinel_result = MagicMock()
     sentinel_result.scalar_one_or_none.return_value = SimpleNamespace(id="u-sentinel")
     claim_result = MagicMock()
@@ -240,7 +242,14 @@ def _retry_db(*, charges=([2],)):
         charge_results.append(r)
     trailing = [MagicMock() for _ in range(4)]  # reset / decrement 兜底
     db.execute = AsyncMock(
-        side_effect=[count_result, sentinel_result, claim_result, *charge_results, *trailing]
+        side_effect=[
+            sentinel_result,
+            count_result,
+            creating_count_result,
+            claim_result,
+            *charge_results,
+            *trailing,
+        ]
     )
     return db
 
@@ -268,7 +277,7 @@ class TestFailedRetryReentry:
         db = _retry_db()
         resp = _call(db)
         assert resp.status_code == 202
-        _stmt, params = db.execute.call_args_list[3][0]
+        _stmt, params = db.execute.call_args_list[4][0]
         assert params["key"] == express_subgate_key(shanghai_today())
         assert params["mode"] == "express"
         assert params["cap"] == 50
@@ -283,8 +292,8 @@ class TestFailedRetryReentry:
         resp = _call(db)
         assert resp.status_code == 429
         client.post.assert_not_awaited()
-        # 第 5 个 execute 是 claim 回退 UPDATE（__creating__ → 旧 job_id）
-        assert len(db.execute.call_args_list) == 5
+        # 第 6 个 execute 是 claim 回退 UPDATE（__creating__ → 旧 job_id）
+        assert len(db.execute.call_args_list) == 6
 
     def test_retry_recharges_refunded_per_mode_rows(self, wired_express):
         """CodeX 复审 P2：上次失败已退款（pass3_quota_refund=done）的重试
@@ -307,7 +316,7 @@ class TestFailedRetryReentry:
         db = _retry_db(charges=[[1], [1], [2]])
         resp = _call(db)
         assert resp.status_code == 202
-        recharge_params = [db.execute.call_args_list[i][0][1] for i in (3, 4)]
+        recharge_params = [db.execute.call_args_list[i][0][1] for i in (4, 5)]
         assert recharge_params[0]["key"] == "ip:h:D:mode:express"
         assert recharge_params[0]["cap"] == 1
         assert recharge_params[1]["key"] == "device:d:D:mode:express"

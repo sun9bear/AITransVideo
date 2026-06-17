@@ -366,6 +366,7 @@ def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
 # ---------------------------------------------------------------------------
 
 _SUPPORTED_SERVICE_MODES = ("express", "studio", "smart", "free")
+_SERVICE_MODE_STUDIO = "studio"
 
 
 def _gate_service_mode(requested_mode, *, free_enabled: bool):
@@ -1614,7 +1615,7 @@ async def intercept_create_job(
     # body) and the gateway PG row (policy.get below).
     if (
         policy
-        and service_mode == "studio"
+        and service_mode == _SERVICE_MODE_STUDIO
         and resolved_pair.language_pair in _NON_INTERACTIVE_LANGUAGE_PAIRS
     ):
         policy["requires_review"] = False

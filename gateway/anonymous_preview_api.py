@@ -959,6 +959,7 @@ async def _reserve_create_capacity(
     max_in_flight: int,
     job_model: object,
     terminal_statuses: list[str],
+    retry_of: Optional[str] = None,
 ) -> str:
     """Reserve one APF create slot before calling the external Job API.
 
@@ -1002,11 +1003,16 @@ async def _reserve_create_capacity(
             await db.commit()
             return "queue_full"
 
+        claim_predicate = (
+            AnonymousPreviewRecord.job_id.is_(None)
+            if retry_of is None
+            else AnonymousPreviewRecord.job_id == retry_of
+        )
         claim = await db.execute(
             _sa_update(AnonymousPreviewRecord)
             .where(
                 AnonymousPreviewRecord.preview_id == preview_id,
-                AnonymousPreviewRecord.job_id.is_(None),
+                claim_predicate,
             )
             .values(
                 job_id=_CREATING_SENTINEL,
@@ -1498,6 +1504,7 @@ async def anonymous_preview_create(
             max_in_flight=max_in_flight,
             job_model=Job,
             terminal_statuses=list(TERMINAL_STATUSES),
+            retry_of=retry_of,
         )
     except Exception as exc:
         logger.warning("anon_create: in-flight reservation failed: %s", exc)
