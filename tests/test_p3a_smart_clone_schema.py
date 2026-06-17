@@ -72,15 +72,17 @@ def test_migration_037_creates_both_tables_and_indexes():
     assert src.count("drop_table") >= 2 and "drop_index" in src
 
 
-def test_migration_037_is_unique_new_head():
-    """037 不能与既有 head 重复 revision，且没有其它文件已 down_revision=037。"""
+def test_migration_037_has_only_production_chain_child():
+    """037 已接入生产迁移链，且只能由 038 继续向后延伸。"""
     versions = (GATEWAY / "alembic" / "versions")
     refs_037 = [
         p.name for p in versions.glob("*.py")
         if p.name != "037_smart_clone_reservations.py"
         and "037_smart_clone_reservations" in p.read_text(encoding="utf-8")
     ]
-    assert refs_037 == [], f"已有文件引用 037（链冲突）: {refs_037}"
+    assert refs_037 == ["038_smart_clone_created_at_index.py"], (
+        f"037 must only feed the current production chain: {refs_037}"
+    )
 
 
 # ---------------------------------------------------------------------------
