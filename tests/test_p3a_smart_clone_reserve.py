@@ -251,10 +251,10 @@ def test_credit_reason_code_deterministic():
 # ---------------------------------------------------------------------------
 
 
-async def _reserve(db, task_id="job_r"):
+async def _reserve(db, task_id="job_r", *, library_cap=10):
     o = await svc.reserve_smart_clone_credit(
         db, user_id=_USER, task_id=task_id, amount_credits=600,
-        ttl_minutes=30, library_cap=10,
+        ttl_minutes=30, library_cap=library_cap,
     )
     assert o.status == "reserved"
     return o.reservation_id
@@ -333,6 +333,41 @@ def test_register_bill_released_reservation_does_not_bill():
 # ---------------------------------------------------------------------------
 # P3c finalizer：capture / release 对账（钱-正确性核心）
 # ---------------------------------------------------------------------------
+
+
+def test_register_bill_rechecks_library_capacity_before_billing():
+    """A competing clone can fill the reserved library slot before callback."""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        try:
+            async with sm() as db:
+                rid = await _reserve(db, "job_r5", library_cap=30)
+                for i in range(30):
+                    db.add(UserVoice(
+                        user_id=_USER,
+                        voice_id=f"other_voice_{i}",
+                        label="other",
+                        provider="minimax_voice_clone",
+                        tts_provider="minimax_tts",
+                        platform="minimax_domestic",
+                        created_from="manual_clone",
+                    ))
+                await db.commit()
+
+                out = await svc.register_smart_clone_with_billing(
+                    db, user_id=_USER, task_id="job_r5", reservation_id=rid,
+                    voice_id="mm_v5", label="x", source_job_id="job_r5",
+                )
+
+                assert out.status == "voice_library_full"
+                assert (await db.execute(select(CloneBillingEvent))).scalar_one_or_none() is None
+                assert (
+                    await db.execute(select(UserVoice).where(UserVoice.voice_id == "mm_v5"))
+                ).scalar_one_or_none() is None
+        finally:
+            await sm.kw["bind"].dispose()
+
+    _run(go())
 
 
 def test_settle_captures_when_billed():
