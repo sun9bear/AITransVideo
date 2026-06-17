@@ -27,14 +27,17 @@ Import constraints
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
+import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from anonymous_preview_policy import (
@@ -879,8 +882,157 @@ async def anonymous_preview_stream(
 # ---------------------------------------------------------------------------
 
 _CREATING_SENTINEL = "__creating__"
+_CREATE_RESERVATION_PREFIX = "creating_until:"
+_CREATE_RESERVATION_TTL_SECONDS = 5 * 60
 _SENTINEL_USER_EMAIL = "anonymous-preview@system"
 _READY_STATUS = "ready_for_mode"  # PreviewStatus.READY_FOR_MODE.value（契约钉死）
+_CREATE_CAPACITY_LOCK_KEY = int.from_bytes(
+    hashlib.blake2b(b"anonymous_preview:create_capacity", digest_size=8).digest(),
+    byteorder="big",
+    signed=True,
+)
+
+
+def _create_reservation_claim_token(*, now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    expires_epoch = int(now.timestamp()) + _CREATE_RESERVATION_TTL_SECONDS
+    return f"{_CREATE_RESERVATION_PREFIX}{expires_epoch:010d}:{secrets.token_urlsafe(16)}"
+
+
+def _create_reservation_cutoff_token(*, now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    return f"{_CREATE_RESERVATION_PREFIX}{int(now.timestamp()):010d}:"
+
+
+def _session_dialect_name(db: AsyncSession) -> Optional[str]:
+    """Best-effort SQLAlchemy dialect name for PG-only lock helpers."""
+
+    candidates = []
+    get_bind = getattr(db, "get_bind", None)
+    if callable(get_bind):
+        try:
+            candidates.append(get_bind())
+        except Exception:
+            pass
+
+    bind = getattr(db, "bind", None)
+    if bind is not None:
+        candidates.append(bind)
+
+    sync_session = getattr(db, "sync_session", None)
+    sync_get_bind = getattr(sync_session, "get_bind", None)
+    if callable(sync_get_bind):
+        try:
+            candidates.append(sync_get_bind())
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        dialect = getattr(candidate, "dialect", None)
+        name = getattr(dialect, "name", None)
+        if name:
+            return str(name)
+    return None
+
+
+async def _acquire_create_capacity_transaction_lock(db: AsyncSession) -> bool:
+    """Serialize APF create capacity count + reservation on PostgreSQL.
+
+    SQLite/fake sessions used by local tests intentionally no-op. Production
+    PostgreSQL holds this transaction advisory lock only until the reservation
+    helper commits, before any external Job API call is made.
+    """
+
+    if _session_dialect_name(db) != "postgresql":
+        return False
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _CREATE_CAPACITY_LOCK_KEY},
+    )
+    return True
+
+
+async def _reserve_create_capacity(
+    db: AsyncSession,
+    *,
+    preview_id: str,
+    max_in_flight: int,
+    job_model: object,
+    terminal_statuses: list[str],
+    retry_of: Optional[str] = None,
+) -> str:
+    """Reserve one APF create slot before calling the external Job API.
+
+    Returns ``reserved``, ``queue_full`` or ``already_created``.
+    """
+
+    from sqlalchemy import func, update as _sa_update
+
+    if max_in_flight <= 0:
+        return "queue_full"
+
+    try:
+        await _acquire_create_capacity_transaction_lock(db)
+        now = datetime.now(timezone.utc)
+        reservation_cutoff = _create_reservation_cutoff_token(now=now)
+
+        job_count_result = await db.execute(
+            select(func.count())
+            .select_from(job_model)
+            .where(
+                job_model.is_anonymous_preview.is_(True),
+                job_model.status.notin_(terminal_statuses),
+            )
+        )
+        active_jobs = int(job_count_result.scalar() or 0)
+
+        creating_count_result = await db.execute(
+            select(func.count())
+            .select_from(AnonymousPreviewRecord)
+            .where(
+                AnonymousPreviewRecord.job_id == _CREATING_SENTINEL,
+                AnonymousPreviewRecord.claim_token_placeholder.like(
+                    f"{_CREATE_RESERVATION_PREFIX}%"
+                ),
+                AnonymousPreviewRecord.claim_token_placeholder >= reservation_cutoff,
+            )
+        )
+        active_reservations = int(creating_count_result.scalar() or 0)
+
+        if active_jobs + active_reservations >= max_in_flight:
+            await db.commit()
+            return "queue_full"
+
+        claim_predicate = (
+            AnonymousPreviewRecord.job_id.is_(None)
+            if retry_of is None
+            else AnonymousPreviewRecord.job_id == retry_of
+        )
+        claim = await db.execute(
+            _sa_update(AnonymousPreviewRecord)
+            .where(
+                AnonymousPreviewRecord.preview_id == preview_id,
+                claim_predicate,
+            )
+            .values(
+                job_id=_CREATING_SENTINEL,
+                claim_token_placeholder=_create_reservation_claim_token(now=now),
+            )
+            .returning(AnonymousPreviewRecord.preview_id)
+        )
+        won_claim = claim.first() is not None
+        await db.commit()
+        return "reserved" if won_claim else "already_created"
+    except Exception:
+        rollback = getattr(db, "rollback", None)
+        if callable(rollback):
+            try:
+                maybe = rollback()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception:
+                logger.debug("anon_create: rollback after reserve failure failed", exc_info=True)
+        raise
 
 # 匿名 express payload 的 tts_provider 白名单（plan 2026-06-12 §D）。
 # 唯一真源在 anonymous_lane.VALID_ANON_EXPRESS_TTS_PROVIDERS（CodeX 第三轮
@@ -1193,7 +1345,7 @@ async def _reset_create_claim(db: "AsyncSession", preview_id: str) -> None:
                 AnonymousPreviewRecord.preview_id == preview_id,
                 AnonymousPreviewRecord.job_id == _CREATING_SENTINEL,
             )
-            .values(job_id=None)
+            .values(job_id=None, claim_token_placeholder=None)
         )
         await db.commit()
     except Exception as exc:
@@ -1217,8 +1369,6 @@ async def anonymous_preview_create(
     """
     import secrets as _secrets
     from datetime import datetime, timezone as _tz
-
-    from sqlalchemy import func, update as _sa_update
 
     from anonymous_consent import validate_anonymous_consent
     from anonymous_express_clone_consent import validate_anonymous_express_clone_consent
@@ -1364,22 +1514,6 @@ async def anonymous_preview_create(
         max_in_flight = int(_load_admin().anonymous_preview_max_in_flight)
     except Exception:
         max_in_flight = 0
-    try:
-        cnt_result = await db.execute(
-            select(func.count())
-            .select_from(Job)
-            .where(
-                Job.is_anonymous_preview.is_(True),
-                Job.status.notin_(list(TERMINAL_STATUSES)),
-            )
-        )
-        in_flight = int(cnt_result.scalar() or 0)
-    except Exception as exc:
-        logger.warning("anon_create: in-flight count failed: %s", exc)
-        return JSONResponse(status_code=503, content={"error": "gate_unavailable"})
-    if in_flight >= max_in_flight:
-        return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
-
     # sentinel 系统用户（035 迁移插入；缺失=部署配置错误，fail-closed）
     sentinel_result = await db.execute(
         select(User).where(User.email == _SENTINEL_USER_EMAIL)
@@ -1392,26 +1526,25 @@ async def anonymous_preview_create(
     # 原子抢占：job_id IS NULL → __creating__（并发双 create 只有一个赢）。
     # 对抗审核 P1：用 RETURNING 判定胜出，不依赖 asyncpg 的 rowcount
     # （某些驱动/配置下 UPDATE 的 rowcount 不可靠 → 合法抢占被误判 409）。
-    # 重试路径（§E）：条件改为 job_id == 旧 failed job_id——并发双重试
-    # 同样只有一个赢（第二个看到 __creating__ 不匹配 → 409）。
-    _claim_predicate = (
-        AnonymousPreviewRecord.job_id.is_(None)
-        if retry_of is None
-        else AnonymousPreviewRecord.job_id == retry_of
-    )
-    claim = await db.execute(
-        _sa_update(AnonymousPreviewRecord)
-        .where(
-            AnonymousPreviewRecord.preview_id == safe_id,
-            _claim_predicate,
+    try:
+        reservation = await _reserve_create_capacity(
+            db,
+            preview_id=safe_id,
+            max_in_flight=max_in_flight,
+            job_model=Job,
+            terminal_statuses=list(TERMINAL_STATUSES),
+            retry_of=retry_of,
         )
-        .values(job_id=_CREATING_SENTINEL)
-        .returning(AnonymousPreviewRecord.preview_id)
-    )
-    won_claim = claim.first() is not None
-    await db.commit()
-    if not won_claim:
+    except Exception as exc:
+        logger.warning("anon_create: in-flight reservation failed: %s", exc)
+        return JSONResponse(status_code=503, content={"error": "gate_unavailable"})
+    if reservation == "queue_full":
+        return JSONResponse(status_code=429, content={"error": "preview_queue_full"})
+    if reservation == "already_created":
         return JSONResponse(status_code=409, content={"error": "already_created"})
+    if reservation != "reserved":
+        logger.error("anon_create: unexpected reservation state %s", reservation)
+        return JSONResponse(status_code=503, content={"error": "gate_unavailable"})
 
     # CodeX 外审 2026-06-12 P1 + 复审 P2：重试配额重新计费——①退款过的
     # per-mode 行原子 re-acquire（否则重试成功后该身份当日可再开一个
@@ -1483,37 +1616,7 @@ async def anonymous_preview_create(
         await _abort_create_claim(db, safe_id, retry_of)
         return JSONResponse(status_code=502, content={"error": "job_create_failed"})
 
-    # 对抗审核 P1 修复——写入顺序对调：先把 record 指向真实 job_id（单独
-    # 提交），__creating__ 哨兵的存活窗从"整个 create 后半段"缩到单条
-    # UPDATE；record 写成功后即使 PG Job 行失败，status/stream 仍可用
-    # （job 真实存在），不会出现永久锁死。
-    try:
-        fresh = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
-        if fresh is not None:
-            fresh.job_id = job_id
-            fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
-            merged = dict(fresh.audit or {})
-            merged["anonymous_consent"] = consent_payload
-            # §E 审计：重试链（旧 failed job_id 追加，支持多次重试追溯）
-            if retry_of is not None:
-                _chain = list(merged.get("retry_chain") or [])
-                _chain.append(retry_of)
-                merged["retry_chain"] = _chain
-            fresh.audit = merged
-        await db.commit()
-    except Exception as exc:
-        # job 已在 Job API 跑、record 仍是 __creating__：不回滚抢占（重试
-        # 会双建任务）；status 端点的 creating 分支可见此态，留 TTL 清理。
-        logger.critical(
-            "anon_create: record 回写失败 job=%s — record 滞留 __creating__, "
-            "需人工核对: %s", job_id, exc,
-        )
-        return JSONResponse(status_code=500, content={"error": "persist_failed"})
-
-    # PG Job 行（sentinel owner + 标记列）。失败不再 5xx：job 已在跑、
-    # record 已指向真实 job_id；损失的只有 in-flight 计数与 mirror 标记
-    # （r2 sweeper 对无 PG 行的 job 直接跳过、不结算——已核验
-    # r2_artifact_sweeper.py:219-222），CRITICAL 日志供运维补行。
+    # Keep the capacity reservation visible until the PG Job row exists.
     try:
         db.add(
             Job(
@@ -1540,9 +1643,39 @@ async def anonymous_preview_create(
         await db.commit()
     except Exception as exc:
         logger.critical(
-            "anon_create: PG Job 行写入失败 job=%s — in-flight 计数与 mirror "
-            "标记缺失, 需人工补行: %s", job_id, exc,
+            "anon_create: PG Job row insert failed job=%s; record remains reserved "
+            "for capacity accounting and needs manual reconciliation: %s",
+            job_id,
+            exc,
         )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "persist_failed"},
+        )
+
+    # PG Job row is now durable, so exposing the real job_id no longer creates
+    # a capacity-accounting gap between the record and the Job mirror row.
+    try:
+        fresh = await _get_record_for_session(db, safe_id, session_ctx.session_id_hash)
+        if fresh is not None:
+            fresh.job_id = job_id
+            fresh.claim_token_placeholder = _secrets.token_urlsafe(16)
+            merged = dict(fresh.audit or {})
+            merged["anonymous_consent"] = consent_payload
+            if retry_of is not None:
+                retry_chain = list(merged.get("retry_chain") or [])
+                retry_chain.append(retry_of)
+                merged["retry_chain"] = retry_chain
+            fresh.audit = merged
+        await db.commit()
+    except Exception as exc:
+        # job 已在 Job API 跑、record 仍是 __creating__：不回滚抢占（重试
+        # 会双建任务）；status 端点的 creating 分支可见此态，留 TTL 清理。
+        logger.critical(
+            "anon_create: record 回写失败 job=%s — record 滞留 __creating__, "
+            "需人工核对: %s", job_id, exc,
+        )
+        return JSONResponse(status_code=500, content={"error": "persist_failed"})
 
     return JSONResponse(
         status_code=202,

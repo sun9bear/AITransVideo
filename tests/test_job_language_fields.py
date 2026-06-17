@@ -217,20 +217,40 @@ def _module_down_revision(path: Path):
             continue
         for target in targets:
             if isinstance(target, ast.Name) and target.id == "down_revision":
-                return value.value if isinstance(value, ast.Constant) else None
+                if isinstance(value, ast.Constant):
+                    return value.value
+                if isinstance(value, (ast.Tuple, ast.List)):
+                    return tuple(
+                        elt.value for elt in value.elts if isinstance(elt, ast.Constant)
+                    )
+                return None
     return None
 
 
-def test_migration_036_is_the_only_child_of_035() -> None:
-    """036 must chain off 035 and nothing else may claim 035 as its parent
-    (single linear head — no fork). AST-parsed, not substring-matched."""
+def test_migration_036_language_branch_matches_production_chain() -> None:
+    """036 language stays on the production chain while 041 merges payment compat."""
     versions_dir = REPO_ROOT / "gateway" / "alembic" / "versions"
-    children = [
+    children_of_035 = [
         path.name
         for path in versions_dir.glob("*.py")
         if _module_down_revision(path) == "035_anonymous_preview"
     ]
-    assert children == ["036_job_language_fields.py"], children
+    assert sorted(children_of_035) == [
+        "036_job_language_fields.py",
+        "036_payment_order_last_reconciled_at.py",
+    ], children_of_035
+
+    children_of_036_language = [
+        path.name
+        for path in versions_dir.glob("*.py")
+        if _module_down_revision(path) == "036_job_language_fields"
+    ]
+    assert children_of_036_language == ["037_smart_clone_reservations.py"], children_of_036_language
+
+    merge_parents = _module_down_revision(
+        versions_dir / "041_payment_order_last_reconciled_at.py"
+    )
+    assert merge_parents == ("040_anon_claim_owner", "036_payment_order_reconcile")
 
 
 # =====================================================================

@@ -292,7 +292,8 @@ class TestCreatePathLanguageGate:
         # `smart` would break Smart's review-gated auto-review branch. The
         # service_mode guard sits in the condition right above the override.
         window = src[max(0, override_idx - 400):override_idx]
-        assert 'service_mode == "studio"' in window, (
+        assert '_SERVICE_MODE_STUDIO = "studio"' in src
+        assert "service_mode == _SERVICE_MODE_STUDIO" in window, (
             "requires_review override must be Studio-scoped (codex P2)"
         )
         assert "_NON_INTERACTIVE_LANGUAGE_PAIRS" in window

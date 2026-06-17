@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from admin_settings import _require_admin
 from auth import get_current_user
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import PaymentOrder, PaymentWebhookEvent, User
 
@@ -101,7 +102,7 @@ async def list_unsettled(
     # 告警），这里是人工复核的入口。
     refunds_result = await db.execute(
         select(PaymentOrder)
-        .where(PaymentOrder.status == "refunded")
+        .where(PaymentOrder.status.in_(("refunded", "partial_refunded")))
         .order_by(PaymentOrder.updated_at.desc())
         .limit(20)
     )
@@ -119,7 +120,7 @@ async def list_unsettled(
     }
 
 
-@router.post("/reconcile")
+@router.post("/reconcile", dependencies=[Depends(require_same_origin_state_change)])
 async def trigger_reconcile(
     user: User | None = Depends(get_current_user),
 ) -> dict:

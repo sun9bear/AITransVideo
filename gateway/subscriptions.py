@@ -87,7 +87,7 @@ async def record_invoice_for_order(
 
     Returns the invoice row attached to the session (not yet committed).
 
-    `status` must be one of: "paid" | "failed" | "refunded".
+    `status` must be one of: "paid" | "failed" | "refunded" | "partial_refunded".
     """
     result = await db.execute(
         select(BillingInvoice).where(
@@ -100,9 +100,17 @@ async def record_invoice_for_order(
         if invoice.status == status:
             # Pure replay — idempotent no-op.
             return invoice
-        if invoice.status == "paid" and status == "refunded":
-            # The single legitimate transition T4 supports.
+        if invoice.status == "paid" and status in {"partial_refunded", "refunded"}:
+            invoice.status = status
+            invoice.updated_at = settled_at
+            return invoice
+        if invoice.status == "partial_refunded" and status == "refunded":
             invoice.status = "refunded"
+            invoice.updated_at = settled_at
+            return invoice
+        if invoice.status == "partial_refunded" and status == "paid":
+            if invoice.paid_at is None:
+                invoice.paid_at = settled_at
             invoice.updated_at = settled_at
             return invoice
         # Any other transition (e.g. paid → failed, refunded → paid) is not
@@ -151,10 +159,13 @@ async def upsert_active_subscription(
       handled by the caller so audit-log writes stay localized there.
     """
     result = await db.execute(
-        select(Subscription).where(
+        select(Subscription)
+        .where(
             Subscription.user_id == user.id,
             Subscription.status == "active",
         )
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     existing = result.scalar_one_or_none()
 
