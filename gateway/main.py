@@ -99,7 +99,11 @@ def _attach_rotating_file_log() -> None:
         handler.setFormatter(
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
-        logging.getLogger().addHandler(handler)
+        handler.setLevel(logging.INFO)
+        root_logger = logging.getLogger()
+        if root_logger.level > logging.INFO:
+            root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(handler)
     except Exception as exc:  # noqa: BLE001
         print(
             f"[gateway] WARNING: could not attach rotating file handler "
