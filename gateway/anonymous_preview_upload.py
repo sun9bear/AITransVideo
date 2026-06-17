@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import os
 import re
@@ -264,11 +265,16 @@ async def handle_anonymous_upload(
             # Fall back to single .body() read for test fakes that don't
             # implement an async generator.
             stream_fn = getattr(request, "stream", None)
-            if stream_fn is not None and asyncio.iscoroutinefunction(
-                getattr(stream_fn, "__call__", None)
-            ):
-                # stream() is a sync method returning an async generator
-                async for chunk in request.stream():  # type: ignore[union-attr]
+            stream_iter = None
+            if callable(stream_fn):
+                maybe_stream = stream_fn()
+                if inspect.isawaitable(maybe_stream):
+                    maybe_stream = await maybe_stream
+                if hasattr(maybe_stream, "__aiter__"):
+                    stream_iter = maybe_stream
+
+            if stream_iter is not None:
+                async for chunk in stream_iter:
                     bytes_written += len(chunk)
                     if bytes_written > max_upload_bytes:
                         raise UploadTooLarge(max_upload_bytes)
@@ -277,12 +283,12 @@ async def handle_anonymous_upload(
             else:
                 # Fallback: read body as bytes (test fakes / coroutine)
                 body_fn = getattr(request, "body", None)
-                if asyncio.iscoroutinefunction(body_fn):
-                    body: bytes = await request.body()  # type: ignore[union-attr]
+                if callable(body_fn):
+                    body = body_fn()
+                    if inspect.isawaitable(body):
+                        body = await body
                 else:
-                    body = request.body  # type: ignore[assignment]
-                    if callable(body):
-                        body = body()
+                    body = body_fn
 
                 if len(body) > max_upload_bytes:
                     raise UploadTooLarge(max_upload_bytes)

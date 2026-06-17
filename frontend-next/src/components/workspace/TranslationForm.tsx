@@ -912,7 +912,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
 
 /* ---------- internal helpers ---------- */
 
-// Gateway 扣费门错误码（402/403 detail.error_code），命中时改走持久 banner。
+// Gateway 扣费门错误码（402/403 top-level error 或 detail.error_code），命中时改走持久 banner。
 const CREDIT_GATE_ERROR_CODES = new Set([
   "insufficient_credits",
   "quota_exhausted",
@@ -922,7 +922,12 @@ const CREDIT_GATE_ERROR_CODES = new Set([
 function isCreditGateError(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   if (!error.payload || typeof error.payload !== "object") return false
-  const detail = (error.payload as { detail?: unknown }).detail
+  const payload = error.payload as { detail?: unknown; error?: unknown }
+  const topLevelCode = payload.error
+  if (typeof topLevelCode === "string" && CREDIT_GATE_ERROR_CODES.has(topLevelCode)) {
+    return true
+  }
+  const detail = payload.detail
   if (!detail || typeof detail !== "object") return false
   const code = (detail as { error_code?: unknown }).error_code
   return typeof code === "string" && CREDIT_GATE_ERROR_CODES.has(code)

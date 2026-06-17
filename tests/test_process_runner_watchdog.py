@@ -217,6 +217,19 @@ def test_compute_deadline_uses_duration_tier_when_available(tmp_path: Path) -> N
     assert runner._compute_deadline_seconds(job_long) == 8 * 3600
 
 
+def test_compute_deadline_uses_estimated_duration_when_source_missing(tmp_path: Path) -> None:
+    """Gateway-submitted long jobs should use estimated duration before fallback."""
+    runner = _make_runner(tmp_path, run_timeout_seconds=6 * 3600)
+
+    job_long_estimate = _make_job(
+        source_duration_seconds=None,
+        estimated_duration_seconds=9000.0,
+    )
+
+    assert runner._compute_deadline_seconds(job_long_estimate) == get_timeout_for_duration(150.0)
+    assert runner._compute_deadline_seconds(job_long_estimate) == 8 * 3600
+
+
 def test_compute_deadline_falls_back_to_run_timeout_when_no_duration(tmp_path: Path) -> None:
     """无 source_duration_seconds 或为 None 时，回退到 run_timeout_seconds。"""
     runner = _make_runner(tmp_path, run_timeout_seconds=1234)

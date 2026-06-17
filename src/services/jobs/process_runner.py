@@ -419,6 +419,8 @@ class ProcessJobRunner:
         """
         if job is not None:
             duration_s = getattr(job, "source_duration_seconds", None)
+            if not isinstance(duration_s, (int, float)) or duration_s <= 0:
+                duration_s = getattr(job, "estimated_duration_seconds", None)
             if isinstance(duration_s, (int, float)) and duration_s > 0:
                 return get_timeout_for_duration(duration_s / 60.0)
         return self.run_timeout_seconds

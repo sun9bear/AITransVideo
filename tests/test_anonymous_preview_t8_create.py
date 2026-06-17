@@ -7,6 +7,7 @@ probe/admin）注入 fake，逐门断言 fail-closed 矩阵与零结算所有权
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -34,7 +35,7 @@ from anonymous_session import AnonymousSessionContext  # noqa: E402
 # 单跑 / 与 T7 并跑行为一致。db.execute 全程 mock，不需要真表。
 # ---------------------------------------------------------------------------
 
-from sqlalchemy import Boolean, Column, String  # noqa: E402
+from sqlalchemy import Boolean, Column, DateTime, String  # noqa: E402
 from sqlalchemy.orm import declarative_base  # noqa: E402
 
 _Base = declarative_base()
@@ -70,6 +71,8 @@ class _FakeRecordModel(_Base):
     __tablename__ = "records_fake_t8"
     preview_id = Column(String, primary_key=True)
     job_id = Column(String)
+    claim_token_placeholder = Column(String)
+    expires_at = Column(DateTime(timezone=True))
 
 
 def _run(coro):
@@ -116,10 +119,18 @@ def _request(body=VALID_CONSENT) -> MagicMock:
     return req
 
 
-def _db(*, in_flight: int = 0, sentinel_id: str | None = "u-sentinel", claim_rows: int = 1):
+def _db(
+    *,
+    in_flight: int = 0,
+    creating_claims: int = 0,
+    sentinel_id: str | None = "u-sentinel",
+    claim_rows: int = 1,
+):
     db = MagicMock()
     count_result = MagicMock()
     count_result.scalar.return_value = in_flight
+    creating_result = MagicMock()
+    creating_result.scalar.return_value = creating_claims
     sentinel_result = MagicMock()
     sentinel_result.scalar_one_or_none.return_value = (
         SimpleNamespace(id=sentinel_id) if sentinel_id else None
@@ -129,7 +140,25 @@ def _db(*, in_flight: int = 0, sentinel_id: str | None = "u-sentinel", claim_row
     claim_result.first = MagicMock(
         return_value=("prv-won",) if claim_rows == 1 else None
     )
-    db.execute = AsyncMock(side_effect=[count_result, sentinel_result, claim_result])
+    db.execute_calls = []
+
+    async def _execute(stmt, params=None):
+        db.execute_calls.append((stmt, params))
+        rendered = str(stmt)
+        rendered_lower = rendered.lower()
+        if "pg_advisory_xact_lock" in rendered:
+            return MagicMock()
+        if "count" in rendered_lower and "records_fake_t8" in rendered:
+            return creating_result
+        if "count" in rendered_lower:
+            return count_result
+        if "users_fake_t8" in rendered:
+            return sentinel_result
+        if "UPDATE" in rendered and "records_fake_t8" in rendered:
+            return claim_result
+        return MagicMock()
+
+    db.execute = AsyncMock(side_effect=_execute)
     db.commit = AsyncMock()
     db.add = MagicMock()
     return db
@@ -292,6 +321,12 @@ def test_create_in_flight_gate_429(wired):
     wired["client"].post.assert_not_awaited()
 
 
+def test_create_in_flight_gate_counts_creating_reservations(wired):
+    resp = _call(_db(in_flight=1, creating_claims=1))
+    assert resp.status_code == 429
+    wired["client"].post.assert_not_awaited()
+
+
 def test_create_admin_read_failure_means_zero_capacity(wired):
     wired["monkeypatch"].setitem(
         sys.modules,
@@ -323,6 +358,21 @@ def test_create_job_api_failure_resets_claim(wired):
     wired["reset"].assert_awaited_once()
 
 
+def test_create_keeps_record_reserved_until_pg_job_row_exists(wired):
+    db = _db()
+    record_job_ids_seen_by_pg_insert: list[str | None] = []
+
+    def _add_spy(_row):
+        record_job_ids_seen_by_pg_insert.append(wired["record"].job_id)
+
+    db.add.side_effect = _add_spy
+    resp = _call(db)
+
+    assert resp.status_code == 202
+    assert record_job_ids_seen_by_pg_insert == [None]
+    assert wired["record"].job_id == "job-abc"
+
+
 # --- 对抗审核 P1 回归：status 端点不得拿 __creating__ 哨兵去查 Job API -------
 
 
@@ -345,3 +395,56 @@ def test_pipeline_third_defense_source_guard():
     src = Path(process_module.__file__).read_text(encoding="utf-8")
     assert "防 clone 第三道防线" in src
     assert "job_voice_strategy = 'preset_mapping'" in src
+
+
+@pytest.mark.asyncio
+async def test_create_capacity_lock_uses_postgresql_transaction_advisory_lock() -> None:
+    statements: list[tuple[object, dict | None]] = []
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _FakeDb:
+        def get_bind(self):
+            return _Bind()
+
+        async def execute(self, stmt, params=None):
+            statements.append((stmt, params))
+
+    acquired = await api._acquire_create_capacity_transaction_lock(_FakeDb())
+
+    assert acquired is True
+    assert len(statements) == 1
+    assert "pg_advisory_xact_lock" in str(statements[0][0])
+    assert isinstance(statements[0][1]["lock_key"], int)
+
+
+def test_create_reservation_claim_marker_uses_short_ttl() -> None:
+    now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+
+    fresh = api._create_reservation_claim_token(now=now)
+    expired = api._create_reservation_claim_token(now=now - timedelta(minutes=6))
+    cutoff = api._create_reservation_cutoff_token(now=now)
+
+    assert fresh.startswith("creating_until:")
+    assert expired.startswith("creating_until:")
+    assert fresh > cutoff
+    assert expired < cutoff
+
+
+def test_create_reservation_count_uses_marker_ttl_not_preview_ttl() -> None:
+    src = inspect.getsource(api._reserve_create_capacity)
+
+    assert "_create_reservation_cutoff_token" in src
+    assert "_create_reservation_claim_token" in src
+    assert "claim_token_placeholder" in src
+    assert "AnonymousPreviewRecord.expires_at" not in src
+
+
+def test_reset_create_claim_clears_reservation_marker() -> None:
+    src = inspect.getsource(api._reset_create_claim).replace(" ", "")
+
+    assert "claim_token_placeholder=None" in src

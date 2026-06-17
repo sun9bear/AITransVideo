@@ -53,10 +53,12 @@ from payment_providers import (
 from plan_catalog import (
     VALID_BILLING_PERIODS as _CATALOG_BILLING_PERIODS,
     get_legacy_price_table,
+    get_plan,
     get_price,
     valid_target_plan_codes,
 )
 from subscriptions import (
+    _period_end as _subscription_period_end,
     record_invoice_for_order,
     upsert_active_subscription,
 )
@@ -64,6 +66,8 @@ from subscriptions import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
+
+_REFUND_AMOUNT_METADATA_KEY = "refund_amount_fen_total"
 
 # Frozen import-time snapshots kept for backward-compatible test imports.
 # Request-time code paths call the live functions (valid_target_plan_codes(),
@@ -277,6 +281,7 @@ async def _refresh_order_from_provider(
     *,
     db: AsyncSession,
     order: PaymentOrder,
+    raise_on_error: bool = False,
 ) -> None:
     try:
         provider = get_provider(order.provider)
@@ -292,6 +297,8 @@ async def _refresh_order_from_provider(
         return
     except Exception as exc:
         logger.warning("Provider %s order query failed for %s: %s", order.provider, order.id, exc)
+        if raise_on_error:
+            raise
         return
 
     if query_result is None:
@@ -307,6 +314,8 @@ async def _refresh_order_from_provider(
             )
         except ValueError as exc:
             logger.warning("Ignoring alipay query result for %s: %s", order.id, exc)
+            if raise_on_error:
+                raise
             return
 
     if order.provider == "paddle":
@@ -323,6 +332,8 @@ async def _refresh_order_from_provider(
             )
         except ValueError as exc:
             logger.warning("Ignoring paddle query result for %s: %s", order.id, exc)
+            if raise_on_error:
+                raise
             return
 
     if order.provider == "wechatpay":
@@ -347,6 +358,8 @@ async def _refresh_order_from_provider(
                 )
             except ValueError as exc:
                 logger.warning("Ignoring wechat query result for %s: %s", order.id, exc)
+                if raise_on_error:
+                    raise
                 return
 
     if query_result.provider_order_id and order.provider_order_id != query_result.provider_order_id:
@@ -752,10 +765,28 @@ async def receive_webhook(
     # 仍走 order-not-found no-op（见 _validate_*_event_against_order 的
     # INVARIANT 注记），不得借道结算。
     resolved_order_id = event.order_id
-    if event.new_status == "refunded" and not resolved_order_id:
+    is_refund_resource_event = _is_refund_resource_event(
+        provider_name, event.event_type, event.raw_payload
+    )
+    if is_refund_resource_event and not resolved_order_id:
         resolved_order_id = await _resolve_refund_order_id(
             db, provider_name=provider_name, raw_payload=event.raw_payload
         )
+    if is_refund_resource_event and not resolved_order_id:
+        logger.warning(
+            "Ignoring unbound refund resource event %s from %s",
+            event.provider_event_id,
+            provider_name,
+        )
+        return _provider_webhook_response(provider_name, settled=False)
+    if is_refund_resource_event and event.new_status != "refunded":
+        logger.info(
+            "Ignoring non-final refund resource event %s from %s (order_id=%s)",
+            event.provider_event_id,
+            provider_name,
+            resolved_order_id or "<unbound>",
+        )
+        return _provider_webhook_response(provider_name, settled=False)
 
     if provider_name == "alipay":
         signature_valid = signature_valid and await _validate_alipay_event_against_order(
@@ -829,21 +860,74 @@ async def _resolve_refund_order_id(
     return str(order.id) if order is not None else ""
 
 
+def _is_refund_resource_event(
+    provider_name: str,
+    event_type: str,
+    raw_payload: dict | None,
+) -> bool:
+    payload = raw_payload or {}
+    raw_event_type = str(payload.get("event_type") or event_type or "").strip()
+    if provider_name == "wechatpay":
+        return raw_event_type.upper().startswith("REFUND.")
+    if provider_name == "paddle":
+        if raw_event_type not in ("adjustment.created", "adjustment.updated"):
+            return False
+        data = payload.get("data") or {}
+        action = str(data.get("action") or "").strip().lower()
+        return action in ("refund", "chargeback")
+    return False
+
+
 def _extract_refund_amount_fen(provider_name: str, raw_payload: dict | None) -> int | None:
     """从退款事件里提取退款金额（分）。取不到返回 None（按全额处理）。"""
     payload = raw_payload or {}
+
+    def _int_or_none(value: object) -> int | None:
+        return int(str(value)) if value not in (None, "") else None
+
     try:
         if provider_name == "wechatpay":
             amount = ((payload.get("transaction") or {}).get("amount")) or {}
             refund = amount.get("refund")
-            return int(refund) if refund is not None else None
+            return _int_or_none(refund)
         if provider_name == "paddle":
-            totals = ((payload.get("data") or {}).get("totals")) or {}
-            total = totals.get("total")
-            return int(str(total)) if total not in (None, "") else None
+            data = (payload.get("data") or {})
+            totals = data.get("totals") or {}
+            subtotal = _int_or_none(totals.get("subtotal"))
+            if subtotal is not None:
+                return subtotal
+
+            item_subtotals: list[int] = []
+            for item in data.get("items") or []:
+                item_totals = (item or {}).get("totals") or {}
+                item_subtotal = _int_or_none(item_totals.get("subtotal"))
+                if item_subtotal is not None:
+                    item_subtotals.append(item_subtotal)
+            if item_subtotals:
+                return sum(item_subtotals)
+            return None
     except (TypeError, ValueError):
         return None
     return None
+
+
+def _record_order_refund_amount_fen(order: PaymentOrder, refund_amount_fen: int) -> int:
+    previous = _order_refund_amount_fen_total(order)
+    current = max(int(refund_amount_fen or 0), 0)
+    total = previous + current
+    metadata = dict(getattr(order, "metadata_json", None) or {})
+    metadata[_REFUND_AMOUNT_METADATA_KEY] = total
+    order.metadata_json = metadata
+    return total
+
+
+def _order_refund_amount_fen_total(order: PaymentOrder) -> int:
+    metadata = getattr(order, "metadata_json", None) or {}
+    raw_value = metadata.get(_REFUND_AMOUNT_METADATA_KEY, 0)
+    try:
+        return max(int(raw_value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _provider_webhook_response(
@@ -1091,7 +1175,10 @@ async def _process_payment_event(
     # 必须在订单行上串行化，后到者拿锁后重读到终态被守卫挡掉，防止
     # 双结算/重复发订阅点数。sqlite（测试）方言无 FOR UPDATE，自动忽略。
     result = await db.execute(
-        select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update()
+        select(PaymentOrder)
+        .where(PaymentOrder.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     order = result.scalar_one_or_none()
     if order is None:
@@ -1115,8 +1202,19 @@ async def _process_payment_event(
     # depends on to keep `billing_invoices.status` truthful. Without allowing
     # that transition here, a later refund webhook would be silently rejected
     # and billing history would lie.
-    _is_paid_to_refund = order.status == "paid" and new_status == "refunded"
-    if order.status in ("paid", "refunded", "cancelled") and not _is_paid_to_refund:
+    _is_refund_transition = (
+        order.status in ("paid", "partial_refunded") and new_status == "refunded"
+    )
+    _is_paid_after_early_partial_refund = (
+        order.status == "partial_refunded"
+        and new_status == "paid"
+        and order.paid_at is None
+    )
+    if (
+        order.status in ("paid", "partial_refunded", "refunded", "cancelled")
+        and not _is_refund_transition
+        and not _is_paid_after_early_partial_refund
+    ):
         event.processed = True
         event.error_message = f"Order already in terminal state: {order.status}"
         event.processed_at = now
@@ -1134,8 +1232,23 @@ async def _process_payment_event(
                         provider_event_id, order_id)
         return False
 
+    cumulative_refund_amount_fen = None
+    if new_status == "refunded" and refund_amount_fen is not None:
+        cumulative_refund_amount_fen = _record_order_refund_amount_fen(
+            order, refund_amount_fen
+        )
+    is_known_partial_refund = (
+        new_status == "refunded"
+        and cumulative_refund_amount_fen is not None
+        and cumulative_refund_amount_fen < order.amount_cny
+    )
+    if _is_paid_after_early_partial_refund:
+        settlement_status = "partial_refunded"
+    else:
+        settlement_status = "partial_refunded" if is_known_partial_refund else new_status
+
     # Update order status
-    order.status = new_status
+    order.status = settlement_status
     if new_status == "paid":
         order.paid_at = now
 
@@ -1151,7 +1264,12 @@ async def _process_payment_event(
         #    current gates still rely on. `subscriptions` is the canonical
         #    paid-state record; `user.plan_code` mirrors it so
         #    `entitlements.py` and `job_intercept.py` don't need to change.
-        user_result = await db.execute(select(User).where(User.id == order.user_id))
+        user_result = await db.execute(
+            select(User)
+            .where(User.id == order.user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         user = user_result.scalar_one_or_none()
 
         invoice = await record_invoice_for_order(
@@ -1198,17 +1316,17 @@ async def _process_payment_event(
     elif new_status == "refunded":
         # Refund truth layer: billing history made truthful (T4 既有行为)。
         await record_invoice_for_order(
-            db, order=order, settled_at=now, status="refunded"
+            db, order=order, settled_at=now, status=settlement_status
         )
         # R7 退款闭环：回收订阅 / plan 投影 / 本单关联 credits。
         # 部分退款（已知退款金额 < 订单金额）不自动回收，留人工复核——
         # admin /api/admin/billing/unsettled 的 recent_refunds 面板可见；
         # 金额未知（query 路径 / 字段缺失）按全额处理。
-        if refund_amount_fen is not None and refund_amount_fen < order.amount_cny:
+        if is_known_partial_refund:
             logger.warning(
                 "Partial refund for order %s (refund=%s < order=%s); "
                 "entitlements kept — manual review required",
-                order_id, refund_amount_fen, order.amount_cny,
+                order_id, cumulative_refund_amount_fen, order.amount_cny,
             )
         else:
             await _recall_entitlements_for_refund(db, order=order, now=now)
@@ -1242,7 +1360,12 @@ async def _recall_entitlements_for_refund(
       退款结算本身——发票/订单真值优先落库）
     """
     user = (
-        await db.execute(select(User).where(User.id == order.user_id))
+        await db.execute(
+            select(User)
+            .where(User.id == order.user_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if user is None:
         logger.warning("Refund recall: user %s not found for order %s",
@@ -1251,28 +1374,114 @@ async def _recall_entitlements_for_refund(
 
     subscription = (
         await db.execute(
-            select(Subscription).where(
+            select(Subscription)
+            .where(
                 Subscription.user_id == user.id,
                 Subscription.status == "active",
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
-    if subscription is not None and subscription.plan_code == order.target_plan_code:
-        subscription.status = "cancelled"
-        subscription.cancelled_at = now
-        subscription.updated_at = now
+
+    affected_current_access = (
+        (subscription is not None and subscription.plan_code == order.target_plan_code)
+        or (user.plan_code or "free") == order.target_plan_code
+    )
+    remaining_paid_order = None
+    fallback_plan_code = None
+    if affected_current_access:
+        remaining_paid_order = await _highest_remaining_paid_order_for_user(
+            db, order=order, at=now
+        )
+        fallback_plan_code = (
+            getattr(remaining_paid_order, "target_plan_code", None)
+            if remaining_paid_order is not None else None
+        )
+
+    same_plan_access_remains = fallback_plan_code == order.target_plan_code
+
+    subscription_cancelled = False
+    subscription_restored = False
+    plan_downgraded = False
+
+    if (
+        subscription is not None
+        and subscription.plan_code == order.target_plan_code
+    ):
+        if fallback_plan_code is None:
+            subscription.status = "cancelled"
+            subscription.cancelled_at = now
+            subscription.updated_at = now
+            subscription_cancelled = True
+        elif remaining_paid_order is not None:
+            _restore_subscription_from_paid_order(
+                subscription,
+                paid_order=remaining_paid_order,
+                now=now,
+            )
+            subscription_restored = True
 
     if (user.plan_code or "free") == order.target_plan_code:
+        new_plan_code = fallback_plan_code or "free"
         old_plan = user.plan_code
-        user.plan_code = "free"
-        db.add(AdminAuditLog(
-            admin_user_id=user.id,
-            target_user_id=user.id,
-            action="payment_refund_downgrade",
-            field_name="plan_code",
-            old_value=old_plan,
-            new_value="free",
-        ))
+        if old_plan != new_plan_code:
+            user.plan_code = new_plan_code
+            db.add(AdminAuditLog(
+                admin_user_id=user.id,
+                target_user_id=user.id,
+                action="payment_refund_downgrade",
+                field_name="plan_code",
+                old_value=old_plan,
+                new_value=new_plan_code,
+            ))
+            plan_downgraded = True
+    if same_plan_access_remains:
+        logger.info(
+            "Refund recall for order %s kept plan %s because another paid "
+            "same-plan order remains",
+            order.id,
+            order.target_plan_code,
+        )
+    elif fallback_plan_code is not None:
+        logger.info(
+            "Refund recall for order %s restored remaining paid plan %s",
+            order.id,
+            fallback_plan_code,
+        )
+
+    if remaining_paid_order is not None:
+        try:
+            from credits_service import ensure_subscription_bucket
+
+            bucket_plan_code = getattr(remaining_paid_order, "target_plan_code", None)
+            bucket_expires_at = None
+            if subscription is not None and subscription_restored:
+                bucket_expires_at = getattr(subscription, "current_period_end", None)
+            if bucket_expires_at is None:
+                fallback_paid_at = getattr(remaining_paid_order, "paid_at", None)
+                if isinstance(fallback_paid_at, datetime):
+                    bucket_expires_at = _subscription_period_end(
+                        fallback_paid_at,
+                        getattr(remaining_paid_order, "billing_period", ""),
+                    )
+            if bucket_plan_code:
+                await ensure_subscription_bucket(
+                    db,
+                    user_id=user.id,
+                    plan_code=bucket_plan_code,
+                    related_order_id=getattr(remaining_paid_order, "id", None),
+                    related_subscription_id=getattr(subscription, "id", None),
+                    expires_at=bucket_expires_at,
+                )
+        except Exception:
+            logger.warning(
+                "Refund fallback credits restore failed for order %s "
+                "(fallback order %s; non-fatal)",
+                order.id,
+                getattr(remaining_paid_order, "id", None),
+                exc_info=True,
+            )
 
     try:
         from credits_service import revoke_buckets_for_order
@@ -1286,8 +1495,129 @@ async def _recall_entitlements_for_refund(
         )
 
     logger.info(
-        "Refund settled for order %s: subscription_cancelled=%s plan_downgraded=%s",
+        "Refund settled for order %s: subscription_cancelled=%s "
+        "subscription_restored=%s plan_downgraded=%s",
         order.id,
-        bool(subscription is not None and subscription.status == "cancelled"),
-        user.plan_code == "free",
+        subscription_cancelled,
+        subscription_restored,
+        plan_downgraded,
+    )
+
+
+def _restore_subscription_from_paid_order(
+    subscription: Subscription,
+    *,
+    paid_order: PaymentOrder,
+    now: datetime,
+) -> None:
+    plan_code = getattr(paid_order, "target_plan_code", None)
+    if plan_code:
+        subscription.plan_code = plan_code
+    if getattr(paid_order, "billing_period", None):
+        subscription.billing_period = paid_order.billing_period
+    if getattr(paid_order, "provider", None):
+        subscription.provider = paid_order.provider
+    fallback_paid_at = getattr(paid_order, "paid_at", None)
+    if isinstance(fallback_paid_at, datetime):
+        subscription.current_period_start = fallback_paid_at
+        subscription.current_period_end = _subscription_period_end(
+            fallback_paid_at,
+            getattr(paid_order, "billing_period", ""),
+        )
+    subscription.updated_at = now
+
+
+async def _has_other_paid_order_for_plan(
+    db: AsyncSession,
+    *,
+    order: PaymentOrder,
+) -> bool:
+    result = await db.execute(
+        select(PaymentOrder)
+        .where(
+            PaymentOrder.user_id == order.user_id,
+            PaymentOrder.id != order.id,
+            PaymentOrder.target_plan_code == order.target_plan_code,
+            PaymentOrder.status.in_(("paid", "partial_refunded")),
+        )
+    )
+    now = datetime.now(timezone.utc)
+    return any(
+        _paid_order_active_at(paid_order, now)
+        for paid_order in result.scalars().all()
+    )
+
+
+async def _highest_remaining_paid_order_for_user(
+    db: AsyncSession,
+    *,
+    order: PaymentOrder,
+    at: datetime,
+) -> PaymentOrder | None:
+    result = await db.execute(
+        select(PaymentOrder)
+        .where(
+            PaymentOrder.user_id == order.user_id,
+            PaymentOrder.id != order.id,
+            PaymentOrder.status.in_(("paid", "partial_refunded")),
+        )
+    )
+    paid_orders = [
+        paid_order for paid_order in result.scalars().all()
+        if _paid_order_active_at(paid_order, at)
+    ]
+    if not paid_orders:
+        return None
+    return max(
+        paid_orders,
+        key=lambda paid_order: (
+            _plan_entitlement_rank(getattr(paid_order, "target_plan_code", None)),
+            _order_paid_sort_key(paid_order),
+            str(getattr(paid_order, "id", "")),
+        ),
+    )
+
+
+def _plan_entitlement_rank(plan_code: str | None) -> tuple[int, int, int]:
+    code = plan_code or "free"
+    try:
+        plan = get_plan(code)
+    except Exception:
+        return (0, 0, 0)
+    return (
+        get_price(code, "monthly") or 0,
+        getattr(plan, "max_duration_minutes", 0) or 0,
+        getattr(plan, "max_concurrent_jobs", 0) or 0,
+    )
+
+
+def _order_paid_sort_key(order: PaymentOrder) -> float:
+    paid_at = getattr(order, "paid_at", None) or getattr(order, "created_at", None)
+    if not isinstance(paid_at, datetime):
+        return 0.0
+    if paid_at.tzinfo is None:
+        paid_at = paid_at.replace(tzinfo=timezone.utc)
+    return paid_at.timestamp()
+
+
+def _paid_order_active_at(order: PaymentOrder, at: datetime) -> bool:
+    period_end = _paid_order_period_end(order)
+    if period_end is None:
+        return False
+    if period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return period_end > at
+
+
+def _paid_order_period_end(order: PaymentOrder) -> datetime | None:
+    paid_at = getattr(order, "paid_at", None)
+    if not isinstance(paid_at, datetime):
+        return None
+    if paid_at.tzinfo is None:
+        paid_at = paid_at.replace(tzinfo=timezone.utc)
+    return _subscription_period_end(
+        paid_at,
+        getattr(order, "billing_period", ""),
     )
