@@ -438,7 +438,10 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     const previewId = state.previewId
 
     // express lane 才把克隆 opt-in 传给后端（free lane 不显示该勾选、恒 false）。
-    const autoVoiceClone = limits.active_lane === 'express' && state.expressAutoVoiceClone
+    const autoVoiceClone =
+      limits.active_lane === 'express' &&
+      limits.express_clone_available &&
+      state.expressAutoVoiceClone
     setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null }))
 
     try {
@@ -460,7 +463,10 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     if (!state.previewId) return
     const gen = pollGenRef.current
     const previewId = state.previewId
-    const autoVoiceClone = limits.active_lane === 'express' && state.expressAutoVoiceClone
+    const autoVoiceClone =
+      limits.active_lane === 'express' &&
+      limits.express_clone_available &&
+      state.expressAutoVoiceClone
     setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null, errorMsg: '' }))
     try {
       // create 端仅 failed 终态可重入（服务端原子抢占防并发双重试）；
@@ -642,7 +648,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           {/* plan 2026-06-14 §3.1：express lane 才显示"克隆我的音色"opt-in（可选，
               不 gate 按钮）。CosyVoice 国内免费克隆；未勾选走预设。绝不 MiniMax。
               是否真克隆还取决于服务端 admin 主开关 + 全局 cap + worker。 */}
-          {limits.active_lane === 'express' && (
+          {limits.active_lane === 'express' && limits.express_clone_available && (
             <label className="flex items-start gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
               <input
                 type="checkbox"

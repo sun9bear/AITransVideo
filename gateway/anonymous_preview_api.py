@@ -591,6 +591,19 @@ async def anonymous_upload(
 # GET /limits  (APF 限制旋钮，2026-06-11)
 # ---------------------------------------------------------------------------
 
+def _resolve_express_clone_available(active_lane: str | None) -> bool:
+    if active_lane != "express":
+        return False
+    try:
+        from admin_settings import load_settings as _load_admin_for_clone
+
+        return (
+            _load_admin_for_clone().anonymous_express_cosyvoice_clone_enabled is True
+        )
+    except Exception:
+        return False
+
+
 @router.get("/limits")
 async def anonymous_preview_limits() -> Response:
     """公开只读端点：当前生效的匿名预览限制（前端试用面板动态文案用）。
@@ -615,6 +628,7 @@ async def anonymous_preview_limits() -> Response:
             "preview_seconds": limits.anonymous_preview_max_seconds,
             "active_lane": active_lane,
             "master_open": active_lane is not None,
+            "express_clone_available": _resolve_express_clone_available(active_lane),
         },
     )
 
