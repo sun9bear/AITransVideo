@@ -37,6 +37,35 @@ def _module_down_revision(path: Path):
     return None
 
 
+def _module_revision(path: Path):
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id == "revision":
+                return value.value if isinstance(value, ast.Constant) else None
+    return None
+
+
+def test_migration_040_revision_matches_production_stamp() -> None:
+    path = (
+        _REPO_ROOT
+        / "gateway"
+        / "alembic"
+        / "versions"
+        / "040_anonymous_preview_claim_owner.py"
+    )
+    revision = _module_revision(path)
+
+    assert revision == "040_anon_claim_owner"
+    assert len(revision) <= 32
+
+
 def test_migration_041_revision_id_fits_alembic_version_column() -> None:
     """Production alembic_version.version_num is VARCHAR(32)."""
     src = _MIGRATION_PATH.read_text(encoding="utf-8")

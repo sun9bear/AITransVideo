@@ -1,6 +1,6 @@
 """Phase 4 claim binding — anonymous_preview_records.claim_user_id（owner 列 + 索引）.
 
-Revision ID: 040_anonymous_preview_claim_owner
+Revision ID: 040_anon_claim_owner
 Revises: 039_smart_clone_carryover
 Create Date: 2026-06-15
 
@@ -26,7 +26,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 
-revision: str = "040_anonymous_preview_claim_owner"
+revision: str = "040_anon_claim_owner"
 down_revision: Union[str, None] = "039_smart_clone_carryover"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
