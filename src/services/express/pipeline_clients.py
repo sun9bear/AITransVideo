@@ -48,6 +48,10 @@ _REGISTER_TIMEOUT_S = 15.0
 
 # admin_settings keys（主 spec §7）
 _K_ENABLED = "express_cosyvoice_auto_clone_enabled"
+# plan 2026-06-14 §3.4：匿名/快捷 CosyVoice 克隆主开关（L1'，默认 False）。
+# 与登录态 _K_ENABLED 独立——匿名走全局 cap（reservation 侧 sentinel owner），
+# 不用 user allowlist（匿名无 user role）。
+_K_ANON_ENABLED = "anonymous_express_cosyvoice_clone_enabled"
 _K_ALLOWLIST_ENABLED = "express_cosyvoice_auto_clone_allowlist_enabled"
 _K_ALLOWLIST = "express_cosyvoice_auto_clone_user_allowlist"
 _K_MIN_RATIO = "express_cosyvoice_auto_clone_main_speaker_min_ratio"
@@ -168,9 +172,14 @@ def build_express_auto_clone_clients(
     target_model: str,
     sample_max_seconds: float,
     temporary_expires_at: str,
+    is_anonymous: bool = False,
 ) -> ExpressAutoCloneClients:
     """装配 8 个真实 client callable。worker 由 ``build_client_from_env`` 构造
-    （L2 gate 已确认 enabled，但仍 None-safe）。"""
+    （L2 gate 已确认 enabled，但仍 None-safe）。
+
+    ``is_anonymous=True``（plan 2026-06-14 §3.4）：reserve 走匿名全局 cap
+    （owner=sentinel user）；其余 client 行为不变（CosyVoice worker clone）。
+    """
     from services.mainland_worker.client_factory import build_client_from_env
 
     worker = build_client_from_env()
@@ -204,7 +213,8 @@ def build_express_auto_clone_clients(
 
     def _reserve(*, user_id, job_id, speaker_id, target_model) -> ReserveResult:
         r = reservation_client.reserve(
-            user_id=user_id, job_id=job_id, speaker_id=speaker_id, target_model=target_model
+            user_id=user_id, job_id=job_id, speaker_id=speaker_id,
+            target_model=target_model, is_anonymous=is_anonymous,
         )
         return ReserveResult(
             ok=r.ok, reservation_id=r.reservation_id, deny_reason=r.deny_reason, error=r.error
@@ -324,28 +334,38 @@ def maybe_run_express_auto_clone(
     speaker_voices: dict,
     speaker_routing: dict,
     express_consent,
+    anonymous_preview: bool = False,
 ) -> ExpressAutoCloneOutcome | None:
     """process.py 的唯一入口。进入闸全在这里：
 
+    登录态 express（``anonymous_preview=False``，默认，行为字节级不变）：
     - identity（user_id / job_id 非空）
-    - **L1 admin 主开关**（默认 False → no-op，Express 行为不变）
-    - **L4 consent**（无 consent → skip，不调 auto_clone；前端 UI 留 PR3）
-    - **L2 worker env**（武汉 worker 未启用 → skip）
-    - **L3 allowlist**（fail-closed：空 / 非 list / 不含该 user → skip。空
-      allowlist = 没人能用，等效 admin flag off；无 admin bypass）
+    - **L1 admin 主开关** ``express_cosyvoice_auto_clone_enabled``（默认 False → no-op）
+    - **L4 consent** / **L2 worker env** / **L3 allowlist**（fail-closed per-user）
 
-    任一不过 → return None（**不构造 client、不调 run_express_auto_clone**），
-    Express 走预设音色。全过则装配真实 deps 调编排，成功原地注入 routing。
+    匿名/快捷（``anonymous_preview=True``，plan 2026-06-14 §3.4）：
+    - **L1' admin 主开关** ``anonymous_express_cosyvoice_clone_enabled``（默认 False）
+    - **L4 consent** / **L2 worker env**（同上）
+    - **L3' 全局 cap**：**不用** user allowlist（匿名无 user role），改由 reservation
+      侧 sentinel owner + ``anonymous_clone_*`` 全局 cap fail-closed 兜底成本。
+
+    两条路径都**只走 CosyVoice worker clone**，任一闸不过 → return None（不构造
+    client、不调编排），回 CosyVoice 预设音色，**绝不** MiniMax。
 
     本函数**不抛**：任何意外 → log + return None（回预设）。
     """
     try:
         if not user_id or not job_id:
             return None
-        # L1 admin 主开关（最重要：默认 False → Express 行为字节级不变）
-        if not bool(_admin(_K_ENABLED, False)):
+        # L1 / L1' admin 主开关（默认 False → no-op，行为不变）。
+        # **strict ``is True``**（CodeX P2 审核）：pipeline 侧 _admin 读 raw JSON，
+        # 不经 gateway StrictBool 校验；手改 admin_settings.json 成字符串
+        # "false"/"0" 时 bool("false")=True 会误开。严格只认 Python True，
+        # malformed/字符串/数字一律 fail-closed skip（回预设）。
+        master_key = _K_ANON_ENABLED if anonymous_preview else _K_ENABLED
+        if _admin(master_key, False) is not True:
             return None
-        # L4 consent（Codex PR2-F：无 consent 不调 auto_clone）
+        # L4 consent（无 consent → skip，不调 auto_clone）
         if not _has_consent(express_consent):
             return None
         # L2 worker env
@@ -353,19 +373,17 @@ def maybe_run_express_auto_clone(
 
         if not is_worker_enabled_in_env():
             return None
-        # L3 allowlist —— **fail-closed canary gate**（与 PR1 availability +
-        # 主 spec 一致）：空 allowlist = 没人能用（等效 admin flag off，双保险），
-        # **不是**"全员放行"。非 list（malformed）也 fail-closed skip。
-        # pipeline 只有 user_id、没有 user role，所以**不做 admin bypass**
-        # （availability endpoint 才有 admin bypass）；admin 灰度冒烟须把自己的
-        # user_id 显式加进 allowlist —— 与部署 SOP 一致。
-        allowlist_enabled = _admin(_K_ALLOWLIST_ENABLED, True)
-        if allowlist_enabled is not False:
-            allowlist = _admin(_K_ALLOWLIST, [])
-            if not isinstance(allowlist, list) or not allowlist:
-                return None
-            if str(user_id) not in {str(x) for x in allowlist}:
-                return None
+        # L3 allowlist —— 仅登录态 express。**fail-closed canary gate**：空 / 非
+        # list / 不含该 user → skip。匿名/快捷**跳过** allowlist（匿名无 user role），
+        # 由 reservation 侧 anonymous_clone_* 全局 cap fail-closed 兜底。
+        if not anonymous_preview:
+            allowlist_enabled = _admin(_K_ALLOWLIST_ENABLED, True)
+            if allowlist_enabled is not False:
+                allowlist = _admin(_K_ALLOWLIST, [])
+                if not isinstance(allowlist, list) or not allowlist:
+                    return None
+                if str(user_id) not in {str(x) for x in allowlist}:
+                    return None
 
         target_model = str(_admin(_K_TARGET_MODEL, TARGET_MODEL_DEFAULT) or TARGET_MODEL_DEFAULT)
         try:
@@ -393,6 +411,7 @@ def maybe_run_express_auto_clone(
             target_model=target_model,
             sample_max_seconds=sample_max_seconds,
             temporary_expires_at=temporary_expires_at,
+            is_anonymous=anonymous_preview,
         )
         return run_express_auto_clone(
             user_id=user_id,
@@ -407,7 +426,8 @@ def maybe_run_express_auto_clone(
             min_ratio=min_ratio,
             min_line_count=min_line_count,
             admin_settings_snapshot={
-                _K_ENABLED: True,
+                master_key: True,
+                "anonymous_preview": bool(anonymous_preview),
                 _K_TARGET_MODEL: target_model,
                 _K_MIN_RATIO: min_ratio,
             },

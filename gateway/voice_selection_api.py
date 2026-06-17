@@ -185,12 +185,17 @@ def _resolve_speaker_display_name(rs: dict, speaker_id: str) -> str | None:
 
 
 def _get_clone_cost_credits() -> int:
-    """Read voice clone cost from runtime pricing, fallback to 500."""
+    """Read voice clone cost from runtime pricing, fallback to 600.
+
+    plan 2026-06-14 §4.2：默认 500→600。生产恒读 pricing_runtime.json 实际值；
+    此 fallback 仅 runtime 不可用时用——计费安全兜底必须对齐新 canonical(600)，
+    否则 missing-runtime 时 reserve/capture 会 under-charge 100 点。
+    """
     try:
         from pricing_runtime import get_runtime_pricing
         return get_runtime_pricing().credits.voice_clone_cost_credits
     except Exception:
-        return 500
+        return 600
 
 
 async def _commit_shadow(db: AsyncSession, label: str) -> None:
@@ -660,7 +665,7 @@ async def voice_clone_for_selection(
         if total_duration_s >= 300:
             return _json_response(400, {"error": "excessive_duration", "message": f"选中片段总时长 {total_duration_s:.1f}s，不能超过 300s"})
 
-        # Live reserve credits (from runtime pricing, fallback 500)
+        # Live reserve credits (from runtime pricing, fallback 600 — plan 2026-06-14 §4.2)
         clone_cost = _get_clone_cost_credits()
         user_id = user.id if user else None
         reserve_reason_code = f"{_VOICE_CLONE_RESERVE_REASON}_{uuid.uuid4().hex[:12]}"

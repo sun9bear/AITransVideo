@@ -31,9 +31,19 @@ What it provides:
   (``evaluate_anonymous_preview_admission``);
 * an explicit boundary helper
   (``raise_clone_provider_boundary``) that always raises
-  ``NotImplementedError`` so any downstream caller that mistakes the
-  ``EXPRESS_TEMPORARY_CLONE_GATE`` strategy for "clone is wired" fails
-  loudly instead of silently calling a paid provider.
+  ``NotImplementedError``.
+
+**克隆接线现状（plan 2026-06-14 §3.3，CosyVoice 放行 / MiniMax 拦截）**：匿名/快捷
+CosyVoice 国内**临时**克隆**已接线**——但在 **pipeline**
+``src.services.express.maybe_run_express_auto_clone`` 里，由它自带的 admin 主开关
+（``anonymous_express_cosyvoice_clone_enabled``）+ server-confirmed consent + 全局
+cap + 武汉 worker + 原子 reservation 多重 gate 控制，失败回 CosyVoice 预设、**绝不**
+MiniMax。本契约模块**仍是纯决策 shell**：它只产出 ``voice_strategy`` 契约信号
+（``EXPRESS_TEMPORARY_CLONE_GATE`` 仅当 admin flag 开时），**自身从不调用任何 clone
+provider**。``raise_clone_provider_boundary`` 因此**仍然恒抛**——它保证的是"**本契约
+模块的调用图**永不变成 clone 执行器"（拦的是把克隆误接进 admission 模块），而不是
+否定 pipeline 那条已接线的 CosyVoice 路径。MiniMax / 付费持久克隆**绝不**在匿名/快捷
+路径出现（无论本模块还是 pipeline）。
 """
 
 from __future__ import annotations
@@ -388,16 +398,16 @@ def _safe_clone_boundary_label(mode: object) -> str:
 def raise_clone_provider_boundary(mode: object) -> None:
     """Boundary marker — always raises ``NotImplementedError``.
 
-    APF3a ships without any real voice-clone provider wiring. Any code
-    path that reaches the express clone gate (i.e. obtains
-    :attr:`VoiceStrategy.EXPRESS_TEMPORARY_CLONE_GATE` from an
-    ``AnonymousPreviewAdmission``) and then attempts to call a real
-    provider must invoke this function first. It always raises
-    ``NotImplementedError``, guaranteeing that:
+    **本助手仍然恒抛**（plan 2026-06-14 §3.3）。匿名/快捷 CosyVoice 临时克隆
+    现已接线，但**在 pipeline** ``services.express.maybe_run_express_auto_clone``
+    （自带 admin 主开关 + consent + 全局 cap + worker + reservation gate），**不在
+    本契约模块**。本模块仍是纯决策 shell：拿到
+    :attr:`VoiceStrategy.EXPRESS_TEMPORARY_CLONE_GATE` 只是契约信号，任何想在
+    **本模块调用图内**直接调 clone provider 的代码必须先调本函数 → 恒抛，保证：
 
-    * no paid provider is contacted from this module's call graph;
-    * any silent-fallback mistake at the integration boundary fails
-      loudly during local tests instead of in production.
+    * 本契约模块的调用图永不联系任何 clone provider（CosyVoice 或 MiniMax）；
+    * 把克隆误接进 admission 模块的 silent-fallback 错误在本地测试就大声失败；
+    * MiniMax / 付费持久克隆**绝不**经匿名/快捷路径（本模块或 pipeline 均不）。
 
     ``mode`` is typed as ``object`` because the boundary must hold even
     when called with a raw wire-mode string, a ``str`` subclass, a

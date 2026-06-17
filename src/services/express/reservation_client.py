@@ -96,13 +96,22 @@ def _post_json(path: str, payload: dict, *, timeout: float = _DEFAULT_TIMEOUT_S)
 
 
 def reserve(
-    *, user_id, job_id, speaker_id, target_model, timeout: float = _DEFAULT_TIMEOUT_S
+    *, user_id, job_id, speaker_id, target_model, is_anonymous: bool = False,
+    timeout: float = _DEFAULT_TIMEOUT_S,
 ) -> ReserveResult:
+    """预占一个 auto-clone 名额。
+
+    ``is_anonymous=True``（plan 2026-06-14 §3.4）：匿名/快捷 CosyVoice 克隆。
+    endpoint 据此用 ``anonymous_clone_daily_global_cap`` / ``anonymous_clone_active_cap``
+    全局 cap（owner=sentinel user，per-sentinel cap 天然 = 全局）而非登录态
+    per-user express cap。默认 False = 登录态 express auto-clone（行为不变）。
+    """
     payload = {
         "user_id": str(user_id),
         "job_id": str(job_id),
         "speaker_id": str(speaker_id),
         "target_model": str(target_model),
+        "is_anonymous": bool(is_anonymous),
     }
     try:
         status, body = _post_json(_RESERVE_PATH, payload, timeout=timeout)

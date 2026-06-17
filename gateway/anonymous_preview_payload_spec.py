@@ -31,6 +31,12 @@ ANONYMOUS_PREVIEW_PAYLOAD_SPEC: frozenset[str] = frozenset(
         "tts_provider",
         "source_content_hash",
         "anonymous_preview",  # G3 标记字段，匿名 lane 穿透用
+        # plan 2026-06-14 §3.1：匿名 Express CosyVoice 克隆 opt-in consent。
+        # 仅 express lane 且用户显式勾选克隆时由 create 注入（free lane 永不带）；
+        # 形状 {auto_voice_clone: true, server_confirmed_at: <服务端盖>}。这是
+        # **CosyVoice 免费克隆**授权字段，不是 MiniMax/付费 clone 字段（后者仍在
+        # FORBIDDEN_PAYLOAD_FIELDS 全禁）。pipeline 经 Job API snapshot 读取。
+        "express_consent",
     }
 )
 

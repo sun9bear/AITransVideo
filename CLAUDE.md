@@ -48,6 +48,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **曾发生的教训：** 2026-04-05 曾因在 S2 说话人审核的 fallback 路径加了自动克隆逻辑，导致 MiniMax 账户余额被两次 clone 调用耗尽。用户多次强调 "克隆应该用户主动决定" 之后才发现问题。此类失误不得重复。
 
+### CosyVoice 国内免费克隆的澄清边界（2026-06-14，plan `docs/plans/2026-06-14-anonymous-express-cosyvoice-clone-enable-plan.md`）
+
+本硬约束的 DNA 是 **"烧用户可见账单 / 额度 / 账户永久库存"**（对照 memory `feedback_paid_api_constraint_scope`）。据此澄清**CosyVoice 国内 v3.5 免费克隆不在本硬约束射程**——它**注册零扣费**（实测，见 memory `cosyvoice_v35_vs_v3_pricing`）、不占 MiniMax 账户 slot、合成是 pipeline 既有必经步骤，且克隆能力的费用已在商业化定价中向用户收取。因此：
+
+- **放行（自动可触发）**：匿名 / 登录快捷版的 **CosyVoice 国内临时克隆**——但必须经 pipeline `services.express.maybe_run_express_auto_clone` 的多重 gate：admin 主开关（`anonymous_express_cosyvoice_clone_enabled` / 登录态 `express_cosyvoice_auto_clone_enabled`，**默认 False**）+ server-confirmed consent（`express_consent.auto_voice_clone`）+ 全局/per-user cap（fail-closed）+ 武汉 worker runtime + 原子 reservation。任一不过 / 失败 / 异常 → 回 CosyVoice **预设音色**，**绝不**换 provider。
+- **仍全禁（本约束原义不变）**：**MiniMax / 其他厂商的付费持久克隆** 绝不在任何 fallback / 兜底 / 异常 / batch / retry 路径自动调用。MiniMax 克隆**只**走登录智能版用户**显式 consent + 预扣点数（600）**的知情付费路径（属上文「✅ 用户显式触发」例外）。
+- **匿名/快捷克隆 provider 之间不自动 fallback**：CosyVoice 克隆失败只回 CosyVoice 预设，**绝不**回落到 MiniMax 等付费 clone provider。
+
+> 一句话：放行的是 **CosyVoice 免费克隆**（注册免费 + 费用已收取），拦截的仍是 **MiniMax 付费克隆**（烧账户余额）。2026-04-05 事故的红线（fallback 里自动调 MiniMax）**完全保留**。
+
 ## Project Overview
 
 多用户视频翻译/配音 SaaS 工作台。React (Next.js) 前端 + Python 后端，通过 FastAPI Gateway 连接。
@@ -153,6 +163,13 @@ No Redux. Each page manages state via `useState` + API fetch. Job status polling
 - 自动克隆成功后写入 `user_voices.is_temporary=true` 与 `temporary_expires_at`，并通过 worker routing 进入 CosyVoice mainland worker TTS。
 - 预约与清理由 `express_clone_reservations`、reservation sweeper、temporary voice cleanup sweeper/CLI 负责；不要新增绕过 reservation 的付费 clone 路径。
 - 用户显式传入 `voice_a` / `voice_b` 仍正常传递。
+
+**匿名 / 登录快捷版 CosyVoice 克隆（2026-06-14，plan `docs/plans/2026-06-14-anonymous-express-cosyvoice-clone-enable-plan.md`）：** `services.express.maybe_run_express_auto_clone` 是 process.py 的唯一入口，含 `anonymous_preview` 分支——匿名/快捷预览（`anonymous_preview=true`）走 **CosyVoice 国内免费克隆**（拦 MiniMax，见上文「付费 API」澄清边界）。
+
+- **匿名分支 gate（L1'/L3'）**：主开关用 `anonymous_express_cosyvoice_clone_enabled`（**默认 False**，strict `is True` 判定，防 raw-JSON 字符串 `"false"` 误开）；**不用** user allowlist（匿名无 user role），改由 reservation 侧 **sentinel owner（`anonymous-preview@system`）+ `anonymous_clone_daily_global_cap`/`anonymous_clone_active_cap` 全局 cap** fail-closed 兜底成本。登录态 express 分支（allowlist + per-user cap）行为不变。
+- **consent**：匿名 Express 克隆 opt-in 由独立 `gateway/anonymous_express_clone_consent.py`（SOFT gate）校验，与内容权利 `anonymous_consent`（HARD 403）分离；仅 express lane + 用户勾选时由 create 注入 `express_consent`，经 Job API snapshot 传 pipeline。`anonymous_preview` 是 **server-only 信任标记**——公共 `POST /job-api/jobs` 路径无条件 strip 客户端夹带值（防提权）。
+- **防线②（方案 A 旁路）**：匿名任务 payload `voice_strategy` 恒 `preset_mapping` **不动**；CosyVoice 克隆经 `_speaker_voices`+`requires_worker` routing 旁路注入 → `tts_generator` 强制走 worker（`force_mimo_preset` 只在 `free_voiceclone` 路径，与此无关）。
+- **守卫**：`tests/test_anon_clone_enable_t2_*`、`test_anonymous_express_t4_payload_consistency`（防线③ import 黑名单豁免 provider-free 的 consent 验证器）；gateway 侧从不 import 克隆执行模块（克隆只在 pipeline worker 发生）。
 
 ### 免费档（Free Tier）音色与交付策略
 

@@ -591,6 +591,19 @@ async def anonymous_upload(
 # GET /limits  (APF 限制旋钮，2026-06-11)
 # ---------------------------------------------------------------------------
 
+def _resolve_express_clone_available(active_lane: str | None) -> bool:
+    if active_lane != "express":
+        return False
+    try:
+        from admin_settings import load_settings as _load_admin_for_clone
+
+        return (
+            _load_admin_for_clone().anonymous_express_cosyvoice_clone_enabled is True
+        )
+    except Exception:
+        return False
+
+
 @router.get("/limits")
 async def anonymous_preview_limits() -> Response:
     """公开只读端点：当前生效的匿名预览限制（前端试用面板动态文案用）。
@@ -615,6 +628,7 @@ async def anonymous_preview_limits() -> Response:
             "preview_seconds": limits.anonymous_preview_max_seconds,
             "active_lane": active_lane,
             "master_open": active_lane is not None,
+            "express_clone_available": _resolve_express_clone_available(active_lane),
         },
     )
 
@@ -1371,6 +1385,7 @@ async def anonymous_preview_create(
     from datetime import datetime, timezone as _tz
 
     from anonymous_consent import validate_anonymous_consent
+    from anonymous_express_clone_consent import validate_anonymous_express_clone_consent
     from anonymous_preview_payload_spec import validate_create_payload
     from anonymous_preview_probe import probe_source
     from models import Job, User
@@ -1432,6 +1447,17 @@ async def anonymous_preview_create(
         )
     consent_payload["server_confirmed_at"] = datetime.now(_tz.utc).isoformat()
 
+    # plan 2026-06-14 §3.1：匿名 Express CosyVoice 克隆 opt-in（SOFT gate，与
+    # 上面内容权利 HARD 403 gate **分离**）。用户在 express 卡片显式勾选"允许克隆
+    # 我的音色"才注入 express_consent；未勾选/缺失/strict-bool coercion → None →
+    # 不注入 → express 走 CosyVoice 预设音色（**不报错**，非 403）。仅 express lane
+    # 注入（下方）。这是 CosyVoice 免费克隆授权，不是 MiniMax 付费 clone。
+    _express_clone_consent, _ = validate_anonymous_express_clone_consent(
+        (body or {}).get("express_consent") if isinstance(body, dict) else None
+    )
+    if _express_clone_consent is not None:
+        _express_clone_consent["server_confirmed_at"] = datetime.now(_tz.utc).isoformat()
+
     # 开关门按 record.mode 分流（plan 2026-06-12 §A/D2）：free 保持既有
     # 双门（enable_free_tier env + free admin flag）逐字节不变；express 查
     # anonymous_express_enabled（含 §E② mimo runtime 防御纵深）。create 是
@@ -1465,8 +1491,25 @@ async def anonymous_preview_create(
     if not probe.get("ok") or not probe.get("duration_seconds"):
         return JSONResponse(status_code=409, content={"error": "teaser_unprobeable"})
     try:
-        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）
-        admission = admit_for_free_preview(float(probe["duration_seconds"]), resolve_apf_limits())
+        # APF 限制旋钮：admin 热值优先（字段与 settings 同名，policy 直接消费）。
+        # plan 2026-06-14 §3.3：express lane 把真实 mode + admin 克隆主开关传给
+        # admission，使其 voice_strategy 诚实反映 express 克隆 gate（契约信号；
+        # 真克隆触发在 pipeline maybe_run_express_auto_clone，见 §3.4，不受此影响）。
+        _express_clone_enabled = False
+        if record_mode == "express":
+            try:
+                from admin_settings import load_settings as _load_admin_for_clone
+                _express_clone_enabled = (
+                    _load_admin_for_clone().anonymous_express_cosyvoice_clone_enabled is True
+                )
+            except Exception:
+                _express_clone_enabled = False  # fail-safe：读不到当作关
+        admission = admit_for_free_preview(
+            float(probe["duration_seconds"]),
+            resolve_apf_limits(),
+            mode=record_mode,
+            express_clone_enabled=_express_clone_enabled,
+        )
         decision = admission.decision
         decision_str = decision.value if hasattr(decision, "value") else str(decision)
         if decision_str != "admitted":
@@ -1551,6 +1594,13 @@ async def anonymous_preview_create(
         "source_content_hash": record.source_hash,
         "anonymous_preview": True,
     }
+    # plan 2026-06-14 §3.1：仅 express lane + 用户克隆 opt-in 时注入 express_consent。
+    # free lane 永不带（保持纯预设）。voice_strategy 仍恒 preset_mapping（防线② 不动）
+    # ——CosyVoice 克隆经 pipeline 内 maybe_run_express_auto_clone + worker routing
+    # 旁路注入（方案 A），不靠 voice_strategy 字段；克隆是否真跑由 pipeline 侧
+    # anonymous_express_cosyvoice_clone_enabled 主开关 + 全局 cap + worker 决定。
+    if record_mode == "express" and _express_clone_consent is not None:
+        payload["express_consent"] = _express_clone_consent
     violations = validate_create_payload(payload)
     if violations:
         logger.error("anon_create: payload spec violations: %s", violations)

@@ -3602,6 +3602,9 @@ class ProcessPipeline:
                         speaker_voices=_speaker_voices,
                         speaker_routing=_speaker_voice_routing,
                         express_consent=_snap("express_consent", None),
+                        # plan 2026-06-14 §3.4：匿名 express 走匿名主开关 + 全局 cap
+                        # 分支（L1'/L3'）；登录态 express 不变。
+                        anonymous_preview=job_anonymous_preview,
                     )
                     # Mirror any injected clone voice into the a/b vars the
                     # translation/display path reads (matches the Studio
@@ -8067,10 +8070,12 @@ class ProcessPipeline:
             ) / "pricing_runtime.json"
             if runtime_file.exists():
                 data = _json.loads(runtime_file.read_text(encoding="utf-8"))
-                return data.get("credits", {}).get("voice_clone_cost_credits", 500)
+                # plan 2026-06-14 §4.2：默认 fallback 500→600（生产恒读 runtime
+                # 实际值；此默认仅 missing-key/缺文件路径用，与新 canonical 一致）。
+                return data.get("credits", {}).get("voice_clone_cost_credits", 600)
         except Exception:
             pass
-        return 500
+        return 600
 
     def _build_translation_review_payload(
         self,

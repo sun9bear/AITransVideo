@@ -231,7 +231,7 @@ class TestCloneCostFromRuntimeFile:
             assert PipelineClass._get_clone_cost_credits() == 750
 
     def test_fallback_when_file_missing(self) -> None:
-        """When the runtime file doesn't exist, falls back to 500."""
+        """When the runtime file doesn't exist, falls back to 600 (plan 2026-06-14 §4.2)."""
         PipelineClass = _get_pipeline_class()
         with patch("pipeline.process.Path") as mock_path_cls:
             mock_file = MagicMock()
@@ -239,10 +239,10 @@ class TestCloneCostFromRuntimeFile:
             mock_path_cls.return_value = mock_file
             # Call the real static method — it should hit the fallback
             result = PipelineClass._get_clone_cost_credits()
-        assert result == 500
+        assert result == 600
 
     def test_fallback_on_corrupt_json(self, tmp_path: Path) -> None:
-        """When the runtime file has invalid JSON, falls back to 500."""
+        """When the runtime file has invalid JSON, falls back to 600 (plan 2026-06-14 §4.2)."""
         runtime_file = tmp_path / "pricing_runtime.json"
         runtime_file.write_text("NOT VALID JSON", encoding="utf-8")
 
@@ -252,7 +252,7 @@ class TestCloneCostFromRuntimeFile:
         # Simpler: just monkeypatch and verify behavior
         result = PipelineClass._get_clone_cost_credits()
         # In test env, the real /opt path won't exist, so it falls back
-        assert result == 500
+        assert result == 600
 
     def test_payload_uses_method(self) -> None:
         """_build_voice_selection_review_payload should call _get_clone_cost_credits."""

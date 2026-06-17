@@ -212,7 +212,15 @@ class TestResolveApfLimits:
 # ---------------------------------------------------------------------------
 
 class TestLimitsEndpoint:
-    def _client(self, monkeypatch, *, flag_enabled: bool, limits=None):
+    def _client(
+        self,
+        monkeypatch,
+        *,
+        flag_enabled: bool,
+        limits=None,
+        active_lane="free",
+        clone_enabled=False,
+    ):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
@@ -234,7 +242,16 @@ class TestLimitsEndpoint:
         monkeypatch.setattr(api, "resolve_apf_limits", lambda: limits)
         # plan 2026-06-12 §G：/limits 增返 active_lane / master_open，
         # 测试钉死 resolver 隔离 admin_settings.json 文件状态。
-        monkeypatch.setattr(api, "_resolve_active_lane", lambda: "free")
+        monkeypatch.setattr(api, "_resolve_active_lane", lambda: active_lane)
+        import admin_settings as adm_mod
+
+        monkeypatch.setattr(
+            adm_mod,
+            "load_settings",
+            lambda: SimpleNamespace(
+                anonymous_express_cosyvoice_clone_enabled=clone_enabled
+            ),
+        )
 
         app = FastAPI()
         app.include_router(api.router)
@@ -256,7 +273,30 @@ class TestLimitsEndpoint:
             "preview_seconds": 240,
             "active_lane": "free",
             "master_open": True,
+            "express_clone_available": False,
         }
+
+    def test_limits_hides_clone_opt_in_when_admin_clone_switch_off(self, monkeypatch):
+        client = self._client(
+            monkeypatch,
+            flag_enabled=True,
+            active_lane="express",
+            clone_enabled=False,
+        )
+        resp = client.get("/gateway/anonymous-preview/limits")
+        assert resp.status_code == 200
+        assert resp.json()["express_clone_available"] is False
+
+    def test_limits_exposes_clone_opt_in_when_express_clone_enabled(self, monkeypatch):
+        client = self._client(
+            monkeypatch,
+            flag_enabled=True,
+            active_lane="express",
+            clone_enabled=True,
+        )
+        resp = client.get("/gateway/anonymous-preview/limits")
+        assert resp.status_code == 200
+        assert resp.json()["express_clone_available"] is True
 
     def test_no_session_or_csrf_required(self, monkeypatch):
         """GET 只读端点：无 cookie、无 Origin header 也必须可访问。"""

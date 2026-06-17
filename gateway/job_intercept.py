@@ -1179,6 +1179,15 @@ async def intercept_create_job(
     except Exception:
         request_data = {}
 
+    # plan 2026-06-14 §3.4 安全硬化（CodeX P2 审核）：``anonymous_preview`` 是
+    # **server-only 信任标记**——只有 gateway 匿名 create 路径
+    # （anonymous_preview_api，直发 Job API + internal_headers）能设。公共
+    # 认证 create 路径**无条件剥离**客户端夹带值，否则登录用户可夹带
+    # ``anonymous_preview:true`` 让 pipeline 切到匿名克隆分支（改用匿名主开关、
+    # 跳过登录态 allowlist）实现提权 / 绕 cap。剥离后该标记对公共路径永远为假。
+    if isinstance(request_data, dict):
+        request_data.pop("anonymous_preview", None)
+
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
     # but the entry-side gate was never updated — submissions of

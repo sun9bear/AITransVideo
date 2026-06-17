@@ -74,6 +74,9 @@ interface PanelState {
   stageLabel: string
   progress: number | null
   consentChecked: boolean
+  /** plan 2026-06-14 §3.1：express lane "克隆我的音色" opt-in（默认未勾选，
+   *  与内容权利 consentChecked 分离）。仅 express lane 渲染该勾选。 */
+  expressAutoVoiceClone: boolean
 }
 
 const INITIAL_STATE: PanelState = {
@@ -87,6 +90,7 @@ const INITIAL_STATE: PanelState = {
   stageLabel: '',
   progress: null,
   consentChecked: false,
+  expressAutoVoiceClone: false,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -419,6 +423,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       step: 'consent',
       previewId: uploadResp.preview_id,
       consentChecked: false,
+      expressAutoVoiceClone: false,
     }))
   }
 
@@ -432,10 +437,15 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     const gen = pollGenRef.current
     const previewId = state.previewId
 
+    // express lane 才把克隆 opt-in 传给后端（free lane 不显示该勾选、恒 false）。
+    const autoVoiceClone =
+      limits.active_lane === 'express' &&
+      limits.express_clone_available &&
+      state.expressAutoVoiceClone
     setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null }))
 
     try {
-      await createPreview(previewId, new Date().toISOString())
+      await createPreview(previewId, new Date().toISOString(), { autoVoiceClone })
     } catch (err) {
       if (gen !== pollGenRef.current) return
       const msg = err instanceof Error ? err.message : '创建预览失败，请重试'
@@ -453,11 +463,15 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     if (!state.previewId) return
     const gen = pollGenRef.current
     const previewId = state.previewId
+    const autoVoiceClone =
+      limits.active_lane === 'express' &&
+      limits.express_clone_available &&
+      state.expressAutoVoiceClone
     setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null, errorMsg: '' }))
     try {
       // create 端仅 failed 终态可重入（服务端原子抢占防并发双重试）；
       // 重试仍走全部闸判定（in-flight / lane 开关 / admission）。
-      await createPreview(previewId, new Date().toISOString())
+      await createPreview(previewId, new Date().toISOString(), { autoVoiceClone })
     } catch (err) {
       if (gen !== pollGenRef.current) return
       const msg = err instanceof Error ? err.message : '重试失败，请稍后再试'
@@ -630,6 +644,28 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
               我确认对该视频内容及其中人声拥有必要权利，同意将其用于本次预览合成。
             </span>
           </label>
+
+          {/* plan 2026-06-14 §3.1：express lane 才显示"克隆我的音色"opt-in（可选，
+              不 gate 按钮）。CosyVoice 国内免费克隆；未勾选走预设。绝不 MiniMax。
+              是否真克隆还取决于服务端 admin 主开关 + 全局 cap + worker。 */}
+          {limits.active_lane === 'express' && limits.express_clone_available && (
+            <label className="flex items-start gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+              <input
+                type="checkbox"
+                checked={state.expressAutoVoiceClone}
+                onChange={(e) =>
+                  setState((s) => ({ ...s, expressAutoVoiceClone: e.target.checked }))
+                }
+                className="mt-0.5 h-4 w-4 shrink-0 rounded border-border"
+              />
+              <span className="text-sm text-foreground leading-relaxed">
+                <span className="font-medium">（可选）克隆我的原声音色</span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  勾选后将用视频中主说话人的声音生成更接近原声的配音（免费，仅用于本次预览）。不勾选则使用预设音色。
+                </span>
+              </span>
+            </label>
+          )}
 
           <button
             type="button"

@@ -70,6 +70,7 @@ def test_default_payload_matches_current_frozen_values():
     # 2026-05-13-smart-mvp-p2-implementation-plan §5.3.
     assert p.credits.debit_rates == {
         "express.standard": 10,
+        "free.standard": 0,
         "studio.standard": 15,
         "studio.high": 30,
         "studio.flagship": 50,
@@ -81,7 +82,8 @@ def test_default_payload_matches_current_frozen_values():
         # Smart is a paid feature like studio — paid-first consumption.
         "smart": ["trial", "subscription", "topup", "free"],
     }
-    assert p.credits.voice_clone_cost_credits == 500
+    # plan 2026-06-14 §4.2：MiniMax/正式克隆默认 500→600（默认 schema 真源）。
+    assert p.credits.voice_clone_cost_credits == 600
 
     # --- topup ---
     assert p.topup.enabled is False

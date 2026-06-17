@@ -1412,6 +1412,9 @@ _RESERVATION_JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _RESERVATION_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]{1,56}$")
 # target_model 白名单（与 admin_settings._VALID_CLONE_TARGET_MODELS 一致）
 _RESERVATION_TARGET_MODELS = frozenset({"cosyvoice-v3.5-flash", "cosyvoice-v3.5-plus"})
+# 匿名预览 sentinel 系统用户 email（migration 035 插入；与 anonymous_preview_api
+# 一致）。匿名克隆全局 cap 的唯一合法 owner（CodeX P2 纵深防御）。
+_ANON_PREVIEW_SENTINEL_EMAIL = "anonymous-preview@system"
 
 
 def _load_express_reservation_caps() -> tuple[int, int, int] | None:
@@ -1430,6 +1433,28 @@ def _load_express_reservation_caps() -> tuple[int, int, int] | None:
         )
     except Exception as exc:
         logger.warning("express reservation: admin_settings load failed: %s", exc)
+        return None
+
+
+def _load_anonymous_clone_reservation_caps() -> tuple[int, int, int] | None:
+    """plan 2026-06-14 §3.4：匿名/快捷 CosyVoice 克隆**全局** cap。
+
+    owner=sentinel user（anonymous-preview@system），所有匿名克隆共享同一 owner，
+    故 express_reservation_service 的 per-user cap 作用在 sentinel 上 = 天然全局
+    cap。读 ``anonymous_clone_daily_global_cap`` / ``anonymous_clone_active_cap``；
+    reservation_ttl 复用 express 的（同一克隆生命周期，无需独立旋钮）。
+    读不到 → ``None``（fail-closed：caller 返 503，不进 reserve）。
+    """
+    try:
+        from admin_settings import load_settings
+        admin = load_settings()
+        return (
+            int(getattr(admin, "anonymous_clone_daily_global_cap", 100)),
+            int(getattr(admin, "anonymous_clone_active_cap", 20)),
+            int(getattr(admin, "express_cosyvoice_auto_clone_reservation_ttl_minutes", 30)),
+        )
+    except Exception as exc:
+        logger.warning("anonymous clone reservation: admin_settings load failed: %s", exc)
         return None
 
 
@@ -1452,6 +1477,9 @@ async def internal_express_reservation_reserve(
     job_id = str(body.get("job_id", "")).strip()
     speaker_id = str(body.get("speaker_id", "")).strip()
     target_model = str(body.get("target_model", "")).strip()
+    # plan 2026-06-14 §3.4：匿名/快捷 CosyVoice 克隆走全局 cap（strict is True，
+    # 不被 "1"/"true" 等夹带值打开）。默认 False = 登录态 express auto-clone。
+    is_anonymous = body.get("is_anonymous") is True
 
     try:
         user_uuid = uuid.UUID(str(user_id))
@@ -1464,7 +1492,28 @@ async def internal_express_reservation_reserve(
     if target_model not in _RESERVATION_TARGET_MODELS:
         return _json(400, {"ok": False, "error": "invalid_target_model"})
 
-    caps = _load_express_reservation_caps()
+    # 纵深防御（CodeX P2 审核，plan 2026-06-14 §3.4）：匿名全局 cap 只对 sentinel
+    # 系统用户（anonymous-preview@system）开放。即使 anonymous_preview 被夹带导致
+    # is_anonymous=True，非 sentinel owner 的 reserve 一律 403——保证 anonymous_clone_*
+    # 是真全局 cap（owner=sentinel），夹带者无法借匿名分支绕过 per-user express cap。
+    if is_anonymous:
+        sentinel_id = (
+            await db.execute(
+                select(User.id).where(User.email == _ANON_PREVIEW_SENTINEL_EMAIL)
+            )
+        ).scalar_one_or_none()
+        if sentinel_id is None or user_uuid != sentinel_id:
+            return _json(
+                403,
+                {"ok": False, "error": "anonymous_reserve_requires_sentinel_owner"},
+            )
+
+    # 匿名走全局 cap（anonymous_clone_*），登录态走 per-user express cap。
+    caps = (
+        _load_anonymous_clone_reservation_caps()
+        if is_anonymous
+        else _load_express_reservation_caps()
+    )
     if caps is None:
         # fail-closed：admin_settings 读不到不允许 reserve
         return _json(503, {"ok": False, "error": "admin_settings_unavailable"})

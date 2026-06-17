@@ -74,27 +74,36 @@ class StreamGate(NamedTuple):
 def admit_for_free_preview(
     teaser_duration_seconds: object,
     settings: "Settings",
+    *,
+    mode: str = "free",
+    express_clone_enabled: bool = False,
 ) -> FreePreviewAdmissionResult:
     """Translate a gateway upload request into an admission contract call.
 
     Constructs ``AnonymousPreviewAdmissionConfig`` entirely from *settings*
-    fields — no numeric literals appear in this module. Calls the contract
-    entry point with ``mode="free"`` (P0 切片只开 Free 档). Returns a
+    fields — no numeric literals appear in this module. Returns a
     ``FreePreviewAdmissionResult`` whose fields are the contract result fields
     copied verbatim; no field is defaulted, overridden, or omitted here.
+
+    plan 2026-06-14 §3.3（CosyVoice 克隆放行）：``mode`` / ``express_clone_enabled``
+    让 adapter 把真实档位 + admin 主开关 ``anonymous_express_cosyvoice_clone_enabled``
+    传给契约，使 admission 的 ``voice_strategy`` **诚实反映** express 克隆 gate
+    （flag 开 → ``EXPRESS_TEMPORARY_CLONE_GATE``）。**注意**：admission 的
+    voice_strategy 是契约信号，**当前不被 create 消费**（create 的 payload
+    voice_strategy 恒 preset_mapping，防线② 不动）；真正的匿名/快捷 CosyVoice 克隆
+    触发由 **pipeline** ``services.express.maybe_run_express_auto_clone`` 独立
+    gating（admin 主开关 + consent + 全局 cap + worker + reservation）。本参数仅
+    让契约诚实，不改运行时克隆行为。默认 ``mode="free"`` / ``express_clone_enabled
+    =False`` 保持旧调用方字节级不变。
 
     Args:
         teaser_duration_seconds: Probed duration of the teaser clip. Passed
             directly to the contract validator (accepts int/float, rejects
             bool/NaN/inf/negative).
-        settings: Gateway ``Settings`` instance. The following attributes are
-            read:
-            * ``anonymous_preview_max_seconds``
-            * ``anonymous_preview_cap_per_device`` (unused in config but
-              consistent provenance note — quota lives in counter store, not
-              admission config).
-            The admission config only uses ``max_preview_duration_seconds``;
-            the clone flag defaults ``False`` per contract.
+        settings: Gateway ``Settings`` instance（读 ``anonymous_preview_max_seconds``）。
+        mode: 档位（"free" / "express"）。非 express 时 clone flag 强制 False。
+        express_clone_enabled: admin ``anonymous_express_cosyvoice_clone_enabled``
+            的真实值（caller 从 admin_settings 读后传入）。
 
     Returns:
         ``FreePreviewAdmissionResult`` with fields taken verbatim from
@@ -102,16 +111,19 @@ def admit_for_free_preview(
     """
     config = AnonymousPreviewAdmissionConfig(
         max_preview_duration_seconds=settings.anonymous_preview_max_seconds,
-        # Clone gate remains False for P0 Free-only slice; value is read from
-        # settings if the attribute exists in a future config extension, but
-        # for now the contract default (False) is the only correct value and
-        # settings does not yet expose a dedicated field.
-        anonymous_express_cosyvoice_clone_enabled=False,
+        # 只有 express 档才把 admin 主开关传进契约；其它档（free 等）强制 False，
+        # 契约据此 emit EXPRESS_TEMPORARY_CLONE_GATE 或 PRESET_ONLY（仅契约信号）。
+        # strict ``is True``（CodeX P4 复核）：只有 Python True 才开 gate，
+        # 与 pipeline 侧 master 开关 + create 调用点的 strict 语义一致；truthy
+        # 非 bool（"false" / 1）一律视为关。
+        anonymous_express_cosyvoice_clone_enabled=(
+            (express_clone_enabled is True) if str(mode) == "express" else False
+        ),
     )
 
     admission = evaluate_anonymous_preview_admission(
         config=config,
-        mode="free",
+        mode=mode,
         source_duration_seconds=teaser_duration_seconds,
     )
 
