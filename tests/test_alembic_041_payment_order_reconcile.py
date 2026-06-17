@@ -33,7 +33,13 @@ def _module_down_revision(path: Path):
             continue
         for target in targets:
             if isinstance(target, ast.Name) and target.id == "down_revision":
-                return value.value if isinstance(value, ast.Constant) else None
+                if isinstance(value, ast.Constant):
+                    return value.value
+                if isinstance(value, (ast.Tuple, ast.List)):
+                    return tuple(
+                        elt.value for elt in value.elts if isinstance(elt, ast.Constant)
+                    )
+                return None
     return None
 
 
@@ -75,26 +81,54 @@ def test_migration_041_revision_id_fits_alembic_version_column() -> None:
     assert len(revision) <= 32
 
 
-def test_migration_041_revises_production_head() -> None:
+def test_migration_041_merges_production_head_and_legacy_payment_stamp() -> None:
     src = _MIGRATION_PATH.read_text(encoding="utf-8")
-    assert 'down_revision: Union[str, None] = "040_anon_claim_owner"' in src
+    assert '"040_anon_claim_owner"' in src
+    assert '"036_payment_order_reconcile"' in src
+    down_revision = _module_down_revision(_MIGRATION_PATH)
+
+    assert down_revision == ("040_anon_claim_owner", "036_payment_order_reconcile")
+
+
+def test_legacy_036_payment_revision_is_still_defined() -> None:
+    path = (
+        _REPO_ROOT
+        / "gateway"
+        / "alembic"
+        / "versions"
+        / "036_payment_order_last_reconciled_at.py"
+    )
+    revision = _module_revision(path)
+
+    assert revision == "036_payment_order_reconcile"
+    assert len(revision) <= 32
 
 
 def test_alembic_chain_matches_current_production_head() -> None:
     """Keep GitHub migration history aligned with the US production DB."""
     versions_dir = _REPO_ROOT / "gateway" / "alembic" / "versions"
     expected_edges = {
-        "035_anonymous_preview": ["036_job_language_fields.py"],
+        "035_anonymous_preview": [
+            "036_job_language_fields.py",
+            "036_payment_order_last_reconciled_at.py",
+        ],
         "036_job_language_fields": ["037_smart_clone_reservations.py"],
         "037_smart_clone_reservations": ["038_smart_clone_created_at_index.py"],
         "038_smart_clone_created_at_index": ["039_smart_clone_carryover.py"],
         "039_smart_clone_carryover": ["040_anonymous_preview_claim_owner.py"],
         "040_anon_claim_owner": ["041_payment_order_last_reconciled_at.py"],
+        "036_payment_order_reconcile": ["041_payment_order_last_reconciled_at.py"],
     }
     for parent, expected_children in expected_edges.items():
         children = [
             path.name
             for path in versions_dir.glob("*.py")
-            if _module_down_revision(path) == parent
+            if (
+                _module_down_revision(path) == parent
+                or (
+                    isinstance(_module_down_revision(path), tuple)
+                    and parent in _module_down_revision(path)
+                )
+            )
         ]
-        assert children == expected_children, (parent, children)
+        assert sorted(children) == sorted(expected_children), (parent, children)
