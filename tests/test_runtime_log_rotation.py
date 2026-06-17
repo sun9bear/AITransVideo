@@ -12,6 +12,7 @@ Covers:
 """
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import sys
@@ -28,12 +29,26 @@ import yaml
 _WORKTREE_ROOT = Path(__file__).resolve().parents[1]
 _COMPOSE_PATH = _WORKTREE_ROOT / "docker-compose.yml"
 _SRC_PATH = _WORKTREE_ROOT / "src"
+_GATEWAY_MAIN_PATH = _WORKTREE_ROOT / "gateway" / "main.py"
 
 
 def _ensure_src_on_path() -> None:
     src = str(_SRC_PATH)
     if src not in sys.path:
         sys.path.insert(0, src)
+
+
+def _load_gateway_attach_rotating_file_log():
+    module = ast.parse(_GATEWAY_MAIN_PATH.read_text(encoding="utf-8"))
+    function_node = next(
+        node for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_attach_rotating_file_log"
+    )
+    isolated = ast.Module(body=[function_node], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+    namespace = {"logging": logging}
+    exec(compile(isolated, str(_GATEWAY_MAIN_PATH), "exec"), namespace)
+    return namespace["_attach_rotating_file_log"]
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +211,43 @@ def test_gateway_attach_rotating_file_log_bad_dir_no_raise(tmp_path, monkeypatch
 
     # Should not raise.
     _simulate_attach(str(collision_path))
+
+
+def test_gateway_attach_rotating_file_log_captures_info_when_root_preconfigured(
+    tmp_path, monkeypatch,
+):
+    """Gateway persistent logs should keep INFO records after preconfigured logging."""
+    monkeypatch.setenv("AIVIDEOTRANS_RUNTIME_LOGS_DIR", str(tmp_path))
+
+    root_logger = logging.getLogger()
+    old_level = root_logger.level
+    pre_handlers = list(root_logger.handlers)
+    preconfigured_handler = logging.StreamHandler()
+    preconfigured_handler.setLevel(logging.WARNING)
+    root_logger.addHandler(preconfigured_handler)
+
+    attach_gateway_log = _load_gateway_attach_rotating_file_log()
+
+    try:
+        root_logger.setLevel(logging.WARNING)
+        attach_gateway_log()
+
+        new_handlers = [
+            h for h in root_logger.handlers
+            if h not in pre_handlers and h is not preconfigured_handler
+        ]
+        assert new_handlers, "No gateway file handler was attached"
+
+        logging.getLogger("gateway_info_test").info("gateway info line should persist")
+        for h in new_handlers:
+            h.flush()
+
+        log_file = tmp_path / "gateway.app.log"
+        assert "gateway info line should persist" in log_file.read_text(
+            encoding="utf-8"
+        )
+    finally:
+        for h in [h for h in root_logger.handlers if h not in pre_handlers]:
+            root_logger.removeHandler(h)
+            h.close()
+        root_logger.setLevel(old_level)
