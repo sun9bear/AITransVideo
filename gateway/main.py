@@ -135,6 +135,7 @@ from job_intercept import (
     intercept_delete_job_v2,
     intercept_get_job,
     intercept_job_subresource,
+    intercept_language_facts,
     intercept_list_jobs,
     intercept_rename_job,
     intercept_suggested_copy_name,
@@ -615,6 +616,8 @@ app.include_router(user_voice_internal_router)
 # APF P0 anonymous preview (plan 2026-06-10 T7) — must be before catch-all.
 from anonymous_preview_api import router as anonymous_preview_router  # noqa: E402
 app.include_router(anonymous_preview_router)
+from anonymous_preview_chunked_api import router as anonymous_preview_chunked_router  # noqa: E402
+app.include_router(anonymous_preview_chunked_router)
 
 # Customer support API + notification center (plan 2026-05-08)
 from notifications_api import internal_router as notifications_internal_router
@@ -698,6 +701,7 @@ app.post(
     dependencies=[Depends(require_same_origin_state_change)],
 )(voice_candidates_for_selection)
 app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
+app.get("/api/language-facts")(intercept_language_facts)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.
 app.api_route(
