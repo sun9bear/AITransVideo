@@ -601,7 +601,7 @@ def test_settle_releases_when_no_billing_event():
     _run(go())
 
 
-def test_settle_blocks_release_when_reserved_register_failed_handoff():
+def test_settle_captures_reserved_register_failed_handoff():
     async def go():
         sm = await _make_sessionmaker(bucket_remaining=800)
         async with sm() as db:
@@ -623,12 +623,15 @@ def test_settle_blocks_release_when_reserved_register_failed_handoff():
 
             out = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
 
-            assert out.status == "settlement_failed"
+            assert out.status == "captured"
             rem, resv = await _bucket_remaining_reserved(db)
-            assert rem == 800 and resv == 600
+            assert rem == 200 and resv == 0
             row = (await db.execute(select(SmartCloneReservation).where(
                 SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
-            assert row.status == "reserved" and row.settled_at is None
+            assert row.status == "captured"
+            assert row.reason_code == "captured_register_failed"
+            assert row.captured_voice_id is None
+            assert row.settled_at is not None
 
     _run(go())
 
@@ -650,11 +653,13 @@ def test_settle_for_task_uses_smart_state_override_before_db_commit():
                 },
             )
 
-            assert stats["settlement_failed"] == 1
+            assert stats["captured"] == 1
             rem, resv = await _bucket_remaining_reserved(db)
-            assert rem == 800 and resv == 600
+            assert rem == 200 and resv == 0
             row = (await db.execute(select(SmartCloneReservation))).scalar_one()
-            assert row.status == "reserved" and row.settled_at is None
+            assert row.status == "captured"
+            assert row.reason_code == "captured_register_failed"
+            assert row.settled_at is not None
 
     _run(go())
 

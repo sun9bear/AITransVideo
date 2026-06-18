@@ -531,6 +531,7 @@ async def register_smart_clone_with_billing(
 
 
 _CAPTURE_REASON = "smart_clone_capture"
+_REGISTER_FAILED_CAPTURE_REASON = "smart_clone_capture_register_failed"
 _RELEASE_REASON = "smart_clone_release"
 
 
@@ -619,6 +620,7 @@ async def settle_smart_clone_reservation(
     # 否则同 task 多 reservation 时第二个会撞第一个的 capture entry → shadow_capture
     # 以为已结算跳过 → 第二个 600 永久挂 reserved（扣了不退）。
     capture_reason = f"{_CAPTURE_REASON}_{res.id}"
+    register_failed_capture_reason = f"{_REGISTER_FAILED_CAPTURE_REASON}_{res.id}"
     release_reason = f"{_RELEASE_REASON}_{res.id}"
     event = (
         await db.execute(
@@ -626,28 +628,30 @@ async def settle_smart_clone_reservation(
         )
     ).scalar_one_or_none()
     chargeable = event is not None and bool(event.chargeable)
-    if not chargeable and await _has_register_failed_handoff(
-        db, res, smart_state_override=smart_state_override
-    ):
-        await db.rollback()
-        return SettleOutcome(status="settlement_failed", reservation_id=str(res_pk))
+    register_failed_handoff = (
+        not chargeable
+        and await _has_register_failed_handoff(
+            db, res, smart_state_override=smart_state_override
+        )
+    )
 
-    if chargeable:
+    if chargeable or register_failed_handoff:
+        reason_code = capture_reason if chargeable else register_failed_capture_reason
         await shadow_capture(
             db, user_id=res.user_id, job_id=credit_job_id,
             actual_credits=int(res.amount_credits), service_mode=service_mode,
-            reason_code=capture_reason, reserve_reason_code=reserve_reason,
+            reason_code=reason_code, reserve_reason_code=reserve_reason,
         )
         settled_ok = await _has_existing_settlement(
             db, user_id=res.user_id, job_id=credit_job_id,
-            reason_code=capture_reason, reserve_reason_code=reserve_reason,
+            reason_code=reason_code, reserve_reason_code=reserve_reason,
         )
         if not settled_ok:
             await db.rollback()
             return SettleOutcome(status="settlement_failed", reservation_id=str(res_pk))
         res.status = CAPTURED
-        res.captured_voice_id = event.voice_id
-        res.reason_code = "captured"
+        res.captured_voice_id = event.voice_id if event is not None else None
+        res.reason_code = "captured" if chargeable else "captured_register_failed"
         final = "captured"
     else:
         await shadow_release(
