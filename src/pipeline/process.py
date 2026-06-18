@@ -4233,15 +4233,40 @@ class ProcessPipeline:
                         _sid for _sid in _smart_main_speaker_ids
                         if _sid not in _smart_existing_voice_matches
                     ]
-                    # Phase 3: sample extraction is wasted work when EITHER
-                    # consent OR admin disallows new clone. Skip the
-                    # ffmpeg concat work so the pipeline doesn't burn I/O
-                    # on samples evaluate_voice_review will ignore.
-                    if (
+                    _smart_needs_new_clone = bool(
                         _smart_consent_allows_clone
                         and _smart_admin_clone_enabled
                         and _smart_speaker_ids_requiring_clone
-                    ):
+                    )
+                    _smart_user_id_for_mirror = str(_snap("user_id") or "")
+                    _smart_job_id_for_mirror = str(_snap("job_id") or "")
+                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
+                    if not isinstance(_smart_state_for_mirror, dict):
+                        _smart_state_for_mirror = {}
+                    _smart_clone_reservation_id_for_mirror = (
+                        str(
+                            _snap("smart_clone_reservation_id")
+                            or _smart_state_for_mirror.get(
+                                "smart_clone_reservation_id"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
+                    _smart_reservation_active_for_clone = bool(
+                        _smart_needs_new_clone
+                        and _smart_clone_reservation_id_for_mirror
+                        and _check_smart_clone_reservation_active(
+                            user_id=_smart_user_id_for_mirror,
+                            task_id=_smart_job_id_for_mirror,
+                            reservation_id=_smart_clone_reservation_id_for_mirror,
+                        )
+                    )
+                    # Phase 3: sample extraction is wasted work when EITHER
+                    # consent/admin OR paid reservation state disallows new clone.
+                    # Skip the ffmpeg concat work so no-reservation Smart jobs
+                    # can fall through to preset instead of pausing before review.
+                    if _smart_reservation_active_for_clone:
                         _smart_sample_root = (
                             final_project_dir / "smart_clone_samples"
                         )
@@ -4496,35 +4521,6 @@ class ProcessPipeline:
                     # evaluate_voice_review short-circuits to PRESET
                     # when EITHER gate is closed OR when main_speakers
                     # is empty. The gate below mirrors all conditions.
-                    _smart_needs_new_clone = bool(
-                        _smart_consent_allows_clone
-                        and _smart_admin_clone_enabled
-                        and _smart_speaker_ids_requiring_clone
-                    )
-                    _smart_user_id_for_mirror = str(_snap("user_id") or "")
-                    _smart_job_id_for_mirror = str(_snap("job_id") or "")
-                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
-                    if not isinstance(_smart_state_for_mirror, dict):
-                        _smart_state_for_mirror = {}
-                    _smart_clone_reservation_id_for_mirror = (
-                        str(
-                            _snap("smart_clone_reservation_id")
-                            or _smart_state_for_mirror.get(
-                                "smart_clone_reservation_id"
-                            )
-                            or ""
-                        ).strip()
-                        or None
-                    )
-                    _smart_reservation_active_for_clone = bool(
-                        _smart_needs_new_clone
-                        and _smart_clone_reservation_id_for_mirror
-                        and _check_smart_clone_reservation_active(
-                            user_id=_smart_user_id_for_mirror,
-                            task_id=_smart_job_id_for_mirror,
-                            reservation_id=_smart_clone_reservation_id_for_mirror,
-                        )
-                    )
                     _smart_max_new_clones_for_review = (
                         1 if _smart_reservation_active_for_clone else 0
                     )

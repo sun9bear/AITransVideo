@@ -2413,6 +2413,13 @@ class TestB3DCloneSampleExtractorContract:
         assert "else 0" in block, (
             "Missing or inactive reservations must cap new clones to zero."
         )
+        sample_gate_idx = block.find("if _smart_reservation_active_for_clone:")
+        extract_idx = block.find("_smart_extractor.extract_sample(")
+        assert sample_gate_idx >= 0 and sample_gate_idx < extract_idx, (
+            "Smart branch must gate clone sample extraction on an active "
+            "reservation so no-reservation jobs can fall back to presets "
+            "instead of pausing before review."
+        )
         assert "_smart_reserved_clone_register_failures" in block, (
             "Reservation-backed clone registration failures must be tracked "
             "separately from best-effort legacy mirror failures."
