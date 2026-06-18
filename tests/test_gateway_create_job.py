@@ -1389,6 +1389,66 @@ class TestSmartVoiceQuotaPreflightGates:
         assert job_rows[0].job_id == captured_body["job_id"]
         assert job_rows[0].smart_state == captured_body["smart_state"]
 
+    def test_create_smart_job_reuses_existing_create_idempotency_key_before_reserve(self):
+        import admin_settings as admin_mod
+
+        existing_job = SimpleNamespace(
+            job_id="job_existing_retry",
+            status="queued",
+            current_stage=None,
+            project_dir="/tmp/job_existing_retry",
+            display_name="existing",
+            service_mode="smart",
+        )
+
+        async def fake_proxy(*args, **kwargs):
+            raise AssertionError("retry must not create a duplicate upstream job")
+
+        async def fake_reserve(*args, **kwargs):
+            raise AssertionError("retry must not reserve a second clone credit")
+
+        body = self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        body["create_idempotency_key"] = "idem-smart-retry"
+        req = _make_request(body)
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            existing_job=existing_job,
+            user_for_quota=user,
+            user_voice_count=1,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept.reserve_smart_clone_credit",
+                                side_effect=fake_reserve,
+                                create=True,
+                            ):
+                                resp = _run(intercept_create_job(req, db, user))
+
+        payload = json.loads(resp.body)
+        assert resp.status_code == 202
+        assert payload["job_id"] == existing_job.job_id
+        assert payload["idempotent"] is True
+
     def test_create_smart_job_skips_voice_quota_preflight_when_admin_auto_clone_disabled(self):
         """Admin gate False → preflight must NOT query user_voices and
         MUST NOT reject near-cap users with smart_voice_library_at_safety_water_mark.

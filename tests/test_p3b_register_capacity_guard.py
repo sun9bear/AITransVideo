@@ -26,3 +26,14 @@ def test_register_billed_passes_admin_library_cap_to_service():
         "await register_smart_clone_with_billing("
     )
     assert "voice_library_full" in body
+
+
+def test_register_billed_preserves_admin_library_cap_bypass():
+    body = _func_src("internal_smart_clone_register_billed")
+
+    assert "select(User.role)" in body
+    assert 'role == "admin"' in body
+    assert "library_cap = 999_999" in body
+    assert body.index("library_cap = 999_999") < body.index(
+        "await register_smart_clone_with_billing("
+    )
