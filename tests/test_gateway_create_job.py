@@ -1393,6 +1393,72 @@ class TestSmartVoiceQuotaPreflightGates:
         assert job_rows[0].job_id == captured_body["job_id"]
         assert job_rows[0].smart_state == captured_body["smart_state"]
 
+    def test_create_smart_job_skips_clone_reserve_when_combined_balance_short(self):
+        import admin_settings as admin_mod
+
+        captured_body: dict = {}
+        reserve_calls: list[dict] = []
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success(captured_body.get("job_id", "job_missing"))
+
+        async def fake_reserve(db, **kwargs):
+            reserve_calls.append(dict(kwargs))
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id="22222222-2222-2222-2222-222222222222",
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+            credit_available=700,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            s.smart_user_voice_clone_cap = 30
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch("job_intercept.estimate_credits", return_value=200):
+                                with patch(
+                                    "job_intercept.reserve_smart_clone_credit",
+                                    side_effect=fake_reserve,
+                                    create=True,
+                                ):
+                                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert reserve_calls == []
+        assert captured_body["smart_state"] == {
+            "smart_clone_credit_reserved": False,
+            "smart_clone_reservation_deny_reason": "insufficient_credits",
+        }
+
     def test_create_smart_job_reuses_existing_create_idempotency_key_before_reserve(self):
         import admin_settings as admin_mod
 

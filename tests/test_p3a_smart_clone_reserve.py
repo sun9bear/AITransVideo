@@ -11,6 +11,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import Column, MetaData, Table, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
@@ -53,12 +54,21 @@ _UNKNOWN = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
 
 _users_md = MetaData()
 _users_stub = Table("users", _users_md, Column("id", PG_UUID(as_uuid=True), primary_key=True))
+_TEST_ENGINES = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_sqlite_engines():
+    yield
+    while _TEST_ENGINES:
+        _run(_TEST_ENGINES.pop().dispose())
 
 
 async def _make_sessionmaker(*, bucket_remaining: int = 800) -> async_sessionmaker[AsyncSession]:
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False}
     )
+    _TEST_ENGINES.append(engine)
     async with engine.begin() as conn:
         await conn.run_sync(lambda s: _users_stub.create(s))
         await conn.run_sync(lambda s: UserVoice.__table__.create(s))
@@ -106,6 +116,9 @@ def test_reserve_happy_creates_row_and_reserves_credit():
             row = (await db.execute(select(SmartCloneReservation))).scalar_one()
             assert row.status == "reserved" and row.amount_credits == 600
             assert str(row.id) == o.reservation_id
+            ledger = (await db.execute(select(CreditsLedger))).scalar_one()
+            assert ledger.related_job_id == f"smart_clone_{row.id}"
+            assert ledger.related_job_id != row.task_id
             # 信用真预扣 600（available 800→200）
             assert await _bucket_available(db) == 200
     _run(go())

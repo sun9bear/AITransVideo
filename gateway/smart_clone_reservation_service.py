@@ -52,6 +52,11 @@ def credit_reserve_reason_code(reservation_id: object) -> str:
     return f"smart_clone_reserve_{reservation_id}"
 
 
+def credit_related_job_id(reservation_id: object) -> str:
+    """Ledger related id for clone-credit reserve/capture/release rows."""
+    return f"smart_clone_{reservation_id}"
+
+
 @dataclass(frozen=True)
 class SmartReserveOutcome:
     """``reserve_smart_clone_credit`` 结果。
@@ -192,11 +197,12 @@ async def reserve_smart_clone_credit(
     # 5. 信用预扣 600（不足 → InsufficientCreditsError，走预设）
     reservation_id = uuid.uuid4()
     reason = credit_reserve_reason_code(reservation_id)
+    credit_job_id = credit_related_job_id(reservation_id)
     try:
         await reserve_credits_or_raise(
             db,
             user_id=user_id,
-            job_id=task_id,
+            job_id=credit_job_id,
             estimated_credits=int(amount_credits),
             service_mode="smart",
             reason_code=reason,
@@ -529,6 +535,7 @@ async def settle_smart_clone_reservation(
         return SettleOutcome(status="already_settled", reservation_id=str(res_pk))
 
     reserve_reason = credit_reserve_reason_code(res.id)
+    credit_job_id = credit_related_job_id(res.id)
     # **per-reservation** 结算 reason_code（CodeX 钱-loop 审核）：含 reservation_id，
     # 让 _has_existing_settlement 按本 reservation 精确判定"本次结算真落 ledger"。
     # 否则同 task 多 reservation 时第二个会撞第一个的 capture entry → shadow_capture
@@ -544,12 +551,12 @@ async def settle_smart_clone_reservation(
 
     if chargeable:
         await shadow_capture(
-            db, user_id=res.user_id, job_id=res.task_id,
+            db, user_id=res.user_id, job_id=credit_job_id,
             actual_credits=int(res.amount_credits), service_mode=service_mode,
             reason_code=capture_reason, reserve_reason_code=reserve_reason,
         )
         settled_ok = await _has_existing_settlement(
-            db, user_id=res.user_id, job_id=res.task_id,
+            db, user_id=res.user_id, job_id=credit_job_id,
             reason_code=capture_reason, reserve_reason_code=reserve_reason,
         )
         if not settled_ok:
@@ -561,11 +568,11 @@ async def settle_smart_clone_reservation(
         final = "captured"
     else:
         await shadow_release(
-            db, user_id=res.user_id, job_id=res.task_id,
+            db, user_id=res.user_id, job_id=credit_job_id,
             reason_code=release_reason, reserve_reason_code=reserve_reason,
         )
         settled_ok = await _has_existing_settlement(
-            db, user_id=res.user_id, job_id=res.task_id,
+            db, user_id=res.user_id, job_id=credit_job_id,
             reason_code=release_reason, reserve_reason_code=reserve_reason,
         )
         if not settled_ok:
@@ -646,6 +653,7 @@ __all__ = [
     "SettleOutcome",
     "ActiveReservationOutcome",
     "credit_reserve_reason_code",
+    "credit_related_job_id",
     "count_active_smart_reservations",
     "count_active_library_voices",
     "reserve_smart_clone_credit",
