@@ -1352,6 +1352,35 @@ async def intercept_create_job(
     from plan_catalog import get_effective_plan_gate
     plan_info = get_effective_plan_gate(user) if user else get_legacy_plan_gate_dict().get("free", {})
 
+    # --- 0. Idempotency key ---
+    # Retry/double-submit requests must return the original job before active
+    # concurrency or clone-reservation gates can reject an otherwise harmless
+    # duplicate create call.
+    idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
+    if user is not None and idempotency_key:
+        existing_by_create_key = (
+            await db.execute(
+                select(Job).where(
+                    Job.user_id == user.id,
+                    Job.create_idempotency_key == str(idempotency_key),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_by_create_key is not None:
+            return Response(
+                content=json.dumps({
+                    "job_id": existing_by_create_key.job_id,
+                    "status": existing_by_create_key.status,
+                    "current_stage": existing_by_create_key.current_stage,
+                    "project_dir": existing_by_create_key.project_dir,
+                    "display_name": existing_by_create_key.display_name,
+                    "service_mode": existing_by_create_key.service_mode,
+                    "idempotent": True,
+                }, ensure_ascii=False),
+                status_code=202,
+                headers={"content-type": "application/json"},
+            )
+
     # --- Smart MVP §7.3 pre-flight voice library quota check (2026-05-16) ---
     # Without this, smart jobs that would hit the water-mark brake at
     # voice_review fail HALFWAY through (after S0/S1/S2 ASR + speaker
@@ -1663,32 +1692,6 @@ async def intercept_create_job(
     ):
         policy["requires_review"] = False
 
-    # --- 5. Idempotency key ---
-    idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
-    if user is not None and idempotency_key:
-        existing_by_create_key = (
-            await db.execute(
-                select(Job).where(
-                    Job.user_id == user.id,
-                    Job.create_idempotency_key == str(idempotency_key),
-                )
-            )
-        ).scalar_one_or_none()
-        if existing_by_create_key is not None:
-            return Response(
-                content=json.dumps({
-                    "job_id": existing_by_create_key.job_id,
-                    "status": existing_by_create_key.status,
-                    "current_stage": existing_by_create_key.current_stage,
-                    "project_dir": existing_by_create_key.project_dir,
-                    "display_name": existing_by_create_key.display_name,
-                    "service_mode": existing_by_create_key.service_mode,
-                    "idempotent": True,
-                }, ensure_ascii=False),
-                status_code=202,
-                headers={"content-type": "application/json"},
-            )
-
     # Ordinary jobs keep a fixed 7-day retention deadline from creation. Admin
     # jobs intentionally have no TTL and are excluded from both cleanup paths.
     job_expires_at = None if is_admin else datetime.now(timezone.utc) + timedelta(days=7)
@@ -1874,6 +1877,7 @@ async def intercept_create_job(
                     quality_tier=policy.get("quality_tier", "standard"),
                 )
                 _clone_cost_credits = _get_smart_clone_cost_credits()
+                await ensure_credit_buckets_for_user(db, user=user)
                 _reserve_outcome = await reserve_smart_clone_credit(
                     db,
                     user_id=user.id,

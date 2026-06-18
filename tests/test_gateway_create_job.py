@@ -1330,6 +1330,7 @@ class TestSmartVoiceQuotaPreflightGates:
         captured_body: dict = {}
         captured_jobs: list = []
         reserve_calls: list[dict] = []
+        events: list[str] = []
         reservation_id = "11111111-1111-1111-1111-111111111111"
 
         async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
@@ -1338,6 +1339,7 @@ class TestSmartVoiceQuotaPreflightGates:
             return _upstream_success(captured_body.get("job_id", "job_missing"))
 
         async def fake_reserve(db, **kwargs):
+            events.append("reserve")
             reserve_calls.append(dict(kwargs))
             return SimpleNamespace(
                 status="reserved",
@@ -1345,6 +1347,9 @@ class TestSmartVoiceQuotaPreflightGates:
                 deny_reason=None,
                 idempotent_hit=False,
             )
+
+        async def fake_ensure_buckets(*args, **kwargs):
+            events.append("ensure")
 
         req = _make_request(
             self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
@@ -1383,13 +1388,19 @@ class TestSmartVoiceQuotaPreflightGates:
                                 create=True,
                             ):
                                 with patch(
-                                    "job_intercept.reserve_smart_clone_credit",
-                                    side_effect=fake_reserve,
+                                    "job_intercept.ensure_credit_buckets_for_user",
+                                    side_effect=fake_ensure_buckets,
                                     create=True,
                                 ):
-                                    resp = _run(intercept_create_job(req, db, user))
+                                    with patch(
+                                        "job_intercept.reserve_smart_clone_credit",
+                                        side_effect=fake_reserve,
+                                        create=True,
+                                    ):
+                                        resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
+        assert events[:2] == ["ensure", "reserve"]
         assert captured_body["job_id"].startswith("job_")
         assert len(captured_body["job_id"]) == 36
         assert reserve_calls == [
@@ -1708,7 +1719,7 @@ class TestSmartVoiceQuotaPreflightGates:
         req = _make_request(body)
         user = _make_user(plan_code="plus")
         db = _make_db_session(
-            active_job_count=0,
+            active_job_count=99,
             existing_job=existing_job,
             user_for_quota=user,
             user_voice_count=1,
