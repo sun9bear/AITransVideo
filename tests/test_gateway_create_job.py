@@ -1372,13 +1372,21 @@ class TestSmartVoiceQuotaPreflightGates:
             "smart_consent": consent,
         }
 
-    def test_paid_clone_confirmation_accepts_generic_and_legacy_fields(self):
+    def test_paid_clone_confirmation_accepts_generic_and_600_price_legacy_field(
+        self,
+        monkeypatch,
+    ):
         import job_intercept
 
         assert job_intercept._smart_paid_clone_confirmed({
             "confirm_paid_voice_clone_credits": True,
         })
+        monkeypatch.setattr(job_intercept, "_get_smart_clone_cost_credits", lambda: 600)
         assert job_intercept._smart_paid_clone_confirmed({
+            "confirm_paid_voice_clone_600_credits": True,
+        })
+        monkeypatch.setattr(job_intercept, "_get_smart_clone_cost_credits", lambda: 700)
+        assert not job_intercept._smart_paid_clone_confirmed({
             "confirm_paid_voice_clone_600_credits": True,
         })
         assert not job_intercept._smart_paid_clone_confirmed({})

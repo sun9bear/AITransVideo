@@ -2436,6 +2436,27 @@ class TestB3DCloneSampleExtractorContract:
             "reservation so no-reservation jobs can fall back to presets "
             "instead of pausing before review."
         )
+        capped_sample_list_idx = block.find(
+            "_smart_speaker_ids_to_extract_clone_samples"
+        )
+        assert 0 <= capped_sample_list_idx < sample_gate_idx, (
+            "Smart sample extraction must precompute a clone-cap-limited "
+            "speaker list before entering the extraction loop."
+        )
+        assert (
+            "_smart_speaker_ids_requiring_clone[\n"
+            "                            :_smart_max_new_clones_for_review"
+        ) in block, (
+            "Sample extraction must be limited to speakers that can actually "
+            "consume the one reservation-backed clone slot."
+        )
+        assert (
+            "for _candidate_sid in (\n"
+            "                                _smart_speaker_ids_to_extract_clone_samples"
+        ) in block, (
+            "Sample extraction loop must iterate over the capped cloneable "
+            "speaker list, not every speaker requiring a clone."
+        )
         assert "_smart_reserved_clone_register_failures" in block, (
             "Reservation-backed clone registration failures must be tracked "
             "separately from best-effort legacy mirror failures."

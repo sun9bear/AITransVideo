@@ -4262,6 +4262,14 @@ class ProcessPipeline:
                             reservation_id=_smart_clone_reservation_id_for_mirror,
                         )
                     )
+                    _smart_max_new_clones_for_review = (
+                        1 if _smart_reservation_active_for_clone else 0
+                    )
+                    _smart_speaker_ids_to_extract_clone_samples = (
+                        _smart_speaker_ids_requiring_clone[
+                            :_smart_max_new_clones_for_review
+                        ]
+                    )
                     # Phase 3: sample extraction is wasted work when EITHER
                     # consent/admin OR paid reservation state disallows new clone.
                     # Skip the ffmpeg concat work so no-reservation Smart jobs
@@ -4280,7 +4288,9 @@ class ProcessPipeline:
                             _smart_extractor = None  # type: ignore[assignment]
 
                         if _smart_extractor is not None:
-                            for _candidate_sid in _smart_speaker_ids_requiring_clone:
+                            for _candidate_sid in (
+                                _smart_speaker_ids_to_extract_clone_samples
+                            ):
                                 _speaker_lines = [
                                     ln for ln in (
                                         getattr(transcript_result, "lines", None) or []
@@ -4521,9 +4531,6 @@ class ProcessPipeline:
                     # evaluate_voice_review short-circuits to PRESET
                     # when EITHER gate is closed OR when main_speakers
                     # is empty. The gate below mirrors all conditions.
-                    _smart_max_new_clones_for_review = (
-                        1 if _smart_reservation_active_for_clone else 0
-                    )
                     _smart_quota_remaining = 0
                     _smart_clone_provider = _build_b2_not_wired_clone_provider()
                     if (

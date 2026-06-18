@@ -109,9 +109,13 @@ def _get_smart_clone_cost_credits() -> int:
 
 
 def _smart_paid_clone_confirmed(raw_consent: object) -> bool:
-    return isinstance(raw_consent, dict) and any(
-        raw_consent.get(field) is True
-        for field in _SMART_PAID_CLONE_CONFIRM_FIELDS
+    if not isinstance(raw_consent, dict):
+        return False
+    if raw_consent.get("confirm_paid_voice_clone_credits") is True:
+        return True
+    return (
+        raw_consent.get("confirm_paid_voice_clone_600_credits") is True
+        and _get_smart_clone_cost_credits() == 600
     )
 
 
