@@ -1729,13 +1729,32 @@ class TestSmartVoiceQuotaPreflightGates:
     def test_create_smart_job_reuses_existing_create_idempotency_key_before_reserve(self):
         import admin_settings as admin_mod
 
+        now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
         existing_job = SimpleNamespace(
             job_id="job_existing_retry",
+            source_type="youtube_url",
+            source_ref="https://youtube.example/watch?v=idem",
+            speakers="auto",
             status="queued",
             current_stage=None,
             project_dir="/tmp/job_existing_retry",
             display_name="existing",
             service_mode="smart",
+            source_language="en",
+            target_language="zh-CN",
+            language_pair="en->zh-CN",
+            created_at=now,
+            updated_at=now,
+            started_at=None,
+            completed_at=None,
+            expires_at=now,
+            editing_touched_at=None,
+            copy_of_job_id=None,
+            root_job_id="job_existing_retry",
+            edit_generation=0,
+            role_snapshot="user",
+            review_gate=None,
+            error_summary=None,
         )
 
         async def fake_proxy(*args, **kwargs):
@@ -1785,6 +1804,16 @@ class TestSmartVoiceQuotaPreflightGates:
         assert resp.status_code == 202
         assert payload["job_id"] == existing_job.job_id
         assert payload["idempotent"] is True
+        assert payload["job_type"] == "translation"
+        assert payload["source_type"] == existing_job.source_type
+        assert payload["source_ref"] == existing_job.source_ref
+        assert payload["output_target"] == "jianying_draft"
+        assert payload["speakers"] == existing_job.speakers
+        assert payload["progress_message"] is None
+        assert payload["created_at"] == now.isoformat()
+        assert payload["updated_at"] == now.isoformat()
+        assert payload["service_mode"] == "smart"
+        assert payload["display_name"] == "existing"
 
     def test_create_smart_job_skips_voice_quota_preflight_when_admin_auto_clone_disabled(self):
         """Admin gate False → preflight must NOT query user_voices and

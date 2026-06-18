@@ -361,6 +361,48 @@ def _merge_gateway_job_metadata(upstream_job: dict, db_job: Job | None) -> dict:
     return merged
 
 
+def _job_create_response_payload_from_db_job(job: Job, *, idempotent: bool = False) -> dict:
+    """Serialize an existing Gateway job for create-idempotency retries."""
+    payload = {
+        "job_id": getattr(job, "job_id", ""),
+        "job_type": "translation",
+        "source_type": getattr(job, "source_type", "") or "",
+        "source_ref": getattr(job, "source_ref", "") or "",
+        "output_target": "jianying_draft",
+        "speakers": getattr(job, "speakers", "auto") or "auto",
+        "voice_a": None,
+        "voice_b": None,
+        "source_language": getattr(job, "source_language", None),
+        "target_language": getattr(job, "target_language", None),
+        "language_pair": getattr(job, "language_pair", None),
+        "status": getattr(job, "status", "queued") or "queued",
+        "current_stage": getattr(job, "current_stage", None),
+        "progress_message": None,
+        "created_at": _serialize_response_value(getattr(job, "created_at", None)),
+        "updated_at": _serialize_response_value(getattr(job, "updated_at", None)),
+        "started_at": _serialize_response_value(getattr(job, "started_at", None)),
+        "completed_at": _serialize_response_value(getattr(job, "completed_at", None)),
+        "project_dir": getattr(job, "project_dir", None),
+        "manifest_path": None,
+        "review_gate": getattr(job, "review_gate", None),
+        "error_summary": getattr(job, "error_summary", None),
+        "fallback_summary": None,
+        "service_mode": getattr(job, "service_mode", None),
+        "display_name": getattr(job, "display_name", None),
+        "expires_at": _serialize_response_value(getattr(job, "expires_at", None)),
+        "editing_touched_at": _serialize_response_value(
+            getattr(job, "editing_touched_at", None)
+        ),
+        "copy_of_job_id": getattr(job, "copy_of_job_id", None),
+        "root_job_id": getattr(job, "root_job_id", None),
+        "edit_generation": getattr(job, "edit_generation", 0) or 0,
+        "role_snapshot": getattr(job, "role_snapshot", None),
+    }
+    if idempotent:
+        payload["idempotent"] = True
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Structured error codes — spec §7
 # ---------------------------------------------------------------------------
@@ -1371,15 +1413,12 @@ async def intercept_create_job(
         ).scalar_one_or_none()
         if existing_by_create_key is not None:
             return Response(
-                content=json.dumps({
-                    "job_id": existing_by_create_key.job_id,
-                    "status": existing_by_create_key.status,
-                    "current_stage": existing_by_create_key.current_stage,
-                    "project_dir": existing_by_create_key.project_dir,
-                    "display_name": existing_by_create_key.display_name,
-                    "service_mode": existing_by_create_key.service_mode,
-                    "idempotent": True,
-                }, ensure_ascii=False),
+                content=json.dumps(
+                    _job_create_response_payload_from_db_job(
+                        existing_by_create_key, idempotent=True
+                    ),
+                    ensure_ascii=False,
+                ),
                 status_code=202,
                 headers={"content-type": "application/json"},
             )
