@@ -48,6 +48,16 @@ def test_smart_preview_youtube_url_forces_bounded_assemblyai_before_submit():
     )
 
 
+def test_smart_preview_create_sends_paid_clone_confirmation():
+    """Preview clone requests must carry explicit paid-clone confirmation."""
+    fn = _exported_function_src(_src(), "createSmartPreviewJob")
+
+    assert "confirm_paid_voice_clone_credits: true" in fn
+    assert fn.index("confirm_paid_voice_clone_credits: true") < fn.index(
+        "apiClient.post"
+    )
+
+
 def test_convert_preview_to_full_keeps_user_transcription_choice():
     """Preview-only URL guard must not rewrite full-length conversion requests."""
     fn = _exported_function_src(_src(), "convertPreviewToFull")

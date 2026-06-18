@@ -2361,13 +2361,20 @@ async def intercept_create_job(
     _smart_clone_skipped_reason: str | None = None
     _smart_clone_reservation_id: str | None = None
     _smart_pre_job_id: str | None = None  # 对抗性复核 P1-C：forward 后校验一致性
-    if (
+    _smart_preview_clone_requested = (
         service_mode == "smart"
         and user is not None
         and request_data.get("preview_mode") is True
         and isinstance(request_data.get("smart_consent"), dict)
         and request_data["smart_consent"].get("auto_voice_clone") is True
-    ):
+    )
+    if _smart_preview_clone_requested and not smart_paid_clone_confirmed:
+        return _error_response(
+            400, "smart_paid_clone_confirmation_required",
+            "智能版预览克隆需要先确认本次付费克隆额度。",
+            {"required_credits": _SMART_CLONE_RESERVE_CREDITS},
+        )
+    if _smart_preview_clone_requested:
         from admin_settings import load_settings as _load_admin_for_clone
         _admin_for_clone = _load_admin_for_clone()
         if getattr(_admin_for_clone, "smart_preview_clone_enabled", False) is not True:
@@ -2625,7 +2632,18 @@ async def intercept_create_job(
                     # independent daily ledger (reserved before forward), NOT the
                     # legacy free-PLAN quota — skip reserve_quota so they never
                     # consume users.free_jobs_quota_used.
-                    reserved = True if service_mode == "free" else await reserve_quota(db, user.id, job)
+                    # Paid smart-preview exemption jobs use their own credit
+                    # reservation gate and must not consume or be blocked by
+                    # the legacy free-PLAN counter after the upstream job is
+                    # persisted locally.
+                    skip_legacy_free_quota_reserve = (
+                        service_mode == "free" or _smart_preview_via_exemption
+                    )
+                    reserved = (
+                        True
+                        if skip_legacy_free_quota_reserve
+                        else await reserve_quota(db, user.id, job)
+                    )
                     if not reserved and user_plan == "free":
                         # Quota reservation failed — rollback local record
                         await db.rollback()

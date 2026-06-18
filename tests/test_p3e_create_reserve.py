@@ -41,6 +41,7 @@ def test_reserve_gated_on_smart_consent_and_flag():
     assert 'service_mode == "smart"' in flat
     assert 'request_data.get("preview_mode") is True' in flat
     assert 'request_data["smart_consent"].get("auto_voice_clone") is True' in flat
+    assert "smart_paid_clone_confirmed" in flat
     assert "smart_preview_clone_enabled" in body
 
 
@@ -74,15 +75,30 @@ def test_paid_preview_exemption_skips_legacy_free_quota_only():
     body = _create_src()
     flat = " ".join(body.split())
     assert 'user_plan == "free" and not _smart_preview_via_exemption' in flat
+    assert 'service_mode == "free" or _smart_preview_via_exemption' in flat
 
     concurrency_idx = body.index("active_count_result = await db.execute(")
     quota_guard_idx = body.index('if user and not is_admin and user_plan == "free"')
     free_quota_idx = body.index("has_quota, quota_used, quota_total = await check_quota(db, user)")
     reserve_idx = body.index("_smart_clone_skipped_reason: str | None = None")
-    assert concurrency_idx < free_quota_idx < reserve_idx
+    quota_reserve_idx = body.index("skip_legacy_free_quota_reserve = (")
+    assert concurrency_idx < free_quota_idx < reserve_idx < quota_reserve_idx
 
     concurrency_block = body[concurrency_idx:quota_guard_idx]
     assert "_smart_preview_via_exemption" not in concurrency_block
+
+
+def test_preview_reserve_requires_paid_clone_confirmation():
+    """CodeX PR #33: preview clone reserve needs durable paid confirmation."""
+    body = _create_src()
+    reserve_block = body[
+        body.index("_smart_preview_clone_requested = ("):
+        body.index("upstream_response = await proxy_request(")
+    ]
+    flat = " ".join(reserve_block.split())
+    assert "if _smart_preview_clone_requested and not smart_paid_clone_confirmed" in flat
+    assert '"smart_paid_clone_confirmation_required"' in reserve_block
+    assert 'if _smart_preview_clone_requested:' in reserve_block
 
 
 def test_reserve_uses_pregenerated_job_id_option_c():
@@ -148,11 +164,11 @@ def test_degrade_does_not_block_failsafe():
     # exemption 兜底——由 _smart_preview_via_exemption 守卫，只拒绝**未获 smart** 的免费
     # 预览用户 600 预留失败（防免费白嫖完整任务），entitled 用户 via_exemption=False 仍降级。
     reserve_block = body[body.index("_smart_clone_skipped_reason: str | None = None"):body.index("upstream_response = await proxy_request(")]
-    assert reserve_block.count("return _error_response") <= 1, (
+    assert reserve_block.count("return _error_response") <= 2, (
         "reserve 降级区出现非预期阻断 return（entitled 用户降级不得被阻断）"
     )
     if "return _error_response" in reserve_block:
-        _ri = reserve_block.index("return _error_response")
+        _ri = reserve_block.index('"smart_preview_reserve_failed"')
         _guard = reserve_block[max(0, _ri - 220):_ri]
         assert "_smart_preview_via_exemption" in _guard, (
             "reserve 区唯一的 error return 必须由 _smart_preview_via_exemption 守卫"

@@ -91,6 +91,7 @@ export async function createSmartPreviewJob(
     auto_retts: true,
     auto_multimodal_verification: false,
     no_extra_charge_without_confirmation: true,
+    confirm_paid_voice_clone_credits: true,
     on_budget_exhausted: 'degraded_delivery_with_report',
   }
   body.preview_mode = true
@@ -204,7 +205,7 @@ export function mapSmartPreviewCreateError(
   if (status === 401 || code === 'auth_required') {
     return { reason: 'auth_required', message: '请先登录后再试用智能版预览。' }
   }
-  if (code === 'smart_consent_invalid') {
+  if (code === 'smart_consent_invalid' || code === 'smart_paid_clone_confirmation_required') {
     return { reason: 'consent_invalid', message: '同意确认无效，请刷新页面后重试。' }
   }
   if (code === 'smart_disabled' || code === 'reuse_disabled') {
