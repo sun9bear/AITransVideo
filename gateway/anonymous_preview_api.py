@@ -1940,7 +1940,7 @@ async def anonymous_preview_claim(
     logger.info(
         "anon_claim: bound %d record(s) to user=%s", len(preview_ids), uid
     )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=200,
         content={
             "claimed": True,
@@ -1948,3 +1948,14 @@ async def anonymous_preview_claim(
             "count": len(preview_ids),
         },
     )
+    response.set_cookie(
+        key="avt_anon",
+        value="",
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=0,
+        expires=0,
+        path="/",
+    )
+    return response

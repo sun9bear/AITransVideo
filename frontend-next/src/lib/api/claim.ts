@@ -15,6 +15,7 @@
 // 非敏感提示位：仅用于「登录后是否值得调 /claim」的客户端判断。真凭证是
 // HttpOnly avt_anon cookie，这里**不存任何凭证**。预览 ready 时写、认领后清。
 const CLAIM_HINT_KEY = "avt_anon_preview_pending"
+const CLAIM_REQUEST_TIMEOUT_MS = 1500
 
 export interface ClaimResult {
   claimed: boolean
@@ -67,11 +68,17 @@ export function clearAnonClaimHint(): void {
  * 过期 / 无可认领 / 已被他人认领），**不是**错误。
  */
 export async function claimAnonymousPreview(): Promise<ClaimOutcome> {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => {
+    controller.abort()
+  }, CLAIM_REQUEST_TIMEOUT_MS)
+
   try {
     const response = await fetch("/gateway/anonymous-preview/claim", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       body: "{}",
     })
     if (!response.ok) {
@@ -93,6 +100,8 @@ export async function claimAnonymousPreview(): Promise<ClaimOutcome> {
   } catch {
     // 网络/异常 → **可重试**，保留 hint。
     return { claimed: false, count: 0, settled: false }
+  } finally {
+    window.clearTimeout(timeoutId)
   }
 }
 
