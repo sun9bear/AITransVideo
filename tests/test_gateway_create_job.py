@@ -1307,6 +1307,88 @@ class TestSmartVoiceQuotaPreflightGates:
             "smart_consent": consent,
         }
 
+    def test_create_smart_job_reserves_clone_credit_and_stamps_job_record(self):
+        import admin_settings as admin_mod
+        from models import Job
+
+        captured_body: dict = {}
+        captured_jobs: list = []
+        reserve_calls: list[dict] = []
+        reservation_id = "11111111-1111-1111-1111-111111111111"
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success(captured_body.get("job_id", "job_missing"))
+
+        async def fake_reserve(db, **kwargs):
+            reserve_calls.append(dict(kwargs))
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id=reservation_id,
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+        )
+        db.add.side_effect = lambda obj: captured_jobs.append(obj)
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            s.smart_user_voice_clone_cap = 30
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept.reserve_smart_clone_credit",
+                                side_effect=fake_reserve,
+                                create=True,
+                            ):
+                                resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert captured_body["job_id"].startswith("job_")
+        assert len(captured_body["job_id"]) == 36
+        assert reserve_calls == [
+            {
+                "user_id": user.id,
+                "task_id": captured_body["job_id"],
+                "amount_credits": 600,
+                "ttl_minutes": 30,
+                "library_cap": 30,
+            }
+        ]
+        assert captured_body["smart_state"] == {
+            "smart_clone_credit_reserved": True,
+            "smart_clone_reservation_id": reservation_id,
+        }
+        job_rows = [obj for obj in captured_jobs if isinstance(obj, Job)]
+        assert len(job_rows) == 1
+        assert job_rows[0].job_id == captured_body["job_id"]
+        assert job_rows[0].smart_state == captured_body["smart_state"]
+
     def test_create_smart_job_skips_voice_quota_preflight_when_admin_auto_clone_disabled(self):
         """Admin gate False → preflight must NOT query user_voices and
         MUST NOT reject near-cap users with smart_voice_library_at_safety_water_mark.
