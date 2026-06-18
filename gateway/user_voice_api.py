@@ -1586,6 +1586,11 @@ async def internal_smart_clone_register_billed(
         library_cap = int(getattr(load_settings(), "smart_user_voice_clone_cap", 30))
     except Exception:
         return _json(503, {"ok": False, "error": "admin_settings_unavailable"})
+    role = (
+        await db.execute(select(User.role).where(User.id == user_uuid))
+    ).scalar_one_or_none()
+    if role == "admin":
+        library_cap = 999_999
 
     from smart_clone_reservation_service import register_smart_clone_with_billing
 

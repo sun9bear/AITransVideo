@@ -1636,6 +1636,29 @@ async def intercept_create_job(
 
     # --- 5. Idempotency key ---
     idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
+    if user is not None and idempotency_key:
+        existing_by_create_key = (
+            await db.execute(
+                select(Job).where(
+                    Job.user_id == user.id,
+                    Job.create_idempotency_key == str(idempotency_key),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_by_create_key is not None:
+            return Response(
+                content=json.dumps({
+                    "job_id": existing_by_create_key.job_id,
+                    "status": existing_by_create_key.status,
+                    "current_stage": existing_by_create_key.current_stage,
+                    "project_dir": existing_by_create_key.project_dir,
+                    "display_name": existing_by_create_key.display_name,
+                    "service_mode": existing_by_create_key.service_mode,
+                    "idempotent": True,
+                }, ensure_ascii=False),
+                status_code=202,
+                headers={"content-type": "application/json"},
+            )
 
     # Ordinary jobs keep a fixed 7-day retention deadline from creation. Admin
     # jobs intentionally have no TTL and are excluded from both cleanup paths.

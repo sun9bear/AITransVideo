@@ -160,6 +160,8 @@ def _make_db_session(
             return names_result  # existing_names SELECT
         if "display_name like" in sql_text:
             return branch4_result  # branch-4 COUNT(*)
+        if "create_idempotency_key" in sql_text and "jobs" in sql_text:
+            return no_job_result
         if "user_voices" in sql_text:
             if track_user_voice_query is not None:
                 track_user_voice_query.append(sql_text)
@@ -168,6 +170,8 @@ def _make_db_session(
             return credits_result
         if "subscriptions" in sql_text:
             return no_subscription_result
+        if "from users" in sql_text:
+            return user_result
         # Legacy path: active-count, existing-job, user-select in order.
         legacy_call_count["n"] += 1
         if legacy_call_count["n"] == 1:
