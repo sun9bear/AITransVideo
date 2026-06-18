@@ -2,10 +2,11 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
 import { clearPostAuthSessionHint } from "@/lib/auth/post-auth-redirect"
+import { maybeClaimAnonPreviewAfterLogin } from "@/lib/api/claim"
 import { WORKSPACE_THEME_STORAGE_KEY } from "@/lib/theme"
 import { Button } from "@/components/ui/button"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
@@ -123,6 +124,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const unreadNotifications = useNotificationUnreadCount(user !== null)
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const claimRetryUserRef = useRef<string | null>(null)
   // darkMode is hydrated from localStorage on first client render so the
   // user's preference persists across reloads. Default is light for the
   // workspace because most mobile browser chrome and auth surfaces are light.
@@ -164,6 +166,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       document.documentElement.removeAttribute("data-theme")
     }
   }, [darkMode])
+
+  useEffect(() => {
+    if (!user?.id) {
+      claimRetryUserRef.current = null
+      return
+    }
+    if (claimRetryUserRef.current === user.id) {
+      return
+    }
+    claimRetryUserRef.current = user.id
+    void maybeClaimAnonPreviewAfterLogin()
+  }, [user?.id])
 
   // Close mobile sidebar on route change
   useEffect(() => {

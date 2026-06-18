@@ -1,5 +1,7 @@
 "use client"
 
+import { maybeClaimAnonPreviewAfterLogin } from "@/lib/api/claim"
+
 const DEFAULT_POST_AUTH_PATH = "/translations/new"
 const SESSION_HINT_COOKIE = "avt_session_hint=1; Max-Age=604800; Path=/; SameSite=Lax; Secure"
 const SESSION_READY_ATTEMPTS = 12
@@ -58,6 +60,11 @@ export async function goToPostAuthRedirect(path: string): Promise<void> {
   if (!ready) {
     throw new Error("登录状态写入失败,请刷新页面后重试")
   }
+  // 匿名预览→登录认领（plan 2026-06-15 §7）：此刻 avt_session（新用户）与
+  // avt_anon（匿名 session）cookie 同时在场，正是 /claim 所需。必须在硬跳转
+  // （window.location.assign 会丢掉所有内存态）之前 fire；内部 fire-and-forget +
+  // 仅在 hint 存在时触发，绝不阻断登录跳转。集中在此覆盖三种登录表单。
+  await maybeClaimAnonPreviewAfterLogin()
   document.cookie = SESSION_HINT_COOKIE
   window.location.assign(path)
 }
