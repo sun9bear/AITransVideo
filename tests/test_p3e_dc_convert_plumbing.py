@@ -114,6 +114,17 @@ def test_dc_convert_pre_forward_existing_check_idempotent():
     assert 'request_data["job_id"] = _convert_job_id' in flat
 
 
+def test_dc_convert_job_id_not_overwritten_by_generic_smart_create():
+    """CodeX PR #33 P1：convert 设置的 deterministic job_id 必须保留到 forward；
+    generic Smart create 只能在没有 server-set job_id 时 mint UUID。"""
+    flat = _flat(_create_src())
+    convert_set_idx = flat.index('request_data["job_id"] = _convert_job_id')
+    generic_mint_idx = flat.index('request_data["job_id"] = f"job_{_uuid.uuid4().hex}"')
+    guard_idx = flat.rfind('if not ( isinstance(request_data.get("job_id"), str)', 0, generic_mint_idx)
+    assert convert_set_idx < guard_idx < generic_mint_idx
+    assert 'and request_data["job_id"].strip()' in flat[guard_idx:generic_mint_idx]
+
+
 def test_dc_idempotent_response_does_not_re_forward():
     """🔥 _idempotent_convert_job_response 用 GET 取回现有 job（不重新 forward create）。"""
     body = _func_src(_JI, "_idempotent_convert_job_response")

@@ -34,13 +34,26 @@ def _create_src() -> str:
 
 
 def test_reserve_gated_on_smart_consent_and_flag():
-    """reserve 仅当 service_mode==smart + consent.auto_voice_clone is True +
-    admin smart_preview_clone_enabled。"""
+    """reserve 仅当 service_mode==smart + preview_mode is True +
+    consent.auto_voice_clone is True + admin smart_preview_clone_enabled。"""
     body = _create_src()
     flat = " ".join(body.split())
     assert 'service_mode == "smart"' in flat
+    assert 'request_data.get("preview_mode") is True' in flat
     assert 'request_data["smart_consent"].get("auto_voice_clone") is True' in flat
     assert "smart_preview_clone_enabled" in body
+
+
+def test_preview_reserve_does_not_catch_full_smart_requests():
+    """CodeX PR #33 P1：预览 600 reserve 必须限定 preview_mode；普通 full Smart
+    auto_voice_clone=True 由上方 paid-confirmation create reservation 处理，不得再进
+    preview block 二次预留或绕过未勾选确认。"""
+    body = _create_src()
+    reserve_block = body[
+        body.index("_smart_clone_skipped_reason: str | None = None"):
+        body.index("upstream_response = await proxy_request(")
+    ]
+    assert 'request_data.get("preview_mode") is True' in reserve_block
 
 
 def test_reserve_uses_pregenerated_job_id_option_c():

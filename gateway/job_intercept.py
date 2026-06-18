@@ -2180,7 +2180,14 @@ async def intercept_create_job(
             )
 
     if service_mode == "smart" and user is not None:
-        request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
+        # Convert-preview flow may already have supplied a deterministic
+        # server-side job_id for single-flight idempotency. Client job_id was
+        # stripped earlier, so preserve any value present here.
+        if not (
+            isinstance(request_data.get("job_id"), str)
+            and request_data["job_id"].strip()
+        ):
+            request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
         auto_clone_requested = (
             smart_consent_payload is not None
             and smart_consent_payload.get("auto_voice_clone") is True
@@ -2328,8 +2335,8 @@ async def intercept_create_job(
     # **降级一律不阻断**（CLAUDE.md 免费触点不静默降级）：disabled/denied/error
     # → 不写 marker → pipeline 退预设；skip 原因记 `_smart_clone_skipped_reason`
     # （审计可见；前端降级提示响应字段 = P3e-4）。
-    # 触发条件 = smart + 用户 consent.auto_voice_clone + admin
-    # smart_preview_clone_enabled。reservation 真有效性由 register-billed
+    # 触发条件 = smart + preview_mode is True + 用户 consent.auto_voice_clone +
+    # admin smart_preview_clone_enabled。reservation 真有效性由 register-billed
     # endpoint 写 billing event 时原子再校验（gateway 不在此扣费，只预留）。
     _smart_clone_skipped_reason: str | None = None
     _smart_clone_reservation_id: str | None = None
@@ -2337,6 +2344,7 @@ async def intercept_create_job(
     if (
         service_mode == "smart"
         and user is not None
+        and request_data.get("preview_mode") is True
         and isinstance(request_data.get("smart_consent"), dict)
         and request_data["smart_consent"].get("auto_voice_clone") is True
     ):
