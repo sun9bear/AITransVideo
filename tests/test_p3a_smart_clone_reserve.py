@@ -336,6 +336,33 @@ def test_register_bill_preserves_source_metadata():
     _run(go())
 
 
+def test_check_active_reservation_requires_reserved_unbilled_slot():
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=1400)
+        try:
+            async with sm() as db:
+                rid = await _reserve(db, "job_active")
+                active = await svc.check_smart_clone_reservation_active(
+                    db, user_id=_USER, task_id="job_active", reservation_id=rid,
+                )
+                assert active.active is True
+                assert active.reason == "active"
+
+                await svc.register_smart_clone_with_billing(
+                    db, user_id=_USER, task_id="job_active", reservation_id=rid,
+                    voice_id="mm_active", label="active", source_job_id="job_active",
+                )
+                billed = await svc.check_smart_clone_reservation_active(
+                    db, user_id=_USER, task_id="job_active", reservation_id=rid,
+                )
+                assert billed.active is False
+                assert billed.reason == "already_billed"
+        finally:
+            await sm.kw["bind"].dispose()
+
+    _run(go())
+
+
 def test_register_bill_idempotent_no_double():
     """🔥 幂等：同 reservation 第二次 register+bill → idempotent，不双写。"""
     async def go():

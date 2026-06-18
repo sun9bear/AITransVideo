@@ -35,6 +35,12 @@ def test_register_billed_route_registered():
     assert "async def internal_smart_clone_register_billed(" in src
 
 
+def test_reservation_active_check_route_registered():
+    src = _read()
+    assert '@internal_router.post("/smart-clone/reservations/check-active")' in src
+    assert "async def internal_smart_clone_reservation_check_active(" in src
+
+
 def test_register_billed_has_internal_auth():
     body = _func_src("internal_smart_clone_register_billed")
     assert body, "endpoint 函数未找到"
