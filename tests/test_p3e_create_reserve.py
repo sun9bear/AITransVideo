@@ -56,6 +56,19 @@ def test_preview_reserve_does_not_catch_full_smart_requests():
     assert 'request_data.get("preview_mode") is True' in reserve_block
 
 
+def test_full_smart_reserve_does_not_catch_preview_requests():
+    """CodeX PR #33: preview requests must not run the generic full-Smart
+    create-time clone reservation path even if they carry paid-clone confirm."""
+    body = _create_src()
+    full_block = body[
+        body.index('if service_mode == "smart" and user is not None:'):
+        body.index("_smart_clone_skipped_reason: str | None = None")
+    ]
+    flat = " ".join(full_block.split())
+    assert '_smart_request_is_preview = request_data.get("preview_mode") is True' in flat
+    assert "not _smart_request_is_preview" in flat
+
+
 def test_reserve_uses_pregenerated_job_id_option_c():
     """Option C：forward 前预生成 job_id（task_id=job_id）调 reserve，
     并把 job_id 塞 request_data 让 Job API 用它（决定性派生见 P1-A 测试）。"""

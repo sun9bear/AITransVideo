@@ -2195,7 +2195,12 @@ async def intercept_create_job(
             smart_consent_payload is not None
             and smart_consent_payload.get("auto_voice_clone") is True
         )
-        consent_allows_clone = auto_clone_requested and smart_paid_clone_confirmed
+        _smart_request_is_preview = request_data.get("preview_mode") is True
+        consent_allows_clone = (
+            auto_clone_requested
+            and smart_paid_clone_confirmed
+            and not _smart_request_is_preview
+        )
         try:
             from admin_settings import load_settings
 
@@ -2203,7 +2208,12 @@ async def intercept_create_job(
             admin_clone_enabled = bool(
                 getattr(_admin_for_clone, "smart_auto_clone_enabled", True)
             )
-            if auto_clone_requested and admin_clone_enabled and not smart_paid_clone_confirmed:
+            if (
+                auto_clone_requested
+                and admin_clone_enabled
+                and not smart_paid_clone_confirmed
+                and not _smart_request_is_preview
+            ):
                 _smart_initial_state = {
                     "smart_clone_credit_reserved": False,
                     "smart_clone_reservation_deny_reason": (
