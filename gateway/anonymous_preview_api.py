@@ -1907,6 +1907,7 @@ async def anonymous_preview_claim(
                 update(AnonymousSession)
                 .where(
                     AnonymousSession.session_id_hash == session_id_hash,
+                    AnonymousSession.expires_at > now,
                     or_(
                         AnonymousSession.claim_user_id.is_(None),
                         AnonymousSession.claim_user_id == uid,
