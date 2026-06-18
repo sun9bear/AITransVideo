@@ -65,6 +65,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // fail-closed; the checkbox only renders when express + available.
   const [expressAutoCloneAvailable, setExpressAutoCloneAvailable] = useState(false)
   const [expressAutoVoiceClone, setExpressAutoVoiceClone] = useState(false)
+  const [smartPaidCloneAccepted, setSmartPaidCloneAccepted] = useState(false)
   // Phase 2a LAUNCH GATE: free voice-rights attestation (《民法典》1023). Must be
   // checked before a free job may be submitted; reset on mode switch.
   const [freeVoiceRightsConfirmed, setFreeVoiceRightsConfirmed] = useState(false)
@@ -100,6 +101,16 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
   const [voiceCloneCostCredits, setVoiceCloneCostCredits] = useState<number | null>(null)
   const [voiceCloneCostLoadFailed, setVoiceCloneCostLoadFailed] = useState(false)
+  const smartCloneConfirmationError =
+    serviceMode !== "smart"
+      ? null
+      : voiceCloneCostCredits == null
+        ? voiceCloneCostLoadFailed
+          ? "暂时无法读取智能版自动克隆扣点，请稍后再试。"
+          : "正在读取智能版自动克隆扣点，请稍后再试。"
+        : !smartPaidCloneAccepted
+          ? "请先确认智能版自动克隆音色的额外预扣点数。"
+          : null
 
   const sourceValidationError =
     sourceType === "youtube_url"
@@ -112,6 +123,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // HARD-fails (403 consent_required) otherwise.
   const validationError =
     sourceValidationError ??
+    smartCloneConfirmationError ??
     (serviceMode === "free" && !freeVoiceRightsConfirmed
       ? "请先阅读并勾选免费版声音授权声明。"
       : null)
@@ -253,6 +265,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     }
   }, [serviceMode])
 
+  useEffect(() => {
+    if (serviceMode !== "smart" || voiceCloneCostCredits == null) {
+      setSmartPaidCloneAccepted(false)
+    }
+  }, [serviceMode, voiceCloneCostCredits])
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (validationError) {
@@ -284,6 +302,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         // spec §2.6: force false unless currently in Express, so a stale
         // checkbox (mode switched away then back) can't trigger a paid clone.
         expressAutoVoiceClone: serviceMode === "express" ? expressAutoVoiceClone : false,
+        smartPaidCloneConfirmed:
+          serviceMode === "smart" && voiceCloneCostCredits != null
+            ? smartPaidCloneAccepted
+            : false,
         freeVoiceRightsConfirmed: serviceMode === "free" ? freeVoiceRightsConfirmed : false,
         sourceLanguage: sendPair ? selectedPair.source_language : undefined,
         targetLanguage: sendPair ? selectedPair.target_language : undefined,
@@ -794,6 +816,40 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                     <span className="block">· 该音色为本次任务临时使用，不进入你的永久音色库；系统后续会按清理策略处理</span>
                     <span className="block">· 会占用一次音色克隆配额</span>
                     <span className="block">· 失败时自动改用预设音色，不影响配音完成</span>
+                  </span>
+                </span>
+              </label>
+            </section>
+          ) : null}
+
+          {serviceMode === "smart" ? (
+            <section
+              className="rounded-xl border p-4"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--bamboo) 8%, transparent)",
+                borderColor: "color-mix(in oklab, var(--bamboo) 32%, transparent)",
+              }}
+            >
+              <label
+                className={`flex items-start gap-3 ${
+                  voiceCloneCostCredits == null ? "cursor-not-allowed opacity-70" : "cursor-pointer"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 shrink-0 accent-[color:var(--primary)]"
+                  checked={smartPaidCloneAccepted}
+                  disabled={
+                    isBlockedByConcurrency ||
+                    submitState === "submitting" ||
+                    voiceCloneCostCredits == null
+                  }
+                  onChange={(e) => setSmartPaidCloneAccepted(e.target.checked)}
+                />
+                <span className="block space-y-1.5">
+                  <span className="block text-sm font-medium text-foreground">确认智能版自动克隆扣点</span>
+                  <span className="block text-xs leading-relaxed text-muted-foreground">
+                    我确认：如果本次智能版需要自动新克隆主说话人音色，将额外预扣 {voiceCloneCostLabel}；未发生新克隆或任务未消耗该克隆时会释放。
                   </span>
                 </span>
               </label>

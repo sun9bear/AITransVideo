@@ -95,28 +95,30 @@ export async function submitTranslationJob(
   // smart submissions MUST carry the complete 6-field consent
   // payload. Gateway's validate_smart_consent() rejects partial
   // / malformed shapes with 400 ``smart_consent_invalid``. User
-  // selects smart via the UI mode picker; clicking that button is
-  // the implicit consent for all 6 fields (terms shown in the
-  // smart card description). MVP defaults:
+  // selects smart via the UI mode picker; paid auto-clone additionally
+  // requires the explicit checkbox wired through smartPaidCloneConfirmed.
+  // MVP defaults:
   //   - auto_voice_clone=true: MVP cloning is core value-add
   //   - auto_retranslate=false: MVP doesn't re-translate (deferred to P3+ verifier)
   //   - auto_retts=true: MVP retries failed TTS within budget
   //   - auto_multimodal_verification=false: verifier is P3+ feature
   //   - no_extra_charge_without_confirmation=true: no hidden charges beyond
   //     the explicit paid-clone confirmation below
-  //   - confirm_paid_voice_clone_credits=true: Smart's automatic new
-  //     voice clone is a visible paid add-on confirmed by choosing Smart
+  //   - confirm_paid_voice_clone_credits follows the explicit paid-clone
+  //     checkbox; if pricing failed to load or the box is unchecked, Gateway
+  //     records paid_clone_confirmation_required and skips new clone reserve
   //   - on_budget_exhausted=degraded_delivery_with_report:
   //     'fail_and_refund' is currently rejected by validator (partial-
   //     capture settle path is STUB; Codex 40 P1.2).
   if (requestBody.service_mode === 'smart') {
+    const paidCloneConfirmed = input.smartPaidCloneConfirmed === true
     requestBody.smart_consent = {
       auto_voice_clone: true,
       auto_retranslate: false,
       auto_retts: true,
       auto_multimodal_verification: false,
       no_extra_charge_without_confirmation: true,
-      confirm_paid_voice_clone_credits: true,
+      confirm_paid_voice_clone_credits: paidCloneConfirmed,
       on_budget_exhausted: 'degraded_delivery_with_report',
     }
   }

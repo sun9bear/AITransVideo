@@ -195,6 +195,13 @@ export interface CreateTranslationJobInput {
    */
   expressAutoVoiceClone?: boolean
   /**
+   * Smart paid auto-clone confirmation. Only meaningful for
+   * ``service_mode === 'smart'`` after the UI has loaded the authoritative
+   * clone price and the user has checked the paid add-on confirmation box.
+   * The submit layer forces false for non-smart modes and for unloaded prices.
+   */
+  smartPaidCloneConfirmed?: boolean
+  /**
    * Phase 2a LAUNCH GATE (《民法典》1023): free voice-rights attestation. Only
    * meaningful for ``service_mode === 'free'``. Maps to
    * ``free_consent.voice_rights_confirmed``; the gateway HARD-fails without it.

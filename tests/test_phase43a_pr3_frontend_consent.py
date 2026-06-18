@@ -64,16 +64,18 @@ def test_consent_payload_only_for_express():
         assert "smart" not in window.lower(), "express_consent 块不应混入 smart 语义"
 
 
-def test_smart_submission_sends_paid_clone_confirmation():
-    """Smart create payload must include explicit paid-clone consent
-    required by Gateway's paid reservation gate."""
+def test_smart_submission_uses_explicit_paid_clone_confirmation():
+    """Smart create payload must gate paid-clone consent on the form checkbox."""
     src = _read(_JOBS_TS)
     assert "confirm_paid_voice_clone_credits" in src
+    assert "smartPaidCloneConfirmed" in _read(_TYPES_TS)
     assert "confirm_paid_voice_clone_600_credits: true" not in src
+    assert not re.search(r"confirm_paid_voice_clone_credits\s*:\s*true", src)
+    assert re.search(r"paidCloneConfirmed\s*=\s*input\.smartPaidCloneConfirmed\s*===\s*true", src)
     assert re.search(
-        r"confirm_paid_voice_clone_credits\s*:\s*true",
+        r"confirm_paid_voice_clone_credits\s*:\s*paidCloneConfirmed",
         src,
-    ), "Smart submissions must confirm the paid clone add-on"
+    ), "Smart paid clone confirmation must come from explicit form state"
 
 
 def test_smart_copy_discloses_runtime_clone_add_on_cost():
@@ -83,6 +85,21 @@ def test_smart_copy_discloses_runtime_clone_add_on_cost():
     assert "voiceCloneCostCredits" in src
     assert "voiceCloneCostLabel" in src
     assert "600 点" not in src
+
+
+def test_smart_paid_clone_confirmation_requires_price_and_checkbox():
+    """Smart form must require loaded pricing plus explicit checkbox consent."""
+    src = _read(_FORM_TSX)
+    assert "smartPaidCloneAccepted" in src
+    assert "setSmartPaidCloneAccepted(false)" in src
+    assert "voiceCloneCostCredits != null" in src
+    assert "smartCloneConfirmationError" in src
+    assert "smartPaidCloneConfirmed" in src
+    assert re.search(
+        r"serviceMode\s*===\s*['\"]smart['\"]\s*&&\s*voiceCloneCostCredits\s*!=\s*null\s*\?\s*smartPaidCloneAccepted\s*:\s*false",
+        src,
+        re.S,
+    ), "submit must only confirm paid clone when Smart price is loaded and checked"
 
 
 def test_frontend_never_sends_server_confirmed_at():

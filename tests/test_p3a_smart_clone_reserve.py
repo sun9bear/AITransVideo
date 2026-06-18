@@ -7,6 +7,7 @@ PG-only 的 FOR UPDATE 阻塞在 sqlite 测不了（逻辑路径相同）。
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -448,6 +449,18 @@ def test_register_bill_rejects_idempotent_voice_id_mismatch():
             ).scalar_one_or_none() is None
 
     _run(go())
+
+
+def test_register_bill_wraps_voice_insert_autoflush_conflict():
+    """The idempotency handler must catch conflicts raised inside add_user_voice."""
+    src = inspect.getsource(svc.register_smart_clone_with_billing)
+    voice_idx = src.index("await add_user_voice")
+    handler_idx = src.index("except IntegrityError")
+    try_idx = src.rfind("try:", 0, voice_idx)
+    no_autoflush_idx = src.index("with db.no_autoflush")
+
+    assert try_idx != -1
+    assert try_idx < no_autoflush_idx < voice_idx < handler_idx
 
 
 def test_register_bill_no_active_reservation_does_not_bill():

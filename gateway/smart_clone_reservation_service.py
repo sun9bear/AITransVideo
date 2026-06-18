@@ -462,46 +462,50 @@ async def register_smart_clone_with_billing(
         )
 
     # 4. 写 durable billing event（chargeable=true）= 唯一权威计费信号
-    db.add(
-        CloneBillingEvent(
-            id=uuid.uuid4(),
-            task_id=task_id,
-            reservation_id=res_pk,
-            provider="minimax",
-            voice_id=voice_id,
-            chargeable=True,
-        )
-    )
-    # 4. 入库（commit=False，同一事务）
-    await add_user_voice(
-        db,
-        user_id=user_id,
-        voice_id=voice_id,
-        label=label,
-        provider=provider,
-        tts_provider=tts_provider,
-        platform=platform,
-        source_speaker_id=source_speaker_id,
-        source_job_id=source_job_id,
-        source_type=source_type,
-        source_ref=source_ref,
-        source_content_hash=source_content_hash,
-        source_video_title=source_video_title,
-        source_speaker_name=source_speaker_name,
-        source_speaker_name_key=source_speaker_name_key,
-        source_published_at=source_published_at,
-        source_content_summary=source_content_summary,
-        source_content_era=source_content_era,
-        source_content_tags=source_content_tags,
-        clone_sample_seconds=clone_sample_seconds,
-        clone_sample_segment_ids=clone_sample_segment_ids,
-        target_model=target_model,
-        created_from="smart_preview",
-        notes=notes,
-        commit=False,
-    )
-    # 5. 一起 commit（billing event + user_voice 原子）
     try:
+        db.add(
+            CloneBillingEvent(
+                id=uuid.uuid4(),
+                task_id=task_id,
+                reservation_id=res_pk,
+                provider="minimax",
+                voice_id=voice_id,
+                chargeable=True,
+            )
+        )
+    # 4. 入库（commit=False，同一事务）
+        # Keep the pending billing event from autoflushing inside the
+        # add_user_voice lookup. Its explicit flush/commit still lands in this
+        # idempotency handler if a concurrent writer wins the reservation.
+        with db.no_autoflush:
+            await add_user_voice(
+                db,
+                user_id=user_id,
+                voice_id=voice_id,
+                label=label,
+                provider=provider,
+                tts_provider=tts_provider,
+                platform=platform,
+                source_speaker_id=source_speaker_id,
+                source_job_id=source_job_id,
+                source_type=source_type,
+                source_ref=source_ref,
+                source_content_hash=source_content_hash,
+                source_video_title=source_video_title,
+                source_speaker_name=source_speaker_name,
+                source_speaker_name_key=source_speaker_name_key,
+                source_published_at=source_published_at,
+                source_content_summary=source_content_summary,
+                source_content_era=source_content_era,
+                source_content_tags=source_content_tags,
+                clone_sample_seconds=clone_sample_seconds,
+                clone_sample_segment_ids=clone_sample_segment_ids,
+                target_model=target_model,
+                created_from="smart_preview",
+                notes=notes,
+                commit=False,
+            )
+        # 5. 一起 commit（billing event + user_voice 原子）
         await db.commit()
     except IntegrityError:
         # uq_clone_billing_event_reservation 竞态 → 另一并发写已成 → 幂等
