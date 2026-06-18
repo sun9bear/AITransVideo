@@ -71,6 +71,31 @@ export function clearAnonClaimHint(): void {
 // banner（如 A 认领未转完整登出、B 登录看到 A 的 banner）。读时超期/损坏即清。
 const CONVERT_READY_KEY = "avt_anon_convert_ready"
 const CONVERT_READY_TTL_MS = 24 * 60 * 60 * 1000
+const ANON_CONVERT_READY_EVENT = "avt_anon_convert_ready_changed"
+
+function emitAnonConvertReadyChanged(): void {
+  try {
+    window.dispatchEvent(new Event(ANON_CONVERT_READY_EVENT))
+  } catch {
+    // Ignore server/pre-DOM environments.
+  }
+}
+
+export function subscribeAnonConvertReady(listener: () => void): () => void {
+  try {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === CONVERT_READY_KEY) listener()
+    }
+    window.addEventListener(ANON_CONVERT_READY_EVENT, listener)
+    window.addEventListener("storage", onStorage)
+    return () => {
+      window.removeEventListener(ANON_CONVERT_READY_EVENT, listener)
+      window.removeEventListener("storage", onStorage)
+    }
+  } catch {
+    return () => {}
+  }
+}
 
 /** 认领成功后调用：记下「有一个已认领预览待转完整」+ 其 preview_id（带时间戳）。 */
 export function setAnonConvertReady(previewId: string): void {
@@ -79,6 +104,7 @@ export function setAnonConvertReady(previewId: string): void {
       CONVERT_READY_KEY,
       JSON.stringify({ previewId, ts: Date.now() }),
     )
+    emitAnonConvertReadyChanged()
   } catch {
     // 忽略（隐私模式/配额）——转完整入口不显示，用户仍可正常上传创建。
   }
@@ -107,6 +133,7 @@ export function getAnonConvertReady(): string | null {
 export function clearAnonConvertReady(): void {
   try {
     window.localStorage.removeItem(CONVERT_READY_KEY)
+    emitAnonConvertReadyChanged()
   } catch {
     // 忽略
   }

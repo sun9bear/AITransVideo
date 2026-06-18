@@ -101,6 +101,19 @@ def test_form_reads_convert_ready_and_state():
     assert re.search(r"reuseAnonPreviewId.*useState", src) or "setReuseAnonPreviewId" in src, "reuseAnonPreviewId state"
 
 
+def test_form_handles_late_convert_ready_writes():
+    claim_src = _read(CLAIM_TS)
+    form_src = _read(FORM_TSX)
+    # CodeX P2: AppShell retry can claim after the create page has mounted.
+    # Same-tab localStorage writes do not emit a native storage event, so the
+    # claim helper must notify the mounted form explicitly.
+    assert "ANON_CONVERT_READY_EVENT" in claim_src
+    assert "window.dispatchEvent" in claim_src
+    assert "subscribeAnonConvertReady" in claim_src
+    assert "subscribeAnonConvertReady" in form_src
+    assert re.search(r"setReuseAnonPreviewId\(\s*getAnonConvertReady\(\)\s*\)", form_src)
+
+
 def test_form_source_validation_short_circuits_in_convert_mode():
     src = _read(FORM_TSX)
     # sourceValidationError 在 reuseAnonPreviewId 时短路为 null（否则表单永远不可提交）。

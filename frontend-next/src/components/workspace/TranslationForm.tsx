@@ -15,7 +15,7 @@ import {
   type UserEntitlements,
 } from "@/lib/api/entitlements"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
-import { clearAnonConvertReady, getAnonConvertReady } from "@/lib/api/claim"
+import { clearAnonConvertReady, getAnonConvertReady, subscribeAnonConvertReady } from "@/lib/api/claim"
 import { isSmartPreviewCloneEntryEnabled } from "@/lib/api/smartPreviewClone"
 import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
@@ -268,11 +268,15 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // 模式（用认领的完整原视频作源，免重新上传）。localStorage key 在转完整成功 或
   // 用户「更换视频」时才清，故刷新页面不丢（提交失败可重试）。
   useEffect(() => {
-    const timerId = window.setTimeout(() => {
-      const claimedId = getAnonConvertReady()
-      if (claimedId) setReuseAnonPreviewId(claimedId)
-    }, 0)
-    return () => window.clearTimeout(timerId)
+    const syncConvertReady = () => {
+      setReuseAnonPreviewId(getAnonConvertReady())
+    }
+    const timerId = window.setTimeout(syncConvertReady, 0)
+    const unsubscribe = subscribeAnonConvertReady(syncConvertReady)
+    return () => {
+      window.clearTimeout(timerId)
+      unsubscribe()
+    }
   }, [])
 
   // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
