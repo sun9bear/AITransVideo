@@ -2005,6 +2005,16 @@ async def intercept_create_job(
                         ),
                     }
         except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                logger.warning(
+                    "failed to rollback smart clone reservation failure "
+                    "job_id=%s user=%s",
+                    request_data.get("job_id"),
+                    getattr(user, "id", None),
+                    exc_info=True,
+                )
             logger.warning(
                 "smart clone reservation failed before create; "
                 "continuing without paid clone job_id=%s user=%s: %s",
