@@ -403,6 +403,44 @@ def _job_create_response_payload_from_db_job(job: Job, *, idempotent: bool = Fal
     return payload
 
 
+async def _settle_smart_clone_reservation_from_job_state(
+    db: AsyncSession,
+    job: Job,
+    *,
+    reason: str,
+) -> None:
+    smart_state = getattr(job, "smart_state", None)
+    if not isinstance(smart_state, dict):
+        return
+    if smart_state.get("smart_clone_credit_reserved") is not True:
+        return
+    reservation_id = smart_state.get("smart_clone_reservation_id")
+    if not reservation_id:
+        return
+    try:
+        outcome = await settle_smart_clone_reservation(
+            db,
+            reservation_id=reservation_id,
+            service_mode=getattr(job, "service_mode", None) or "smart",
+            smart_state_override=smart_state,
+        )
+        logger.info(
+            "settled smart clone reservation=%s for job=%s reason=%s outcome=%s",
+            reservation_id,
+            getattr(job, "job_id", None),
+            reason,
+            getattr(outcome, "status", None),
+        )
+    except Exception:
+        logger.warning(
+            "failed to settle smart clone reservation=%s for job=%s reason=%s",
+            reservation_id,
+            getattr(job, "job_id", None),
+            reason,
+            exc_info=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Structured error codes — spec §7
 # ---------------------------------------------------------------------------
@@ -5588,6 +5626,11 @@ async def update_source_metadata(
                         await db.commit()
                     except Exception:
                         await db.rollback()
+                    await _settle_smart_clone_reservation_from_job_state(
+                        db,
+                        job,
+                        reason="late_base_credit_insufficient",
+                    )
                     await _compensate_upstream_job(job_id)
                     return _insufficient_credits_response(exc)
                 except Exception as _e:
@@ -5596,6 +5639,11 @@ async def update_source_metadata(
                         await db.rollback()
                     except Exception:
                         pass
+                    await _settle_smart_clone_reservation_from_job_state(
+                        db,
+                        job,
+                        reason="late_base_credit_reserve_failed",
+                    )
                     await _compensate_upstream_job(job_id)
                     return _error_response(
                         500,

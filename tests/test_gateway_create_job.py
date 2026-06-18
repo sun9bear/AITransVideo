@@ -38,6 +38,7 @@ from job_intercept import (  # noqa: E402
     intercept_create_job,
     update_source_metadata,
     _error_response,
+    InsufficientCreditsError,
     PLAN_CATALOG,
 )
 
@@ -790,6 +791,65 @@ class TestUpdateSourceMetadata:
         body = json.loads(resp.body)
         assert resp.status_code == 400
         assert body["error"] == "no_update_fields"
+
+    def test_late_base_credit_failure_releases_smart_clone_reservation(self):
+        reservation_id = "77777777-7777-7777-7777-777777777777"
+        job_mock = SimpleNamespace(
+            job_id="job-smart-late",
+            user_id="uid-1",
+            source_duration_seconds=None,
+            actual_minutes=None,
+            metering_snapshot={"service_mode": "smart", "quality_tier": "standard"},
+            service_mode="smart",
+            role_snapshot="user",
+            smart_state={
+                "smart_clone_credit_reserved": True,
+                "smart_clone_reservation_id": reservation_id,
+            },
+            status="queued",
+            current_stage=None,
+            error_summary=None,
+        )
+        job_result = MagicMock()
+        job_result.scalar_one_or_none.return_value = job_mock
+        existing_reserve_result = MagicMock()
+        existing_reserve_result.scalar_one_or_none.return_value = None
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[job_result, existing_reserve_result])
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        req = MagicMock()
+        req.body = AsyncMock(return_value=json.dumps({
+            "source_duration_seconds": 600.0,
+        }).encode())
+
+        async def fail_reserve(*args, **kwargs):
+            raise InsufficientCreditsError(required=1000, available=100)
+
+        with patch("job_intercept.ensure_credit_buckets_for_user", new=AsyncMock()):
+            with patch("job_intercept.reserve_credits_or_raise", side_effect=fail_reserve):
+                with patch(
+                    "job_intercept.settle_smart_clone_reservation",
+                    new=AsyncMock(return_value=SimpleNamespace(status="released")),
+                ) as settle_mock:
+                    with patch(
+                        "job_intercept._compensate_upstream_job",
+                        new=AsyncMock(),
+                    ) as compensate_mock:
+                        resp = _run(update_source_metadata(req, "job-smart-late", db))
+
+        body = json.loads(resp.body)
+        assert resp.status_code == 402
+        assert body["error"] == "insufficient_credits"
+        assert job_mock.status == "failed"
+        assert job_mock.current_stage == "failed"
+        settle_mock.assert_awaited_once()
+        settle_kwargs = settle_mock.await_args.kwargs
+        assert settle_kwargs["reservation_id"] == reservation_id
+        assert settle_kwargs["service_mode"] == "smart"
+        assert settle_kwargs["smart_state_override"] == job_mock.smart_state
+        compensate_mock.assert_awaited_once_with("job-smart-late")
 
 
 # ===================================================================
