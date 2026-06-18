@@ -2,7 +2,7 @@
  * smartPreviewClone.ts — 智能版 3 分钟预览克隆（P3e-4c）前端数据层.
  *
  * 给「登录但未获 smart entitlement」的免费用户一条受限智能版预览 lane：选智能版 →
- * 预扣 600 点克隆主说话人 → 拿到 3 分钟带水印、仅在线播放的 teaser；满意后「转完整」
+ * 按 gateway pricing 预扣克隆主说话人 → 拿到 3 分钟带水印、仅在线播放的 teaser；满意后「转完整」
  * 复用原视频 + 已克隆音色，走正式流程**按分钟正常扣点**（项目主 2026-06-15 决策：
  * 转换照常按分钟扣；entitlement 走正式流程·需升级套餐）。
  *
@@ -21,13 +21,6 @@ import { apiClient, ApiError } from '@/lib/api/client'
 import { toJobSummary } from '@/lib/api/mappers'
 import type { ApiJobRecord } from '@/types/api'
 import type { CreateTranslationJobInput, JobSummary } from '@/types/jobs'
-
-/**
- * 主说话人单次预览克隆的预扣点数（plan 2026-06-14 §3；后端
- * ``smart_clone_reservation_service.PURPOSE = "smart_clone_minimax_600"``）。
- * 预扣弹窗按此展示金额；**真正的扣费由服务端 reserve 决定**，前端只做展示。
- */
-export const SMART_PREVIEW_CLONE_CREDITS = 600
 
 /**
  * 预览入口可见性 —— Next public flag（同 POST_EDIT / FREE_TIER / ANONYMOUS_PREVIEW
@@ -186,12 +179,27 @@ export interface SmartPreviewCreateError {
   message: string
 }
 
+export interface SmartPreviewCreateErrorOptions {
+  /** Gateway pricing API returned ``smart_preview_clone_cost_credits``. */
+  cloneCostCredits?: number | null
+}
+
+function formatCloneCostCredits(value: number | null | undefined): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return null
+  }
+  return `${Math.trunc(value)} 点`
+}
+
 /**
  * 映射「发起预览」失败。402 ``smart_preview_reserve_failed`` 的
  * ``detail.skipped_reason`` 才是真正原因（deny_reason 枚举见 reservation service）。
  * 未知 reason 走稳健兜底（不硬耦合穷举，后端新增 reason 不会崩 UI）。
  */
-export function mapSmartPreviewCreateError(err: unknown): SmartPreviewCreateError {
+export function mapSmartPreviewCreateError(
+  err: unknown,
+  options: SmartPreviewCreateErrorOptions = {},
+): SmartPreviewCreateError {
   const { status, code, detail } = readGatewayError(err)
   if (status === 401 || code === 'auth_required') {
     return { reason: 'auth_required', message: '请先登录后再试用智能版预览。' }
@@ -206,11 +214,15 @@ export function mapSmartPreviewCreateError(err: unknown): SmartPreviewCreateErro
     const skipped =
       detail && typeof detail.skipped_reason === 'string' ? detail.skipped_reason : ''
     switch (skipped) {
-      case 'insufficient_credits':
+      case 'insufficient_credits': {
+        const costLabel = formatCloneCostCredits(options.cloneCostCredits)
         return {
           reason: 'insufficient_credits',
-          message: `余额不足：本次预览需预扣 ${SMART_PREVIEW_CLONE_CREDITS} 点克隆额度，请充值后再试。`,
+          message: costLabel
+            ? `余额不足：本次预览需预扣 ${costLabel} 克隆额度，请充值后再试。`
+            : '余额不足：本次预览需预扣克隆额度，请充值后再试。',
         }
+      }
       case 'voice_library_full':
         return {
           reason: 'voice_library_full',

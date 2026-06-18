@@ -29,6 +29,8 @@ from credits_service import DEBIT_RATES
 
 def _build_pricing_response(clone_cost: int = 500) -> dict:
     """Build the same response that get_voice_selection_pricing() returns."""
+    from smart_clone_reservation_service import SMART_PREVIEW_CLONE_RESERVE_CREDITS
+
     return {
         "service_mode": "studio",
         "credits_per_minute": {
@@ -38,6 +40,7 @@ def _build_pricing_response(clone_cost: int = 500) -> dict:
             "minimax_hd": DEBIT_RATES.get(("studio", "flagship"), 50),
         },
         "voice_clone_cost_credits": clone_cost,
+        "smart_preview_clone_cost_credits": SMART_PREVIEW_CLONE_RESERVE_CREDITS,
     }
 
 
@@ -64,6 +67,15 @@ class TestVoiceSelectionPricingReturnsGatewayTruth:
         result = _build_pricing_response(clone_cost=999)
         assert result["voice_clone_cost_credits"] == 999
 
+    def test_smart_preview_clone_cost_comes_from_gateway_reserve_constant(self) -> None:
+        from smart_clone_reservation_service import SMART_PREVIEW_CLONE_RESERVE_CREDITS
+
+        result = _build_pricing_response(clone_cost=999)
+        assert (
+            result["smart_preview_clone_cost_credits"]
+            == SMART_PREVIEW_CLONE_RESERVE_CREDITS
+        )
+
     def test_response_shape(self) -> None:
         result = _build_pricing_response()
         assert result["service_mode"] == "studio"
@@ -72,6 +84,7 @@ class TestVoiceSelectionPricingReturnsGatewayTruth:
             assert key in cpm
             assert isinstance(cpm[key], int)
         assert isinstance(result["voice_clone_cost_credits"], int)
+        assert isinstance(result["smart_preview_clone_cost_credits"], int)
 
     def test_frozen_v3_values(self) -> None:
         """Sanity check: current V3 frozen values."""
@@ -131,6 +144,7 @@ class TestCloneCostFromRuntimePricing:
         # The clone cost line must use _get_clone_cost_credits — the
         # runtime pricing path.
         assert "_get_clone_cost_credits()" in source
+        assert "_get_smart_preview_clone_cost_credits()" in source
         # admin_settings appears ONLY for the smart_pause_warning_enabled
         # field. Inspect that any line that mentions admin_settings is
         # NOT also a clone-cost line.

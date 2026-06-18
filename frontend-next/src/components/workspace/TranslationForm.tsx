@@ -15,10 +15,7 @@ import {
   type UserEntitlements,
 } from "@/lib/api/entitlements"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
-import {
-  isSmartPreviewCloneEntryEnabled,
-  SMART_PREVIEW_CLONE_CREDITS,
-} from "@/lib/api/smartPreviewClone"
+import { isSmartPreviewCloneEntryEnabled } from "@/lib/api/smartPreviewClone"
 import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
 import { getVoiceSelectionPricing } from "@/lib/api/voiceSelection"
@@ -105,6 +102,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // UI so users aren't surprised by a mid-job pause.
   const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
   const [voiceCloneCostCredits, setVoiceCloneCostCredits] = useState<number | null>(null)
+  const [smartPreviewCloneCostCredits, setSmartPreviewCloneCostCredits] = useState<number | null>(null)
   const [voiceCloneCostLoadFailed, setVoiceCloneCostLoadFailed] = useState(false)
   // P3e-4c：智能版 3 分钟预览克隆入口（免费 / 未获 smart 的登录用户）。展示闸由
   // Next flag 控制；真正的 gate 在服务端（admin smart_preview_clone_enabled +
@@ -154,6 +152,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const voiceCloneCostLabel =
     voiceCloneCostCredits != null
       ? `${voiceCloneCostCredits} 点`
+      : voiceCloneCostLoadFailed
+        ? "暂时无法读取"
+        : "读取中"
+  const smartPreviewCloneCostLabel =
+    smartPreviewCloneCostCredits != null
+      ? `${smartPreviewCloneCostCredits} 点`
       : voiceCloneCostLoadFailed
         ? "暂时无法读取"
         : "读取中"
@@ -222,11 +226,13 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       .then((pricing) => {
         setSmartPauseWarningEnabled(Boolean(pricing.smart_pause_warning_enabled))
         setVoiceCloneCostCredits(pricing.voice_clone_cost_credits)
+        setSmartPreviewCloneCostCredits(pricing.smart_preview_clone_cost_credits)
         setVoiceCloneCostLoadFailed(false)
       })
       .catch(() => {
         setSmartPauseWarningEnabled(false)
         setVoiceCloneCostCredits(null)
+        setSmartPreviewCloneCostCredits(null)
         setVoiceCloneCostLoadFailed(true)
       })
     // Phase 4.3a PR3: Express auto-clone availability (admin flag + allowlist).
@@ -722,7 +728,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      克隆主说话人音色，先看前 3 分钟带水印预览（预扣 {SMART_PREVIEW_CLONE_CREDITS} 点）。满意再转完整成片，按分钟正常扣点。
+                      克隆主说话人音色，先看前 3 分钟带水印预览（预扣 {smartPreviewCloneCostLabel}）。满意再转完整成片，按分钟正常扣点。
                     </p>
                     <button
                       type="button"
@@ -1036,6 +1042,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           onOpenChange={setSmartPreviewOpen}
           jobInput={smartPreviewInput}
           availableCredits={credits?.total_available ?? null}
+          cloneCostCredits={smartPreviewCloneCostCredits}
+          cloneCostLoadFailed={voiceCloneCostLoadFailed}
           onCreated={onCreated}
         />
       ) : null}

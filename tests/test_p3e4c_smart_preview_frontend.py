@@ -8,6 +8,20 @@ _REPO = Path(__file__).resolve().parents[1]
 _SMART_PREVIEW_TS = (
     _REPO / "frontend-next" / "src" / "lib" / "api" / "smartPreviewClone.ts"
 )
+_TRANSLATION_FORM_TSX = (
+    _REPO / "frontend-next" / "src" / "components" / "workspace" / "TranslationForm.tsx"
+)
+_CONFIRM_DIALOG_TSX = (
+    _REPO
+    / "frontend-next"
+    / "src"
+    / "components"
+    / "workspace"
+    / "SmartPreviewConfirmDialog.tsx"
+)
+_VOICE_SELECTION_TS = (
+    _REPO / "frontend-next" / "src" / "lib" / "api" / "voiceSelection.ts"
+)
 
 
 def _src() -> str:
@@ -40,3 +54,19 @@ def test_convert_preview_to_full_keeps_user_transcription_choice():
 
     assert "body.transcription_method = 'assemblyai'" not in fn
     assert "reuse_preview_job_id" in fn
+
+
+def test_smart_preview_cost_is_not_frontend_hardcoded():
+    """Preview clone cost must flow from Gateway pricing, not a TS constant."""
+    api_src = _src()
+    form_src = _TRANSLATION_FORM_TSX.read_text(encoding="utf-8")
+    dialog_src = _CONFIRM_DIALOG_TSX.read_text(encoding="utf-8")
+    voice_selection_src = _VOICE_SELECTION_TS.read_text(encoding="utf-8")
+
+    assert "SMART_PREVIEW_CLONE_CREDITS" not in api_src
+    assert "SMART_PREVIEW_CLONE_CREDITS" not in form_src
+    assert "SMART_PREVIEW_CLONE_CREDITS" not in dialog_src
+    assert "smart_preview_clone_cost_credits: number" in voice_selection_src
+    assert "pricing.smart_preview_clone_cost_credits" in form_src
+    assert "cloneCostCredits={smartPreviewCloneCostCredits}" in form_src
+    assert "mapSmartPreviewCreateError(error, { cloneCostCredits })" in dialog_src

@@ -80,10 +80,10 @@ def test_db_late_reserve_reduced_by_offset():
 
 def test_p3_reserve_offset_single_source_constant():
     """🔥 CodeX P3：reserve-offset R_own 用命名常量（非裸 600 字面量），防 pricing 漂移。
-    克隆 reserve 字面量 600 仍由 test_create_600_clone_reserve_untouched 钉真值。"""
+    真值由 smart_clone_reservation_service 的 gateway 预览克隆常量钉住。"""
     src = _JI.read_text(encoding="utf-8")
     flat = _flat(src)
-    assert "_SMART_CLONE_RESERVE_CREDITS = 600" in flat
+    assert "_SMART_CLONE_RESERVE_CREDITS = SMART_PREVIEW_CLONE_RESERVE_CREDITS" in flat
     assert "smart_clone_reserved_credits" in flat
     assert "_smart_clone_create_reserved_credits" in flat
 

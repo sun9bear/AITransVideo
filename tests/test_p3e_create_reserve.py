@@ -98,11 +98,11 @@ def test_smart_preview_mode_stamped_from_preview_request_strict():
     assert '"smart_preview_mode": request_data.get("preview_mode") is True' in flat
 
 
-def test_reserve_amount_600_and_lib_cap():
-    """预扣 600 + 库容门用 admin smart_user_voice_clone_cap。"""
+def test_reserve_amount_uses_gateway_preview_clone_constant_and_lib_cap():
+    """预扣点数来自 gateway 预览克隆常量 + 库容门用 admin smart_user_voice_clone_cap。"""
     body = _create_src()
     flat = " ".join(body.split())
-    assert "amount_credits=600" in flat
+    assert "amount_credits=_SMART_CLONE_RESERVE_CREDITS" in flat
     assert "smart_user_voice_clone_cap" in body
     assert "library_cap=_smart_lib_cap" in flat
 

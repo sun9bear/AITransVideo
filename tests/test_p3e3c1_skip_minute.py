@@ -109,11 +109,11 @@ def test_create_still_reserves_minutes_for_normal_smart():
     assert "reserve_credits_or_raise(" in body
 
 
-def test_create_600_clone_reserve_untouched():
-    """🔥 600 克隆 reserve 不受影响（跳的是分钟点，不是克隆点）。"""
+def test_create_clone_reserve_uses_gateway_preview_constant():
+    """🔥 克隆 reserve 不受影响（跳的是分钟点，不是克隆点）。"""
     body = _create_src()
     flat = " ".join(body.split())
-    assert "amount_credits=600" in flat
+    assert "amount_credits=_SMART_CLONE_RESERVE_CREDITS" in flat
     assert "_reserve_smart_clone(" in flat
 
 

@@ -57,6 +57,7 @@ from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
 from smart_clone_reservation_service import (
     PREVIEW_PURPOSE as SMART_PREVIEW_PURPOSE,
+    SMART_PREVIEW_CLONE_RESERVE_CREDITS,
     reserve_smart_clone_credit,
     settle_smart_clone_reservation,
 )
@@ -95,9 +96,10 @@ _SMART_PAID_CLONE_CONFIRM_FIELDS = (
 )
 _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES = 24 * 60
 # P3e（plan 2026-06-15 §4.5，CodeX 复审 P3）：智能版预览克隆 600 点预扣 =
-# offset 的单一来源。普通智能版新克隆的 create reservation 仍通过 runtime
-# pricing 读取（见 _get_smart_clone_cost_credits），二者不可混用。
-_SMART_CLONE_RESERVE_CREDITS = 600
+# offset 的单一来源。真正的 gateway 源在 smart_clone_reservation_service，
+# pricing API 也从那里暴露给前端。普通智能版新克隆的 create reservation
+# 仍通过 runtime pricing 读取（见 _get_smart_clone_cost_credits），二者不可混用。
+_SMART_CLONE_RESERVE_CREDITS = SMART_PREVIEW_CLONE_RESERVE_CREDITS
 
 
 def _get_smart_clone_cost_credits() -> int:
@@ -2427,10 +2429,9 @@ async def intercept_create_job(
                         user_id=user.id,
                         task_id=_pre_job_id,
                         purpose=SMART_PREVIEW_PURPOSE,
-                        # 克隆 reserve 金额（== _SMART_CLONE_RESERVE_CREDITS；保留字面量
-                        # 让既有钱-守卫 test_create_600_clone_reserve_untouched /
-                        # test_reserve_amount_600_and_lib_cap 钉住真值。改价须同步常量）。
-                        amount_credits=600,
+                        # 克隆 reserve 金额来自 gateway 单一业务常量；前端仅通过
+                        # pricing API 读取展示值，不再硬编码。
+                        amount_credits=_SMART_CLONE_RESERVE_CREDITS,
                         ttl_minutes=60,
                         library_cap=_smart_lib_cap,
                         daily_global_cap=_smart_daily_cap,

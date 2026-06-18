@@ -48,6 +48,7 @@ EXPIRED = "expired"
 
 PURPOSE = "smart_clone_minimax_600"
 PREVIEW_PURPOSE = "smart_preview_clone_minimax_600"
+SMART_PREVIEW_CLONE_RESERVE_CREDITS = 600
 _REGISTER_FAILED_HANDOFF_REASONS = frozenset({
     "clone_library_register_failed",
 })
@@ -883,6 +884,7 @@ async def sweep_settle_stale_reservations(db: AsyncSession, *, limit: int = 200)
 
 __all__ = [
     "RESERVED", "CAPTURED", "RELEASED", "EXPIRED", "PURPOSE", "PREVIEW_PURPOSE",
+    "SMART_PREVIEW_CLONE_RESERVE_CREDITS",
     "SmartReserveOutcome",
     "RegisterBillOutcome",
     "SettleOutcome",

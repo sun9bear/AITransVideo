@@ -11,7 +11,6 @@ import { buildStreamUrl } from "@/lib/api/downloads"
 import {
   convertPreviewToFull,
   mapSmartPreviewReuseError,
-  SMART_PREVIEW_CLONE_CREDITS,
 } from "@/lib/api/smartPreviewClone"
 import type { CreateTranslationJobInput, JobSummary } from "@/types/jobs"
 
@@ -183,8 +182,7 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
             <div className="space-y-2.5">
               <p className="text-sm font-medium text-foreground">满意这个效果？</p>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                转完整成片将复用同一视频与已克隆音色，按分钟正常扣点，不再重复扣预览的{" "}
-                {SMART_PREVIEW_CLONE_CREDITS} 点克隆费。
+                转完整成片将复用同一视频与已克隆音色，按分钟正常扣点，不再重复扣预览已支付的克隆费。
               </p>
               {errorMessage ? (
                 <p className="text-xs leading-relaxed text-[color:var(--cinnabar)]">{errorMessage}</p>
