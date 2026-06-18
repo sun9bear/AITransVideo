@@ -52,7 +52,10 @@ def test_db_create_reserve_reduced_by_offset():
     不再直接用 shadow_credits。offset 含 R_own(600 if reservation) + R_carryover。"""
     flat = _flat(_create_src())
     # CodeX P3：自有克隆侧用单一来源常量（非硬编码 600）
-    assert "_SMART_CLONE_RESERVE_CREDITS if _smart_clone_reservation_id else 0" in flat
+    assert (
+        "_SMART_CLONE_RESERVE_CREDITS if ( _smart_clone_reservation_id "
+        "or _smart_clone_create_reservation_id ) else 0"
+    ) in flat
     assert 'preview_clone_credit_offset' in flat
     assert "_minute_reserve_credits = max(0, shadow_credits - _reserve_offset)" in flat
     # reserve 调用用净额（不是 gross shadow_credits）

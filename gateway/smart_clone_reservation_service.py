@@ -47,6 +47,7 @@ RELEASED = "released"
 EXPIRED = "expired"
 
 PURPOSE = "smart_clone_minimax_600"
+PREVIEW_PURPOSE = "smart_preview_clone_minimax_600"
 _REGISTER_FAILED_HANDOFF_REASONS = frozenset({
     "clone_library_register_failed",
 })
@@ -176,7 +177,10 @@ async def count_global_smart_reservations_today(
     result = await db.execute(
         select(func.count())
         .select_from(SmartCloneReservation)
-        .where(SmartCloneReservation.created_at >= day_start)
+        .where(
+            SmartCloneReservation.created_at >= day_start,
+            SmartCloneReservation.purpose == PREVIEW_PURPOSE,
+        )
     )
     return int(result.scalar() or 0)
 
@@ -197,6 +201,7 @@ async def count_global_inflight_smart_reservations(
         .where(
             SmartCloneReservation.status == RESERVED,
             SmartCloneReservation.expires_at >= now,
+            SmartCloneReservation.purpose == PREVIEW_PURPOSE,
         )
     )
     return int(result.scalar() or 0)
@@ -243,6 +248,7 @@ async def reserve_smart_clone_credit(
     required_available_credits: int | None = None,
     daily_global_cap: int | None = None,
     inflight_cap: int | None = None,
+    purpose: str = PURPOSE,
 ) -> SmartReserveOutcome:
     """原子预扣一个智能版预览克隆 600 点名额（v3 §3 预览阶段）。
 
@@ -254,6 +260,7 @@ async def reserve_smart_clone_credit(
     endpoint）从 admin/plan 读后传入；service 保持纯（可测）。
     """
     now = _now()
+    reservation_purpose = str(purpose or PURPOSE)
 
     # 1. 锁 users row（串行化同 user 并发；unknown user fail-closed）
     user_pk = (
@@ -270,7 +277,7 @@ async def reserve_smart_clone_credit(
         await db.execute(
             select(SmartCloneReservation).where(
                 SmartCloneReservation.task_id == task_id,
-                SmartCloneReservation.purpose == PURPOSE,
+                SmartCloneReservation.purpose == reservation_purpose,
                 SmartCloneReservation.status == RESERVED,
             )
         )
@@ -347,7 +354,7 @@ async def reserve_smart_clone_credit(
             id=reservation_id,
             user_id=user_id,
             task_id=task_id,
-            purpose=PURPOSE,
+            purpose=reservation_purpose,
             amount_credits=int(amount_credits),
             status=RESERVED,
             created_at=now,
@@ -366,7 +373,7 @@ async def reserve_smart_clone_credit(
             await db.execute(
                 select(SmartCloneReservation).where(
                     SmartCloneReservation.task_id == task_id,
-                    SmartCloneReservation.purpose == PURPOSE,
+                    SmartCloneReservation.purpose == reservation_purpose,
                     SmartCloneReservation.status == RESERVED,
                 )
             )
@@ -875,7 +882,7 @@ async def sweep_settle_stale_reservations(db: AsyncSession, *, limit: int = 200)
 
 
 __all__ = [
-    "RESERVED", "CAPTURED", "RELEASED", "EXPIRED", "PURPOSE",
+    "RESERVED", "CAPTURED", "RELEASED", "EXPIRED", "PURPOSE", "PREVIEW_PURPOSE",
     "SmartReserveOutcome",
     "RegisterBillOutcome",
     "SettleOutcome",

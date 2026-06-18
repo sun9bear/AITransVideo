@@ -95,9 +95,17 @@ async def _make_sessionmaker(*, bucket_remaining: int = 5000) -> async_sessionma
     return sm
 
 
-def _resv(user_id, task_id, *, status="reserved", created_at, expires_at):
+def _resv(
+    user_id,
+    task_id,
+    *,
+    status="reserved",
+    created_at,
+    expires_at,
+    purpose=svc.PREVIEW_PURPOSE,
+):
     return SmartCloneReservation(
-        id=uuid.uuid4(), user_id=user_id, task_id=task_id, purpose=svc.PURPOSE,
+        id=uuid.uuid4(), user_id=user_id, task_id=task_id, purpose=purpose,
         amount_credits=600, status=status, created_at=created_at,
         updated_at=created_at, expires_at=expires_at,
     )
@@ -169,6 +177,35 @@ def test_count_global_inflight_only_active_nonexpired_across_users():
             await db.commit()
             n = await svc.count_global_inflight_smart_reservations(db, now=now)
             assert n == 2
+    _run(go())
+
+
+def test_preview_caps_ignore_full_smart_reservations():
+    """Preview anti-abuse caps must not consume paid full-Smart clone capacity."""
+    async def go():
+        sm = await _make_sessionmaker()
+        now = datetime.now(timezone.utc)
+        day_start = shanghai_day_start_utc(now)
+        async with sm() as db:
+            db.add(_resv(
+                _USER,
+                "pv1",
+                created_at=day_start + timedelta(minutes=1),
+                expires_at=now + timedelta(hours=1),
+                purpose=svc.PREVIEW_PURPOSE,
+            ))
+            db.add(_resv(
+                _OTHER,
+                "full1",
+                created_at=day_start + timedelta(minutes=2),
+                expires_at=now + timedelta(hours=1),
+                purpose=svc.PURPOSE,
+            ))
+            await db.commit()
+            today = await svc.count_global_smart_reservations_today(db, now=now)
+            inflight = await svc.count_global_inflight_smart_reservations(db, now=now)
+            assert today == 1
+            assert inflight == 1
     _run(go())
 
 
@@ -315,6 +352,8 @@ def test_job_intercept_passes_both_caps_to_reserve():
     window = flat[a:a + 600]
     assert "daily_global_cap=" in window
     assert "inflight_cap=" in window
+    assert "purpose=" in window
+    assert "PREVIEW_PURPOSE" in window
 
 
 # ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@ from models import Job, User, UserVoice
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
 from smart_clone_reservation_service import (
+    PREVIEW_PURPOSE as SMART_PREVIEW_PURPOSE,
     reserve_smart_clone_credit,
     settle_smart_clone_reservation,
 )
@@ -2411,6 +2412,7 @@ async def intercept_create_job(
                         db,
                         user_id=user.id,
                         task_id=_pre_job_id,
+                        purpose=SMART_PREVIEW_PURPOSE,
                         # 克隆 reserve 金额（== _SMART_CLONE_RESERVE_CREDITS；保留字面量
                         # 让既有钱-守卫 test_create_600_clone_reserve_untouched /
                         # test_reserve_amount_600_and_lib_cap 钉住真值。改价须同步常量）。
@@ -2659,7 +2661,12 @@ async def intercept_create_job(
                     # 重算）；reserve 偏少时 settle additional-debit 补足、不漏扣。net=0 时
                     # reserve_credits_or_raise(0) no-op（短任务只占 600 克隆）。
                     _reserve_offset = (
-                        _SMART_CLONE_RESERVE_CREDITS if _smart_clone_reservation_id else 0
+                        _SMART_CLONE_RESERVE_CREDITS
+                        if (
+                            _smart_clone_reservation_id
+                            or _smart_clone_create_reservation_id
+                        )
+                        else 0
                     )
                     if _convert_smart_state:
                         _reserve_offset += int(
