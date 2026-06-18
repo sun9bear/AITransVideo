@@ -370,6 +370,45 @@ def test_register_bill_rechecks_library_capacity_before_billing():
     _run(go())
 
 
+def test_billed_reservation_does_not_double_count_next_library_reserve():
+    """Registered preview clone capacity is represented by its UserVoice row."""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=2000)
+        try:
+            async with sm() as db:
+                for i in range(29):
+                    db.add(UserVoice(
+                        user_id=_USER,
+                        voice_id=f"existing_voice_{i}",
+                        label="existing",
+                        provider="minimax_voice_clone",
+                        tts_provider="minimax_tts",
+                        platform="minimax_domestic",
+                        created_from="manual_clone",
+                    ))
+                await db.commit()
+
+                rid = await _reserve(db, "job_registered", library_cap=31)
+                out = await svc.register_smart_clone_with_billing(
+                    db, user_id=_USER, task_id="job_registered", reservation_id=rid,
+                    voice_id="mm_registered", label="registered",
+                    source_job_id="job_registered", library_cap=31,
+                )
+                assert out.status == "billed"
+
+                next_reserve = await svc.reserve_smart_clone_credit(
+                    db, user_id=_USER, task_id="job_next", amount_credits=600,
+                    ttl_minutes=30, library_cap=31,
+                )
+
+                assert next_reserve.status == "reserved"
+                assert next_reserve.reservation_id is not None
+        finally:
+            await sm.kw["bind"].dispose()
+
+    _run(go())
+
+
 def test_settle_captures_when_billed():
     """🔥 有 chargeable event → capture 600：remaining 真扣到 200、reserved 清 0。"""
     async def go():

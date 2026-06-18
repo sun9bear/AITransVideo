@@ -1949,6 +1949,56 @@ class TestB3DCloneSampleExtractorContract:
         assert body["created_from"] == "smart_auto"
         assert body["notes"] == "Smart auto-clone from job j-1"
 
+    def test_p3b_billed_mirror_helper_routes_reserved_clone_to_billing_endpoint(self, monkeypatch):
+        """Reserved preview clones must register through the billed endpoint."""
+        from pipeline.process import _register_smart_clone_in_user_voices
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+        recorded = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "ok": True,
+                    "status": "billed",
+                    "reservation_id": "11111111-1111-1111-1111-111111111111",
+                }
+
+        def _fake_post(url, *, json=None, headers=None, timeout=None):
+            recorded["url"] = url
+            recorded["json"] = json
+            recorded["headers"] = headers
+            recorded["timeout"] = timeout
+            return _Resp()
+
+        import requests as _requests_mod
+        monkeypatch.setattr(_requests_mod, "post", _fake_post)
+
+        result = _register_smart_clone_in_user_voices(
+            user_id="00000000-0000-0000-0000-0000000000a1",
+            voice_id="mm_voice_reserved",
+            label="Speaker A",
+            source_speaker_id="speaker_a",
+            source_job_id="job-reserved",
+            smart_clone_reservation_id="11111111-1111-1111-1111-111111111111",
+        )
+
+        assert result is True
+        assert recorded["url"] == (
+            "http://127.0.0.1:8880/api/internal/smart-clone/register-billed"
+        )
+        assert recorded["headers"] == {"X-Internal-Key": "test-key"}
+        assert recorded["timeout"] == 5.0
+        body = recorded["json"]
+        assert body["user_id"] == "00000000-0000-0000-0000-0000000000a1"
+        assert body["task_id"] == "job-reserved"
+        assert body["reservation_id"] == "11111111-1111-1111-1111-111111111111"
+        assert body["voice_id"] == "mm_voice_reserved"
+        assert body["label"] == "Speaker A"
+        assert body["source_speaker_id"] == "speaker_a"
+
     def test_b3e_fix_mirror_helper_returns_false_on_failures(self, monkeypatch):
         """Codex 第二十九轮 P0: ANY failure mode returns False so the
         caller can escalate to handoff. NEVER raises."""
@@ -2308,6 +2358,10 @@ class TestB3DCloneSampleExtractorContract:
             "Smart branch missing _smart_clone_mirror_failures list — "
             "needed to aggregate per-speaker mirror failures and "
             "escalate to handoff."
+        )
+        assert "smart_clone_reservation_id=" in block, (
+            "Smart branch must pass smart_clone_reservation_id into the "
+            "mirror helper so preview clones create CloneBillingEvent rows."
         )
         assert "clone_library_register_failed" in block, (
             "Smart branch missing clone_library_register_failed reason "
