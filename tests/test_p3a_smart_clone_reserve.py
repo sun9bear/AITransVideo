@@ -499,6 +499,45 @@ def test_register_bill_released_reservation_does_not_bill():
     _run(go())
 
 
+def test_register_bill_expired_current_reservation_does_not_bill():
+    """Late register-billed callbacks must not charge expired reservations."""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_r4_expired")
+            row = (
+                await db.execute(
+                    select(SmartCloneReservation).where(
+                        SmartCloneReservation.id == uuid.UUID(str(rid))
+                    )
+                )
+            ).scalar_one()
+            row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            await db.commit()
+
+            out = await svc.register_smart_clone_with_billing(
+                db, user_id=_USER, task_id="job_r4_expired", reservation_id=rid,
+                voice_id="mm_v4_expired", label="x", source_job_id="job_r4_expired",
+            )
+
+            assert out.status == "no_active_reservation"
+            expired = (
+                await db.execute(
+                    select(SmartCloneReservation).where(
+                        SmartCloneReservation.id == uuid.UUID(str(rid))
+                    )
+                )
+            ).scalar_one()
+            assert expired.status == svc.EXPIRED
+            assert (await db.execute(select(CloneBillingEvent))).scalar_one_or_none() is None
+            assert (
+                await db.execute(
+                    select(UserVoice).where(UserVoice.voice_id == "mm_v4_expired")
+                )
+            ).scalar_one_or_none() is None
+    _run(go())
+
+
 # ---------------------------------------------------------------------------
 # P3c finalizer：capture / release 对账（钱-正确性核心）
 # ---------------------------------------------------------------------------

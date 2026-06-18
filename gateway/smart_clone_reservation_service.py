@@ -452,7 +452,19 @@ async def register_smart_clone_with_billing(
     if user_pk is None:
         await db.rollback()
         return RegisterBillOutcome(status="no_active_reservation")
-    await _expire_stale_for_user(db, user_id, now=_now())
+    now = _now()
+    await _expire_stale_for_user(db, user_id, now=now)
+    expires_at = res.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at < now:
+        res.status = EXPIRED
+        res.reason_code = "ttl_expired"
+        res.updated_at = now
+        await db.commit()
+        return RegisterBillOutcome(
+            status="no_active_reservation", reservation_id=str(res_pk)
+        )
     other_reserved = await count_active_smart_reservations(
         db, user_id, exclude_reservation_id=res_pk
     )
