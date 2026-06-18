@@ -58,6 +58,26 @@ def test_register_billed_dispatches_to_service():
     assert re.search(r"await register_smart_clone_with_billing\(", body)
 
 
+def test_register_billed_forwards_source_metadata_to_service():
+    body = _func_src("internal_smart_clone_register_billed")
+    for field in (
+        "source_type",
+        "source_ref",
+        "source_content_hash",
+        "source_video_title",
+        "source_speaker_name",
+        "source_speaker_name_key",
+        "source_content_summary",
+        "source_content_era",
+        "source_content_tags",
+        "clone_sample_seconds",
+        "clone_sample_segment_ids",
+        "notes",
+    ):
+        assert f"{field}=body.get(\"{field}\")" in body
+    assert 'source_published_at=_parse_optional_datetime(body.get("source_published_at"))' in body
+
+
 def test_register_billed_maps_no_active_reservation_to_409():
     body = _func_src("internal_smart_clone_register_billed")
     assert "no_active_reservation" in body

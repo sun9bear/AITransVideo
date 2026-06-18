@@ -278,6 +278,61 @@ def test_register_bill_happy_atomic_event_and_voice():
     _run(go())
 
 
+def test_register_bill_preserves_source_metadata():
+    """Billed registration must keep reuse/audit metadata from the pipeline."""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        try:
+            async with sm() as db:
+                rid = await _reserve(db, "job_meta")
+                published_at = datetime(2024, 5, 1, tzinfo=timezone.utc)
+                out = await svc.register_smart_clone_with_billing(
+                    db,
+                    user_id=_USER,
+                    task_id="job_meta",
+                    reservation_id=rid,
+                    voice_id="mm_meta",
+                    label="Speaker Meta",
+                    source_speaker_id="speaker_a",
+                    source_job_id="job_meta",
+                    source_type="youtube_url",
+                    source_ref="https://youtu.be/source",
+                    source_content_hash="youtube:source",
+                    source_video_title="Source Title",
+                    source_speaker_name="Speaker A",
+                    source_speaker_name_key="speaker a",
+                    source_published_at=published_at,
+                    source_content_summary="channel: test",
+                    source_content_era="2024",
+                    source_content_tags={"channel": "Test", "tags": ["AI"]},
+                    clone_sample_seconds=12.5,
+                    clone_sample_segment_ids=[1, 2],
+                    notes="Smart auto-clone from job job_meta",
+                )
+                assert out.status == "billed"
+
+                uv = (
+                    await db.execute(select(UserVoice).where(UserVoice.voice_id == "mm_meta"))
+                ).scalar_one()
+                assert uv.source_type == "youtube_url"
+                assert uv.source_ref == "https://youtu.be/source"
+                assert uv.source_content_hash == "youtube:source"
+                assert uv.source_video_title == "Source Title"
+                assert uv.source_speaker_name == "Speaker A"
+                assert uv.source_speaker_name_key == "speaker a"
+                assert uv.source_published_at == published_at
+                assert uv.source_content_summary == "channel: test"
+                assert uv.source_content_era == "2024"
+                assert uv.source_content_tags == {"channel": "Test", "tags": ["AI"]}
+                assert uv.clone_sample_seconds == 12.5
+                assert uv.clone_sample_segment_ids == [1, 2]
+                assert uv.notes == "Smart auto-clone from job job_meta"
+        finally:
+            await sm.kw["bind"].dispose()
+
+    _run(go())
+
+
 def test_register_bill_idempotent_no_double():
     """🔥 幂等：同 reservation 第二次 register+bill → idempotent，不双写。"""
     async def go():

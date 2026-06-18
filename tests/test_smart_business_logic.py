@@ -2364,6 +2364,10 @@ class TestB3DCloneSampleExtractorContract:
             "Smart branch must pass smart_clone_reservation_id into the "
             "mirror helper so preview clones create CloneBillingEvent rows."
         )
+        assert "max_new_clones=" in block, (
+            "Reserved smart preview jobs must cap provider-created clones "
+            "to one reservation-backed voice."
+        )
         assert "clone_library_register_failed" in block, (
             "Smart branch missing clone_library_register_failed reason "
             "code — Codex 第二十九轮 P0: mirror failure must surface "
