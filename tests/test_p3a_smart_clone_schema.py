@@ -97,7 +97,7 @@ def test_reservation_table_name_and_columns():
     expected = {
         "id", "user_id", "task_id", "purpose", "amount_credits", "status",
         "created_at", "updated_at", "expires_at", "settled_at",
-        "captured_voice_id", "reason_code",
+        "captured_voice_id", "reason_code", "carryover_applied_to_task_id",
     }
     actual = set(t.columns.keys())
     assert expected <= actual, f"ORM 缺列: {expected - actual}"
@@ -122,7 +122,12 @@ def test_reservation_required_and_optional_columns():
     cols = SmartCloneReservation.__table__.columns
     for name in ("user_id", "task_id", "purpose", "amount_credits", "status", "expires_at"):
         assert cols[name].nullable is False, f"{name} 必须 NOT NULL"
-    for name in ("settled_at", "captured_voice_id", "reason_code"):
+    for name in (
+        "settled_at",
+        "captured_voice_id",
+        "reason_code",
+        "carryover_applied_to_task_id",
+    ):
         assert cols[name].nullable is True, f"{name} 在 reserved 阶段为 NULL → 必须 nullable"
 
 
@@ -151,6 +156,8 @@ def test_reservation_user_status_count_index():
     from models import SmartCloneReservation
     t = SmartCloneReservation.__table__
     assert any(i.name == "idx_smart_clone_reservation_user_status" for i in t.indexes)
+    assert any(i.name == "idx_smart_clone_reservation_created_at" for i in t.indexes)
+    assert any(i.name == "idx_smart_clone_reservation_carryover" for i in t.indexes)
 
 
 # ---------------------------------------------------------------------------

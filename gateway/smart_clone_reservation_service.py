@@ -640,12 +640,28 @@ async def settle_smart_clone_reservation(
             db, res, smart_state_override=smart_state_override
         )
     )
+    amount_credits = int(res.amount_credits or 0)
+
+    if amount_credits <= 0:
+        if chargeable or register_failed_handoff:
+            res.status = CAPTURED
+            res.captured_voice_id = event.voice_id if event is not None else None
+            res.reason_code = "captured" if chargeable else "captured_register_failed"
+            final = "captured"
+        else:
+            res.status = RELEASED
+            res.reason_code = res.reason_code or "released_no_clone"
+            final = "released"
+        res.settled_at = now
+        res.updated_at = now
+        await db.commit()
+        return SettleOutcome(status=final, reservation_id=str(res_pk))
 
     if chargeable or register_failed_handoff:
         reason_code = capture_reason if chargeable else register_failed_capture_reason
         await shadow_capture(
             db, user_id=res.user_id, job_id=credit_job_id,
-            actual_credits=int(res.amount_credits), service_mode=service_mode,
+            actual_credits=amount_credits, service_mode=service_mode,
             reason_code=reason_code, reserve_reason_code=reserve_reason,
         )
         settled_ok = await _has_existing_settlement(

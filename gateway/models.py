@@ -1001,6 +1001,9 @@ class SmartCloneReservation(Base):
         String(200), nullable=True
     )
     reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    carryover_applied_to_task_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
 
     __table_args__ = (
         # 幂等第二道防线：同 (task_id, purpose) 最多一个 active(reserved)。
@@ -1026,6 +1029,16 @@ class SmartCloneReservation(Base):
             "expires_at",
             postgresql_where=text("status = 'reserved'"),
             sqlite_where=text("status = 'reserved'"),
+        ),
+        Index(
+            "idx_smart_clone_reservation_created_at",
+            "created_at",
+        ),
+        Index(
+            "idx_smart_clone_reservation_carryover",
+            "carryover_applied_to_task_id",
+            postgresql_where=text("carryover_applied_to_task_id IS NOT NULL"),
+            sqlite_where=text("carryover_applied_to_task_id IS NOT NULL"),
         ),
     )
 

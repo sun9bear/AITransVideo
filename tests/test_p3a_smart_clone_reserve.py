@@ -677,6 +677,81 @@ def test_settle_releases_when_no_billing_event():
     _run(go())
 
 
+def test_settle_zero_cost_captures_when_billed_without_ledger():
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            outcome = await svc.reserve_smart_clone_credit(
+                db,
+                user_id=_USER,
+                task_id="job_zero_bill",
+                amount_credits=0,
+                ttl_minutes=30,
+                library_cap=10,
+            )
+            assert outcome.status == "reserved"
+            rid = outcome.reservation_id
+            assert rid is not None
+
+            await svc.register_smart_clone_with_billing(
+                db,
+                user_id=_USER,
+                task_id="job_zero_bill",
+                reservation_id=rid,
+                voice_id="mm_zero",
+                label="zero",
+                source_job_id="job_zero_bill",
+            )
+
+            out = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+
+            assert out.status == "captured"
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 800 and resv == 0
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            assert row.status == "captured"
+            assert row.amount_credits == 0
+            assert row.captured_voice_id == "mm_zero"
+            assert row.settled_at is not None
+            ledgers = (await db.execute(select(CreditsLedger))).scalars().all()
+            assert ledgers == []
+
+    _run(go())
+
+
+def test_settle_zero_cost_releases_when_unbilled_without_ledger():
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            outcome = await svc.reserve_smart_clone_credit(
+                db,
+                user_id=_USER,
+                task_id="job_zero_release",
+                amount_credits=0,
+                ttl_minutes=30,
+                library_cap=10,
+            )
+            assert outcome.status == "reserved"
+            rid = outcome.reservation_id
+            assert rid is not None
+
+            out = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+
+            assert out.status == "released"
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 800 and resv == 0
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            assert row.status == "released"
+            assert row.amount_credits == 0
+            assert row.settled_at is not None
+            ledgers = (await db.execute(select(CreditsLedger))).scalars().all()
+            assert ledgers == []
+
+    _run(go())
+
+
 def test_settle_captures_reserved_register_failed_handoff():
     async def go():
         sm = await _make_sessionmaker(bucket_remaining=800)
