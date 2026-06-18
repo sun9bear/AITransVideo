@@ -150,6 +150,26 @@ def test_reserve_insufficient_credits_denied_no_charge():
 # ---------------------------------------------------------------------------
 
 
+def test_reserve_combined_credit_requirement_denied_no_charge():
+    """Combined Smart base+clone affordability is checked inside the user lock."""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=700)  # clone ok, base+clone not ok
+        async with sm() as db:
+            o = await svc.reserve_smart_clone_credit(
+                db,
+                user_id=_USER,
+                task_id="job_combined",
+                amount_credits=600,
+                ttl_minutes=30,
+                library_cap=10,
+                required_available_credits=800,
+            )
+            assert o.status == "denied" and o.deny_reason == "insufficient_credits"
+            assert (await db.execute(select(SmartCloneReservation))).scalar_one_or_none() is None
+            assert await _bucket_available(db) == 700
+    _run(go())
+
+
 def test_reserve_library_full_denied_before_charge():
     async def go():
         sm = await _make_sessionmaker(bucket_remaining=800)

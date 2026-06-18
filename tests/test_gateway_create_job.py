@@ -1383,6 +1383,7 @@ class TestSmartVoiceQuotaPreflightGates:
                 "amount_credits": 600,
                 "ttl_minutes": 1440,
                 "library_cap": 30,
+                "required_available_credits": 800,
             }
         ]
         assert captured_body["smart_state"] == {
@@ -1599,7 +1600,7 @@ class TestSmartVoiceQuotaPreflightGates:
             service_mode="smart",
         )
 
-    def test_create_smart_job_skips_clone_reserve_when_combined_balance_short(self):
+    def test_create_smart_job_passes_combined_balance_guard_to_clone_reserve(self):
         import admin_settings as admin_mod
 
         captured_body: dict = {}
@@ -1613,9 +1614,9 @@ class TestSmartVoiceQuotaPreflightGates:
         async def fake_reserve(db, **kwargs):
             reserve_calls.append(dict(kwargs))
             return SimpleNamespace(
-                status="reserved",
-                reservation_id="22222222-2222-2222-2222-222222222222",
-                deny_reason=None,
+                status="denied",
+                reservation_id=None,
+                deny_reason="insufficient_credits",
                 idempotent_hit=False,
             )
 
@@ -1659,7 +1660,9 @@ class TestSmartVoiceQuotaPreflightGates:
                                     resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
-        assert reserve_calls == []
+        assert len(reserve_calls) == 1
+        assert reserve_calls[0]["amount_credits"] == 600
+        assert reserve_calls[0]["required_available_credits"] == 800
         assert captured_body["smart_state"] == {
             "smart_clone_credit_reserved": False,
             "smart_clone_reservation_deny_reason": "insufficient_credits",

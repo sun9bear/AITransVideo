@@ -32,7 +32,11 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from credits_service import InsufficientCreditsError, reserve_credits_or_raise
+from credits_service import (
+    InsufficientCreditsError,
+    get_user_buckets,
+    reserve_credits_or_raise,
+)
 from models import CloneBillingEvent, Job, SmartCloneReservation, User, UserVoice
 
 
@@ -142,6 +146,17 @@ async def count_active_library_voices(db: AsyncSession, user_id: object) -> int:
     return int(result.scalar() or 0)
 
 
+def _available_credits_from_buckets(buckets: list[object]) -> int:
+    return sum(
+        max(
+            0,
+            int(getattr(bucket, "remaining", 0) or 0)
+            - max(0, int(getattr(bucket, "reserved", 0) or 0)),
+        )
+        for bucket in buckets
+    )
+
+
 async def reserve_smart_clone_credit(
     db: AsyncSession,
     *,
@@ -150,6 +165,7 @@ async def reserve_smart_clone_credit(
     amount_credits: int,
     ttl_minutes: int,
     library_cap: int,
+    required_available_credits: int | None = None,
 ) -> SmartReserveOutcome:
     """原子预扣一个智能版预览克隆 600 点名额（v3 §3 预览阶段）。
 
@@ -196,6 +212,15 @@ async def reserve_smart_clone_credit(
     if lib_total >= library_cap:
         await db.commit()  # 提交 inline expire（即便 deny）
         return SmartReserveOutcome(status="denied", deny_reason="voice_library_full")
+
+    required_total = int(required_available_credits or amount_credits)
+    if required_total > int(amount_credits):
+        buckets = await get_user_buckets(db, user_id, for_update=True)
+        if _available_credits_from_buckets(buckets) < required_total:
+            await db.commit()
+            return SmartReserveOutcome(
+                status="denied", deny_reason="insufficient_credits"
+            )
 
     # 5. 信用预扣 600（不足 → InsufficientCreditsError，走预设）
     reservation_id = uuid.uuid4()

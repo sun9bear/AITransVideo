@@ -62,7 +62,6 @@ from smart_clone_reservation_service import (
 from credits_service import (
     InsufficientCreditsError,
     ensure_credit_buckets_for_user, estimate_credits,
-    get_user_buckets,
     reserve_credits_or_raise,
 )
 # Plan 2026-05-07 §4.5 (P1.1 fix): shared mirror helper so the sweeper
@@ -1847,7 +1846,6 @@ async def intercept_create_job(
                         or 30
                     )
                 )
-                _clone_deny_reason: str | None = None
                 _base_est_min = (
                     estimated_duration_seconds / 60.0
                     if estimated_duration_seconds
@@ -1858,63 +1856,46 @@ async def intercept_create_job(
                     service_mode=service_mode,
                     quality_tier=policy.get("quality_tier", "standard"),
                 )
-                if _base_credits > 0:
-                    await ensure_credit_buckets_for_user(db, user=user)
-                    _buckets = await get_user_buckets(db, user.id, for_update=True)
-                    _available = sum(
-                        max(
-                            0,
-                            int(getattr(bucket, "remaining", 0) or 0)
-                            - int(getattr(bucket, "reserved", 0) or 0),
-                        )
-                        for bucket in _buckets
+                _reserve_outcome = await reserve_smart_clone_credit(
+                    db,
+                    user_id=user.id,
+                    task_id=str(request_data["job_id"]),
+                    amount_credits=600,
+                    ttl_minutes=max(
+                        _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
+                        int(
+                            getattr(
+                                _admin_for_clone,
+                                "smart_clone_create_reservation_ttl_minutes",
+                                _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
+                            )
+                            or _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES
+                        ),
+                    ),
+                    library_cap=_library_cap,
+                    required_available_credits=(
+                        int(_base_credits) + 600 if _base_credits > 0 else None
+                    ),
+                )
+                if (
+                    _reserve_outcome.status == "reserved"
+                    and _reserve_outcome.reservation_id
+                ):
+                    _smart_clone_create_reservation_id = (
+                        _reserve_outcome.reservation_id
                     )
-                    if _available < _base_credits + 600:
-                        _clone_deny_reason = "insufficient_credits"
-
-                if _clone_deny_reason:
                     _smart_initial_state = {
-                        "smart_clone_credit_reserved": False,
-                        "smart_clone_reservation_deny_reason": _clone_deny_reason,
+                        "smart_clone_credit_reserved": True,
+                        "smart_clone_reservation_id": _reserve_outcome.reservation_id,
                     }
                 else:
-                    _reserve_outcome = await reserve_smart_clone_credit(
-                        db,
-                        user_id=user.id,
-                        task_id=str(request_data["job_id"]),
-                        amount_credits=600,
-                        ttl_minutes=max(
-                            _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
-                            int(
-                                getattr(
-                                    _admin_for_clone,
-                                    "smart_clone_create_reservation_ttl_minutes",
-                                    _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
-                                )
-                                or _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES
-                            ),
+                    _smart_initial_state = {
+                        "smart_clone_credit_reserved": False,
+                        "smart_clone_reservation_deny_reason": (
+                            _reserve_outcome.deny_reason
+                            or _reserve_outcome.status
                         ),
-                        library_cap=_library_cap,
-                    )
-                    if (
-                        _reserve_outcome.status == "reserved"
-                        and _reserve_outcome.reservation_id
-                    ):
-                        _smart_clone_create_reservation_id = (
-                            _reserve_outcome.reservation_id
-                        )
-                        _smart_initial_state = {
-                            "smart_clone_credit_reserved": True,
-                            "smart_clone_reservation_id": _reserve_outcome.reservation_id,
-                        }
-                    else:
-                        _smart_initial_state = {
-                            "smart_clone_credit_reserved": False,
-                            "smart_clone_reservation_deny_reason": (
-                                _reserve_outcome.deny_reason
-                                or _reserve_outcome.status
-                            ),
-                        }
+                    }
         except Exception as exc:
             logger.warning(
                 "smart clone reservation failed before create; "
