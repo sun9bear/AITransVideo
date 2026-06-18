@@ -34,6 +34,7 @@ F. Import guards
 from __future__ import annotations
 
 import ast
+import inspect
 import sys
 import types
 import uuid
@@ -342,6 +343,55 @@ class TestSessionCookie:
         assert isinstance(result, AnonymousSessionContext)
         assert result.session_id_hash == hashed
         assert result.is_new is False
+
+    @pytest.mark.asyncio
+    async def test_claimed_session_cookie_get_or_create_rotates(self, monkeypatch):
+        raw_token = "claimed_token_xyz_abc_def"
+        hashed = _hash_token(raw_token)
+        row = _make_session_row(hashed, expired=False)
+        row.claim_user_id = str(uuid.uuid4())
+        fake_req = MagicMock()
+        fake_req.cookies = {"avt_anon": raw_token}
+        fake_resp = MagicMock()
+        fake_db = AsyncMock()
+
+        async def _fake_lookup(db, sid):
+            assert sid == hashed
+            return row
+
+        monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
+
+        result = await get_or_create_anonymous_session(fake_req, fake_resp, fake_db)
+        assert isinstance(result, AnonymousSessionContext)
+        assert result.is_new is True
+        fake_resp.set_cookie.assert_called_once()
+        fake_db.add.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_claimed_session_cookie_require_returns_401(self, monkeypatch):
+        raw_token = "claimed_token_require_xyz"
+        hashed = _hash_token(raw_token)
+        row = _make_session_row(hashed, expired=False)
+        row.claim_user_id = str(uuid.uuid4())
+        fake_req = MagicMock()
+        fake_req.headers = {}
+        fake_req.cookies = {"avt_anon": raw_token}
+        fake_db = AsyncMock()
+
+        async def _fake_lookup(db, sid):
+            assert sid == hashed
+            return row
+
+        monkeypatch.setattr(anon_session_mod, "_lookup_session", _fake_lookup)
+
+        result = await require_anonymous_session(fake_req, fake_db)
+        from fastapi.responses import JSONResponse
+        assert isinstance(result, JSONResponse)
+        assert result.status_code == 401
+
+    def test_lookup_session_filters_claimed_rows(self):
+        src = inspect.getsource(anon_session_mod._lookup_session)
+        assert "AnonymousSession.claim_user_id.is_(None)" in src
 
 
 # ---------------------------------------------------------------------------
