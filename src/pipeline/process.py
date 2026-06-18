@@ -4723,6 +4723,7 @@ class ProcessPipeline:
                     # would have hit §7.3 brake don't silently miss it).
                     # Handoff reason below: clone_library_register_failed.
                     _smart_clone_mirror_failures: list[str] = []
+                    _smart_reserved_clone_register_failures: list[str] = []
                     _smart_user_id_for_mirror = str(
                         _snap("user_id") or ""
                     )
@@ -4906,6 +4907,17 @@ class ProcessPipeline:
                                 _smart_clone_mirror_failures.append(
                                     _dec.speaker_id
                                 )
+                                if _smart_clone_reservation_id_for_mirror:
+                                    _smart_reserved_clone_register_failures.append(
+                                        _dec.speaker_id
+                                    )
+                                    _sp_entry.pop("voice_id", None)
+                                    _sp_entry["auto_decision"] = (
+                                        "clone_register_failed"
+                                    )
+                                    _sp_entry["smart_clone_skipped_reason"] = (
+                                        "clone_register_failed_reserved_handoff"
+                                    )
                         elif _dec.choice == VoiceReviewChoice.REUSED:
                             _apply_smart_reused_voice_decision(
                                 speaker_entry=_sp_entry,
@@ -4974,6 +4986,75 @@ class ProcessPipeline:
                     # Prefer translation_result.segments on cache-hit re-runs
                     # (segment-level may have been edited via post-edit), fall
                     # back to transcript_result.lines on fresh runs.
+                    if _smart_reserved_clone_register_failures:
+                        print(
+                            f"[smart] reserved clone registration failed for "
+                            f"{len(_smart_reserved_clone_register_failures)} "
+                            f"speaker(s): "
+                            f"{','.join(_smart_reserved_clone_register_failures)}; "
+                            "stopping for handoff so reserved credits are not "
+                            "released after a paid provider clone.",
+                            flush=True,
+                        )
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="clone_register_failed_reserved",
+                            decision="rejected",
+                            reason_code="clone_register_failed_reserved_handoff",
+                            evidence={
+                                "failed_speakers": list(
+                                    _smart_reserved_clone_register_failures
+                                ),
+                                "reservation_id": (
+                                    _smart_clone_reservation_id_for_mirror
+                                ),
+                            },
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                        )
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": "clone_library_register_failed",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                            project_dir=final_project_dir,
+                            user_message="智能版克隆计费登记失败，需要人工接管。",
+                            web_review_marker_builder=self._build_web_review_marker,
+                        )
+                        state_manager.set_stage(
+                            "voice_selection",
+                            StageStatus.RUNNING,
+                            {"execution_mode": "smart_handoff_voice_review"},
+                        )
+                        current_stage_name = None
+                        _write_usage_summary(usage_meter)
+                        _emit_smart_cost_summary_from_meter(
+                            final_project_dir,
+                            job_id=config.job_id,
+                            usage_meter=usage_meter,
+                            minutes_processed=(
+                                float(actual_duration_ms) / 60000.0
+                                if actual_duration_ms
+                                else float(
+                                    _snap("source_duration_seconds") or 0.0
+                                ) / 60.0
+                            ),
+                            credits_policy="pending_settle",
+                        )
+                        return self._build_paused_result(
+                            project_dir=final_project_dir,
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            message="智能版克隆计费登记失败，需要人工接管。",
+                        )
+
                     _dub_source = (
                         translation_result.segments
                         if translation_result is not None
