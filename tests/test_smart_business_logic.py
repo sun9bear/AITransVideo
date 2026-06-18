@@ -2342,9 +2342,10 @@ class TestB3DCloneSampleExtractorContract:
         lines = source[idx:].splitlines()
         # Phase 4 (2026-05-17) added per-speaker possible-match pause
         # audit loop + admin policy read, pushing the CLONED branch
-        # past the previous 900-line window. Bumped to 1100 to keep
-        # covering the mirror call without inflating it indefinitely.
-        block = "\n".join(lines[:1100])
+        # past the previous 900-line window. Bumped to 1150 to keep
+        # covering the billed mirror arguments without inflating it
+        # indefinitely.
+        block = "\n".join(lines[:1150])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (

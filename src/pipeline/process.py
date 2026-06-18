@@ -1390,6 +1390,7 @@ def _register_smart_clone_in_user_voices(
     source_speaker_name: str | None = None,
     clone_sample_seconds: float | None = None,
     clone_sample_segment_ids: object | None = None,
+    smart_clone_reservation_id: str | None = None,
     created_from: str | None = "smart_auto",
     notes: str | None = None,
 ) -> bool:
@@ -1426,6 +1427,10 @@ def _register_smart_clone_in_user_voices(
     voice_id = (voice_id or "").strip()
     if not user_id or not voice_id:
         return False
+    reservation_id = (smart_clone_reservation_id or "").strip()
+    task_id = (source_job_id or "").strip()
+    if reservation_id and not task_id:
+        return False
     api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
     if not api_key:
         return False
@@ -1434,6 +1439,9 @@ def _register_smart_clone_in_user_voices(
         "voice_id": voice_id,
         "label": label or voice_id,
     }
+    if reservation_id:
+        payload["task_id"] = task_id
+        payload["reservation_id"] = reservation_id
     if source_speaker_id:
         payload["source_speaker_id"] = source_speaker_id
     if source_job_id:
@@ -1465,8 +1473,13 @@ def _register_smart_clone_in_user_voices(
     if notes:
         payload["notes"] = notes
     try:
+        endpoint = (
+            "smart-clone/register-billed"
+            if reservation_id
+            else "user-voices/register-smart"
+        )
         resp = requests.post(
-            "http://127.0.0.1:8880/api/internal/user-voices/register-smart",
+            f"http://127.0.0.1:8880/api/internal/{endpoint}",
             json=payload,
             headers={"X-Internal-Key": api_key},
             timeout=5.0,
@@ -4698,6 +4711,19 @@ class ProcessPipeline:
                     _smart_job_id_for_mirror = str(
                         _snap("job_id") or ""
                     )
+                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
+                    if not isinstance(_smart_state_for_mirror, dict):
+                        _smart_state_for_mirror = {}
+                    _smart_clone_reservation_id_for_mirror = (
+                        str(
+                            _snap("smart_clone_reservation_id")
+                            or _smart_state_for_mirror.get(
+                                "smart_clone_reservation_id"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
 
                     for _dec in _smart_voice_review.decisions:
                         _sp_entry = _smart_speakers_by_id.get(_dec.speaker_id)
@@ -4859,6 +4885,9 @@ class ProcessPipeline:
                                     _smart_per_speaker_segment_ids.get(
                                         _dec.speaker_id
                                     )
+                                ),
+                                smart_clone_reservation_id=(
+                                    _smart_clone_reservation_id_for_mirror
                                 ),
                                 created_from="smart_auto",
                                 notes=(

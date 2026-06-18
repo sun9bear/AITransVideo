@@ -28,12 +28,12 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from credits_service import InsufficientCreditsError, reserve_credits_or_raise
-from models import SmartCloneReservation, User, UserVoice
+from models import CloneBillingEvent, SmartCloneReservation, User, UserVoice
 
 
 RESERVED = "reserved"
@@ -90,15 +90,30 @@ async def _expire_stale_for_user(db: AsyncSession, user_id: object, *, now: date
     return int(result.rowcount or 0)
 
 
-async def count_active_smart_reservations(db: AsyncSession, user_id: object) -> int:
-    """该 user 当前 active(reserved) smart clone reservation 数（库容门并发分量）。"""
+async def count_active_smart_reservations(
+    db: AsyncSession,
+    user_id: object,
+    *,
+    exclude_reservation_id: object | None = None,
+) -> int:
+    """Count reserved clone slots that have not materialized into billed voices."""
+    conditions = [
+        SmartCloneReservation.user_id == user_id,
+        SmartCloneReservation.status == RESERVED,
+    ]
+    if exclude_reservation_id is not None:
+        conditions.append(SmartCloneReservation.id != exclude_reservation_id)
     result = await db.execute(
         select(func.count())
         .select_from(SmartCloneReservation)
-        .where(
-            SmartCloneReservation.user_id == user_id,
-            SmartCloneReservation.status == RESERVED,
+        .outerjoin(
+            CloneBillingEvent,
+            and_(
+                CloneBillingEvent.reservation_id == SmartCloneReservation.id,
+                CloneBillingEvent.chargeable.is_(True),
+            ),
         )
+        .where(*conditions, CloneBillingEvent.id.is_(None))
     )
     return int(result.scalar() or 0)
 
@@ -303,8 +318,6 @@ async def register_smart_clone_with_billing(
         return RegisterBillOutcome(status="no_active_reservation")
 
     # 2. 幂等：该 reservation 已有 billing event → no-op（pipeline 重试）
-    from models import CloneBillingEvent
-
     existing = (
         await db.execute(
             select(CloneBillingEvent).where(
@@ -326,20 +339,10 @@ async def register_smart_clone_with_billing(
     if user_pk is None:
         await db.rollback()
         return RegisterBillOutcome(status="no_active_reservation")
-    other_reserved = (
-        await db.execute(
-            select(func.count())
-            .select_from(SmartCloneReservation)
-            .where(
-                SmartCloneReservation.user_id == user_id,
-                SmartCloneReservation.status == RESERVED,
-                SmartCloneReservation.id != res_pk,
-            )
-        )
-    ).scalar()
-    active_library_load = await count_active_library_voices(db, user_id) + int(
-        other_reserved or 0
+    other_reserved = await count_active_smart_reservations(
+        db, user_id, exclude_reservation_id=res_pk
     )
+    active_library_load = await count_active_library_voices(db, user_id) + other_reserved
     if active_library_load >= int(library_cap):
         await db.rollback()
         return RegisterBillOutcome(
