@@ -268,8 +268,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // 模式（用认领的完整原视频作源，免重新上传）。localStorage key 在转完整成功 或
   // 用户「更换视频」时才清，故刷新页面不丢（提交失败可重试）。
   useEffect(() => {
-    const claimedId = getAnonConvertReady()
-    if (claimedId) setReuseAnonPreviewId(claimedId)
+    const timerId = window.setTimeout(() => {
+      const claimedId = getAnonConvertReady()
+      if (claimedId) setReuseAnonPreviewId(claimedId)
+    }, 0)
+    return () => window.clearTimeout(timerId)
   }, [])
 
   // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
