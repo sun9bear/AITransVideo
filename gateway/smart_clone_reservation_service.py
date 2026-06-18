@@ -262,6 +262,65 @@ class RegisterBillOutcome:
     reservation_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ActiveReservationOutcome:
+    active: bool
+    reason: str
+    reservation_id: str | None = None
+
+
+async def check_smart_clone_reservation_active(
+    db: AsyncSession,
+    *,
+    user_id: object,
+    task_id: str,
+    reservation_id: object,
+) -> ActiveReservationOutcome:
+    try:
+        res_pk = (
+            reservation_id
+            if isinstance(reservation_id, uuid.UUID)
+            else uuid.UUID(str(reservation_id))
+        )
+    except (ValueError, AttributeError, TypeError):
+        await db.rollback()
+        return ActiveReservationOutcome(False, "invalid_reservation_id")
+
+    res = (
+        await db.execute(
+            select(SmartCloneReservation).where(SmartCloneReservation.id == res_pk)
+        )
+    ).scalar_one_or_none()
+    if res is None:
+        await db.rollback()
+        return ActiveReservationOutcome(False, "no_active_reservation")
+    if res.status != RESERVED:
+        await db.rollback()
+        return ActiveReservationOutcome(False, f"status_{res.status}", str(res_pk))
+    if str(res.task_id) != str(task_id) or str(res.user_id) != str(user_id):
+        await db.rollback()
+        return ActiveReservationOutcome(False, "reservation_mismatch", str(res_pk))
+    now = _now()
+    expires_at = res.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at < now:
+        await db.rollback()
+        return ActiveReservationOutcome(False, "expired", str(res_pk))
+    existing = (
+        await db.execute(
+            select(CloneBillingEvent.id).where(
+                CloneBillingEvent.reservation_id == res_pk
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        await db.rollback()
+        return ActiveReservationOutcome(False, "already_billed", str(res_pk))
+    await db.rollback()
+    return ActiveReservationOutcome(True, "active", str(res_pk))
+
+
 async def register_smart_clone_with_billing(
     db: AsyncSession,
     *,
@@ -585,10 +644,12 @@ __all__ = [
     "SmartReserveOutcome",
     "RegisterBillOutcome",
     "SettleOutcome",
+    "ActiveReservationOutcome",
     "credit_reserve_reason_code",
     "count_active_smart_reservations",
     "count_active_library_voices",
     "reserve_smart_clone_credit",
+    "check_smart_clone_reservation_active",
     "register_smart_clone_with_billing",
     "settle_smart_clone_reservation",
     "settle_smart_clone_reservations_for_task",

@@ -1627,6 +1627,46 @@ async def internal_smart_clone_register_billed(
     })
 
 
+@internal_router.post("/smart-clone/reservations/check-active")
+async def internal_smart_clone_reservation_check_active(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    user_id = body.get("user_id")
+    task_id = str(body.get("task_id", "")).strip()
+    reservation_id = body.get("reservation_id")
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (ValueError, AttributeError, TypeError):
+        return _json(400, {"ok": False, "error": "invalid_user_id"})
+    try:
+        reservation_uuid = uuid.UUID(str(reservation_id))
+    except (ValueError, AttributeError, TypeError):
+        return _json(400, {"ok": False, "error": "invalid_reservation_id"})
+    if not _RESERVATION_JOB_ID_PATTERN.match(task_id):
+        return _json(400, {"ok": False, "error": "invalid_task_id"})
+
+    from smart_clone_reservation_service import check_smart_clone_reservation_active
+
+    outcome = await check_smart_clone_reservation_active(
+        db,
+        user_id=user_uuid,
+        task_id=task_id,
+        reservation_id=reservation_uuid,
+    )
+    return _json(200, {
+        "ok": True,
+        "active": outcome.active,
+        "reason": outcome.reason,
+        "reservation_id": outcome.reservation_id,
+    })
+
+
 @internal_router.post("/express-auto-clone-reservations/{reservation_id}/consume")
 async def internal_express_reservation_consume(
     reservation_id: str,

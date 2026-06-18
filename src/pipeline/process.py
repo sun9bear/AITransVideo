@@ -1492,6 +1492,43 @@ def _register_smart_clone_in_user_voices(
     return bool(data.get("ok"))
 
 
+def _check_smart_clone_reservation_active(
+    *,
+    user_id: str,
+    task_id: str,
+    reservation_id: str,
+) -> bool:
+    """Return True only when Gateway confirms this reservation can fund a clone."""
+    import os
+    import requests  # type: ignore[import-not-found]
+
+    user_id = (user_id or "").strip()
+    task_id = (task_id or "").strip()
+    reservation_id = (reservation_id or "").strip()
+    if not user_id or not task_id or not reservation_id:
+        return False
+    api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    if not api_key:
+        return False
+    try:
+        resp = requests.post(
+            "http://127.0.0.1:8880/api/internal/smart-clone/reservations/check-active",
+            json={
+                "user_id": user_id,
+                "task_id": task_id,
+                "reservation_id": reservation_id,
+            },
+            headers={"X-Internal-Key": api_key},
+            timeout=5.0,
+        )
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+    except Exception:
+        return False
+    return bool(data.get("ok") and data.get("active"))
+
+
 def _is_valid_speaker_id(value: object) -> bool:
     return isinstance(value, str) and _SPEAKER_ID_PATTERN.match(value.strip()) is not None
 
@@ -4412,12 +4449,42 @@ class ProcessPipeline:
                         and _smart_admin_clone_enabled
                         and _smart_speaker_ids_requiring_clone
                     )
+                    _smart_user_id_for_mirror = str(_snap("user_id") or "")
+                    _smart_job_id_for_mirror = str(_snap("job_id") or "")
+                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
+                    if not isinstance(_smart_state_for_mirror, dict):
+                        _smart_state_for_mirror = {}
+                    _smart_clone_reservation_id_for_mirror = (
+                        str(
+                            _snap("smart_clone_reservation_id")
+                            or _smart_state_for_mirror.get(
+                                "smart_clone_reservation_id"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
+                    _smart_reservation_active_for_clone = bool(
+                        _smart_needs_new_clone
+                        and _smart_clone_reservation_id_for_mirror
+                        and _check_smart_clone_reservation_active(
+                            user_id=_smart_user_id_for_mirror,
+                            task_id=_smart_job_id_for_mirror,
+                            reservation_id=_smart_clone_reservation_id_for_mirror,
+                        )
+                    )
+                    _smart_max_new_clones_for_review = (
+                        1 if _smart_reservation_active_for_clone else 0
+                    )
                     if (
                         _smart_consent_allows_clone
                         and _smart_admin_clone_enabled
                         and _smart_main_speakers
                     ):
-                        if _smart_needs_new_clone:
+                        if (
+                            _smart_needs_new_clone
+                            and _smart_reservation_active_for_clone
+                        ):
                             # 2026-05-16: admin role bypasses voice
                             # library cap (admin_settings.smart_user_voice_clone_cap).
                             # Smart §7.3 water-mark brake is a safety
@@ -4504,23 +4571,6 @@ class ProcessPipeline:
                         _smart_clone_provider = (
                             _build_b2_not_wired_clone_provider()
                         )
-
-                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
-                    if not isinstance(_smart_state_for_mirror, dict):
-                        _smart_state_for_mirror = {}
-                    _smart_clone_reservation_id_for_mirror = (
-                        str(
-                            _snap("smart_clone_reservation_id")
-                            or _smart_state_for_mirror.get(
-                                "smart_clone_reservation_id"
-                            )
-                            or ""
-                        ).strip()
-                        or None
-                    )
-                    _smart_max_new_clones_for_review = (
-                        1 if _smart_clone_reservation_id_for_mirror else None
-                    )
 
                     _smart_voice_review = evaluate_voice_review(
                         main_speakers=_smart_main_speakers,
@@ -4724,12 +4774,6 @@ class ProcessPipeline:
                     # Handoff reason below: clone_library_register_failed.
                     _smart_clone_mirror_failures: list[str] = []
                     _smart_reserved_clone_register_failures: list[str] = []
-                    _smart_user_id_for_mirror = str(
-                        _snap("user_id") or ""
-                    )
-                    _smart_job_id_for_mirror = str(
-                        _snap("job_id") or ""
-                    )
 
                     for _dec in _smart_voice_review.decisions:
                         _sp_entry = _smart_speakers_by_id.get(_dec.speaker_id)
