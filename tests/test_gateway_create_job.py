@@ -1277,7 +1277,7 @@ class TestSmartVoiceQuotaPreflightGates:
         "auto_retts": True,
         "auto_multimodal_verification": True,
         "no_extra_charge_without_confirmation": True,
-        "confirm_paid_voice_clone_600_credits": True,
+        "confirm_paid_voice_clone_credits": True,
         "on_budget_exhausted": "degraded_delivery_with_report",
     }
 
@@ -1311,6 +1311,17 @@ class TestSmartVoiceQuotaPreflightGates:
             "estimated_duration_seconds": 120,
             "smart_consent": consent,
         }
+
+    def test_paid_clone_confirmation_accepts_generic_and_legacy_fields(self):
+        import job_intercept
+
+        assert job_intercept._smart_paid_clone_confirmed({
+            "confirm_paid_voice_clone_credits": True,
+        })
+        assert job_intercept._smart_paid_clone_confirmed({
+            "confirm_paid_voice_clone_600_credits": True,
+        })
+        assert not job_intercept._smart_paid_clone_confirmed({})
 
     def test_create_smart_job_reserves_clone_credit_and_stamps_job_record(self):
         import admin_settings as admin_mod
@@ -1367,11 +1378,16 @@ class TestSmartVoiceQuotaPreflightGates:
                             return_value=self._PLUS_SMART_GATE,
                         ):
                             with patch(
-                                "job_intercept.reserve_smart_clone_credit",
-                                side_effect=fake_reserve,
+                                "job_intercept._get_smart_clone_cost_credits",
+                                return_value=750,
                                 create=True,
                             ):
-                                resp = _run(intercept_create_job(req, db, user))
+                                with patch(
+                                    "job_intercept.reserve_smart_clone_credit",
+                                    side_effect=fake_reserve,
+                                    create=True,
+                                ):
+                                    resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
         assert captured_body["job_id"].startswith("job_")
@@ -1380,10 +1396,10 @@ class TestSmartVoiceQuotaPreflightGates:
             {
                 "user_id": user.id,
                 "task_id": captured_body["job_id"],
-                "amount_credits": 600,
+                "amount_credits": 750,
                 "ttl_minutes": 1440,
                 "library_cap": 30,
-                "required_available_credits": 800,
+                "required_available_credits": 950,
             }
         ]
         assert captured_body["smart_state"] == {
@@ -1402,7 +1418,8 @@ class TestSmartVoiceQuotaPreflightGates:
         reserve_calls: list[dict] = []
         track_queries: list[str] = []
         legacy_consent = dict(self._FULL_CONSENT_BOTH_ALLOW)
-        legacy_consent.pop("confirm_paid_voice_clone_600_credits")
+        legacy_consent.pop("confirm_paid_voice_clone_credits", None)
+        legacy_consent.pop("confirm_paid_voice_clone_600_credits", None)
 
         async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
             if override_body:

@@ -88,8 +88,28 @@ from services.language_registry import (
 # never silently skip review.
 _NON_INTERACTIVE_LANGUAGE_PAIRS = frozenset({make_pair_key(LANG_ZH_CN, LANG_EN)})
 
-_SMART_PAID_CLONE_CONFIRM_FIELD = "confirm_paid_voice_clone_600_credits"
+_SMART_PAID_CLONE_CONFIRM_FIELDS = (
+    "confirm_paid_voice_clone_credits",
+    "confirm_paid_voice_clone_600_credits",
+)
 _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES = 24 * 60
+
+
+def _get_smart_clone_cost_credits() -> int:
+    try:
+        from pricing_runtime import get_runtime_pricing
+
+        value = int(get_runtime_pricing().credits.voice_clone_cost_credits or 0)
+        return value if value > 0 else 600
+    except Exception:
+        return 600
+
+
+def _smart_paid_clone_confirmed(raw_consent: object) -> bool:
+    return isinstance(raw_consent, dict) and any(
+        raw_consent.get(field) is True
+        for field in _SMART_PAID_CLONE_CONFIRM_FIELDS
+    )
 
 
 POST_EDIT_RESPONSE_FIELDS = (
@@ -1248,10 +1268,7 @@ async def intercept_create_job(
     if service_mode == "smart":
         from smart_consent import validate_smart_consent
         raw_consent = request_data.get("smart_consent")
-        smart_paid_clone_confirmed = (
-            isinstance(raw_consent, dict)
-            and raw_consent.get(_SMART_PAID_CLONE_CONFIRM_FIELD) is True
-        )
+        smart_paid_clone_confirmed = _smart_paid_clone_confirmed(raw_consent)
         consent_obj, consent_error = validate_smart_consent(raw_consent)
         if consent_error is not None:
             return _error_response(
@@ -1856,11 +1873,12 @@ async def intercept_create_job(
                     service_mode=service_mode,
                     quality_tier=policy.get("quality_tier", "standard"),
                 )
+                _clone_cost_credits = _get_smart_clone_cost_credits()
                 _reserve_outcome = await reserve_smart_clone_credit(
                     db,
                     user_id=user.id,
                     task_id=str(request_data["job_id"]),
-                    amount_credits=600,
+                    amount_credits=_clone_cost_credits,
                     ttl_minutes=max(
                         _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
                         int(
@@ -1874,7 +1892,9 @@ async def intercept_create_job(
                     ),
                     library_cap=_library_cap,
                     required_available_credits=(
-                        int(_base_credits) + 600 if _base_credits > 0 else None
+                        int(_base_credits) + _clone_cost_credits
+                        if _base_credits > 0
+                        else None
                     ),
                 )
                 if (

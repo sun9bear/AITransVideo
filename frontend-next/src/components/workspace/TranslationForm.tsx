@@ -98,6 +98,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // personal-voice candidate is found. Surface this in the submission
   // UI so users aren't surprised by a mid-job pause.
   const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
+  const [voiceCloneCostCredits, setVoiceCloneCostCredits] = useState<number | null>(null)
+  const [voiceCloneCostLoadFailed, setVoiceCloneCostLoadFailed] = useState(false)
 
   const sourceValidationError =
     sourceType === "youtube_url"
@@ -136,6 +138,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     currentRate != null
       ? `${currentRate} 点/分钟`
       : ratesLoadFailed
+        ? "暂时无法读取"
+        : "读取中"
+  const voiceCloneCostLabel =
+    voiceCloneCostCredits != null
+      ? `${voiceCloneCostCredits} 点`
+      : voiceCloneCostLoadFailed
         ? "暂时无法读取"
         : "读取中"
   // For UI display: show the most recent active job if blocked
@@ -202,8 +210,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     getVoiceSelectionPricing()
       .then((pricing) => {
         setSmartPauseWarningEnabled(Boolean(pricing.smart_pause_warning_enabled))
+        setVoiceCloneCostCredits(pricing.voice_clone_cost_credits)
+        setVoiceCloneCostLoadFailed(false)
       })
-      .catch(() => setSmartPauseWarningEnabled(false))
+      .catch(() => {
+        setSmartPauseWarningEnabled(false)
+        setVoiceCloneCostCredits(null)
+        setVoiceCloneCostLoadFailed(true)
+      })
     // Phase 4.3a PR3: Express auto-clone availability (admin flag + allowlist).
     // Fail-closed in the client; default state is already false.
     getExpressAutoCloneAvailability()
@@ -699,7 +713,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             ) : serviceMode === "smart" ? (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                智能版按源视频时长扣点，当前基础标准为 {rateLabel}。AI 自动审核翻译并按需处理主说话人音色；若需要自动新克隆音色，会额外预扣 600 点，未发生新克隆时会释放。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。
+                智能版按源视频时长扣点，当前基础标准为 {rateLabel}。AI 自动审核翻译并按需处理主说话人音色；若需要自动新克隆音色，会额外预扣 {voiceCloneCostLabel}，未发生新克隆时会释放。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。
               </p>
             ) : (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">

@@ -65,21 +65,24 @@ def test_consent_payload_only_for_express():
 
 
 def test_smart_submission_sends_paid_clone_confirmation():
-    """Smart create payload must include the explicit 600-credit clone consent
+    """Smart create payload must include explicit paid-clone consent
     required by Gateway's paid reservation gate."""
     src = _read(_JOBS_TS)
-    assert "confirm_paid_voice_clone_600_credits" in src
+    assert "confirm_paid_voice_clone_credits" in src
+    assert "confirm_paid_voice_clone_600_credits: true" not in src
     assert re.search(
-        r"confirm_paid_voice_clone_600_credits\s*:\s*true",
+        r"confirm_paid_voice_clone_credits\s*:\s*true",
         src,
-    ), "Smart submissions must confirm the paid 600-credit clone add-on"
+    ), "Smart submissions must confirm the paid clone add-on"
 
 
-def test_smart_copy_discloses_clone_add_on_cost():
-    """The Smart mode description must not promise that cloning is free."""
+def test_smart_copy_discloses_runtime_clone_add_on_cost():
+    """The Smart mode description must consume Gateway pricing facts."""
     src = _read(_FORM_TSX)
     assert "不会另外扣点" not in src
-    assert "600" in src and "克隆" in src
+    assert "voiceCloneCostCredits" in src
+    assert "voiceCloneCostLabel" in src
+    assert "600 点" not in src
 
 
 def test_frontend_never_sends_server_confirmed_at():
