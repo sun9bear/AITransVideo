@@ -4,6 +4,7 @@ import { useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useSession } from "@/components/providers/session-provider"
+import { clearAnonConvertReady } from "@/lib/api/claim"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -102,6 +103,7 @@ export default function SettingsPage() {
             variant="destructive"
             onClick={async () => {
               await fetch("/auth/logout", { method: "POST", credentials: "include" })
+              clearAnonConvertReady()
               toast.success("已退出登录")
               router.push("/auth")
             }}

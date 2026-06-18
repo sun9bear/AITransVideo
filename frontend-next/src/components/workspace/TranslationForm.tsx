@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react"
 import Link from "next/link"
 import { toast } from "sonner"
 
+import { useSession } from "@/components/providers/session-provider"
 import { StatusBadge } from "@/components/status-badge"
 import { SmartPreviewConfirmDialog } from "@/components/workspace/SmartPreviewConfirmDialog"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
@@ -43,6 +44,7 @@ export interface TranslationFormProps {
 }
 
 export function TranslationForm({ onCreated, mode, initialSourceUrl }: TranslationFormProps) {
+  const { user } = useSession()
   const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">("youtube_url")
   const [youtubeUrl, setYoutubeUrl] = useState(initialSourceUrl ?? "")
   const [uploadedFilePath, setUploadedFilePath] = useState("")
@@ -269,7 +271,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // 用户「更换视频」时才清，故刷新页面不丢（提交失败可重试）。
   useEffect(() => {
     const syncConvertReady = () => {
-      setReuseAnonPreviewId(getAnonConvertReady())
+      setReuseAnonPreviewId(getAnonConvertReady(user?.id))
     }
     const timerId = window.setTimeout(syncConvertReady, 0)
     const unsubscribe = subscribeAnonConvertReady(syncConvertReady)
@@ -277,7 +279,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       window.clearTimeout(timerId)
       unsubscribe()
     }
-  }, [])
+  }, [user?.id])
 
   // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
   // Express, or losing availability, force-resets the checkbox to false so a

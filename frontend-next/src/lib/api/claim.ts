@@ -73,6 +73,12 @@ const CONVERT_READY_KEY = "avt_anon_convert_ready"
 const CONVERT_READY_TTL_MS = 24 * 60 * 60 * 1000
 const ANON_CONVERT_READY_EVENT = "avt_anon_convert_ready_changed"
 
+type ConvertReadyRecord = {
+  previewId?: unknown
+  ts?: unknown
+  userId?: unknown
+}
+
 function emitAnonConvertReadyChanged(): void {
   try {
     window.dispatchEvent(new Event(ANON_CONVERT_READY_EVENT))
@@ -98,11 +104,16 @@ export function subscribeAnonConvertReady(listener: () => void): () => void {
 }
 
 /** 认领成功后调用：记下「有一个已认领预览待转完整」+ 其 preview_id（带时间戳）。 */
-export function setAnonConvertReady(previewId: string): void {
+export function setAnonConvertReady(previewId: string, userId: string): void {
   try {
+    const payload: { previewId: string; ts: number; userId: string } = {
+      previewId,
+      ts: Date.now(),
+      userId,
+    }
     window.localStorage.setItem(
       CONVERT_READY_KEY,
-      JSON.stringify({ previewId, ts: Date.now() }),
+      JSON.stringify(payload),
     )
     emitAnonConvertReadyChanged()
   } catch {
@@ -111,14 +122,19 @@ export function setAnonConvertReady(previewId: string): void {
 }
 
 /** 创建页读取待转完整的 preview_id（无 / 超 24h / 损坏 → null 并清）。 */
-export function getAnonConvertReady(): string | null {
+export function getAnonConvertReady(userId?: string | null): string | null {
   try {
     const raw = window.localStorage.getItem(CONVERT_READY_KEY)
     if (!raw) return null
-    const parsed = JSON.parse(raw) as { previewId?: unknown; ts?: unknown }
+    const parsed = JSON.parse(raw) as ConvertReadyRecord
     const previewId = typeof parsed.previewId === "string" ? parsed.previewId : null
     const ts = typeof parsed.ts === "number" ? parsed.ts : 0
+    const storedUserId = typeof parsed.userId === "string" ? parsed.userId : null
     if (!previewId || Date.now() - ts > CONVERT_READY_TTL_MS) {
+      clearAnonConvertReady()
+      return null
+    }
+    if (userId && storedUserId !== userId) {
       clearAnonConvertReady()
       return null
     }
@@ -127,6 +143,23 @@ export function getAnonConvertReady(): string | null {
     // 解析失败（旧裸字符串 / 损坏）→ 清除，回 null。
     clearAnonConvertReady()
     return null
+  }
+}
+
+export function scopeAnonConvertReadyToUser(userId: string): void {
+  try {
+    const raw = window.localStorage.getItem(CONVERT_READY_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as ConvertReadyRecord
+    const previewId = typeof parsed.previewId === "string" ? parsed.previewId : null
+    const ts = typeof parsed.ts === "number" ? parsed.ts : 0
+    const storedUserId = typeof parsed.userId === "string" ? parsed.userId : null
+    if (!previewId || Date.now() - ts > CONVERT_READY_TTL_MS || storedUserId !== userId) {
+      clearAnonConvertReady()
+      return
+    }
+  } catch {
+    clearAnonConvertReady()
   }
 }
 
@@ -190,7 +223,7 @@ export async function claimAnonymousPreview(): Promise<ClaimOutcome> {
  * 预览用户的多余请求）。awaited-but-swallowed，调用方放在 window.location
  * 跳转**之前**。无论结果如何都清除 hint。
  */
-export async function maybeClaimAnonPreviewAfterLogin(): Promise<void> {
+export async function maybeClaimAnonPreviewAfterLogin(userId?: string | null): Promise<void> {
   const hintedPreviewId = getAnonClaimHint()
   if (!hintedPreviewId) {
     return
@@ -202,8 +235,8 @@ export async function maybeClaimAnonPreviewAfterLogin(): Promise<void> {
     // 认领成功 → 把本次浏览器最后预览的 preview_id 传给创建页「转完整」入口。
     // /claim 可能一次绑定多个预览且返回顺序未定义；不回退到第一个 ID，避免转错原视频。
     const claimedPreviewIds = outcome.preview_ids ?? []
-    if (outcome.claimed && claimedPreviewIds.includes(hintedPreviewId)) {
-      setAnonConvertReady(hintedPreviewId)
+    if (outcome.claimed && userId && claimedPreviewIds.includes(hintedPreviewId)) {
+      setAnonConvertReady(hintedPreviewId, userId)
     }
   } catch {
     // 永不阻断登录跳转；异常视为可重试 → 保留 hint。

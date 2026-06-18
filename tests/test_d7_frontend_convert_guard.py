@@ -21,6 +21,9 @@ CLAIM_TS = FE / "lib" / "api" / "claim.ts"
 JOBS_TS = FE / "lib" / "api" / "jobs.ts"
 TYPES_TS = FE / "types" / "jobs.ts"
 FORM_TSX = FE / "components" / "workspace" / "TranslationForm.tsx"
+APP_SHELL_TSX = FE / "components" / "app-shell.tsx"
+SETTINGS_TSX = FE / "app" / "(app)" / "settings" / "page.tsx"
+POST_AUTH_TS = FE / "lib" / "auth" / "post-auth-redirect.ts"
 
 
 def _read(p: Path) -> str:
@@ -40,7 +43,9 @@ def test_claim_ts_convert_ready_helpers_and_ttl():
         assert f"export function {fn}" in src, f"缺 helper {fn}"
     # TTL（CodeX P2）：存 {previewId, ts}，读时超期/损坏即清。
     assert "CONVERT_READY_TTL_MS" in src, "convert-ready 必须带 TTL（防跨账号残留 banner）"
-    assert re.search(r"JSON\.stringify\(\s*\{\s*previewId", src), "应存 {previewId, ts}"
+    assert "JSON.stringify(payload)" in src, "应存 {previewId, ts, userId}"
+    assert re.search(r"payload:\s*\{\s*previewId:\s*string;\s*ts:\s*number;\s*userId:\s*string", src), \
+        "convert-ready payload 必须带 userId"
 
 
 def test_claim_ts_writes_convert_ready_on_claim_success():
@@ -67,8 +72,34 @@ def test_claim_ts_uses_hinted_preview_for_convert_ready():
     # otherwise the create page can preselect the wrong original video.
     assert "const hintedPreviewId = getAnonClaimHint()" in body
     assert re.search(r"\.includes\(\s*hintedPreviewId\s*\)", body)
-    assert "setAnonConvertReady(hintedPreviewId)" in body
+    assert re.search(r"setAnonConvertReady\(\s*hintedPreviewId\s*,\s*userId\s*\)", body)
     assert "setAnonConvertReady(outcome.preview_ids[0])" not in body
+
+
+def test_convert_ready_is_scoped_to_authenticated_user():
+    claim_src = _read(CLAIM_TS)
+    form_src = _read(FORM_TSX)
+    app_shell_src = _read(APP_SHELL_TSX)
+    settings_src = _read(SETTINGS_TSX)
+    post_auth_src = _read(POST_AUTH_TS)
+
+    # CodeX P2: browser-wide localStorage must not put a second account into
+    # the first account's stale convert flow.
+    assert re.search(r"setAnonConvertReady\(previewId: string,\s*userId", claim_src)
+    assert re.search(r"getAnonConvertReady\(userId", claim_src)
+    assert "scopeAnonConvertReadyToUser" in claim_src
+    assert "storedUserId !== userId" in claim_src
+
+    assert "useSession" in form_src
+    assert re.search(r"getAnonConvertReady\(\s*user\?\.id", form_src)
+    assert "scopeAnonConvertReadyToUser(user.id)" in app_shell_src
+    assert "maybeClaimAnonPreviewAfterLogin(user.id)" in app_shell_src
+
+    assert re.search(r"waitForSessionReady\(\): Promise<string \| null>", post_auth_src)
+    assert "maybeClaimAnonPreviewAfterLogin(userId)" in post_auth_src
+
+    assert "clearAnonConvertReady()" in app_shell_src
+    assert "clearAnonConvertReady()" in settings_src
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +142,7 @@ def test_form_handles_late_convert_ready_writes():
     assert "window.dispatchEvent" in claim_src
     assert "subscribeAnonConvertReady" in claim_src
     assert "subscribeAnonConvertReady" in form_src
-    assert re.search(r"setReuseAnonPreviewId\(\s*getAnonConvertReady\(\)\s*\)", form_src)
+    assert re.search(r"setReuseAnonPreviewId\(\s*getAnonConvertReady\(\s*user\?\.id\s*\)\s*\)", form_src)
 
 
 def test_form_source_validation_short_circuits_in_convert_mode():

@@ -6,7 +6,11 @@ import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
 import { clearPostAuthSessionHint } from "@/lib/auth/post-auth-redirect"
-import { maybeClaimAnonPreviewAfterLogin } from "@/lib/api/claim"
+import {
+  clearAnonConvertReady,
+  maybeClaimAnonPreviewAfterLogin,
+  scopeAnonConvertReadyToUser,
+} from "@/lib/api/claim"
 import { WORKSPACE_THEME_STORAGE_KEY } from "@/lib/theme"
 import { Button } from "@/components/ui/button"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
@@ -172,11 +176,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       claimRetryUserRef.current = null
       return
     }
+    scopeAnonConvertReadyToUser(user.id)
     if (claimRetryUserRef.current === user.id) {
       return
     }
     claimRetryUserRef.current = user.id
-    void maybeClaimAnonPreviewAfterLogin()
+    void maybeClaimAnonPreviewAfterLogin(user.id)
   }, [user?.id])
 
   // Close mobile sidebar on route change
@@ -207,6 +212,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const handleLogout = async () => {
     await fetch("/auth/logout", { method: "POST", credentials: "include" })
     clearPostAuthSessionHint()
+    clearAnonConvertReady()
     toast.success("已登出")
     window.location.href = "/auth/login"
   }
