@@ -1598,9 +1598,10 @@ class TestB3DCloneSampleExtractorContract:
             "also revert Piece 3 (real CloneProvider) at the same time."
         )
 
-        # Piece 3 (real provider): the call to
-        # build_smart_clone_provider() must be wired; the b2 stub call
-        # must NOT be in the smart branch.
+        # Piece 3 (real provider): the call to build_smart_clone_provider()
+        # must be wired behind the active-reservation gate. P3e initializes
+        # the not-wired stub as the safe default and only swaps in the real
+        # provider once the reservation is known active.
         assert "build_smart_clone_provider()" in block, (
             "Smart branch no longer calls build_smart_clone_provider() "
             "— Piece 3 (real CloneProvider) reverted. Codex 第二十七轮 "
@@ -1609,14 +1610,30 @@ class TestB3DCloneSampleExtractorContract:
             "either fully-real or fully-stub.\n"
             f"Block (first 3000 chars):\n{block[:3000]}"
         )
-        assert (
-            "_smart_clone_provider = _build_b2_not_wired_clone_provider()"
-            not in block
-        ), (
-            "Smart branch still wires _build_b2_not_wired_clone_provider() "
-            "after PR#3C-b3e — Piece 3 wasn't flipped. Codex 第二十七轮 P0 "
-            "atomic invariant: replace BOTH Piece 2 (quota) and Piece 3 "
-            "(provider) together, or revert BOTH together."
+        reservation_gate_idx = block.find(
+            "_smart_needs_new_clone\n"
+            "                            and _smart_reservation_active_for_clone"
+        )
+        provider_idx = block.find(
+            "_smart_clone_provider = build_smart_clone_provider()"
+        )
+        assert 0 <= reservation_gate_idx < provider_idx, (
+            "Smart branch must only swap in the real CloneProvider after "
+            "checking _smart_reservation_active_for_clone. The not-wired "
+            "stub is allowed as a fail-closed default, but the real "
+            "provider must stay reservation-gated.\n"
+            f"Block (first 3000 chars):\n{block[:3000]}"
+        )
+        assert "_smart_clone_provider = _build_b2_not_wired_clone_provider()" in block, (
+            "Smart branch should keep the not-wired provider as the default "
+            "fail-closed path for no-reservation / disabled-clone jobs."
+        )
+        quota_idx = block.find("_fetch_smart_user_voice_quota_remaining(")
+        assert 0 <= reservation_gate_idx < quota_idx < provider_idx, (
+            "Real quota lookup and real provider wiring must move together "
+            "inside the active-reservation branch. "
+            f"reservation_gate_idx={reservation_gate_idx}, "
+            f"quota_idx={quota_idx}, provider_idx={provider_idx}"
         )
 
         # 2026-05-20 spec change: quota=None NO LONGER hands off.
@@ -1839,7 +1856,7 @@ class TestB3DCloneSampleExtractorContract:
         preceding = block[:quota_idx]
         gate_idx = preceding.rfind(
             "_smart_consent_allows_clone\n                        "
-            "and _smart_admin_clone_enabled\n                        "
+            "and _smart_effective_clone_enabled\n                        "
             "and _smart_main_speakers"
         )
         assert gate_idx >= 0, (
@@ -2151,7 +2168,7 @@ class TestB3DCloneSampleExtractorContract:
         # core conjunction substring spanning the three conditions.
         triple_gate = (
             "_smart_consent_allows_clone\n                        "
-            "and _smart_admin_clone_enabled\n                        "
+            "and _smart_effective_clone_enabled\n                        "
             "and _smart_main_speakers"
         )
         assert triple_gate in block, (
@@ -2396,10 +2413,10 @@ class TestB3DCloneSampleExtractorContract:
         lines = source[idx:].splitlines()
         # Phase 4 (2026-05-17) added per-speaker possible-match pause
         # audit loop + admin policy read, pushing the CLONED branch
-        # past the previous 900-line window. Bumped to 1300 to keep
+        # past the previous 900-line window. Bumped to 1500 to keep
         # covering the billed mirror arguments without inflating it
         # indefinitely.
-        block = "\n".join(lines[:1300])
+        block = "\n".join(lines[:1500])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (
@@ -2679,7 +2696,7 @@ class TestB3DCloneSampleExtractorContract:
         lines = source[idx:].splitlines()
         # Phase 4 (2026-05-17): see test_b3e_fix_clone_decision_processing_calls_mirror
         # for the window-bump rationale.
-        block = "\n".join(lines[:1100])
+        block = "\n".join(lines[:1500])
 
         # Locate the CLONED branch in the decision-processing loop.
         cloned_idx = block.find(
@@ -2688,8 +2705,10 @@ class TestB3DCloneSampleExtractorContract:
         assert cloned_idx >= 0, (
             "CLONED branch missing in smart inline decision loop."
         )
-        # Window through the CLONED branch (until next elif/else).
-        cloned_window = block[cloned_idx : cloned_idx + 2500]
+        # Window through the CLONED branch. P3e added reservation and billing
+        # comments before the audit call, so keep this wide enough to include
+        # the emit without swallowing the whole smart branch.
+        cloned_window = block[cloned_idx : cloned_idx + 5000]
 
         assert "smart_decision_id=_dec.smart_decision_id" in cloned_window, (
             "CLONED emit must pass ``smart_decision_id=_dec.smart_decision_id``. "
@@ -2738,7 +2757,7 @@ class TestB3DCloneSampleExtractorContract:
         #   spec-justification comments + degraded audit emits at
         #   the old handoff sites; clone_mirror_degraded now sits
         #   at ~line 1250 from anchor).
-        block = "\n".join(lines[:1450])
+        block = "\n".join(lines[:1700])
 
         # Count distinct _emit_smart_audit call sites by their
         # decision_type field. Each (decision_type, decision) pair

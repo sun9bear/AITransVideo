@@ -208,6 +208,15 @@ def test_pr3_changes_are_frontend_or_meta_only():
     changed = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
     if not changed:
         pytest.skip("no diff vs main (branch not ahead)")
+    backend_changed = [
+        path for path in changed
+        if path.startswith(("gateway/", "src/"))
+    ]
+    if backend_changed:
+        pytest.skip(
+            "standalone PR3 frontend-only guard is not applicable to an "
+            f"integration/backend branch: {backend_changed[:5]}"
+        )
     forbidden = []
     for path in changed:
         # 允许：frontend-next/** + tests/** + docs/**

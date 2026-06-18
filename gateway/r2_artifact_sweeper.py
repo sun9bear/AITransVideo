@@ -151,6 +151,15 @@ def _classify_candidate(
     if getattr(db_job, "is_anonymous_preview", False) is True:
         return False, None
 
+    # P3e-3d：智能版 3min 预览 teaser 同样 stream-only——绝不 eager-push 到 R2
+    # （会 outlive TTL-delete 承诺 + 暴露干净成片，违背 stream-only）。
+    # smart_preview_mode 在 smart_state JSONB（create 时 stamp），是与
+    # is_anonymous_preview 同性质的 cross-cutting 隔离点（service_mode 不变，
+    # settlement / gating / 水印契约不受影响）。strict ``is True`` fail-safe。
+    _smart_state = getattr(db_job, "smart_state", None)
+    if isinstance(_smart_state, dict) and _smart_state.get("smart_preview_mode") is True:
+        return False, None
+
     expected_gen = db_job.edit_generation or 0
 
     # Primary trigger: never been published (or was reset by overwrite).

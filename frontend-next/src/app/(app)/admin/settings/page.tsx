@@ -1444,32 +1444,41 @@ export default function AdminSettingsPage() {
           />
         </label>
 
-        {/* plan 2026-06-14 §5（CodeX P2 诚实化）：smart_preview_clone_* 是
-            **预留占位**旋钮——对应"smart 3 分钟预览 lane"特性尚未接入，**当前不
-            控制任何运行时克隆路径**，也**不**控制既有 `smart_auto_clone_enabled`
-            （要停既有 smart 全量克隆请用「开启智能版」段的相关开关）。控件渲染为
-            disabled + 灰显，避免运营误判。字段仍随 full-body POST 持久化（同步守卫
+        {/* plan 2026-06-14 §5 / P3e-4c 切片 7（去占位）：smart 3 分钟预览 lane 已
+            前后端接好，旋钮转为可操作。**启用前置**：生产须先 `alembic upgrade` 到
+            037/038（克隆 reservation 双表 + jobs 预览列/索引），否则预扣会 fail-closed
+            → 每次预览 402。本开关 gate create 侧 600 预扣 + pipeline reservation gate
+            + stream-only 策略门；放行免费用户预览还需「开启智能版」通用开关同时为开
+            （lane 豁免要求通用 smart 双层开启）。它**不**控制既有 smart 全量克隆（那由
+            「开启智能版」段控制）。字段随 full-body POST 持久化（同步守卫
             test_anon_clone_enable_t1_admin_sync_guard 要求）。 */}
-        <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4 opacity-60 space-y-3">
+        <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-3">
           <p className="text-sm font-medium text-foreground">
             智能版 MiniMax 克隆预览
-            <span className="ml-2 inline-block rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              预留 · 暂不生效（P3 接入后开放）
+            <span
+              className="ml-2 inline-block rounded px-1.5 py-0.5 text-[10px]"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--ochre) 14%, transparent)",
+                color: "var(--ochre)",
+              }}
+            >
+              启用前需先在生产执行 alembic upgrade 037/038
             </span>
           </p>
           <p className="text-xs text-muted-foreground">
-            规划中的「智能版 3 分钟预览 + 主说话人 600 点预扣克隆」开关与配额。<strong>当前为占位，开关与数值不影响任何运行时行为</strong>，
-            也不影响既有智能版全量任务的音色克隆（那由上方「开启智能版」相关策略控制）。待该特性接入后再开放编辑。
+            「智能版 3 分钟预览 + 主说话人 600 点预扣克隆」lane 的总开关与反滥用配额。开启后免费用户登录选智能版，
+            可预扣 600 点克隆主说话人、看 3 分钟带水印预览，满意再转完整成片（按分钟正常扣点）。
+            <strong>启用前请先在生产执行 alembic upgrade 037/038</strong>，否则预扣会 fail-closed（每次预览返回 402）。
+            放行免费用户预览还需上方「开启智能版」通用开关同时为开。本开关不影响既有智能版全量任务的音色克隆。
           </p>
           <label className="flex items-center gap-3">
             <input
               type="checkbox"
-              disabled
               checked={settings.smart_preview_clone_enabled}
               onChange={(e) => setSettings((s) => ({ ...s, smart_preview_clone_enabled: e.target.checked }))}
-              className="h-4 w-4 rounded border-border cursor-not-allowed"
+              className="h-4 w-4 rounded border-border"
             />
-            <span className="text-sm text-muted-foreground">开启智能版 MiniMax 克隆预览（预留）</span>
+            <span className="text-sm text-foreground">开启智能版 MiniMax 克隆预览</span>
           </label>
           <label className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground w-28">每日全局上限</span>
@@ -1478,7 +1487,6 @@ export default function AdminSettingsPage() {
               min={1}
               max={100000}
               step={1}
-              disabled
               value={settings.smart_preview_clone_daily_global_cap}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10)
@@ -1486,7 +1494,7 @@ export default function AdminSettingsPage() {
                   setSettings((s) => ({ ...s, smart_preview_clone_daily_global_cap: v }))
                 }
               }}
-              className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm cursor-not-allowed"
+              className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
             />
           </label>
           <label className="flex items-center gap-3">
@@ -1496,7 +1504,6 @@ export default function AdminSettingsPage() {
               min={1}
               max={10000}
               step={1}
-              disabled
               value={settings.smart_preview_clone_inflight_cap}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10)
@@ -1504,7 +1511,7 @@ export default function AdminSettingsPage() {
                   setSettings((s) => ({ ...s, smart_preview_clone_inflight_cap: v }))
                 }
               }}
-              className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm cursor-not-allowed"
+              className="w-28 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
             />
           </label>
         </div>

@@ -38,7 +38,7 @@ def _uuid_sqlite(element, compiler, **kw):  # noqa: ARG001
 
 
 from models import (  # noqa: E402
-    CloneBillingEvent, CreditsBucket, CreditsLedger, SmartCloneReservation, UserVoice,
+    CloneBillingEvent, CreditsBucket, CreditsLedger, Job, SmartCloneReservation, UserVoice,
 )
 import smart_clone_reservation_service as svc  # noqa: E402
 import smart_clone_reservation_sweeper as sweeper  # noqa: E402
@@ -63,6 +63,7 @@ async def _make_sessionmaker(*, bucket_remaining: int = 800) -> async_sessionmak
     )
     async with engine.begin() as conn:
         await conn.run_sync(lambda s: _users_stub.create(s))
+        await conn.run_sync(lambda s: Job.__table__.create(s))
         await conn.run_sync(lambda s: UserVoice.__table__.create(s))
         await conn.run_sync(lambda s: SmartCloneReservation.__table__.create(s))
         await conn.run_sync(lambda s: CloneBillingEvent.__table__.create(s))

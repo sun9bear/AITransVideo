@@ -36,6 +36,7 @@ import { Label } from "@/components/ui/label"
 import { StatusBadge } from "@/components/status-badge"
 import { NewTranslationDialog } from "@/components/workspace/NewTranslationDialog"
 import { ResultMediaCard } from "@/components/workspace/ResultMediaCard"
+import { SmartPreviewResultCard } from "@/components/workspace/SmartPreviewResultCard"
 import { selectActiveTaskJob } from "@/features/jobs/selectors"
 import {
   getJobDisplayTitle,
@@ -69,6 +70,9 @@ const EDITABLE_SERVICE_MODES: ReadonlySet<JobSummary["serviceMode"]> = new Set([
 function isJobEditEligible(job: JobSummary): boolean {
   return (
     POST_EDIT_ENABLED &&
+    // 智能版预览任务不可进编辑（后端 is_editable_smart_state 对 smart_preview_mode
+    // 恒 403）。在 eligibility 单点排除，防未来任何 caller 误据此开出编辑入口。
+    !job.smartPreviewMode &&
     EDITABLE_SERVICE_MODES.has(job.serviceMode) &&
     job.status === "succeeded"
   )
@@ -906,6 +910,12 @@ function ExpandedContent({
 
   switch (job.status) {
     case "succeeded":
+      // 智能版预览：stream-only teaser + 转完整 CTA，取代普通 ResultMediaCard
+      // （预览任务后端 403 全部下载 / 素材 / 剪映 / 修改 → 普通卡会渲染坏播放器
+      // 与无效下载按钮）。不传 editHref（预览不可进编辑）。
+      if (job.smartPreviewMode) {
+        return <SmartPreviewResultCard job={job} />
+      }
       return (
         <ResultMediaCard
           jobId={job.id}

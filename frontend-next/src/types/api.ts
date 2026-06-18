@@ -49,6 +49,14 @@ export interface ApiJobRecord {
    */
   service_mode?: 'express' | 'studio' | 'smart' | 'free'
   /**
+   * Smart MVP state (JSONB; backend ``JobRecord.to_dict`` → ``smart_state``).
+   * The workspace UI reads ONLY ``smart_preview_mode`` — a server-stamped flag
+   * (gateway ``intercept_create_job``) marking a 智能版 3 分钟带水印 stream-only
+   * teaser job (P3e-3b/3d). Other keys (status / credits_policy / …) are
+   * admin/pipeline-internal and not consumed here. Absent on non-smart jobs.
+   */
+  smart_state?: { smart_preview_mode?: boolean } | null
+  /**
    * Post-edit infra fields (migration 015, plan 2026-04-18 §3.1).
    * All nullable because pre-migration jobs don't have these columns set.
    */

@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
 import { ResultDownloadList } from "@/components/result-download-list"
 import { ResultMediaCard } from "@/components/workspace/ResultMediaCard"
+import { SmartPreviewResultCard } from "@/components/workspace/SmartPreviewResultCard"
 import { getJobDisplayTitle, getJobSecondaryLabel, getStageLabel } from "@/features/jobs/presentation"
 import { getProjectDetail } from "@/lib/api/jobs"
 import type { ProjectDetailResource } from "@/types/jobs"
@@ -71,12 +72,15 @@ export default function ProjectDetailPage() {
           hasVideo=false && hasAudio=true 时显示 "生成视频" fallback
           按钮（这对老 Express job 的补救路径至关重要，不能被 downloads
           是否为空 gate 住）。CodeX 评审 P2。 */}
-      {job.status === "succeeded" ? (
+      {job.status === "succeeded" && job.smartPreviewMode === true ? (
+        /* 智能版预览：stream-only teaser 播放器 + 转完整 CTA（无下载 / 导出口）。 */
+        <SmartPreviewResultCard job={job} />
+      ) : job.status === "succeeded" ? (
         <ResultMediaCard jobId={jobId} serviceMode={job.serviceMode} />
       ) : null}
 
-      {/* Downloads — 没有可下载条目就显示空状态 */}
-      {availableDownloads.length > 0 ? (
+      {/* Downloads — 预览任务 stream-only（后端 403 全部下载），不渲染下载区 / 空状态。 */}
+      {job.smartPreviewMode === true ? null : availableDownloads.length > 0 ? (
         <details className="mt-2">
           <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
             更多下载

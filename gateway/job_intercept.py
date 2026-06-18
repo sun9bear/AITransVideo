@@ -56,6 +56,8 @@ from models import Job, User, UserVoice
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
 from smart_clone_reservation_service import (
+    PREVIEW_PURPOSE as SMART_PREVIEW_PURPOSE,
+    SMART_PREVIEW_CLONE_RESERVE_CREDITS,
     reserve_smart_clone_credit,
     settle_smart_clone_reservation,
 )
@@ -93,6 +95,11 @@ _SMART_PAID_CLONE_CONFIRM_FIELDS = (
     "confirm_paid_voice_clone_600_credits",
 )
 _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES = 24 * 60
+# P3e（plan 2026-06-15 §4.5，CodeX 复审 P3）：智能版预览克隆 600 点预扣 =
+# offset 的单一来源。真正的 gateway 源在 smart_clone_reservation_service，
+# pricing API 也从那里暴露给前端。普通智能版新克隆的 create reservation
+# 仍通过 runtime pricing 读取（见 _get_smart_clone_cost_credits），二者不可混用。
+_SMART_CLONE_RESERVE_CREDITS = SMART_PREVIEW_CLONE_RESERVE_CREDITS
 
 
 def _get_smart_clone_cost_credits() -> int:
@@ -464,6 +471,66 @@ def _error_response(
         status_code=status_code,
         headers={"content-type": "application/json"},
     )
+
+
+async def _idempotent_convert_job_response(job_id: str) -> Response:
+    """P3e D-C single-flight：重复 convert（同一预览双击/重发）幂等返回现有完整任务。
+
+    **绝不重新 forward create**——Job API ``submit_job`` 无 dedupe，重供已存在 job_id 会
+    ``save_job`` 覆盖 + ``runner.start`` 重启已有 job（重跑付费 workflow / 污染产物）。
+    改为代理一次 Job API ``GET /jobs/{id}`` 取回完整 JobRecord（与 create 响应同
+    ApiJobRecord 形状），保证前端 toJobSummary 不破。ownership 隐式（job_id 由
+    ``sha256(user.id:convert:preview_job_id)`` 派生，跨用户不会撞同一 id）。
+    """
+    from internal_auth import internal_headers
+    from proxy import get_client
+
+    url = f"{settings.job_api_upstream.rstrip('/')}/jobs/{job_id}"
+    try:
+        resp = await get_client().get(url, headers=internal_headers())
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers={"content-type": resp.headers.get("content-type", "application/json")},
+        )
+    except Exception:
+        logger.warning("idempotent convert: GET existing job %s failed", job_id, exc_info=True)
+        return _error_response(
+            409, "convert_already_exists",
+            "该预览已在转换为完整任务，请在任务列表查看。",
+            {"job_id": job_id},
+        )
+
+
+async def _acquire_convert_singleflight_lock(db: AsyncSession, convert_job_id: str) -> None:
+    """串行化**同一预览**的并发 convert（双击/重发），关掉 single-flight 的 transient
+    重跑窗口（CodeX P2 / plan §4.6 step 1.5）。
+
+    取一个**派生自 convert_job_id 的事务级 advisory lock**（PG）：两个并发 convert
+    同一预览 → 同一 key → 第二个阻塞到第一个 commit 后才继续 → 其 pre-forward
+    existing-check 命中现有 F → 幂等返回、不再 forward → 上游 worker **不重跑**。
+    lock 随本事务 commit/rollback 自动释放（``xact`` 级），持有期 ≈ create forward
+    时延（submit_job queue 后即返，非整条 pipeline）。
+
+    **key 必须跨进程稳定**——uvicorn 多 worker 并发可能落在不同进程；**禁用
+    Python ``hash()``**（PYTHONHASHSEED 每进程随机化 → 同 job_id 在两进程算出不同
+    key → 不串行）。用 ``sha256(convert_job_id)`` 取 60 bit **正** bigint（< 2^63，
+    落在 PG advisory key 的 signed-bigint 范围）。key 含 (user, preview)（convert_
+    job_id 即由二者派生），故**不同 convert 不争用**，contention 仅限真双击。
+
+    锁顺序：本 advisory lock 在 convert 块**最早**获取（先于 reserve_quota /
+    credit buckets 的 FOR UPDATE）→ 固定顺序、无 lock-ordering 死锁；与
+    ``_acquire_global_cap_lock`` 固定 key 不同域、不冲突（convert 强制
+    auto_voice_clone=False，根本不进全局 cap 那段）。sqlite/非 PG → **no-op**
+    （与既有 advisory-lock 同语义；并发硬化只在 PG 生效）。
+    """
+    bind = db.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    _key = int(hashlib.sha256(convert_job_id.encode("utf-8")).hexdigest()[:15], 16)
+    await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _key})
 
 
 def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
@@ -1034,6 +1101,30 @@ async def _compensate_upstream_job(job_id: str) -> None:
         logger.error("Failed to compensate upstream job %s: %s", job_id, exc)
 
 
+async def _release_smart_clone_reservation_on_create_failure(
+    db: "AsyncSession", reservation_id: str | None
+) -> None:
+    """P3e-2b 对抗性复核 P1-B/C：create 失败路径（forward 非 2xx / minute reserve
+    失败回滚 / job_id 不一致）**及时**释放已预留的 smart clone 600——避免挂满
+    60min TTL 才被 sweeper 回收（``smart_clone_reservation_sweeper`` 仍是兜底）。
+
+    无 chargeable billing event → ``settle_smart_clone_reservation`` 走 release
+    （退还 600）。绝不抛（释放失败靠 sweeper TTL 兜底）。设计上 settle 自带独立
+    事务（行锁 + 自 commit），在 create 失败/回滚后的 session 上调用安全。
+    """
+    if not reservation_id:
+        return
+    try:
+        from smart_clone_reservation_service import settle_smart_clone_reservation
+        await settle_smart_clone_reservation(db, reservation_id=reservation_id)
+    except Exception as exc:  # noqa: BLE001 — 释放失败靠 sweeper 兜底，绝不阻断
+        logger.warning(
+            "smart clone reservation release on create failure failed "
+            "(reservation=%s; sweeper will reclaim within TTL): %s",
+            reservation_id, exc,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Language facts endpoint (PR-A part 2 §5 / D5)
 # ---------------------------------------------------------------------------
@@ -1301,10 +1392,142 @@ async def intercept_create_job(
     # 跳过登录态 allowlist）实现提权 / 绕 cap。剥离后该标记对公共路径永远为假。
     if isinstance(request_data, dict):
         request_data.pop("anonymous_preview", None)
+        # P3e-2b CodeX 终审 P1 #1：``job_id`` / ``smart_state`` 同为 **server-only
+        # 信任标记**——只有 gateway 在 forward 前 reserve 成功后才设（Option C）。
+        # 公共认证 create 路径无条件剥离客户端夹带值；同样剥离顶层 smart-clone
+        # marker，避免客户端伪造 reservation 状态打开 paid-provider gate。
         request_data.pop("job_id", None)
         request_data.pop("smart_state", None)
         request_data.pop("smart_clone_reservation_id", None)
         request_data.pop("smart_clone_credit_reserved", None)
+
+    # P3e-3c-2: preview→full reuse contract. Frontend sends ONLY
+    # ``reuse_preview_job_id`` (NOT voice_id / NOT source — 防越权). Server
+    # validates same-user + CAPTURED 600-clone + live voice (preview_reuse_
+    # service), then OVERRIDES request_data with **server-derived** voice_a +
+    # original source, forces ``auto_voice_clone=False`` and clears
+    # ``preview_mode``. Money invariants:
+    #   - no re-charge 600: forced auto_voice_clone=False → the 600-reserve
+    #     block below (trigger = auto_voice_clone is True) is skipped → no new
+    #     reservation created.
+    #   - no re-clone: pipeline ``_smart_needs_new_clone`` requires consent
+    #     auto_voice_clone is True → never calls MiniMax. Cloned voice is
+    #     reused via explicit voice_a + same-source auto-reuse.
+    #   - minutes charged: no preview_mode/smart_preview_mode → full create
+    #     flow reserves minutes normally + delivers full output.
+    # Default inert: absent ``reuse_preview_job_id`` → byte-identical create.
+    _reuse_preview_job_id = None
+    # P3e D-C：convert 结转 marker（server-set；指向预览 reservation）。None = 非 convert。
+    # 流到 PG Job.smart_state 写入（泛化分支）+ 经 request_data forward 进 JobRecord。
+    _convert_smart_state: dict | None = None
+    if isinstance(request_data, dict) and "reuse_preview_job_id" in request_data:
+        # CodeX P2: key PRESENCE = reuse intent. A malformed / blank value must
+        # NOT silently fall through to a normal create — that could re-charge
+        # 600 + re-clone the voice the user already paid for in the preview
+        # (money surprise). Reject before any money path.
+        _rv = request_data.get("reuse_preview_job_id")
+        if isinstance(_rv, str) and _rv.strip():
+            _reuse_preview_job_id = _rv.strip()
+        else:
+            return _error_response(
+                400, "reuse_request_invalid",
+                "预览转完整请求无效（reuse_preview_job_id 缺失或格式错误）。",
+                {"reuse_preview_job_id": _rv},
+            )
+    if _reuse_preview_job_id is not None:
+        from admin_settings import load_settings as _load_admin_for_reuse
+        if (
+            getattr(_load_admin_for_reuse(), "smart_preview_clone_enabled", False)
+            is not True
+        ):
+            # flag off + explicit reuse request → reject (do NOT silently
+            # fall through to a normal create with client-supplied fields).
+            return _error_response(
+                403, "reuse_disabled",
+                "预览转完整功能当前未开放。",
+                {"reuse_preview_job_id": _reuse_preview_job_id},
+            )
+        if user is None:
+            return _error_response(
+                401, "auth_required",
+                "请先登录后再从预览转完整流程。",
+                {"reuse_preview_job_id": _reuse_preview_job_id},
+            )
+        from preview_reuse_service import resolve_preview_reuse
+        _reuse_resolution, _reuse_reason = await resolve_preview_reuse(
+            db, user_id=user.id, preview_job_id=_reuse_preview_job_id
+        )
+        if _reuse_resolution is None:
+            _reuse_status = {
+                "preview_not_found": 404,
+                "preview_forbidden": 403,
+            }.get(_reuse_reason or "", 409)
+            return _error_response(
+                _reuse_status, _reuse_reason or "preview_reuse_rejected",
+                "无法从该预览转完整流程，请重新生成预览后再试。",
+                {
+                    "reuse_preview_job_id": _reuse_preview_job_id,
+                    "reason": _reuse_reason,
+                },
+            )
+        # Server-authoritative overrides — 防越权：ignore any client-supplied
+        # voice_a/voice_b/source; the server controls them entirely.
+        request_data["service_mode"] = "smart"
+        request_data["source"] = {
+            "type": _reuse_resolution.source_type,
+            "value": _reuse_resolution.source_ref,
+        }
+        request_data["voice_a"] = _reuse_resolution.voice_id
+        request_data["voice_b"] = None
+        # Force a valid no-clone 6-field §5.3 consent. auto_voice_clone=False
+        # → 600-reserve block skips (no re-charge) + pipeline never re-clones.
+        request_data["smart_consent"] = {
+            "auto_voice_clone": False,
+            "auto_retranslate": False,
+            "auto_retts": False,
+            "auto_multimodal_verification": False,
+            "no_extra_charge_without_confirmation": True,
+            "on_budget_exhausted": "degraded_delivery_with_report",
+        }
+        # Full delivery + minutes charged (NOT a preview).
+        request_data.pop("preview_mode", None)
+        request_data.pop("reuse_preview_job_id", None)
+
+        # P3e D-C single-flight + 600 结转 marker（plan 2026-06-15 §4.6）。
+        # 确定性 job_id 从 (user, preview_job_id) 派生 → 同一预览的重复 convert（双击/
+        # 重发）收敛到同一完整任务。gateway pre-forward existing-check 命中 → 幂等返回
+        # 现有 F（**绝不 forward**）。job_id/smart_state 是 server-only（上方已剥离客户端
+        # 夹带值，1220-1221），此处由 server 设。marker 经 request_data forward 进
+        # JobRecord，并由下方泛化的 PG Job.smart_state 写入落 PG（settle 读 PG 列）。
+        # 钱-语义（CodeX 复审 P2）：单飞 = pre-check 收敛 + **账本层 single-use 兜底**
+        # （钱-权威）。真并发双击的极小窗口（两个都在对方 commit 前 pre-check）由
+        # **advisory lock 串行关掉**（下方 _acquire_convert_singleflight_lock）：同一预览
+        # 的并发 convert 串成单队，第二个在第一个 commit 后 pre-check 命中现有 F → 幂等
+        # 返回、不再 forward → 上游 worker **不重跑**。即便 advisory lock 不在（非 PG），
+        # 钱仍安全：PG job_id PK 原子回滚 loser 分钟 reserve → 只一次 settle；carryover
+        # single-use + shadow_capture 幂等兜底。
+        _convert_job_id = "job_" + hashlib.sha256(
+            f"{user.id}:convert:{_reuse_preview_job_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        # 在 pre-check **之前**取 advisory lock（持有至本事务 commit，覆盖 pre-check→
+        # forward→PG insert 全程），关掉并发 convert 的 transient 重跑窗口。
+        await _acquire_convert_singleflight_lock(db, _convert_job_id)
+        _existing_convert = (
+            await db.execute(select(Job).where(Job.job_id == _convert_job_id))
+        ).scalar_one_or_none()
+        if _existing_convert is not None:
+            return await _idempotent_convert_job_response(_convert_job_id)
+        request_data["job_id"] = _convert_job_id
+        _convert_smart_state = {
+            # settle helper 读 preview_clone_offset_reservation_id（credits_service
+            # _CLONE_CARRYOVER_MARKER）single-use 消费预览结转额度；offset 金额取自
+            # 预览 reservation.amount_credits（不写死 600）。preview_source_job_id 供
+            # 审计链接 P↔F。
+            "preview_clone_credit_offset": int(_reuse_resolution.preview_credit_amount),
+            "preview_clone_offset_reservation_id": _reuse_resolution.preview_reservation_id,
+            "preview_source_job_id": _reuse_resolution.preview_job_id,
+        }
+        request_data["smart_state"] = dict(_convert_smart_state)
 
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
@@ -1332,15 +1555,56 @@ async def intercept_create_job(
     #   - Apply to all users including admin (concurrency/quota/duration
     #     admin bypass is preserved below; kill switch is a safety
     #     boundary that must NOT be bypassable)
+    # P3e-4a：免费 / 未获 smart entitlement 的登录用户能否进入**受限**智能版预览 lane，
+    # 一次性判定（避免下方两道 entitlement gate 重复读 admin_settings；并供 600-reserve
+    # 失败兜底拒绝用）。放行条件见 smart_preview_gate.smart_preview_lane_exempt：登录 +
+    # preview_mode is True + auto_voice_clone is True + 通用 smart 停开启 + 本 lane canary
+    # 旗开。放行后只能跑受限预览（3min 水印 teaser / 只扣 600 / 跳分钟 / stream-only，全由
+    # 下游 smart_preview_mode 服务端强制）。默认 inert（本旗默认 False → 恒 False → 走原 403）。
+    from smart_preview_gate import smart_preview_lane_exempt
+    _smart_preview_exempt = bool(
+        service_mode == "smart" and smart_preview_lane_exempt(request_data, user)
+    )
+    # 该用户是否**靠 exemption 才进来**（本身未获 smart entitlement）。仅这种情况下 600
+    # 预留失败才需严格拒绝（防免费白嫖完整任务）；entitled 用户做预览 reserve 失败仍按既有
+    # "降级预设、不阻断"语义。由 Gate A 在确认 "smart" not in effective_modes 后置 True。
+    _smart_preview_via_exemption = False
+
     if service_mode == "smart" and user is not None:
         from entitlements import get_effective_allowed_service_modes
         effective_modes = get_effective_allowed_service_modes(user)
         if "smart" not in effective_modes:
-            return _error_response(
-                403, "smart_disabled",
-                "智能版当前未启用。请联系管理员开启 Smart 模式后再试。",
-                {"requested_mode": "smart"},
-            )
+            if not _smart_preview_exempt:
+                # P3e-4c entitlement 决策 A（项目主 2026-06-15 拍板「走正式流程·
+                # 需升级套餐」）：preview→full 转化由 plan 不含 smart 的用户（免费档）
+                # 发起时，给"升级套餐"指引而非误导性的全局"未启用 / 联系管理员"。
+                # 钱模型不变（完整流程照常按分钟扣、复用不重扣 600）；此处只让 4xx
+                # reason 可区分 "plan 缺 smart" 与 "kill-switch 全局关"，前端据此渲染
+                # 升级 CTA 而非死路。注：service_mode 已在 _gate_service_mode 后由
+                # request_data 重派生（reuse 覆盖强制 service_mode="smart"），故
+                # express+reuse 伪造无法绕过本门。仅 reuse 转化且 plan base 不含
+                # smart 才走升级文案；kill-switch 关（plan 含 smart 但 env/admin 停）
+                # 仍回既有 smart_disabled——test_smart_kill_switch 的 Plus-user 断言
+                # 不受影响。
+                if _reuse_preview_job_id is not None:
+                    from plan_catalog import get_effective_plan_gate
+                    _plan_base_modes = tuple(
+                        get_effective_plan_gate(user).get("allowed_service_modes", ())
+                    )
+                    if "smart" not in _plan_base_modes:
+                        return _error_response(
+                            403, "smart_upgrade_required",
+                            "转完整智能版需升级到 Plus / Pro 套餐后再试。"
+                            "复用不会重复扣除预览已支付的克隆费用。",
+                            {"requested_mode": "smart", "via": "preview_reuse"},
+                        )
+                return _error_response(
+                    403, "smart_disabled",
+                    "智能版当前未启用。请联系管理员开启 Smart 模式后再试。",
+                    {"requested_mode": "smart"},
+                )
+            # 未获 smart、靠预览 exemption 放行 → 标记，供 600 预留失败兜底拒绝。
+            _smart_preview_via_exemption = True
 
     # --- smart_consent validation (PR#3C-b3g, hardened Codex 第四十轮 P1.1) ---
     # Smart pipeline reads `_snap("smart_consent")` to gate auto-clone
@@ -1566,7 +1830,9 @@ async def intercept_create_job(
     if user and not is_admin:
         from entitlements import get_effective_allowed_service_modes
         effective_modes = get_effective_allowed_service_modes(user)
-        if service_mode not in effective_modes:
+        # P3e-4a：_smart_preview_exempt 已含 service_mode == "smart" 约束，故仅放行 smart
+        # 预览、不放行其它未授权 mode（如 studio）。
+        if service_mode not in effective_modes and not _smart_preview_exempt:
             return _error_response(
                 403, "service_mode_not_allowed",
                 f"当前套餐（{user_plan}）不支持{service_mode}模式，请升级套餐。",
@@ -1595,7 +1861,10 @@ async def intercept_create_job(
             )
 
     # --- 2b. Free quota check ---
-    if user and not is_admin and user_plan == "free":
+    # Paid smart-preview clone requests still pass concurrency and credit
+    # reservation gates; they should not be blocked by the legacy free-job
+    # counter once the preview exemption lane admits them.
+    if user and not is_admin and user_plan == "free" and not _smart_preview_via_exemption:
         has_quota, quota_used, quota_total = await check_quota(db, user)
         if not has_quota:
             return _error_response(
@@ -1889,13 +2158,15 @@ async def intercept_create_job(
 
     _smart_initial_state: dict[str, object] | None = None
     _smart_clone_create_reservation_id: str | None = None
+    _smart_clone_create_reserved_credits = 0
 
     async def _release_smart_clone_create_reservation(reason: str) -> None:
-        nonlocal _smart_clone_create_reservation_id
+        nonlocal _smart_clone_create_reservation_id, _smart_clone_create_reserved_credits
         if not _smart_clone_create_reservation_id:
             return
         reservation_id = _smart_clone_create_reservation_id
         _smart_clone_create_reservation_id = None
+        _smart_clone_create_reserved_credits = 0
         try:
             outcome = await settle_smart_clone_reservation(
                 db,
@@ -1917,12 +2188,24 @@ async def intercept_create_job(
             )
 
     if service_mode == "smart" and user is not None:
-        request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
+        # Convert-preview flow may already have supplied a deterministic
+        # server-side job_id for single-flight idempotency. Client job_id was
+        # stripped earlier, so preserve any value present here.
+        if not (
+            isinstance(request_data.get("job_id"), str)
+            and request_data["job_id"].strip()
+        ):
+            request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
         auto_clone_requested = (
             smart_consent_payload is not None
             and smart_consent_payload.get("auto_voice_clone") is True
         )
-        consent_allows_clone = auto_clone_requested and smart_paid_clone_confirmed
+        _smart_request_is_preview = request_data.get("preview_mode") is True
+        consent_allows_clone = (
+            auto_clone_requested
+            and smart_paid_clone_confirmed
+            and not _smart_request_is_preview
+        )
         try:
             from admin_settings import load_settings
 
@@ -1930,7 +2213,12 @@ async def intercept_create_job(
             admin_clone_enabled = bool(
                 getattr(_admin_for_clone, "smart_auto_clone_enabled", True)
             )
-            if auto_clone_requested and admin_clone_enabled and not smart_paid_clone_confirmed:
+            if (
+                auto_clone_requested
+                and admin_clone_enabled
+                and not smart_paid_clone_confirmed
+                and not _smart_request_is_preview
+            ):
                 _smart_initial_state = {
                     "smart_clone_credit_reserved": False,
                     "smart_clone_reservation_deny_reason": (
@@ -1980,7 +2268,7 @@ async def intercept_create_job(
                     ),
                     library_cap=_library_cap,
                     required_available_credits=(
-                        int(_base_credits) + _clone_cost_credits
+                        max(int(_base_credits), _clone_cost_credits)
                         if _base_credits > 0
                         else None
                     ),
@@ -1992,9 +2280,11 @@ async def intercept_create_job(
                     _smart_clone_create_reservation_id = (
                         _reserve_outcome.reservation_id
                     )
+                    _smart_clone_create_reserved_credits = int(_clone_cost_credits)
                     _smart_initial_state = {
                         "smart_clone_credit_reserved": True,
                         "smart_clone_reservation_id": _reserve_outcome.reservation_id,
+                        "smart_clone_reserved_credits": int(_clone_cost_credits),
                     }
                 else:
                     _smart_initial_state = {
@@ -2056,7 +2346,161 @@ async def intercept_create_job(
             )
         _free_reserved = True
 
+    # P3e-2b: smart 预览克隆 600 点 reserve（Option C：forward 前用**预生成**
+    # job_id 做 reserve(task_id=job_id) + 把 reservation marker 塞
+    # request_data['smart_state'] 一并 forward → Job API 用预供 job_id（P3e-2a）
+    # 并存 smart_state → pipeline `_snap` 读 + mirror→finalizer marker-gate。
+    # 同 free-tier reserve 模式：forward 前 reserve、TTL+inline-expire、crash
+    # 自动释放（smart_clone_reservation_sweeper 兜底）。
+    # **降级一律不阻断**（CLAUDE.md 免费触点不静默降级）：disabled/denied/error
+    # → 不写 marker → pipeline 退预设；skip 原因记 `_smart_clone_skipped_reason`
+    # （审计可见；前端降级提示响应字段 = P3e-4）。
+    # 触发条件 = smart + preview_mode is True + 用户 consent.auto_voice_clone +
+    # admin smart_preview_clone_enabled。reservation 真有效性由 register-billed
+    # endpoint 写 billing event 时原子再校验（gateway 不在此扣费，只预留）。
+    _smart_clone_skipped_reason: str | None = None
+    _smart_clone_reservation_id: str | None = None
+    _smart_pre_job_id: str | None = None  # 对抗性复核 P1-C：forward 后校验一致性
+    _smart_preview_clone_requested = (
+        service_mode == "smart"
+        and user is not None
+        and request_data.get("preview_mode") is True
+        and isinstance(request_data.get("smart_consent"), dict)
+        and request_data["smart_consent"].get("auto_voice_clone") is True
+    )
+    if _smart_preview_clone_requested and not smart_paid_clone_confirmed:
+        return _error_response(
+            400, "smart_paid_clone_confirmation_required",
+            "智能版预览克隆需要先确认本次付费克隆额度。",
+            {"required_credits": _SMART_CLONE_RESERVE_CREDITS},
+        )
+    if _smart_preview_clone_requested:
+        from admin_settings import load_settings as _load_admin_for_clone
+        _admin_for_clone = _load_admin_for_clone()
+        if getattr(_admin_for_clone, "smart_preview_clone_enabled", False) is not True:
+            _smart_clone_skipped_reason = "clone_disabled"
+        elif _smart_preview_via_exemption and not (
+            bool(getattr(settings, "enable_smart_mode", False))
+            and bool(getattr(_admin_for_clone, "smart_mode_enabled", False))
+        ):
+            # P3e-4a TOCTOU 兜底（CodeX P2）：免费 exemption 用户在 gate→reserve 之间通用
+            # smart 停被翻关（env / admin）→ 用 reserve 时的 fresh admin + env 重核，不再
+            # reserve → 下游 402 拒绝，不留单漏网 preview。entitled 用户不入此分支
+            # （via_exemption=False，其通用停状态在 entitlement gate 已保证）。
+            _smart_clone_skipped_reason = "clone_disabled"
+        else:
+            try:
+                from smart_clone_reservation_service import (
+                    reserve_smart_clone_credit as _reserve_smart_clone,
+                )
+                # P1-A + CodeX 终审 P1#2：pre_job_id 决定性派生自
+                # **(user.id, idempotency_key)** → 同用户同 key 重试复用同
+                # task_id（reserve 幂等，根治双预留）；**含 user.id namespace**
+                # 防两用户夹带同 idempotency_key 撞同一 reservation（reservation
+                # 幂等查只看 (task_id,purpose)）。sha256 取 32 hex 小写 → 匹配
+                # submit_job ^job_[0-9a-f]{32}$。
+                _pre_job_id = "job_" + hashlib.sha256(
+                    f"{user.id}:{idempotency_key}".encode("utf-8")
+                ).hexdigest()[:32]
+                # CodeX 终审 P1#3：终态重放幂等——同 (user, key) 派生同
+                # _pre_job_id；reserve 前查已有 PG job，存在说明是重放 → **不再
+                # reserve**（防 reservation 终态 captured/released 后重放再扣 600；
+                # 幂等查只挡 active reserved，挡不住终态后重放）。仍把 deterministic
+                # job_id forward 让 Job API existing-check 去重（不建重复 job）。
+                _smart_existing_job = (
+                    await db.execute(select(Job).where(Job.job_id == _pre_job_id))
+                ).scalar_one_or_none()
+                if _smart_existing_job is not None:
+                    # CodeX 复审 P1#3：重放（同 user+key → 同 _pre_job_id，已有 PG
+                    # job）→ skip reserve（防终态后重放再扣 600）。**不**回 supply
+                    # _pre_job_id —— 否则 Job API submit_job 会 ``save_job`` 覆盖 +
+                    # ``runner.start`` **重启已有 job**（重跑付费 workflow / 污染
+                    # 产物状态）。留空 → Job API mint 新 id → 新预设 job（无
+                    # reservation → pipeline gate 关 → preset 无克隆）。重复 job 是
+                    # 既有"双提交无 create-level idempotency dedup"基线行为，本修
+                    # 只确保**不覆盖重启原 job**、**不再扣 600**。
+                    _smart_clone_skipped_reason = "duplicate_create"
+                else:
+                    await ensure_credit_buckets_for_user(db, user=user)
+                    _smart_lib_cap = int(
+                        getattr(_admin_for_clone, "smart_user_voice_clone_cap", 30) or 30
+                    )
+                    # P3e-4b 全局反滥用 cap：今日全局上限 + 在飞并发上限（防免费 3min
+                    # 预览刷爆 MiniMax 账号）。reserve 端在扣 600 前 fail-closed deny →
+                    # deny_reason 经下方 _smart_clone_skipped_reason 流到 402/预设。
+                    _smart_daily_cap = int(
+                        getattr(_admin_for_clone, "smart_preview_clone_daily_global_cap", 200) or 200
+                    )
+                    _smart_inflight_cap = int(
+                        getattr(_admin_for_clone, "smart_preview_clone_inflight_cap", 5) or 5
+                    )
+                    _smart_resv = await _reserve_smart_clone(
+                        db,
+                        user_id=user.id,
+                        task_id=_pre_job_id,
+                        purpose=SMART_PREVIEW_PURPOSE,
+                        # 克隆 reserve 金额来自 gateway 单一业务常量；前端仅通过
+                        # pricing API 读取展示值，不再硬编码。
+                        amount_credits=_SMART_CLONE_RESERVE_CREDITS,
+                        ttl_minutes=60,
+                        library_cap=_smart_lib_cap,
+                        daily_global_cap=_smart_daily_cap,
+                        inflight_cap=_smart_inflight_cap,
+                    )
+                    if _smart_resv.status == "reserved":
+                        _smart_clone_reservation_id = _smart_resv.reservation_id
+                        _smart_pre_job_id = _pre_job_id
+                        # Option C：预生成 job_id + reservation marker 一并 forward。
+                        request_data["job_id"] = _pre_job_id
+                        request_data["smart_state"] = {
+                            "smart_clone_reservation_id": _smart_resv.reservation_id,
+                            "smart_clone_credit_reserved": True,
+                            "smart_clone_reserved_credits": _SMART_CLONE_RESERVE_CREDITS,
+                            # P3e-3 producer：smart 3min 预览标记（前端 preview_mode
+                            # 请求驱动，strict is True）→ pipeline 读
+                            # smart_state.smart_preview_mode → 3min teaser + 水印
+                            # （+ 后续 P3e-3b 跳分钟）。仅当请求显式 preview_mode
+                            # （前端预览入口）才 True；完整 smart 任务（缺 preview_
+                            # mode）→ False（仍完整任务 + 克隆计费）。前端未送
+                            # preview_mode 前恒 False（inert）。
+                            "smart_preview_mode": request_data.get("preview_mode") is True,
+                        }
+                    else:
+                        # denied(insufficient_credits / voice_library_full) /
+                        # user_not_found → 不阻断、走预设。
+                        _smart_clone_skipped_reason = (
+                            _smart_resv.deny_reason or "user_not_found"
+                        )
+            except Exception as _smart_resv_exc:  # noqa: BLE001 — reserve 故障不阻断
+                logger.warning(
+                    "smart clone preview reserve failed user=%s: %s",
+                    user.id, _smart_resv_exc,
+                )
+                _smart_clone_skipped_reason = "reserve_error"
+        if _smart_clone_skipped_reason:
+            logger.info(
+                "smart clone preview reserve skipped user=%s reason=%s",
+                user.id, _smart_clone_skipped_reason,
+            )
+
+    # P3e-4a（对抗性 P1 兜底）：免费用户**只能**经预览 exemption 进 smart create 路径，
+    # 且该 lane 要求 600 克隆预留成功才成为"受限预览"。若预留未成功（余额不足 / 库满 /
+    # denied / reserve_error / 重放 duplicate_create），**不得**继续 forward 落成一个按
+    # 分钟计费的完整 smart 任务——那会把不受限完整成片白送给未获 smart 的免费用户。显式
+    # 拒绝（402），让用户充够 600 再试；原任务（若重放）仍可在列表查看。
+    # 仅作用于 exemption 放行的免费请求：正常 entitled smart 用户 reserve 失败仍按既有
+    # "降级预设、不阻断"语义继续（CLAUDE.md 免费触点不静默降级只约束付费克隆本身）。
+    if _smart_preview_via_exemption and not _smart_clone_reservation_id:
+        return _error_response(
+            402, "smart_preview_reserve_failed",
+            "智能版预览需要预扣 600 点克隆额度，本次预扣未成功，请确认余额充足后重试。",
+            {"skipped_reason": _smart_clone_skipped_reason},
+        )
+
     # Forward to upstream with modified body
+    # CodeX 复审 P2：proxy_request 抛异常（httpx timeout / client 故障）会绕过
+    # 下方非 2xx/no-job_id/big-except 的 release → 已预留的 smart clone 600 锁到
+    # TTL。包 try/except：异常时及时释放后再 re-raise（保持既有错误传播）。
     try:
         upstream_response = await proxy_request(
             request=request,
@@ -2066,6 +2510,11 @@ async def intercept_create_job(
         )
     except Exception:
         await _release_smart_clone_create_reservation("proxy_exception")
+        if _smart_clone_reservation_id:
+            await _release_smart_clone_reservation_on_create_failure(
+                db, _smart_clone_reservation_id
+            )
+            _smart_clone_reservation_id = None
         raise
 
     # --- 6. Record in PostgreSQL ---
@@ -2074,12 +2523,61 @@ async def intercept_create_job(
                 upstream_response.status_code, user.id if user else None)
     if upstream_response.status_code not in (200, 201, 202):
         await _release_smart_clone_create_reservation("upstream_rejected")
+        if _smart_clone_reservation_id:
+            await _release_smart_clone_reservation_on_create_failure(
+                db, _smart_clone_reservation_id
+            )
+            _smart_clone_reservation_id = None
     if upstream_response.status_code in (200, 201, 202) and user is not None:
         try:
             raw_body = upstream_response.body
             data = json.loads(raw_body)
             job_data = data.get("job") or data
             job_id = job_data.get("job_id")
+            # P3e-2b 对抗性复核 P1-C：Job API 实际用的 job_id 必须 == 预生成的
+            # _smart_pre_job_id（reservation.task_id），否则 reservation 关联断裂
+            # （register-billed 按 job_id 查 reservation 查不到 → 漏结算 + 孤儿
+            # voice）。极低概率（uuid hex 恒匹配 submit_job pattern）；防 proxy/
+            # response 异常。不一致 → 释放 + loud error（fail-safe：用户不被扣）。
+            if (
+                _smart_clone_reservation_id
+                and _smart_pre_job_id
+                and job_id
+                and str(job_id) != str(_smart_pre_job_id)
+            ):
+                logger.error(
+                    "smart clone job_id MISMATCH pre=%s actual=%s — releasing "
+                    "reservation %s (linkage broken; user not charged)",
+                    _smart_pre_job_id, job_id, _smart_clone_reservation_id,
+                )
+                await _release_smart_clone_reservation_on_create_failure(
+                    db, _smart_clone_reservation_id
+                )
+                _smart_clone_reservation_id = None
+            _smart_state_for_pg = (
+                job_data.get("smart_state")
+                if isinstance(job_data.get("smart_state"), dict)
+                else request_data.get("smart_state")
+                if isinstance(request_data.get("smart_state"), dict)
+                else None
+            )
+            if _smart_clone_reservation_id:
+                _smart_state_for_pg = dict(_smart_state_for_pg or {})
+                _smart_state_for_pg.setdefault(
+                    "smart_clone_reservation_id", _smart_clone_reservation_id
+                )
+                _smart_state_for_pg.setdefault("smart_clone_credit_reserved", True)
+                # P3e-3d: gateway stream-only gates read PG Job.smart_state before
+                # mirror can copy JobRecord.smart_state, so create must persist the
+                # preview marker immediately when the reservation path is active.
+                _smart_state_for_pg["smart_preview_mode"] = (
+                    request_data.get("preview_mode") is True
+                )
+            elif _convert_smart_state:
+                # P3e D-C: convert-full has no fresh clone reservation, but it
+                # must persist the preview carryover marker in PG smart_state so
+                # the settlement helper can consume the preview credit exactly once.
+                _smart_state_for_pg = dict(_convert_smart_state)
             if job_id:
                 existing = await db.execute(select(Job).where(Job.job_id == job_id))
                 if existing.scalar_one_or_none() is None:
@@ -2126,13 +2624,7 @@ async def intercept_create_job(
                         # Job API ever normalises the value.
                         display_name=job_data.get("display_name") or generated_display_name,
                         expires_at=job_expires_at,
-                        smart_state=(
-                            job_data.get("smart_state")
-                            if isinstance(job_data.get("smart_state"), dict)
-                            else request_data.get("smart_state")
-                            if isinstance(request_data.get("smart_state"), dict)
-                            else None
-                        ),
+                        smart_state=_smart_state_for_pg,
                     )
                     db.add(job)
                     # Reserve quota in the same transaction.
@@ -2140,10 +2632,25 @@ async def intercept_create_job(
                     # independent daily ledger (reserved before forward), NOT the
                     # legacy free-PLAN quota — skip reserve_quota so they never
                     # consume users.free_jobs_quota_used.
-                    reserved = True if service_mode == "free" else await reserve_quota(db, user.id, job)
+                    # Paid smart-preview exemption jobs use their own credit
+                    # reservation gate and must not consume or be blocked by
+                    # the legacy free-PLAN counter after the upstream job is
+                    # persisted locally.
+                    skip_legacy_free_quota_reserve = (
+                        service_mode == "free" or _smart_preview_via_exemption
+                    )
+                    reserved = (
+                        True
+                        if skip_legacy_free_quota_reserve
+                        else await reserve_quota(db, user.id, job)
+                    )
                     if not reserved and user_plan == "free":
                         # Quota reservation failed — rollback local record
                         await db.rollback()
+                        # P3e-2b P1-B：任务没建 → 释放已预留的 smart clone 600。
+                        await _release_smart_clone_reservation_on_create_failure(
+                            db, _smart_clone_reservation_id
+                        )
                         # Compensate: cancel upstream job to prevent orphan
                         await _compensate_upstream_job(job_id)
                         await _release_smart_clone_create_reservation("quota_failed")
@@ -2173,24 +2680,66 @@ async def intercept_create_job(
                         # by cost_management.py window rollup (PR-A part 2 §6).
                         "language_pair": job.language_pair,
                     }
-                    if shadow_credits > 0:
+                    # P3e-3c-1 钱-关键：智能版 3min 预览只扣 600 克隆点、**不扣分钟/
+                    # 时长点**（teaser P3e-3b 已把 pipeline 工作/产物有界 3min，跳分钟
+                    # 安全=非免费完整任务）。预览判定 = reservation 成功（600 已预留）
+                    # **且**请求 preview_mode（与写入 smart_state.smart_preview_mode 的
+                    # 同条件；普通完整 smart 克隆缺 preview_mode → 不跳、照常扣分钟）。
+                    # settle 是 capture-of-reserve（无 reserve→shadow_capture 查不到→
+                    # no-op），故跳 reserve 自然不收分钟，无需改 settlement。600 克隆
+                    # reserve（上方独立 codepath）+ P3e-2b 失败/释放/补偿路径不受影响。
+                    _is_smart_preview = bool(_smart_clone_reservation_id) and (
+                        request_data.get("preview_mode") is True
+                    )
+                    # P3e D-B（plan 2026-06-15 §4.5）：克隆 600 抵扣进分钟点 → reserve 也减
+                    # offset，避免「付得起最终 max(600,分钟×100) 但不够 gross 600+分钟×100」
+                    # 的用户被误拒。R_own=600（自有克隆 reservation 已在上方预留）；
+                    # R_carryover=convert 结转额度。settle 仍是钱的权威（offset 按 actual
+                    # 重算）；reserve 偏少时 settle additional-debit 补足、不漏扣。net=0 时
+                    # reserve_credits_or_raise(0) no-op（短任务只占 600 克隆）。
+                    _reserve_offset = (
+                        _SMART_CLONE_RESERVE_CREDITS
+                        if _smart_clone_reservation_id
+                        else (
+                            int(
+                                _smart_clone_create_reserved_credits
+                                or _get_smart_clone_cost_credits()
+                            )
+                            if _smart_clone_create_reservation_id
+                            else 0
+                        )
+                    )
+                    if _convert_smart_state:
+                        _reserve_offset += int(
+                            _convert_smart_state.get("preview_clone_credit_offset") or 0
+                        )
+                    _minute_reserve_credits = max(0, shadow_credits - _reserve_offset)
+                    if shadow_credits > 0 and not _is_smart_preview:
                         try:
                             await ensure_credit_buckets_for_user(db, user=user)
                             await reserve_credits_or_raise(
                                 db,
                                 user_id=user.id,
                                 job_id=job_id,
-                                estimated_credits=shadow_credits,
+                                estimated_credits=_minute_reserve_credits,
                                 service_mode=service_mode,
                             )
                         except InsufficientCreditsError as exc:
                             await db.rollback()
+                            # P3e-2b P1-B：分钟点不足任务没建 → 释放 smart clone
+                            # 600（最现实的孤儿场景：够克隆 600 但不够分钟点）。
+                            await _release_smart_clone_reservation_on_create_failure(
+                                db, _smart_clone_reservation_id
+                            )
                             await _compensate_upstream_job(job_id)
                             await _release_smart_clone_create_reservation("base_credit_insufficient")
                             return _insufficient_credits_response(exc)
                         except Exception as exc:
                             logger.exception("credit reserve failed for job %s: %s", job_id, exc)
                             await db.rollback()
+                            await _release_smart_clone_reservation_on_create_failure(
+                                db, _smart_clone_reservation_id
+                            )
                             await _compensate_upstream_job(job_id)
                             await _release_smart_clone_create_reservation("base_credit_reserve_failed")
                             return _error_response(
@@ -2208,6 +2757,13 @@ async def intercept_create_job(
             else:
                 logger.warning("No job_id in upstream response")
                 await _release_smart_clone_create_reservation("missing_job_id")
+                # P3e-2b P2#4：2xx 但无 job_id（异常）→ reservation 关联不上真
+                # job → 释放（sweeper 兜底）。
+                if _smart_clone_reservation_id:
+                    await _release_smart_clone_reservation_on_create_failure(
+                        db, _smart_clone_reservation_id
+                    )
+                    _smart_clone_reservation_id = None
         except Exception as exc:
             logger.exception("Failed to record job %s in DB: %s", job_id, exc)
             try:
@@ -2215,6 +2771,13 @@ async def intercept_create_job(
             except Exception:
                 pass
             await _release_smart_clone_create_reservation("pg_record_failed")
+            # P3e-2b P2#4：2xx 后本地解析/PG 记录失败 → 任务未正确入库 → 释放
+            # smart clone reservation（避免挂满 60min TTL；sweeper 仍兜底）。
+            if _smart_clone_reservation_id:
+                await _release_smart_clone_reservation_on_create_failure(
+                    db, _smart_clone_reservation_id
+                )
+                _smart_clone_reservation_id = None
 
     # Phase 2a free tier — settle the daily reservation: consume on upstream
     # accept, release on reject. TTL + inline-expire is the safety net for
@@ -2584,6 +3147,7 @@ async def _resolve_r2_redirect(
             download_keys_for,
             effective_policy_mode,
         )
+        from preview_policy import extract_smart_preview_flag
     except Exception as exc:  # pragma: no cover - boto3/storage missing
         logger.warning(
             "storage package import failed (%s); falling back to local", exc,
@@ -2615,7 +3179,10 @@ async def _resolve_r2_redirect(
     # （含匿名 express，service_mode=="express"）零下载 key，不进 R2 302。
     if artifact_key not in download_keys_for(
         effective_policy_mode(
-            job.service_mode, bool(getattr(job, "is_anonymous_preview", False))
+            job.service_mode,
+            bool(getattr(job, "is_anonymous_preview", False)),
+            # P3e-3d：智能版预览也走零下载档（读 smart_state.smart_preview_mode）。
+            smart_preview=extract_smart_preview_flag(getattr(job, "smart_state", None)),
         )
     ):
         return None, ""
@@ -2768,6 +3335,7 @@ async def _resolve_r2_stream_redirect(
             effective_policy_mode,
             stream_kinds_for,
         )
+        from preview_policy import extract_smart_preview_flag
     except Exception as exc:  # pragma: no cover - boto3/storage missing
         logger.warning(
             "stream r2 redirect: storage package import failed (%s); falling back",
@@ -2808,7 +3376,10 @@ async def _resolve_r2_stream_redirect(
     # 本身在集合内，必须显式短路否则仍会 302；anonymous_preview 档
     # eager-push 集为空、本来不该有 registry 条目，这里是双保险。
     _policy_mode = effective_policy_mode(
-        job.service_mode, bool(getattr(job, "is_anonymous_preview", False))
+        job.service_mode,
+        bool(getattr(job, "is_anonymous_preview", False)),
+        # P3e-3d：智能版预览的 video stream 也本地直通、不进 R2 redirect。
+        smart_preview=extract_smart_preview_flag(getattr(job, "smart_state", None)),
     )
     if _policy_mode == "anonymous_preview":
         return None, ""
@@ -4370,6 +4941,18 @@ async def _enforce_post_edit_access(
     subpath: str,
     now_utc: datetime,
 ) -> tuple[Job, dict[str, int | None]]:
+    # P3e-4a 防御层（置于一切检查之前，对抗性 P2-C）：smart 预览任务 stream-only
+    # （P3e-3d），进入 editing / commit 会经 copy_as_new / draft 暴露完整产物。enter-edit
+    # 与 editing/commit 都经本函数，故在 gateway FOR-UPDATE 层同档拒绝（权威拒绝在
+    # services.jobs.editing.enter_editing；这里镜像一层确保 post-edit DB sync 对预览任务
+    # 永不触发）。放在 plan-limits 检查**之前**：免费用户当前虽已被 limits=None 挡下，但若
+    # 将来定价给免费档开放 post-edit，预览闸不能因排在 limits 之后而失效。
+    from preview_policy import extract_smart_preview_flag
+    if extract_smart_preview_flag(getattr(job, "smart_state", None)):
+        raise HTTPException(
+            status_code=403,
+            detail="预览任务不支持进入修改模式。",
+        )
     limits = _post_edit_limits_for_user(user)
     if limits is None:
         raise HTTPException(
@@ -5612,7 +6195,32 @@ async def update_source_metadata(
                         late_credits = estimate_credits(
                             dur_float / 60.0, service_mode=_svc_mode, quality_tier=_quality_tier,
                         )
-                        if late_credits > 0:
+                        # P3e-3c-1 钱-关键：智能版预览跳分钟——create 端已跳，late 端
+                        # （duration 报告后补扣）必须同跳，否则 create 跳了 late 又补回 =
+                        # 还是扣了分钟。读 PG Job.smart_state（create 已落 smart_preview_
+                        # mode；普通任务无此键 → 照常补扣，inert）。
+                        from preview_policy import extract_smart_preview_flag
+                        _late_is_smart_preview = extract_smart_preview_flag(
+                            getattr(job, "smart_state", None)
+                        )
+                        # P3e D-B（plan 2026-06-15 §4.5）：late reserve 也减克隆 600 offset
+                        # （与 create 端同口径，CodeX #3 要求两处都改）。读 PG Job.smart_state：
+                        # 自有克隆（smart_clone_reservation_id）→ R_own=600；convert 结转
+                        # （preview_clone_credit_offset）→ R_carryover。create 已 reserve 时
+                        # already_reserved 短路本块（不双减）。settle 仍权威。
+                        _late_ss = dict(getattr(job, "smart_state", None) or {})
+                        _late_own_offset = int(
+                            _late_ss.get("smart_clone_reserved_credits") or 0
+                        )
+                        if (
+                            _late_own_offset <= 0
+                            and _late_ss.get("smart_clone_reservation_id")
+                        ):
+                            _late_own_offset = _SMART_CLONE_RESERVE_CREDITS
+                        _late_offset = _late_own_offset
+                        _late_offset += int(_late_ss.get("preview_clone_credit_offset") or 0)
+                        _late_minute_reserve = max(0, late_credits - _late_offset)
+                        if late_credits > 0 and not _late_is_smart_preview:
                             snap["credits_estimated"] = late_credits
                             job.metering_snapshot = dict(snap)
                             await ensure_credit_buckets_for_user(
@@ -5622,10 +6230,13 @@ async def update_source_metadata(
                             )
                             await reserve_credits_or_raise(
                                 db, user_id=job.user_id, job_id=job_id,
-                                estimated_credits=late_credits,
+                                estimated_credits=_late_minute_reserve,
                                 service_mode=_svc_mode,
                             )
-                            logger.info("V3 late credit reserve for %s: %d credits", job_id, late_credits)
+                            logger.info(
+                                "V3 late credit reserve for %s: %d credits (gross=%d offset=%d)",
+                                job_id, _late_minute_reserve, late_credits, _late_offset,
+                            )
                 except InsufficientCreditsError as exc:
                     job.status = "failed"
                     job.current_stage = "failed"

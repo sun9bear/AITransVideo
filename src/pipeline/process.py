@@ -1393,8 +1393,16 @@ def _register_smart_clone_in_user_voices(
     smart_clone_reservation_id: str | None = None,
     created_from: str | None = "smart_auto",
     notes: str | None = None,
+    reservation_id: str | None = None,
+    task_id: str | None = None,
 ) -> bool:
     """Mirror a smart-path clone into the Gateway UserVoice table.
+
+    P3e §5: when ``reservation_id`` (+ ``task_id``) is present (智能版预览
+    克隆，已预扣 600 reservation），POST 到 **register-billed** endpoint
+    （原子写 durable billing event + 入库，钱-正确性核心）而非 register-smart。
+    无 reservation（既有 full smart auto-clone / flag off）→ 仍走 register-smart
+    （只入库、不计费）。两端点字段 parity（rich source_* 全透传）。
 
     Returns ``True`` on success (HTTP 200, ok:true), ``False`` on
     any failure.
@@ -1472,22 +1480,61 @@ def _register_smart_clone_in_user_voices(
         payload["created_from"] = created_from
     if notes:
         payload["notes"] = notes
+    # P3e §5：reservation 在场 → register-billed（原子写 billing event + 入库，
+    # 钱-正确性核心，含 task_id + reservation_id 供 gateway 行锁校验 reservation
+    # status=reserved 且属本 task）；否则 register-smart（既有，只入库不计费）。
+    # rich source_* 字段两端点都透传（字段 parity）。
+    _reservation_id = (reservation_id or "").strip()
+    _task_id = (task_id or "").strip()
+    _is_billed = bool(_reservation_id and _task_id)
+    if _is_billed:
+        _endpoint = "http://127.0.0.1:8880/api/internal/smart-clone/register-billed"
+        payload["reservation_id"] = _reservation_id
+        payload["task_id"] = _task_id
+    else:
+        _endpoint = "http://127.0.0.1:8880/api/internal/user-voices/register-smart"
+        # 钱-可见性（对抗性复核 V2）：reservation_id 在场但 task_id 缺失（不一致
+        # 状态）→ 静默降级到 register-smart（不写 billing event）→ finalizer release
+        # → 业务白克隆。这种本不该发生（reservation 在场必有 job_id），loud log
+        # 供 ops 排查。注意：fail-safe 方向（用户**不**被扣，只是业务漏收）。
+        if _reservation_id and not _task_id:
+            print(
+                f"[smart][MONEY] reservation present ({_reservation_id}) but task_id "
+                f"empty — routing to register-smart (NO billing event). voice={voice_id}. "
+                f"finalizer will release; business eats clone cost. Needs reconcile.",
+                flush=True,
+            )
     try:
-        endpoint = (
-            "smart-clone/register-billed"
-            if reservation_id
-            else "user-voices/register-smart"
-        )
         resp = requests.post(
-            f"http://127.0.0.1:8880/api/internal/{endpoint}",
+            _endpoint,
             json=payload,
             headers={"X-Internal-Key": api_key},
             timeout=5.0,
         )
         if resp.status_code != 200:
+            # 钱-可见性（对抗性复核 V2）：register-billed 失败（如 409
+            # no_active_reservation：reservation 失效/不属本 task）→ MiniMax 已克隆
+            # 但未写 billing event → finalizer release（用户**不**被扣，fail-safe）
+            # → 业务白克隆 + 留下孤儿 MiniMax voice。loud log 供 ops 对账 +
+            # best-effort 清理（自动删 voice 待后续接 MiniMax client，本期 follow-up）。
+            if _is_billed:
+                print(
+                    f"[smart][MONEY] register-billed FAILED status={resp.status_code} "
+                    f"task={_task_id} reservation={_reservation_id} voice={voice_id} "
+                    f"— clone done but NOT billed; finalizer will release. Needs reconcile.",
+                    flush=True,
+                )
             return False
         data = resp.json()
-    except Exception:
+    except Exception as _reg_exc:
+        if _is_billed:
+            print(
+                f"[smart][MONEY] register-billed EXCEPTION task={_task_id} "
+                f"reservation={_reservation_id} voice={voice_id}: "
+                f"{type(_reg_exc).__name__} — clone done but NOT billed; finalizer "
+                f"will release. Needs reconcile.",
+                flush=True,
+            )
         return False
     return bool(data.get("ok"))
 
@@ -1527,6 +1574,26 @@ def _check_smart_clone_reservation_active(
     except Exception:
         return False
     return bool(data.get("ok") and data.get("active"))
+
+
+def _smart_reservation_gate_open(
+    requires_reservation: bool, reservation_id: object
+) -> bool:
+    """P3e §2 智能版克隆 reservation 收紧闸（纯函数，钱-critical，可单测）。
+
+    - ``requires_reservation=False``（admin 默认）→ **恒 open**：既有 smart
+      auto-clone 行为完全不变（不要求 reservation）。
+    - ``True`` → 仅当带**非空** ``reservation_id`` 才 open；否则闸关 →
+      pipeline 选 provider 时不接真 MiniMax（只 preset / reuse），封死现在
+      full smart 无 reservation 调付费 provider 的漏收（plan §2）。
+
+    注意：本函数只判 reservation_id **是否存在**；其「真有效（status=reserved
+    且属本 task）」由 gateway register-billed endpoint 写 billing event 时**原子
+    再校验**（pipeline 不碰钱）。
+    """
+    if not requires_reservation:
+        return True
+    return bool(str(reservation_id or "").strip())
 
 
 def _is_valid_speaker_id(value: object) -> bool:
@@ -2827,6 +2894,16 @@ class ProcessPipeline:
         # APF P0 T5（AD-7/G3）：匿名预览标记，严格 is True gate；
         # 驱动匿名严格合规 lane + Pass 3 跳过。登录任务恒 False。
         job_anonymous_preview = _snap('anonymous_preview', False) is True
+        # P3e-3：smart 预览标记（在 ``smart_state`` 字典，create 经 preview_mode
+        # stamp）。驱动 3min teaser + 水印 + 跳分钟结算。**区别 is_anonymous_
+        # preview**：smart 预览是**登录**用户、且**保留**克隆 600 结算（只跳分钟），
+        # 故另立标记不复用匿名字段。create 未接线前 smart_state 无此键 → False
+        # （inert，既有 smart 行为不变）。
+        _job_smart_state_snap = _snap('smart_state')
+        job_smart_preview = bool(
+            isinstance(_job_smart_state_snap, dict)
+            and _job_smart_state_snap.get('smart_preview_mode') is True
+        )
         if job_anonymous_preview and job_voice_strategy != 'preset_mapping':
             # 防 clone 第三道防线（对抗审核加固）：匿名任务的 voice_strategy
             # 只允许 preset_mapping——gateway payload 硬编码是第一道、
@@ -2962,6 +3039,52 @@ class ProcessPipeline:
 
                 video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
                 source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
+
+            # --- P3e-3b：智能版 3min 预览 teaser 裁剪（consumer 侧 / 钱-关键耦合）---
+            # smart 预览（job_smart_preview）把源**音频**在 separation/ASR/clone/TTS
+            # 等付费阶段**之前**裁到 ~180s teaser。音频 teaser 同时有界两条边界：
+            # ① 付费 AI 阶段全读 teaser 派生音频（分离→ASR→克隆→TTS 限 3 分钟）；
+            # ② 下方 actual_duration_ms = _ffprobe_duration_ms(source_audio_path) →
+            #    EditorPackageWriter 据此造 base silence（成片音轨长度）+ render
+            #    -shortest → 成片收口到 ~3 分钟。**视频不裁**：原 original.mp4 保留 +
+            #    render 经 -shortest 收口（artifact index source.original_video 仍指真
+            #    原视频，供 P3e-3c-2 转完整复用，不被 teaser 污染）。
+            # 使后续 P3e-3c 跳分钟安全（否则 pipeline 跑完整视频却不收分钟 = 免费完整
+            # 任务，漏收全部分钟点 ≫ 克隆 600）。本步**仍扣分钟**（create reserve 不变 →
+            # settle 照常 = 无漏收）。默认 inert：create 未 stamp smart_preview_mode 前
+            # job_smart_preview=False → 不触发。
+            if job_smart_preview:
+                from utils.smart_preview_teaser import (
+                    SmartPreviewTeaserError,
+                    apply_smart_preview_teaser,
+                    smart_preview_gemini_url_unbounded,
+                )
+
+                # 防御：gemini-on-URL 转录读 normalized_url（原始 URL）做多模态转录，
+                # 本地 teaser 无法有界它 → fail-closed（绝不对未有界的完整源跑付费转录/
+                # TTS）。smart 预览默认 assemblyai + 本地上传（normalized_url 空 → 走本地
+                # speech_audio_path，已被 teaser 有界），本守卫只在误配 gemini+URL 时触发。
+                if smart_preview_gemini_url_unbounded(
+                    getattr(config, "transcription_method", None), normalized_url
+                ):
+                    raise SmartPreviewTeaserError(
+                        "smart 预览不支持 gemini-on-URL 转录（本地 teaser 无法有界源），"
+                        "fail-closed"
+                    )
+
+                # 只裁音频并 repoint source_audio_path：下游付费阶段（分离/ASR/克隆/
+                # TTS）+ actual_duration_ms 改读 3min teaser；video_path **保持原值**。
+                # fail-closed 异常向外层 try 传播 → 任务 terminal failed（绝不退回处理
+                # 完整源）。
+                source_audio_path = apply_smart_preview_teaser(
+                    source_audio_path=source_audio_path,
+                    project_dir=final_project_dir,
+                )
+                print(
+                    "[S0.5] 智能版预览：源音频已裁剪至 3min teaser"
+                    "（原视频/音频保留供转完整复用，成片经 -shortest + 3min 基线静音有界）",
+                    flush=True,
+                )
 
             review_state_manager = ReviewStateManager(final_project_dir / "review_state.json")
             state_manager = StateManager(str(final_project_dir / "project_state.json"))
@@ -4113,6 +4236,61 @@ class ProcessPipeline:
                             "smart_reuse_user_voice_enabled", default=True
                         )
                     )
+                    # P3e §2：reservation marker 落在 ``smart_state`` 字典里
+                    # （create/Option C 经 submit_job 预供 → JobRecord.smart_state；
+                    # 与 finalizer marker-gate `_smart_clone_settle_needed` 读的
+                    # 同一位置一致）。保留顶层 `_snap` 作防御 fallback。create 未
+                    # 接线前 smart_state 无此键 → None（inert，gate 恒按"无 reservation"）。
+                    _smart_state_snap = _snap("smart_state")
+                    _smart_state_dict = (
+                        _smart_state_snap if isinstance(_smart_state_snap, dict) else {}
+                    )
+                    # P3e reservation gate:
+                    # - explicit rollout flag can still force the old global
+                    #   "require reservation for any new Smart clone" behavior.
+                    # - preview tasks require a reservation only when the
+                    #   server-stamped smart_preview_mode marker is present.
+                    # - full Smart create also writes smart_clone_credit_reserved
+                    #   or smart_clone_reservation_deny_reason, so unpaid /
+                    #   failed full-Smart clone attempts stay fail-closed without
+                    #   letting the admin preview flag globally disable full Smart.
+                    _smart_requires_reservation = (
+                        read_admin_setting(
+                            "smart_clone_requires_reservation", default=False
+                        )
+                        is True
+                    ) or (
+                        _smart_state_dict.get("smart_preview_mode") is True
+                    ) or (
+                        _smart_state_dict.get("smart_clone_credit_reserved") is True
+                    ) or isinstance(
+                        _smart_state_dict.get("smart_clone_reservation_deny_reason"),
+                        str,
+                    )
+                    _smart_clone_reservation_id = (
+                        str(
+                            _smart_state_dict.get("smart_clone_reservation_id")
+                            or _snap("smart_clone_reservation_id")
+                            or ""
+                        ).strip()
+                        or None
+                    )
+                    _smart_reservation_gate_open_result = (
+                        _smart_reservation_gate_open(
+                            _smart_requires_reservation,
+                            _smart_clone_reservation_id,
+                        )
+                    )
+                    # CodeX P3e-1a P1：把 reservation 闸**折进** effective clone-enabled，
+                    # 使「闸关」与「admin 关克隆」语义**完全一致**=evaluate_voice_review
+                    # PRESET fall-through。否则只塞进 _smart_needs_new_clone 会让闸关时
+                    # 仍 admin_clone_enabled=True + quota=0 → 触发 PAUSED 水线/样本抽取
+                    # handoff（不是退预设）。**所有** clone 决策点（样本抽取 / needs_new
+                    # _clone / 外层 if / evaluate_voice_review 入参）一律改用本 effective 值。
+                    _smart_effective_clone_enabled = bool(
+                        _smart_admin_clone_enabled
+                        and _smart_reservation_gate_open_result
+                    )
                     # Phase 4 (plan 2026-05-17 §Smart 弱匹配暂停): admin
                     # toggle. Default False so existing users see no
                     # behavior change; admin must opt in to get pauses
@@ -4233,9 +4411,36 @@ class ProcessPipeline:
                         _sid for _sid in _smart_main_speaker_ids
                         if _sid not in _smart_existing_voice_matches
                     ]
+                    # P3e §5 limit-1：reservation 收紧（requires_reservation 且
+                    # 带 reservation_id）时，600 点只覆盖 **1 个**克隆 → 只为
+                    # 「按 vs_payload 稳定顺序的第 1 个待克隆 main speaker」新建
+                    # 克隆；其余待克隆 main speaker 经 evaluate_voice_review 的
+                    # ``clone_allowed_speaker_ids`` cap 退 PRESET（不克隆=不漏收、
+                    # 不 handoff=不打断自动化）。默认（flag off / 无 reservation）
+                    # → ``clone_allowed=None`` → 不限制（既有多说话人克隆行为
+                    # 字节级不变）。用 vs_payload 顺序选首个（**不**用 set 迭代
+                    # 序，CodeX：稳定可复现）。截断同时收窄样本抽取/quota gate。
+                    _smart_clone_allowed_speaker_ids: set[str] | None = None
+                    if _smart_requires_reservation and _smart_clone_reservation_id:
+                        _smart_requiring_set = set(
+                            _smart_speaker_ids_requiring_clone
+                        )
+                        _smart_ordered_requiring = [
+                            str(_sp.get("speaker_id") or "").strip()
+                            for _sp in (vs_payload.get("speakers") or [])
+                            if isinstance(_sp, dict)
+                            and str(_sp.get("speaker_id") or "").strip()
+                            in _smart_requiring_set
+                        ]
+                        _smart_speaker_ids_requiring_clone = (
+                            _smart_ordered_requiring[:1]
+                        )
+                        _smart_clone_allowed_speaker_ids = set(
+                            _smart_speaker_ids_requiring_clone
+                        )
                     _smart_needs_new_clone = bool(
                         _smart_consent_allows_clone
-                        and _smart_admin_clone_enabled
+                        and _smart_effective_clone_enabled
                         and _smart_speaker_ids_requiring_clone
                     )
                     _smart_user_id_for_mirror = str(_snap("user_id") or "")
@@ -4533,9 +4738,18 @@ class ProcessPipeline:
                     # is empty. The gate below mirrors all conditions.
                     _smart_quota_remaining = 0
                     _smart_clone_provider = _build_b2_not_wired_clone_provider()
+                    # P3e §2: reservation 闸已折进 _smart_effective_clone_enabled
+                    # （= admin_clone_enabled AND gate）。闸关 → effective=False →
+                    # needs_new_clone=False → not-wired stub → PRESET fall-through，
+                    # 与 admin 关克隆字节级一致（绝不接真 provider）。
+                    _smart_needs_new_clone = bool(
+                        _smart_consent_allows_clone
+                        and _smart_effective_clone_enabled
+                        and _smart_speaker_ids_requiring_clone
+                    )
                     if (
                         _smart_consent_allows_clone
-                        and _smart_admin_clone_enabled
+                        and _smart_effective_clone_enabled
                         and _smart_main_speakers
                     ):
                         if (
@@ -4637,10 +4851,13 @@ class ProcessPipeline:
                         smart_decision_id_factory=lambda: _smart_uuid.uuid4().hex,
                         existing_voice_matches_by_speaker_id=_smart_existing_voice_matches,
                         possible_voice_matches_by_speaker_id=_smart_possible_voice_matches,
-                        admin_clone_enabled=_smart_admin_clone_enabled,
+                        admin_clone_enabled=_smart_effective_clone_enabled,
                         admin_pause_on_possible_match=_smart_admin_pause_on_possible,
                         admin_auto_reuse_on_possible_match=_smart_admin_auto_reuse_on_possible,
                         max_new_clones=_smart_max_new_clones_for_review,
+                        # P3e §5 limit-1：reservation 收紧时只允许首个待克隆
+                        # main speaker 新建克隆，其余退 PRESET。None=不限制（默认）。
+                        clone_allowed_speaker_ids=_smart_clone_allowed_speaker_ids,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
@@ -5002,6 +5219,17 @@ class ProcessPipeline:
                                     f"{_smart_job_id_for_mirror}"
                                     if _smart_job_id_for_mirror
                                     else "Smart auto-clone"
+                                ),
+                                # P3e §5：reservation 在场 → 改走 register-billed
+                                # （原子写 billing event）。limit-1 保证本 run 最多
+                                # 1 个 CLONED → 最多 1 次 bill；register-billed 以
+                                # reservation_id 唯一约束幂等，重试不双计费。无
+                                # reservation → 二者皆 None → 仍走 register-smart。
+                                reservation_id=_smart_clone_reservation_id,
+                                task_id=(
+                                    _smart_job_id_for_mirror
+                                    or str(_snap("job_id") or "")
+                                    or None
                                 ),
                             )
                             if not _mirror_ok:
@@ -6545,7 +6773,11 @@ class ProcessPipeline:
                 project_dir=final_project_dir,
                 build_result=build_result,
                 watermark_text=free_watermark_text_for(
-                    effective_policy_mode(job_service_mode, job_anonymous_preview)
+                    effective_policy_mode(
+                        job_service_mode,
+                        job_anonymous_preview,
+                        smart_preview=job_smart_preview,
+                    )
                 ),
             )
             assert output_bundle.editor_result is not None
@@ -7258,6 +7490,18 @@ class ProcessPipeline:
         ambient_path = (final_project_dir / "audio" / "ambient.wav").resolve(strict=False)
         source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
         video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
+        # P3e-3b 钱-关键耦合（CodeX/对抗性 P1）：smart 预览 teaser 音频若在盘上，
+        # resume/publish 必须用**它的时长**（而非完整 original.wav）造 base silence。
+        # 否则 Studio 编辑-提交一个预览任务会走本路径，用完整时长造满长 base silence
+        # （EditorPackageWriter）+ 完整视频出片，-shortest 因满长静音不收口 = 完整
+        # 任务（漏收分钟点，P3e-3c 跳分钟后尤甚）。preview_teaser.wav 存在 = 该任务是
+        # 预览（仅 smart 预览 teaser 创建），优先复用之。视频仍用 original.mp4 —
+        # 经 3min base silence + -shortest 收口成 3 分钟，不漏完整片。
+        _preview_teaser_audio = (
+            final_project_dir / "audio" / "preview_teaser.wav"
+        ).resolve(strict=False)
+        if _preview_teaser_audio.is_file():
+            source_audio_path = _preview_teaser_audio
         for missing_rel, p in (
             ("audio/speech_for_asr.wav", speech_path),
             ("audio/ambient.wav", ambient_path),

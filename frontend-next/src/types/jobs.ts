@@ -87,6 +87,14 @@ export interface JobSummary {
    */
   serviceMode?: 'express' | 'studio' | 'smart' | 'free'
   /**
+   * P3e-4c: true when this is a 智能版 3 分钟预览 teaser job
+   * (``smart_state.smart_preview_mode``). The result surface renders
+   * ``SmartPreviewResultCard`` (teaser stream player + 转完整 CTA) instead of
+   * the normal media/download UI — downloads / edit / export are 403'd
+   * server-side (stream-only, P3e-3d). Absent / false on every non-preview job.
+   */
+  smartPreviewMode?: boolean
+  /**
    * Post-edit infra fields (plan 2026-04-18 §3.3). All nullable because
    * jobs created before migration 015 have NULL for these columns until
    * backfill / first-touch populates them.

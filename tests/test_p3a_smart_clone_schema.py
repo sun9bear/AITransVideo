@@ -73,7 +73,7 @@ def test_migration_037_creates_both_tables_and_indexes():
 
 
 def test_migration_037_has_only_production_chain_child():
-    """037 已接入生产迁移链，且只能由 038 继续向后延伸。"""
+    """037 链完整，且唯一后继是 038（P3e-4b created_at 索引）。"""
     versions = (GATEWAY / "alembic" / "versions")
     refs_037 = [
         p.name for p in versions.glob("*.py")
@@ -81,7 +81,7 @@ def test_migration_037_has_only_production_chain_child():
         and "037_smart_clone_reservations" in p.read_text(encoding="utf-8")
     ]
     assert refs_037 == ["038_smart_clone_created_at_index.py"], (
-        f"037 must only feed the current production chain: {refs_037}"
+        f"037 后继应只有 038（链冲突 / 分叉）: {refs_037}"
     )
 
 

@@ -198,6 +198,19 @@ def _get_clone_cost_credits() -> int:
         return 600
 
 
+def _get_smart_preview_clone_cost_credits() -> int:
+    """Read the Smart preview clone reserve cost from the gateway reserve source."""
+    try:
+        from smart_clone_reservation_service import (
+            SMART_PREVIEW_CLONE_RESERVE_CREDITS,
+        )
+
+        value = int(SMART_PREVIEW_CLONE_RESERVE_CREDITS)
+        return value if value >= 0 else 600
+    except Exception:
+        return 600
+
+
 async def _commit_shadow(db: AsyncSession, label: str) -> None:
     try:
         await db.commit()
@@ -334,8 +347,8 @@ async def get_voice_selection_pricing(
 ) -> dict:
     """Return credits-per-minute rates for voice selection display.
 
-    Values come from Gateway truth sources (pricing_runtime + DEBIT_RATES),
-    never from frontend hardcoded constants.
+    Values come from Gateway truth sources (pricing_runtime + DEBIT_RATES +
+    Smart preview reserve constants), never from frontend hardcoded constants.
 
     Phase 4 (plan 2026-05-17-user-voice-candidate-first §Smart 弱匹配
     暂停): includes ``smart_pause_warning_enabled`` so the Smart job
@@ -372,6 +385,7 @@ async def get_voice_selection_pricing(
             "minimax_hd": rates.get(("studio", "flagship"), 50),
         },
         "voice_clone_cost_credits": _get_clone_cost_credits(),
+        "smart_preview_clone_cost_credits": _get_smart_preview_clone_cost_credits(),
         "smart_pause_warning_enabled": smart_pause_warning_enabled,
     }
 

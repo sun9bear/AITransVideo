@@ -13,6 +13,7 @@ import { StageProgress } from '@/components/stage-progress'
 import { LogViewer } from '@/components/log-viewer'
 import { ResultDownloadList } from '@/components/result-download-list'
 import { ResultMediaCard } from '@/components/workspace/ResultMediaCard'
+import { SmartPreviewResultCard } from '@/components/workspace/SmartPreviewResultCard'
 import { TranslationReviewPanel, VoiceReviewPanel, VoiceSelectionPanel, SmartAutoDecisionPanel } from '@/components/workspace'
 import {
   getErrorCategory,
@@ -97,8 +98,10 @@ export default function WorkspacePage() {
           prevStatusRef.current !== nextJob.status &&
           (nextJob.status === 'succeeded' || nextJob.status === 'failed' || nextJob.status === 'cancelled')) {
         sendBrowserNotification(nextJob.status, getJobDisplayTitle(nextJob))
-        // Auto-redirect to projects page after successful completion
-        if (nextJob.status === 'succeeded') {
+        // Auto-redirect to projects page after successful completion.
+        // 智能版预览任务例外：teaser + 转完整 CTA 就在本工作区页，跳转到 /projects
+        // 会丢失试看上下文 → 留在原页。
+        if (nextJob.status === 'succeeded' && !nextJob.smartPreviewMode) {
           toast.success('任务已完成，即将跳转到视频翻译主页...')
           setTimeout(() => {
             router.push('/projects')
@@ -371,19 +374,28 @@ export default function WorkspacePage() {
         </section>
       ) : null}
 
+      {/* 智能版预览：succeeded 时直接在工作区页放 stream-only teaser + 转完整 CTA。
+        * 取代下方 SmartAutoDecisionPanel / 下载区 / "前往主页" 横幅（预览任务无下载，
+        * 决策摘要对 teaser 也不适用）。后端对预览任务 403 全部下载 / 导出。 */}
+      {isSucceeded && job.smartPreviewMode ? (
+        <SmartPreviewResultCard job={job} />
+      ) : null}
+
       {/* PR#3C-P3-c: Smart auto-decision summary panel for smart jobs.
         * Conditional on job.serviceMode === "smart" — the panel does
         * its own /smart-quality-report fetch and self-hides on
         * service_mode_not_smart (defense-in-depth in case the prop
         * lags), so non-smart jobs never see it. Positioned BEFORE
         * the download list per decision log §3 (between
-        * media/completion banner and downloads). */}
-      {job.serviceMode === 'smart' ? (
+        * media/completion banner and downloads).
+        * 预览任务排除（smartPreviewMode）——teaser 不需要决策摘要。 */}
+      {job.serviceMode === 'smart' && !job.smartPreviewMode ? (
         <SmartAutoDecisionPanel jobId={jobId} />
       ) : null}
 
-      {/* Completed: Downloads only (playback + preview is on /projects main page) */}
-      {availableDownloadCount > 0 ? (
+      {/* Completed: Downloads only (playback + preview is on /projects main page).
+        * 预览任务 stream-only，无可下载条目，整块跳过。 */}
+      {!job.smartPreviewMode && availableDownloadCount > 0 ? (
         <>
           {isSucceeded && (
             <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm text-muted-foreground">

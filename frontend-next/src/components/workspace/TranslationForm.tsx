@@ -5,6 +5,7 @@ import Link from "next/link"
 import { toast } from "sonner"
 
 import { StatusBadge } from "@/components/status-badge"
+import { SmartPreviewConfirmDialog } from "@/components/workspace/SmartPreviewConfirmDialog"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
 import { ApiError } from "@/lib/api/client"
 import { getErrorMessage } from "@/lib/api/errors"
@@ -14,6 +15,7 @@ import {
   type UserEntitlements,
 } from "@/lib/api/entitlements"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
+import { isSmartPreviewCloneEntryEnabled } from "@/lib/api/smartPreviewClone"
 import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
 import { getVoiceSelectionPricing } from "@/lib/api/voiceSelection"
@@ -28,7 +30,7 @@ import {
   type ChunkedUploadLimits,
 } from "@/lib/upload/chunkedUpload"
 import { usePollingTask } from "@/lib/react/usePollingTask"
-import { ACTIVE_JOB_STATUSES, type JobSummary } from "@/types/jobs"
+import { ACTIVE_JOB_STATUSES, type CreateTranslationJobInput, type JobSummary } from "@/types/jobs"
 
 export interface TranslationFormProps {
   /** Called when job is created successfully. Container decides what happens next. */
@@ -100,7 +102,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // UI so users aren't surprised by a mid-job pause.
   const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
   const [voiceCloneCostCredits, setVoiceCloneCostCredits] = useState<number | null>(null)
+  const [smartPreviewCloneCostCredits, setSmartPreviewCloneCostCredits] = useState<number | null>(null)
   const [voiceCloneCostLoadFailed, setVoiceCloneCostLoadFailed] = useState(false)
+  // P3e-4c：智能版 3 分钟预览克隆入口（免费 / 未获 smart 的登录用户）。展示闸由
+  // Next flag 控制；真正的 gate 在服务端（admin smart_preview_clone_enabled +
+  // lane exemption + clone reservation）。flag 关 → 入口不渲染（默认 inert）。
+  const smartPreviewEntryEnabled = isSmartPreviewCloneEntryEnabled()
+  const [smartPreviewOpen, setSmartPreviewOpen] = useState(false)
+  const [smartPreviewInput, setSmartPreviewInput] = useState<CreateTranslationJobInput | null>(null)
   const sourceValidationError =
     sourceType === "youtube_url"
       ? validateYoutubeUrl(youtubeUrl)
@@ -143,6 +152,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const voiceCloneCostLabel =
     voiceCloneCostCredits != null
       ? `${voiceCloneCostCredits} 点`
+      : voiceCloneCostLoadFailed
+        ? "暂时无法读取"
+        : "读取中"
+  const smartPreviewCloneCostLabel =
+    smartPreviewCloneCostCredits != null
+      ? `${smartPreviewCloneCostCredits} 点`
       : voiceCloneCostLoadFailed
         ? "暂时无法读取"
         : "读取中"
@@ -211,11 +226,13 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       .then((pricing) => {
         setSmartPauseWarningEnabled(Boolean(pricing.smart_pause_warning_enabled))
         setVoiceCloneCostCredits(pricing.voice_clone_cost_credits)
+        setSmartPreviewCloneCostCredits(pricing.smart_preview_clone_cost_credits)
         setVoiceCloneCostLoadFailed(false)
       })
       .catch(() => {
         setSmartPauseWarningEnabled(false)
         setVoiceCloneCostCredits(null)
+        setSmartPreviewCloneCostCredits(null)
         setVoiceCloneCostLoadFailed(true)
       })
     // Phase 4.3a PR3: Express auto-clone availability (admin flag + allowlist).
@@ -318,6 +335,31 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         toast.error(msg)
       }
     }
+  }
+
+  // P3e-4c：打开智能版 3 分钟预览的预扣确认弹窗。校验源（与主提交同一道
+  // sourceValidationError），构造与普通创建一致的共享 job 配置交给弹窗；smart /
+  // preview / 克隆具体项由 createSmartPreviewJob 强制（前端只送共享配置）。
+  function openSmartPreview() {
+    if (sourceValidationError) {
+      toast.error(sourceValidationError)
+      return
+    }
+    const selectedPair =
+      languageFacts.find((f) => f.pair_key === languagePairKey) ?? GA_DEFAULT_LANGUAGE_FACT
+    const sendPair = !selectedPair.is_default && selectedPair.pipeline_ready
+    setSmartPreviewInput({
+      speakers,
+      youtubeUrl: sourceType === "youtube_url" ? youtubeUrl.trim() : "",
+      sourceType,
+      localFilePath: sourceType === "local_video" ? uploadedFilePath : undefined,
+      localFileName: sourceType === "local_video" ? (uploadFileName || undefined) : undefined,
+      transcriptionMethod: sourceType === "local_video" ? "assemblyai" : transcriptionMethod,
+      service_mode: "smart",
+      sourceLanguage: sendPair ? selectedPair.source_language : undefined,
+      targetLanguage: sendPair ? selectedPair.target_language : undefined,
+    })
+    setSmartPreviewOpen(true)
   }
 
   return (
@@ -668,6 +710,35 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </div>
                     )}
                   </button>
+                ) : smartPreviewEntryEnabled ? (
+                  // P3e-4c：免费 / 未获 smart 的登录用户的预览入口。点击校验源 →
+                  // 打开预扣确认弹窗（付费克隆的用户显式触发面）。
+                  <div className="relative rounded-xl border border-primary/30 bg-primary/[0.05] p-4 text-left">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-sm font-semibold text-foreground">智能版</span>
+                      <span
+                        className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                        style={{
+                          backgroundColor: "color-mix(in oklab, var(--primary) 14%, transparent)",
+                          color: "var(--primary)",
+                          border: "1px solid color-mix(in oklab, var(--primary) 32%, transparent)",
+                        }}
+                      >
+                        预览
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      克隆主说话人音色，先看前 3 分钟带水印预览（预扣 {smartPreviewCloneCostLabel}）。满意再转完整成片，按分钟正常扣点。
+                    </p>
+                    <button
+                      type="button"
+                      disabled={isBlockedByConcurrency || submitState === "submitting"}
+                      onClick={openSmartPreview}
+                      className="mt-3 w-full rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-white transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      试用 3 分钟预览
+                    </button>
+                  </div>
                 ) : (
                   <div className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed">
                     <div className="flex items-center gap-2 mb-2">
@@ -964,6 +1035,18 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           </button>
         </form>
       </section>
+
+      {smartPreviewEntryEnabled ? (
+        <SmartPreviewConfirmDialog
+          open={smartPreviewOpen}
+          onOpenChange={setSmartPreviewOpen}
+          jobInput={smartPreviewInput}
+          availableCredits={credits?.total_available ?? null}
+          cloneCostCredits={smartPreviewCloneCostCredits}
+          cloneCostLoadFailed={voiceCloneCostLoadFailed}
+          onCreated={onCreated}
+        />
+      ) : null}
     </div>
   )
 }

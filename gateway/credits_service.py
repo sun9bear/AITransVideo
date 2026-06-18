@@ -24,10 +24,11 @@ Design principles:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import CreditsBucket, CreditsLedger, Job
@@ -402,6 +403,151 @@ def estimate_actual_job_credits(job: Any) -> tuple[int, str, float | None, str]:
     return credits, quality_tier, float(minutes) if minutes else None, service_mode
 
 
+# ---------------------------------------------------------------------------
+# P3e D-C — smart 克隆 600 抵扣分钟（max(600, 分钟×100)）
+# plan 2026-06-15-smart-clone-600-minute-offset-plan.md §4
+# ---------------------------------------------------------------------------
+
+# convert 结转 marker（reuse 覆盖块 server-set 进 F.smart_state；指向预览 reservation）
+_CLONE_CARRYOVER_MARKER = "preview_clone_offset_reservation_id"
+
+
+async def _smart_clone_offset_own(db: AsyncSession, *, job_id: str) -> int:
+    """C_own = 本 task「将被/已被」收费的克隆点数（max(600,…) 模型的克隆侧）。
+
+    读**唯一权威计费信号** ``CloneBillingEvent``（pipeline 阶段 register-billed 即写、
+    早于终态；``settle_smart_clone_reservation`` 用同一信号决定 capture/release）→ **不
+    依赖**克隆 reservation 是否已先结算（无顺序依赖、无 defer）。join reservation 取权威
+    ``amount_credits``（不写死 600）。无 chargeable event（克隆失败/回预设/白克隆孤儿）
+    → 0 → 分钟全额。
+    """
+    from models import CloneBillingEvent, SmartCloneReservation
+
+    total = (
+        await db.execute(
+            select(func.coalesce(func.sum(SmartCloneReservation.amount_credits), 0))
+            .select_from(CloneBillingEvent)
+            .join(
+                SmartCloneReservation,
+                SmartCloneReservation.id == CloneBillingEvent.reservation_id,
+            )
+            .where(
+                CloneBillingEvent.task_id == job_id,
+                CloneBillingEvent.chargeable.is_(True),
+            )
+        )
+    ).scalar()
+    return int(total or 0)
+
+
+async def _smart_clone_offset_carryover(
+    db: AsyncSession, *, job: Any, user_id, f_job_id: str
+) -> tuple[int, str | None]:
+    """C_carryover = 预览→完整 convert 的 600 结转（single-use，D-C §4.6）。
+
+    完整任务 F 终态结算时对**预览的** reservation 行做 FOR UPDATE single-use 消费：
+    仅 ``status=captured`` ∧ 同 user（防越权）∧ 有 chargeable event ∧ 结转额度未被任何
+    任务消费（``carryover_applied_to_task_id IS NULL``）时，置本列=F 并抵 ``amount_credits``。
+    FOR UPDATE 串行化并发 F；幂等：本列==F（F 自身重放）仍返 amount。指向他人 / 未
+    captured / 已被别的任务消费 → 0（不重复抵）。仅成功完整任务才 settle → 才消费；失败
+    convert 不消费、可重试。返回 ``(credits, source_preview_task_id)``。
+    """
+    smart_state = dict(getattr(job, "smart_state", None) or {})
+    resv_id_raw = smart_state.get(_CLONE_CARRYOVER_MARKER)
+    if not resv_id_raw:
+        return 0, None
+    try:
+        resv_pk = uuid.UUID(str(resv_id_raw))
+    except (ValueError, TypeError):
+        return 0, None
+
+    from models import CloneBillingEvent, SmartCloneReservation
+
+    row = (
+        await db.execute(
+            select(SmartCloneReservation)
+            .where(SmartCloneReservation.id == resv_pk)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return 0, None
+    # 防越权 + 状态复核（即便 marker server-set，仍 defense-in-depth）
+    if str(getattr(row, "user_id", "") or "") != str(user_id or ""):
+        return 0, None
+    if getattr(row, "status", None) != "captured":
+        return 0, None
+
+    applied = getattr(row, "carryover_applied_to_task_id", None)
+    if applied is not None:
+        # 已被消费：F 自身重放 → 幂等返还；别的任务 → 0（不重复抵）
+        if str(applied) == str(f_job_id):
+            return (
+                int(getattr(row, "amount_credits", 0) or 0),
+                str(getattr(row, "task_id", "") or "") or None,
+            )
+        return 0, None
+
+    # chargeable event defense-in-depth（captured 却无 chargeable event = 不一致 ledger，不抵）
+    ev = (
+        await db.execute(
+            select(CloneBillingEvent).where(
+                CloneBillingEvent.reservation_id == resv_pk,
+                CloneBillingEvent.chargeable.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if ev is None:
+        return 0, None
+
+    # 抢到 single-use（row 已 FOR UPDATE 锁住 → 原子 vs 并发 F；与 F 分钟 capture 同事务 commit）
+    row.carryover_applied_to_task_id = str(f_job_id)
+    return (
+        int(getattr(row, "amount_credits", 0) or 0),
+        str(getattr(row, "task_id", "") or "") or None,
+    )
+
+
+async def _smart_clone_minute_offset(
+    db: AsyncSession,
+    *,
+    job: Any,
+    job_id: str,
+    user_id,
+    service_mode: str,
+    actual_credits: int,
+) -> tuple[int, dict]:
+    """把克隆 600 抵扣进分钟点：返回 ``(adjusted_credits, audit)``。
+
+    ``adjusted = max(0, actual_credits − C_own − C_carryover)``，使总扣 = 克隆 600 +
+    adjusted = ``max(600, 分钟×100)``（plan §4.1/§4.6）。只作用于 ``service_mode=="smart"``；
+    express/studio/free 原样返回（inert）。``audit`` 含 convert 结转可审计字段（cost_summary
+    stamp，CodeX #5）。
+    """
+    if (service_mode or "").strip().lower() != "smart":
+        return actual_credits, {}
+    if actual_credits <= 0:
+        return actual_credits, {}
+
+    c_own = await _smart_clone_offset_own(db, job_id=job_id)
+    c_carryover, carryover_source = await _smart_clone_offset_carryover(
+        db, job=job, user_id=user_id, f_job_id=job_id
+    )
+    adjusted = max(0, int(actual_credits) - int(c_own) - int(c_carryover))
+    audit: dict = {}
+    if c_carryover > 0:
+        audit = {
+            "clone_carryover_applied_credits": int(c_carryover),
+            "clone_carryover_source_job_id": carryover_source,
+        }
+    if c_own or c_carryover:
+        logger.info(
+            "smart_clone_minute_offset: job=%s actual=%d c_own=%d c_carryover=%d adjusted=%d",
+            job_id, actual_credits, c_own, c_carryover, adjusted,
+        )
+    return adjusted, audit
+
+
 def _settlement_reason_codes(reason_code: str, reserve_reason_code: str | None) -> set[str]:
     """Return the set of reason_codes that count as "the same job-reserve
     settlement event" for idempotency dedup in ``_has_existing_settlement``.
@@ -424,6 +570,12 @@ def _settlement_reason_codes(reason_code: str, reserve_reason_code: str | None) 
         "capture_additional",
         "capture_overdraft",
         "capture_excess_release",
+        # P3e-3c-1（CodeX 复核 P2）：智能版预览跳分钟 settle 走 shadow_release(
+        # reason_code="smart_preview_minute_release") 释放 job_reserve（理论无
+        # job_reserve → no-op）。归入同一 job_reserve 幂等族，否则重复 terminal
+        # settle（list-jobs/detail/sweeper 多次观察终态）在 fail-safe 释放路径上会
+        # 重复写 release ledger（不扣钱、不留 reserved，但非幂等）。
+        "smart_preview_minute_release",
     }
     # Smart MVP P2 (plan §5.2 末段) — F4 dispatcher reason_codes. Three
     # credits_policy paths × the three-step partial-capture flow add up to
@@ -1028,6 +1180,26 @@ async def settle_job_credit_ledger(
         job = locked_job
 
     snapshot = dict(getattr(job, "metering_snapshot", None) or {})
+
+    # P3e-3c-1 钱-关键（对抗性/CodeX P0）：智能版 3min 预览只扣 600 克隆点（独立
+    # reason_code smart_clone_capture_* 经 settle_smart_clone_reservation 照常 capture）、
+    # **不扣分钟/job 点**。create/late 已跳 minute reserve（reason_code job_reserve）；
+    # 但下方 succeeded 分支会按 actual_minutes/source_duration 重算 actual_credits 调
+    # shadow_capture，而 shadow_capture 在 total_reserved=0 时进 actual>reserved 分支
+    # **从余额额外 debit**（capture_additional / capture_overdraft，**非**纯
+    # capture-of-reserve）→ 即便无分钟 reserve 也会扣分钟。故对预览显式走 release：
+    # 无 job_reserve → no-op；万一有（skip 失守）→ 释放退回，**绝不** capture 分钟
+    # （fail-safe，方向只会是 release/no-op）。在 has_credit_intent / credits_policy
+    # 分发**之前**短路，credits_estimated 是否非零都不影响。
+    if (dict(getattr(job, "smart_state", None) or {})).get("smart_preview_mode") is True:
+        return await shadow_release(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code="smart_preview_minute_release",
+            reserve_reason_code="job_reserve",
+        )
+
     has_credit_intent = (
         _snapshot_int(snapshot, "credits_estimated") > 0
         or await _has_job_credit_reserve(db, user_id=user_id, job_id=job_id)
@@ -1064,11 +1236,21 @@ async def settle_job_credit_ledger(
         if actual_credits <= 0:
             return []
 
+        # P3e D-C：克隆 600 抵扣进分钟点（max(600,分钟×100)）。在 shadow_capture 前重算
+        # actual_credits = max(0, 分钟×100 − C_own − C_carryover)；C_own 读权威
+        # CloneBillingEvent、C_carryover single-use 消费预览结转额度（plan §4）。
+        actual_credits, _offset_audit = await _smart_clone_minute_offset(
+            db, job=job, job_id=job_id, user_id=user_id,
+            service_mode=service_mode, actual_credits=actual_credits,
+        )
+
         snapshot["credits_actual"] = actual_credits
         snapshot["quality_tier"] = quality_tier
         snapshot["credits_actual_quality_tier"] = quality_tier
         snapshot["credits_actual_minutes"] = round(float(minutes or 0.0), 6)
         snapshot["credits_actual_source"] = "final_tts_model"
+        if _offset_audit:
+            snapshot.update(_offset_audit)
         job.metering_snapshot = snapshot
         if minutes is not None:
             job.actual_minutes = float(minutes)
@@ -1144,6 +1326,16 @@ async def _settle_smart_job_credit_ledger(
         actual_credits, _quality_tier, _minutes, service_mode = estimate_actual_job_credits(job)
         if actual_credits <= 0:
             return []
+        # P3e D-C：克隆 600 抵扣（与 legacy succeeded 分支同口径；正式 full smart 终态
+        # 走本 capture_full 分支，必须同样抵扣，否则只 legacy 路径生效会漏抵）。
+        actual_credits, _offset_audit = await _smart_clone_minute_offset(
+            db, job=job, job_id=job_id, user_id=user_id,
+            service_mode=service_mode, actual_credits=actual_credits,
+        )
+        if _offset_audit:
+            _snap = dict(getattr(job, "metering_snapshot", None) or {})
+            _snap.update(_offset_audit)
+            job.metering_snapshot = _snap
         return await shadow_capture(
             db,
             user_id=user_id,

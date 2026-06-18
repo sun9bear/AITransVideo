@@ -133,6 +133,21 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
             f"in editable set {sorted(EDITABLE_SERVICE_MODES)}; only Studio "
             f"and Smart jobs support editing"
         )
+    # P3e-4a (plan 2026-06-14-p3e2-preview-lane-design.md §7): smart 预览任务
+    # （smart_state.smart_preview_mode=True）只产出 3min 水印 teaser（P3e-3b）且
+    # stream-only（P3e-3d）。放进 editing 会经 editor/segments.json + copy_as_new
+    # 暴露完整段落文本 / TTS draft 字节 / 触发完整长度重渲染——彻底击穿"只看不交付"
+    # 的预览契约。无条件拒绝。**置于 is_editable_smart_state 检查之前**，给出明确
+    # stream-only 提示（status=completed 的预览本会过 is_editable 的旧消息，含义误导）；
+    # is_editable_smart_state 本身也已 preview-aware，作为剪映 draft / runner 共享兜底。
+    _smart_state_for_preview = (
+        record.smart_state if isinstance(record.smart_state, dict) else {}
+    )
+    if _smart_state_for_preview.get("smart_preview_mode") is True:
+        raise EditingConflictError(
+            f"smart preview job {record.job_id} cannot enter editing; "
+            f"smart_preview_mode=True jobs are stream-only previews (P3e-3d)"
+        )
     if record.service_mode == "smart" and not is_editable_smart_state(record.smart_state):
         smart_status = (
             record.smart_state.get("status")

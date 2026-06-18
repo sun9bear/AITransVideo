@@ -530,6 +530,20 @@ class AdminSettings(BaseModel):
     smart_preview_clone_daily_global_cap: int = 200
     smart_preview_clone_inflight_cap: int = 5
 
+    # --- 智能版克隆 reservation 收紧 rollout 闸 (plan 2026-06-14 §2/P3e) ---
+    # **pipeline 侧**读的 rollout 开关（区别于上方 create 侧的 smart_preview_clone_
+    # enabled）。控制 plan §2「所有 smart MiniMax 克隆必须 reservation-gated」收紧：
+    #   - False（默认）→ 既有 smart auto-clone 行为**完全不变**（consent + admin +
+    #     speaker 满足即可克隆，不要求 reservation）→ 零回归、既有 smart 测试全绿。
+    #   - True → `process.py` 选 provider 时**额外**要求 JobRecord 带有效
+    #     `smart_clone_reservation_id`（create 端预扣 600 时 stamp）；无 reservation
+    #     → 一律不接真 MiniMax provider，只 preset / reuse。**顺带封死现在 full
+    #     smart 无 reservation 调付费 provider 的漏收**（plan §2）。
+    # ⚠️ 翻 True **必须**在 create endpoint（预扣 + stamp marker）+ 预览 lane 落地
+    # **之后**——否则既有 smart 用户的 auto-clone 会因无 reservation 全部退预设。
+    # 与本项目所有 P3 钱-核心一致：默认 OFF、inert、由项目主显式翻开激活。
+    smart_clone_requires_reservation: StrictBool = False
+
     @field_validator(
         "anonymous_preview_max_upload_mb",
         "anonymous_preview_max_seconds",

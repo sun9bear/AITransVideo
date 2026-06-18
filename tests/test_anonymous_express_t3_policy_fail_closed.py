@@ -190,10 +190,13 @@ class TestPolicySourceGuards:
         # _is_express_job 用 getattr(...) == "express"（Call 节点，不计入）；
         # 其余直接比较不得新增
         "src/services/jobs/api.py": 1,
-        # 既有 11 处是 create-intercept / post-edit 等业务逻辑（§C 范围外、
-        # 本计划前已存在）；§C 两个 R2 redirect gate 已改走 helper。
-        # 任何升高 = 有人绕过 helper 新增策略判断。
-        "gateway/job_intercept.py": 11,
+        # 既有 create-intercept / post-edit 等业务逻辑（§C 范围外、含 i18n
+        # PR-A 等分支累积的 service_mode 业务比较）；§C 两个 R2 redirect gate
+        # 已改走 helper。任何升高 = 有人绕过 helper 新增**策略**判断。
+        # 13 = 12 既有业务比较 + P3e-2b 的 ``service_mode == "smart"`` reserve-gate
+        # （智能版预览克隆 600 预扣触发判断）——**业务/计费判断，非策略判断**
+        # （不决定下载/stream/水印/R2），与既有同类、不绕 effective_policy_mode。
+        "gateway/job_intercept.py": 13,
         "src/utils/free_watermark.py": 0,
     }
 

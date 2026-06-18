@@ -472,6 +472,7 @@ export interface VoiceSelectionPricingResponse {
     minimax_hd: number
   }
   voice_clone_cost_credits: number
+  smart_preview_clone_cost_credits: number
   /** Phase 4 (plan 2026-05-17): admin enabled smart_pause_on_possible_user_voice_match.
    * When true, the Smart submission UI should warn that Smart jobs may pause for
    * human confirmation when a possible (non-strong) personal-voice candidate

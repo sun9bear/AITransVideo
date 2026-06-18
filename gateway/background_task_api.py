@@ -29,6 +29,7 @@ from background_task_executors import TASK_EXECUTORS
 from csrf import require_same_origin_state_change
 from database import async_session, get_db
 from models import Job, User
+from preview_policy import job_is_stream_only_preview
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,10 @@ async def create_task_endpoint(
         raise HTTPException(status_code=400, detail=f"未知任务类型: {payload.task_type}")
 
     job = await _require_job_ownership(db, job_id=job_id, user=user)
+    # P3e-3d：智能版/匿名预览是 stream-only——不允许导出任务（materials_pack /
+    # generate_video 都产出可下载成片）。**登录** smart 预览能到达本端点，必须显式挡。
+    if job_is_stream_only_preview(job):
+        raise HTTPException(status_code=403, detail="预览任务不支持导出/下载")
     project_dir = _resolve_project_dir(job)
 
     # Task ownership follows the JOB, not the caller. This matters because
@@ -232,6 +237,9 @@ async def download_task_artifact(
     if user is None:
         raise HTTPException(status_code=401, detail="未登录")
     job = await _require_job_ownership(db, job_id=job_id, user=user)
+    # P3e-3d：belt-and-suspenders——即便历史任务已生成 zip，预览任务也不放下载。
+    if job_is_stream_only_preview(job):
+        raise HTTPException(status_code=403, detail="预览任务不支持素材下载")
     project_dir = _resolve_project_dir(job)
 
     task = await queue.get_task(db, task_id=task_id)
