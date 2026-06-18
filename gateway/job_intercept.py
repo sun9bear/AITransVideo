@@ -99,8 +99,11 @@ def _get_smart_clone_cost_credits() -> int:
     try:
         from pricing_runtime import get_runtime_pricing
 
-        value = int(get_runtime_pricing().credits.voice_clone_cost_credits or 0)
-        return value if value > 0 else 600
+        raw_value = get_runtime_pricing().credits.voice_clone_cost_credits
+        if raw_value is None:
+            return 600
+        value = int(raw_value)
+        return value if value >= 0 else 600
     except Exception:
         return 600
 

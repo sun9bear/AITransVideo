@@ -1323,6 +1323,36 @@ class TestSmartVoiceQuotaPreflightGates:
         })
         assert not job_intercept._smart_paid_clone_confirmed({})
 
+    def test_smart_clone_cost_respects_zero_runtime_price(self, monkeypatch):
+        import job_intercept
+        import pricing_runtime
+
+        monkeypatch.setattr(
+            pricing_runtime,
+            "get_runtime_pricing",
+            lambda: SimpleNamespace(
+                credits=SimpleNamespace(voice_clone_cost_credits=0)
+            ),
+        )
+
+        assert job_intercept._get_smart_clone_cost_credits() == 0
+
+    def test_smart_clone_cost_falls_back_when_runtime_price_is_missing(
+        self, monkeypatch
+    ):
+        import job_intercept
+        import pricing_runtime
+
+        monkeypatch.setattr(
+            pricing_runtime,
+            "get_runtime_pricing",
+            lambda: SimpleNamespace(
+                credits=SimpleNamespace(voice_clone_cost_credits=None)
+            ),
+        )
+
+        assert job_intercept._get_smart_clone_cost_credits() == 600
+
     def test_create_smart_job_reserves_clone_credit_and_stamps_job_record(self):
         import admin_settings as admin_mod
         from models import Job
