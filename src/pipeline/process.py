@@ -5099,7 +5099,7 @@ class ProcessPipeline:
                         )
                         _emit_smart_audit(
                             final_project_dir,
-                            decision_type="clone_register_failed_reserved",
+                            decision_type="downgrade_handoff",
                             decision="rejected",
                             reason_code="clone_register_failed_reserved_handoff",
                             evidence={

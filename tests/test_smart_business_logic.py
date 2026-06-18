@@ -2465,6 +2465,10 @@ class TestB3DCloneSampleExtractorContract:
             "Reservation-backed clone registration failure must stop for "
             "handoff instead of continuing with an unbilled provider voice."
         )
+        assert 'decision_type="clone_register_failed_reserved"' not in block, (
+            "Reserved register-failed audit must use an allowed Smart "
+            "decision type so the diagnostic JSONL line is not dropped."
+        )
         assert "clone_library_register_failed" in block, (
             "Smart branch missing clone_library_register_failed reason "
             "code — Codex 第二十九轮 P0: mirror failure must surface "
