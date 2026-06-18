@@ -1861,7 +1861,10 @@ async def intercept_create_job(
             )
 
     # --- 2b. Free quota check ---
-    if user and not is_admin and user_plan == "free":
+    # Paid smart-preview clone requests still pass concurrency and credit
+    # reservation gates; they should not be blocked by the legacy free-job
+    # counter once the preview exemption lane admits them.
+    if user and not is_admin and user_plan == "free" and not _smart_preview_via_exemption:
         has_quota, quota_used, quota_total = await check_quota(db, user)
         if not has_quota:
             return _error_response(

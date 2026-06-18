@@ -69,6 +69,22 @@ def test_full_smart_reserve_does_not_catch_preview_requests():
     assert "not _smart_request_is_preview" in flat
 
 
+def test_paid_preview_exemption_skips_legacy_free_quota_only():
+    """CodeX PR #33: paid preview bypasses only the legacy free-job quota."""
+    body = _create_src()
+    flat = " ".join(body.split())
+    assert 'user_plan == "free" and not _smart_preview_via_exemption' in flat
+
+    concurrency_idx = body.index("active_count_result = await db.execute(")
+    quota_guard_idx = body.index('if user and not is_admin and user_plan == "free"')
+    free_quota_idx = body.index("has_quota, quota_used, quota_total = await check_quota(db, user)")
+    reserve_idx = body.index("_smart_clone_skipped_reason: str | None = None")
+    assert concurrency_idx < free_quota_idx < reserve_idx
+
+    concurrency_block = body[concurrency_idx:quota_guard_idx]
+    assert "_smart_preview_via_exemption" not in concurrency_block
+
+
 def test_reserve_uses_pregenerated_job_id_option_c():
     """Option C：forward 前预生成 job_id（task_id=job_id）调 reserve，
     并把 job_id 塞 request_data 让 Job API 用它（决定性派生见 P1-A 测试）。"""
