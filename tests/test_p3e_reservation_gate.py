@@ -118,16 +118,17 @@ def test_reservation_id_read_from_snapshot():
     assert '_snap("smart_clone_reservation_id")' in src
 
 
-def test_requires_reservation_couples_preview_enabled_flag():
-    """🔥 CodeX P3e-2b 终审：reservation 收紧闸在 preview 激活时**自动强制**
-    （smart_clone_requires_reservation OR smart_preview_clone_enabled）——消除
-    "只开 create 侧 preview 旗、忘开 pipeline gate 旗"的配置顺序漏收风险。"""
+def test_requires_reservation_uses_smart_state_markers_not_preview_admin_flag():
+    """CodeX PR #33：preview admin flag 不能全局改变 full Smart。reservation
+    收紧由显式 rollout flag 或 server-stamped smart_state markers 触发：preview
+    marker、full-Smart reserved marker、full-Smart deny marker。"""
     src = _process_src()
     flat = " ".join(src.split())
     assert '"smart_clone_requires_reservation", default=False' in flat
-    assert '"smart_preview_clone_enabled", default=False' in flat
-    # 两旗 OR（任一为真即收紧）
-    assert ") or (" in flat
+    assert '_smart_state_dict.get("smart_preview_mode") is True' in flat
+    assert '_smart_state_dict.get("smart_clone_credit_reserved") is True' in flat
+    assert 'smart_clone_reservation_deny_reason' in flat
+    assert '"smart_preview_clone_enabled", default=False' not in flat
 
 
 def test_reservation_id_read_from_smart_state_dict():

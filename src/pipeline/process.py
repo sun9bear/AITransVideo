@@ -4236,37 +4236,6 @@ class ProcessPipeline:
                             "smart_reuse_user_voice_enabled", default=True
                         )
                     )
-                    # P3e (plan 2026-06-14 §2): reservation 收紧 rollout 闸。
-                    # False（默认）→ 既有 smart auto-clone 行为**完全不变**（不要
-                    # 求 reservation）。True → 选真 MiniMax provider **额外**要求
-                    # JobRecord 带有效 ``smart_clone_reservation_id``（create 预扣
-                    # 600 时 stamp）；无 reservation → 不接真 provider，只 preset/
-                    # reuse（封死现在 full smart 无 reservation 调付费的漏收）。
-                    # reservation 的「真有效（status=reserved 且属本 task）」由
-                    # gateway register-billed endpoint 在写 billing event 时**原子
-                    # 再校验**；pipeline 这里只看 snapshot 有没有 id（不碰钱）。
-                    # CodeX P3e-1a P2：read_admin_setting **不做类型转换**，
-                    # bool("false")=True 会误开收紧。钱核心 flag 必须 ``is True``
-                    # 严格判定（StrictBool 只护 gateway 存盘路径，不护 pipeline
-                    # 直读 JSON）。见 memory feedback_tls_internal_trap 同类 strict-bool。
-                    # CodeX P3e-2b 终审：reservation 收紧闸在 **preview 激活时
-                    # 自动强制**（两旗 OR），消除"配置顺序"漏收风险——若只开
-                    # create 侧 smart_preview_clone_enabled（开始 reserve 600）但
-                    # 忘开 pipeline 侧 smart_clone_requires_reservation，无 reservation
-                    # 的 smart job 仍会走 legacy MiniMax 克隆（漏收 600）。改为
-                    # 任一为真即收紧 → 开 preview 即原子封死 legacy 无 reservation
-                    # 克隆。两旗都 strict ``is True``（read_admin_setting 不转型）。
-                    _smart_requires_reservation = (
-                        read_admin_setting(
-                            "smart_clone_requires_reservation", default=False
-                        )
-                        is True
-                    ) or (
-                        read_admin_setting(
-                            "smart_preview_clone_enabled", default=False
-                        )
-                        is True
-                    )
                     # P3e §2：reservation marker 落在 ``smart_state`` 字典里
                     # （create/Option C 经 submit_job 预供 → JobRecord.smart_state；
                     # 与 finalizer marker-gate `_smart_clone_settle_needed` 读的
@@ -4275,6 +4244,28 @@ class ProcessPipeline:
                     _smart_state_snap = _snap("smart_state")
                     _smart_state_dict = (
                         _smart_state_snap if isinstance(_smart_state_snap, dict) else {}
+                    )
+                    # P3e reservation gate:
+                    # - explicit rollout flag can still force the old global
+                    #   "require reservation for any new Smart clone" behavior.
+                    # - preview tasks require a reservation only when the
+                    #   server-stamped smart_preview_mode marker is present.
+                    # - full Smart create also writes smart_clone_credit_reserved
+                    #   or smart_clone_reservation_deny_reason, so unpaid /
+                    #   failed full-Smart clone attempts stay fail-closed without
+                    #   letting the admin preview flag globally disable full Smart.
+                    _smart_requires_reservation = (
+                        read_admin_setting(
+                            "smart_clone_requires_reservation", default=False
+                        )
+                        is True
+                    ) or (
+                        _smart_state_dict.get("smart_preview_mode") is True
+                    ) or (
+                        _smart_state_dict.get("smart_clone_credit_reserved") is True
+                    ) or isinstance(
+                        _smart_state_dict.get("smart_clone_reservation_deny_reason"),
+                        str,
                     )
                     _smart_clone_reservation_id = (
                         str(

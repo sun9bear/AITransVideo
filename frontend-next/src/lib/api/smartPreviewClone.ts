@@ -85,6 +85,11 @@ export async function createSmartPreviewJob(
   input: CreateTranslationJobInput,
 ): Promise<JobSummary> {
   const body = buildSmartJobBody(input)
+  const sourceType = input.sourceType ?? 'youtube_url'
+  if (sourceType === 'youtube_url') {
+    // Gemini URL transcription cannot be bounded to the teaser window here.
+    body.transcription_method = 'assemblyai'
+  }
   // smart_consent 6 字段必须完整（后端 validate_smart_consent 严格校验）。
   // auto_voice_clone=true 是预览克隆的触发条件；其余字段与 jobs.ts 默认一致。
   body.smart_consent = {
