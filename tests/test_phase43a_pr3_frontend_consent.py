@@ -87,14 +87,21 @@ def test_smart_copy_discloses_runtime_clone_add_on_cost():
     assert "600 点" not in src
 
 
-def test_smart_paid_clone_confirmation_requires_price_and_checkbox():
-    """Smart form must require loaded pricing plus explicit checkbox consent."""
+def test_smart_paid_clone_confirmation_is_optional_but_explicit():
+    """Smart may submit without paid clone consent, but never confirms it implicitly."""
     src = _read(_FORM_TSX)
     assert "smartPaidCloneAccepted" in src
     assert "setSmartPaidCloneAccepted(false)" in src
     assert "voiceCloneCostCredits != null" in src
-    assert "smartCloneConfirmationError" in src
     assert "smartPaidCloneConfirmed" in src
+    validation_block = re.search(
+        r"const\s+validationError\s*=\s*(?P<body>.*?)(?:\n\s*const\s+isUnlimitedConcurrency)",
+        src,
+        re.S,
+    )
+    assert validation_block, "form validation block should be present"
+    assert "smartPaidCloneAccepted" not in validation_block.group("body")
+    assert "voiceCloneCostCredits" not in validation_block.group("body")
     assert re.search(
         r"serviceMode\s*===\s*['\"]smart['\"]\s*&&\s*voiceCloneCostCredits\s*!=\s*null\s*\?\s*smartPaidCloneAccepted\s*:\s*false",
         src,

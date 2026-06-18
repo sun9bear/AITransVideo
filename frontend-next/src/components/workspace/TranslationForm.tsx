@@ -101,17 +101,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
   const [voiceCloneCostCredits, setVoiceCloneCostCredits] = useState<number | null>(null)
   const [voiceCloneCostLoadFailed, setVoiceCloneCostLoadFailed] = useState(false)
-  const smartCloneConfirmationError =
-    serviceMode !== "smart"
-      ? null
-      : voiceCloneCostCredits == null
-        ? voiceCloneCostLoadFailed
-          ? "暂时无法读取智能版自动克隆扣点，请稍后再试。"
-          : "正在读取智能版自动克隆扣点，请稍后再试。"
-        : !smartPaidCloneAccepted
-          ? "请先确认智能版自动克隆音色的额外预扣点数。"
-          : null
-
   const sourceValidationError =
     sourceType === "youtube_url"
       ? validateYoutubeUrl(youtubeUrl)
@@ -123,7 +112,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // HARD-fails (403 consent_required) otherwise.
   const validationError =
     sourceValidationError ??
-    smartCloneConfirmationError ??
     (serviceMode === "free" && !freeVoiceRightsConfirmed
       ? "请先阅读并勾选免费版声音授权声明。"
       : null)
