@@ -531,7 +531,7 @@ async def register_smart_clone_with_billing(
 
 
 _CAPTURE_REASON = "smart_clone_capture"
-_REGISTER_FAILED_CAPTURE_REASON = "smart_clone_capture_register_failed"
+_REGISTER_FAILED_CAPTURE_REASON = "smart_clone_regfail_cap"
 _RELEASE_REASON = "smart_clone_release"
 
 

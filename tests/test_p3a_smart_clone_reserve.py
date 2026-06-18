@@ -632,6 +632,13 @@ def test_settle_captures_reserved_register_failed_handoff():
             assert row.reason_code == "captured_register_failed"
             assert row.captured_voice_id is None
             assert row.settled_at is not None
+            ledger = (
+                await db.execute(
+                    select(CreditsLedger).where(CreditsLedger.direction == "capture")
+                )
+            ).scalar_one()
+            assert ledger.reason_code.startswith("smart_clone_regfail_cap_")
+            assert len(ledger.reason_code) <= 64
 
     _run(go())
 
