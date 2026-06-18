@@ -55,7 +55,10 @@ from display_name_orchestrator import DisplayNameContext, compute_display_name
 from models import Job, User, UserVoice
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
-from smart_clone_reservation_service import reserve_smart_clone_credit
+from smart_clone_reservation_service import (
+    reserve_smart_clone_credit,
+    settle_smart_clone_reservation,
+)
 from credits_service import (
     InsufficientCreditsError,
     ensure_credit_buckets_for_user, estimate_credits,
@@ -1773,6 +1776,34 @@ async def intercept_create_job(
         request_data["free_consent"] = free_consent_payload
 
     _smart_initial_state: dict[str, object] | None = None
+    _smart_clone_create_reservation_id: str | None = None
+
+    async def _release_smart_clone_create_reservation(reason: str) -> None:
+        nonlocal _smart_clone_create_reservation_id
+        if not _smart_clone_create_reservation_id:
+            return
+        reservation_id = _smart_clone_create_reservation_id
+        _smart_clone_create_reservation_id = None
+        try:
+            outcome = await settle_smart_clone_reservation(
+                db,
+                reservation_id=reservation_id,
+                service_mode="smart",
+            )
+            logger.info(
+                "released smart clone create reservation=%s reason=%s outcome=%s",
+                reservation_id,
+                reason,
+                getattr(outcome, "status", None),
+            )
+        except Exception:
+            logger.warning(
+                "failed to release smart clone create reservation=%s reason=%s",
+                reservation_id,
+                reason,
+                exc_info=True,
+            )
+
     if service_mode == "smart" and user is not None:
         request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
         consent_allows_clone = (
@@ -1849,6 +1880,9 @@ async def intercept_create_job(
                         _reserve_outcome.status == "reserved"
                         and _reserve_outcome.reservation_id
                     ):
+                        _smart_clone_create_reservation_id = (
+                            _reserve_outcome.reservation_id
+                        )
                         _smart_initial_state = {
                             "smart_clone_credit_reserved": True,
                             "smart_clone_reservation_id": _reserve_outcome.reservation_id,
@@ -1904,17 +1938,23 @@ async def intercept_create_job(
         _free_reserved = True
 
     # Forward to upstream with modified body
-    upstream_response = await proxy_request(
-        request=request,
-        upstream_base=settings.job_api_upstream,
-        strip_prefix="/job-api",
-        override_body=json.dumps(request_data, ensure_ascii=False).encode("utf-8"),
-    )
+    try:
+        upstream_response = await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+            override_body=json.dumps(request_data, ensure_ascii=False).encode("utf-8"),
+        )
+    except Exception:
+        await _release_smart_clone_create_reservation("proxy_exception")
+        raise
 
     # --- 6. Record in PostgreSQL ---
     job_id = None
     logger.info("intercept_create_job: upstream status=%s user=%s",
                 upstream_response.status_code, user.id if user else None)
+    if upstream_response.status_code not in (200, 201, 202):
+        await _release_smart_clone_create_reservation("upstream_rejected")
     if upstream_response.status_code in (200, 201, 202) and user is not None:
         try:
             raw_body = upstream_response.body
@@ -1987,6 +2027,7 @@ async def intercept_create_job(
                         await db.rollback()
                         # Compensate: cancel upstream job to prevent orphan
                         await _compensate_upstream_job(job_id)
+                        await _release_smart_clone_create_reservation("quota_failed")
                         return _error_response(
                             403, "quota_exhausted",
                             "免费额度已用完，无法创建任务。",
@@ -2026,11 +2067,13 @@ async def intercept_create_job(
                         except InsufficientCreditsError as exc:
                             await db.rollback()
                             await _compensate_upstream_job(job_id)
+                            await _release_smart_clone_create_reservation("base_credit_insufficient")
                             return _insufficient_credits_response(exc)
                         except Exception as exc:
                             logger.exception("credit reserve failed for job %s: %s", job_id, exc)
                             await db.rollback()
                             await _compensate_upstream_job(job_id)
+                            await _release_smart_clone_create_reservation("base_credit_reserve_failed")
                             return _error_response(
                                 500,
                                 "credit_reserve_failed",
@@ -2045,12 +2088,14 @@ async def intercept_create_job(
                     logger.info("Job %s already in DB, skipping", job_id)
             else:
                 logger.warning("No job_id in upstream response")
+                await _release_smart_clone_create_reservation("missing_job_id")
         except Exception as exc:
             logger.exception("Failed to record job %s in DB: %s", job_id, exc)
             try:
                 await db.rollback()
             except Exception:
                 pass
+            await _release_smart_clone_create_reservation("pg_record_failed")
 
     # Phase 2a free tier — settle the daily reservation: consume on upstream
     # accept, release on reject. TTL + inline-expire is the safety net for

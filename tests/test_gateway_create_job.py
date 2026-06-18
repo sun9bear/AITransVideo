@@ -1393,6 +1393,144 @@ class TestSmartVoiceQuotaPreflightGates:
         assert job_rows[0].job_id == captured_body["job_id"]
         assert job_rows[0].smart_state == captured_body["smart_state"]
 
+    def test_create_smart_job_releases_clone_reservation_on_upstream_conflict(self):
+        import admin_settings as admin_mod
+
+        reservation_id = "33333333-3333-3333-3333-333333333333"
+
+        async def fake_reserve(db, **kwargs):
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id=reservation_id,
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+            credit_available=1_000,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            return s
+
+        with patch("job_intercept.proxy_request", return_value=_upstream_conflict()):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept.reserve_smart_clone_credit",
+                                side_effect=fake_reserve,
+                                create=True,
+                            ):
+                                with patch(
+                                    "job_intercept.settle_smart_clone_reservation",
+                                    new_callable=AsyncMock,
+                                    create=True,
+                                ) as settle:
+                                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 409
+        settle.assert_awaited_once_with(
+            db,
+            reservation_id=reservation_id,
+            service_mode="smart",
+        )
+
+    def test_create_smart_job_releases_clone_reservation_when_base_credit_fails(self):
+        import admin_settings as admin_mod
+        from credits_service import InsufficientCreditsError
+
+        reservation_id = "44444444-4444-4444-4444-444444444444"
+
+        async def fake_reserve(db, **kwargs):
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id=reservation_id,
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+            credit_available=1_000,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            return s
+
+        with patch("job_intercept.proxy_request", return_value=_upstream_success()):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch("job_intercept.estimate_credits", return_value=200):
+                                with patch(
+                                    "job_intercept.reserve_smart_clone_credit",
+                                    side_effect=fake_reserve,
+                                    create=True,
+                                ):
+                                    with patch(
+                                        "job_intercept.reserve_credits_or_raise",
+                                        new_callable=AsyncMock,
+                                    ) as reserve_base:
+                                        reserve_base.side_effect = InsufficientCreditsError(
+                                            required=200,
+                                            available=100,
+                                        )
+                                        with patch(
+                                            "job_intercept.settle_smart_clone_reservation",
+                                            new_callable=AsyncMock,
+                                            create=True,
+                                        ) as settle:
+                                            with patch(
+                                                "job_intercept._compensate_upstream_job",
+                                                new_callable=AsyncMock,
+                                            ):
+                                                resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 402
+        settle.assert_awaited_once_with(
+            db,
+            reservation_id=reservation_id,
+            service_mode="smart",
+        )
+
     def test_create_smart_job_skips_clone_reserve_when_combined_balance_short(self):
         import admin_settings as admin_mod
 
