@@ -98,13 +98,18 @@ def _hash_token(raw: str) -> str:
     return hash_scope_key(raw, secret=settings.anonymous_preview_hash_secret)
 
 
+def _session_is_unclaimed(row: AnonymousSession) -> bool:
+    return getattr(row, "claim_user_id", None) is None
+
+
 async def _lookup_session(db: AsyncSession, session_id_hash: str) -> Optional[AnonymousSession]:
-    """Return a non-expired ``AnonymousSession`` row for *session_id_hash*, or None."""
+    """Return a reusable ``AnonymousSession`` row for *session_id_hash*, or None."""
     now = datetime.now(timezone.utc)
     result = await db.execute(
         select(AnonymousSession).where(
             AnonymousSession.session_id_hash == session_id_hash,
             AnonymousSession.expires_at > now,
+            AnonymousSession.claim_user_id.is_(None),
         )
     )
     return result.scalar_one_or_none()
@@ -196,7 +201,7 @@ async def get_or_create_anonymous_session(
         try:
             session_id_hash = _hash_token(avt_anon)
             row = await _lookup_session(db, session_id_hash)
-            if row is not None:
+            if row is not None and _session_is_unclaimed(row):
                 return AnonymousSessionContext(
                     session_id_hash=session_id_hash,
                     raw_token=None,
@@ -257,7 +262,7 @@ async def require_anonymous_session(
             content={"error": "anonymous_session_invalid"},
         )
 
-    if row is None:
+    if row is None or not _session_is_unclaimed(row):
         return JSONResponse(
             status_code=401,
             content={"error": "anonymous_session_invalid_or_expired"},

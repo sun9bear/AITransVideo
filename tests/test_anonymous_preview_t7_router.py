@@ -243,7 +243,8 @@ class TestSessionCookie:
         """First upload call creates a session and sets cookie with correct attrs."""
         # Fake DB that records the add() call
         added_rows = []
-        fake_db = AsyncMock()
+        fake_db = MagicMock()
+        fake_db.commit = AsyncMock()
         fake_db.add.side_effect = lambda row: added_rows.append(row)
 
         # Fake response that captures set_cookie calls
@@ -353,7 +354,8 @@ class TestSessionCookie:
         fake_req = MagicMock()
         fake_req.cookies = {"avt_anon": raw_token}
         fake_resp = MagicMock()
-        fake_db = AsyncMock()
+        fake_db = MagicMock()
+        fake_db.commit = AsyncMock()
 
         async def _fake_lookup(db, sid):
             assert sid == hashed
