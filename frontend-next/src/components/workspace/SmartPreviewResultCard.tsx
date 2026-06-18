@@ -41,7 +41,6 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [upgradeRequired, setUpgradeRequired] = useState(false)
 
-  const posterUrl = buildStreamUrl(job.id, "poster")
   const videoUrl = buildStreamUrl(job.id, "video")
 
   /**
@@ -114,7 +113,6 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
               autoPlay
               playsInline
               preload="metadata"
-              poster={posterUrl}
               src={videoUrl}
               onError={() => {
                 // 流式拉取失败（产物未落盘 / 网络中断 / 瞬时 404）→ 退回可点击的
@@ -133,16 +131,6 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
               className="group relative aspect-video w-full overflow-hidden rounded-lg bg-muted"
               aria-label="播放 3 分钟预览"
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={posterUrl}
-                alt=""
-                loading="lazy"
-                className="h-full w-full object-cover"
-                onError={(e) => {
-                  ;(e.currentTarget as HTMLImageElement).style.display = "none"
-                }}
-              />
               <div className="absolute inset-0 flex items-center justify-center bg-black/30 transition group-hover:bg-black/20">
                 <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/90 transition group-hover:scale-110">
                   <svg viewBox="0 0 24 24" className="ml-1 h-7 w-7 text-black" fill="currentColor">

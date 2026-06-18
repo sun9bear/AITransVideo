@@ -19,6 +19,14 @@ _CONFIRM_DIALOG_TSX = (
     / "workspace"
     / "SmartPreviewConfirmDialog.tsx"
 )
+_RESULT_CARD_TSX = (
+    _REPO
+    / "frontend-next"
+    / "src"
+    / "components"
+    / "workspace"
+    / "SmartPreviewResultCard.tsx"
+)
 _VOICE_SELECTION_TS = (
     _REPO / "frontend-next" / "src" / "lib" / "api" / "voiceSelection.ts"
 )
@@ -56,6 +64,16 @@ def test_smart_preview_create_sends_paid_clone_confirmation():
     assert fn.index("confirm_paid_voice_clone_credits: true") < fn.index(
         "apiClient.post"
     )
+
+
+def test_smart_preview_result_card_does_not_request_forbidden_poster_stream():
+    """Smart-preview stream policy allows video only, so UI must not fetch poster."""
+    src = _RESULT_CARD_TSX.read_text(encoding="utf-8")
+
+    assert 'buildStreamUrl(job.id, "video")' in src
+    assert 'buildStreamUrl(job.id, "poster")' not in src
+    assert "poster={" not in src
+    assert "<img" not in src
 
 
 def test_convert_preview_to_full_keeps_user_transcription_choice():
