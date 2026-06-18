@@ -64,6 +64,24 @@ def test_consent_payload_only_for_express():
         assert "smart" not in window.lower(), "express_consent 块不应混入 smart 语义"
 
 
+def test_smart_submission_sends_paid_clone_confirmation():
+    """Smart create payload must include the explicit 600-credit clone consent
+    required by Gateway's paid reservation gate."""
+    src = _read(_JOBS_TS)
+    assert "confirm_paid_voice_clone_600_credits" in src
+    assert re.search(
+        r"confirm_paid_voice_clone_600_credits\s*:\s*true",
+        src,
+    ), "Smart submissions must confirm the paid 600-credit clone add-on"
+
+
+def test_smart_copy_discloses_clone_add_on_cost():
+    """The Smart mode description must not promise that cloning is free."""
+    src = _read(_FORM_TSX)
+    assert "不会另外扣点" not in src
+    assert "600" in src and "克隆" in src
+
+
 def test_frontend_never_sends_server_confirmed_at():
     """spec §3 / DoD #10：前端绝不构造 server_confirmed_at（后端单一来源）。
     递归扫 frontend-next/src 所有 ts/tsx。"""

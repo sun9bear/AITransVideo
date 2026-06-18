@@ -102,7 +102,10 @@ export async function submitTranslationJob(
   //   - auto_retranslate=false: MVP doesn't re-translate (deferred to P3+ verifier)
   //   - auto_retts=true: MVP retries failed TTS within budget
   //   - auto_multimodal_verification=false: verifier is P3+ feature
-  //   - no_extra_charge_without_confirmation=true: fixed-price product promise
+  //   - no_extra_charge_without_confirmation=true: no hidden charges beyond
+  //     the explicit paid-clone confirmation below
+  //   - confirm_paid_voice_clone_600_credits=true: Smart's automatic new
+  //     voice clone is a visible 600-credit add-on confirmed by choosing Smart
   //   - on_budget_exhausted=degraded_delivery_with_report:
   //     'fail_and_refund' is currently rejected by validator (partial-
   //     capture settle path is STUB; Codex 40 P1.2).
@@ -113,6 +116,7 @@ export async function submitTranslationJob(
       auto_retts: true,
       auto_multimodal_verification: false,
       no_extra_charge_without_confirmation: true,
+      confirm_paid_voice_clone_600_credits: true,
       on_budget_exhausted: 'degraded_delivery_with_report',
     }
   }

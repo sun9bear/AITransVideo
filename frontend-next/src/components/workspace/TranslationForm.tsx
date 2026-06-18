@@ -699,7 +699,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             ) : serviceMode === "smart" ? (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                智能版按源视频时长固定扣点，当前标准为 {rateLabel}。AI 自动审核翻译并按需克隆主说话人音色，系统内部的重试、克隆、TTS 调用都计入这个固定价，不会另外扣点。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。
+                智能版按源视频时长扣点，当前基础标准为 {rateLabel}。AI 自动审核翻译并按需处理主说话人音色；若需要自动新克隆音色，会额外预扣 600 点，未发生新克隆时会释放。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。
               </p>
             ) : (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
