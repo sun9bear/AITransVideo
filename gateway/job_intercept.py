@@ -89,6 +89,8 @@ from services.language_registry import (
 # never silently skip review.
 _NON_INTERACTIVE_LANGUAGE_PAIRS = frozenset({make_pair_key(LANG_ZH_CN, LANG_EN)})
 
+_SMART_PAID_CLONE_CONFIRM_FIELD = "confirm_paid_voice_clone_600_credits"
+
 
 POST_EDIT_RESPONSE_FIELDS = (
     "display_name",
@@ -1242,9 +1244,14 @@ async def intercept_create_job(
     # Defensive: only validate when service_mode==smart so a non-smart
     # submission can't trigger consent errors.
     smart_consent_payload = None
+    smart_paid_clone_confirmed = False
     if service_mode == "smart":
         from smart_consent import validate_smart_consent
         raw_consent = request_data.get("smart_consent")
+        smart_paid_clone_confirmed = (
+            isinstance(raw_consent, dict)
+            and raw_consent.get(_SMART_PAID_CLONE_CONFIRM_FIELD) is True
+        )
         consent_obj, consent_error = validate_smart_consent(raw_consent)
         if consent_error is not None:
             return _error_response(
@@ -1373,6 +1380,7 @@ async def intercept_create_job(
             consent_allows_clone = (
                 smart_consent_payload is not None
                 and smart_consent_payload.get("auto_voice_clone") is True
+                and smart_paid_clone_confirmed
             )
             if consent_allows_clone and admin_clone_enabled:
                 quota_used_result = await db.execute(
@@ -1806,10 +1814,11 @@ async def intercept_create_job(
 
     if service_mode == "smart" and user is not None:
         request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
-        consent_allows_clone = (
+        auto_clone_requested = (
             smart_consent_payload is not None
             and smart_consent_payload.get("auto_voice_clone") is True
         )
+        consent_allows_clone = auto_clone_requested and smart_paid_clone_confirmed
         try:
             from admin_settings import load_settings
 
@@ -1817,7 +1826,14 @@ async def intercept_create_job(
             admin_clone_enabled = bool(
                 getattr(_admin_for_clone, "smart_auto_clone_enabled", True)
             )
-            if consent_allows_clone and admin_clone_enabled:
+            if auto_clone_requested and admin_clone_enabled and not smart_paid_clone_confirmed:
+                _smart_initial_state = {
+                    "smart_clone_credit_reserved": False,
+                    "smart_clone_reservation_deny_reason": (
+                        "paid_clone_confirmation_required"
+                    ),
+                }
+            elif consent_allows_clone and admin_clone_enabled:
                 _library_cap = (
                     999_999
                     if is_admin
