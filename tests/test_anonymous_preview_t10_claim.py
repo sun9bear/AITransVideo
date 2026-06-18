@@ -545,6 +545,7 @@ def test_session_update_sql_renders_pg_constructs():
     assert "update anonymous_sessions" in sess_sql
     assert "session_id_hash =" in sess_sql, "session 用裸 hash PK（非 sess: 派生）"
     assert "claim_user_id is null or" in sess_sql
+    assert "anonymous_sessions.expires_at > " in sess_sql, "不认领已过期 session"
     assert "greatest(anonymous_sessions.expires_at" in sess_sql
     assert "returning anonymous_sessions.session_id_hash" in sess_sql
 
