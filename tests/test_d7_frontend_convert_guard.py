@@ -87,6 +87,7 @@ def test_convert_ready_is_scoped_to_authenticated_user():
     # the first account's stale convert flow.
     assert re.search(r"setAnonConvertReady\(previewId: string,\s*userId", claim_src)
     assert re.search(r"getAnonConvertReady\(userId", claim_src)
+    assert "if (!userId) return null" in claim_src
     assert "scopeAnonConvertReadyToUser" in claim_src
     assert "storedUserId !== userId" in claim_src
 

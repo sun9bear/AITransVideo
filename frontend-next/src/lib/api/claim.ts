@@ -123,6 +123,7 @@ export function setAnonConvertReady(previewId: string, userId: string): void {
 
 /** 创建页读取待转完整的 preview_id（无 / 超 24h / 损坏 → null 并清）。 */
 export function getAnonConvertReady(userId?: string | null): string | null {
+  if (!userId) return null
   try {
     const raw = window.localStorage.getItem(CONVERT_READY_KEY)
     if (!raw) return null
