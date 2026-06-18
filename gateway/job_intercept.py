@@ -55,6 +55,10 @@ from display_name_orchestrator import DisplayNameContext, compute_display_name
 from models import Job, User, UserVoice
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
+from smart_clone_reservation_service import (
+    reserve_smart_clone_credit,
+    settle_smart_clone_reservation,
+)
 from credits_service import (
     InsufficientCreditsError,
     ensure_credit_buckets_for_user, estimate_credits,
@@ -83,6 +87,36 @@ from services.language_registry import (
 # EXPLICITLY here — never auto-inherited from is_default — so adding a pair can
 # never silently skip review.
 _NON_INTERACTIVE_LANGUAGE_PAIRS = frozenset({make_pair_key(LANG_ZH_CN, LANG_EN)})
+
+_SMART_PAID_CLONE_CONFIRM_FIELDS = (
+    "confirm_paid_voice_clone_credits",
+    "confirm_paid_voice_clone_600_credits",
+)
+_SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES = 24 * 60
+
+
+def _get_smart_clone_cost_credits() -> int:
+    try:
+        from pricing_runtime import get_runtime_pricing
+
+        raw_value = get_runtime_pricing().credits.voice_clone_cost_credits
+        if raw_value is None:
+            return 600
+        value = int(raw_value)
+        return value if value >= 0 else 600
+    except Exception:
+        return 600
+
+
+def _smart_paid_clone_confirmed(raw_consent: object) -> bool:
+    if not isinstance(raw_consent, dict):
+        return False
+    if raw_consent.get("confirm_paid_voice_clone_credits") is True:
+        return True
+    return (
+        raw_consent.get("confirm_paid_voice_clone_600_credits") is True
+        and _get_smart_clone_cost_credits() == 600
+    )
 
 
 POST_EDIT_RESPONSE_FIELDS = (
@@ -329,6 +363,86 @@ def _merge_gateway_job_metadata(upstream_job: dict, db_job: Job | None) -> dict:
         if value is not None:
             merged[lang_field] = value
     return merged
+
+
+def _job_create_response_payload_from_db_job(job: Job, *, idempotent: bool = False) -> dict:
+    """Serialize an existing Gateway job for create-idempotency retries."""
+    payload = {
+        "job_id": getattr(job, "job_id", ""),
+        "job_type": "translation",
+        "source_type": getattr(job, "source_type", "") or "",
+        "source_ref": getattr(job, "source_ref", "") or "",
+        "output_target": "jianying_draft",
+        "speakers": getattr(job, "speakers", "auto") or "auto",
+        "voice_a": None,
+        "voice_b": None,
+        "source_language": getattr(job, "source_language", None),
+        "target_language": getattr(job, "target_language", None),
+        "language_pair": getattr(job, "language_pair", None),
+        "status": getattr(job, "status", "queued") or "queued",
+        "current_stage": getattr(job, "current_stage", None),
+        "progress_message": None,
+        "created_at": _serialize_response_value(getattr(job, "created_at", None)),
+        "updated_at": _serialize_response_value(getattr(job, "updated_at", None)),
+        "started_at": _serialize_response_value(getattr(job, "started_at", None)),
+        "completed_at": _serialize_response_value(getattr(job, "completed_at", None)),
+        "project_dir": getattr(job, "project_dir", None),
+        "manifest_path": None,
+        "review_gate": getattr(job, "review_gate", None),
+        "error_summary": getattr(job, "error_summary", None),
+        "fallback_summary": None,
+        "service_mode": getattr(job, "service_mode", None),
+        "display_name": getattr(job, "display_name", None),
+        "expires_at": _serialize_response_value(getattr(job, "expires_at", None)),
+        "editing_touched_at": _serialize_response_value(
+            getattr(job, "editing_touched_at", None)
+        ),
+        "copy_of_job_id": getattr(job, "copy_of_job_id", None),
+        "root_job_id": getattr(job, "root_job_id", None),
+        "edit_generation": getattr(job, "edit_generation", 0) or 0,
+        "role_snapshot": getattr(job, "role_snapshot", None),
+    }
+    if idempotent:
+        payload["idempotent"] = True
+    return payload
+
+
+async def _settle_smart_clone_reservation_from_job_state(
+    db: AsyncSession,
+    job: Job,
+    *,
+    reason: str,
+) -> None:
+    smart_state = getattr(job, "smart_state", None)
+    if not isinstance(smart_state, dict):
+        return
+    if smart_state.get("smart_clone_credit_reserved") is not True:
+        return
+    reservation_id = smart_state.get("smart_clone_reservation_id")
+    if not reservation_id:
+        return
+    try:
+        outcome = await settle_smart_clone_reservation(
+            db,
+            reservation_id=reservation_id,
+            service_mode=getattr(job, "service_mode", None) or "smart",
+            smart_state_override=smart_state,
+        )
+        logger.info(
+            "settled smart clone reservation=%s for job=%s reason=%s outcome=%s",
+            reservation_id,
+            getattr(job, "job_id", None),
+            reason,
+            getattr(outcome, "status", None),
+        )
+    except Exception:
+        logger.warning(
+            "failed to settle smart clone reservation=%s for job=%s reason=%s",
+            reservation_id,
+            getattr(job, "job_id", None),
+            reason,
+            exc_info=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1301,10 @@ async def intercept_create_job(
     # 跳过登录态 allowlist）实现提权 / 绕 cap。剥离后该标记对公共路径永远为假。
     if isinstance(request_data, dict):
         request_data.pop("anonymous_preview", None)
+        request_data.pop("job_id", None)
+        request_data.pop("smart_state", None)
+        request_data.pop("smart_clone_reservation_id", None)
+        request_data.pop("smart_clone_credit_reserved", None)
 
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
@@ -1233,9 +1351,11 @@ async def intercept_create_job(
     # Defensive: only validate when service_mode==smart so a non-smart
     # submission can't trigger consent errors.
     smart_consent_payload = None
+    smart_paid_clone_confirmed = False
     if service_mode == "smart":
         from smart_consent import validate_smart_consent
         raw_consent = request_data.get("smart_consent")
+        smart_paid_clone_confirmed = _smart_paid_clone_confirmed(raw_consent)
         consent_obj, consent_error = validate_smart_consent(raw_consent)
         if consent_error is not None:
             return _error_response(
@@ -1319,6 +1439,32 @@ async def intercept_create_job(
     from plan_catalog import get_effective_plan_gate
     plan_info = get_effective_plan_gate(user) if user else get_legacy_plan_gate_dict().get("free", {})
 
+    # --- 0. Idempotency key ---
+    # Retry/double-submit requests must return the original job before active
+    # concurrency or clone-reservation gates can reject an otherwise harmless
+    # duplicate create call.
+    idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
+    if user is not None and idempotency_key:
+        existing_by_create_key = (
+            await db.execute(
+                select(Job).where(
+                    Job.user_id == user.id,
+                    Job.create_idempotency_key == str(idempotency_key),
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_by_create_key is not None:
+            return Response(
+                content=json.dumps(
+                    _job_create_response_payload_from_db_job(
+                        existing_by_create_key, idempotent=True
+                    ),
+                    ensure_ascii=False,
+                ),
+                status_code=202,
+                headers={"content-type": "application/json"},
+            )
+
     # --- Smart MVP §7.3 pre-flight voice library quota check (2026-05-16) ---
     # Without this, smart jobs that would hit the water-mark brake at
     # voice_review fail HALFWAY through (after S0/S1/S2 ASR + speaker
@@ -1364,6 +1510,7 @@ async def intercept_create_job(
             consent_allows_clone = (
                 smart_consent_payload is not None
                 and smart_consent_payload.get("auto_voice_clone") is True
+                and smart_paid_clone_confirmed
             )
             if consent_allows_clone and admin_clone_enabled:
                 quota_used_result = await db.execute(
@@ -1629,9 +1776,6 @@ async def intercept_create_job(
     ):
         policy["requires_review"] = False
 
-    # --- 5. Idempotency key ---
-    idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
-
     # Ordinary jobs keep a fixed 7-day retention deadline from creation. Admin
     # jobs intentionally have no TTL and are excluded from both cleanup paths.
     job_expires_at = None if is_admin else datetime.now(timezone.utc) + timedelta(days=7)
@@ -1743,6 +1887,148 @@ async def intercept_create_job(
     if free_consent_payload is not None:
         request_data["free_consent"] = free_consent_payload
 
+    _smart_initial_state: dict[str, object] | None = None
+    _smart_clone_create_reservation_id: str | None = None
+
+    async def _release_smart_clone_create_reservation(reason: str) -> None:
+        nonlocal _smart_clone_create_reservation_id
+        if not _smart_clone_create_reservation_id:
+            return
+        reservation_id = _smart_clone_create_reservation_id
+        _smart_clone_create_reservation_id = None
+        try:
+            outcome = await settle_smart_clone_reservation(
+                db,
+                reservation_id=reservation_id,
+                service_mode="smart",
+            )
+            logger.info(
+                "released smart clone create reservation=%s reason=%s outcome=%s",
+                reservation_id,
+                reason,
+                getattr(outcome, "status", None),
+            )
+        except Exception:
+            logger.warning(
+                "failed to release smart clone create reservation=%s reason=%s",
+                reservation_id,
+                reason,
+                exc_info=True,
+            )
+
+    if service_mode == "smart" and user is not None:
+        request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
+        auto_clone_requested = (
+            smart_consent_payload is not None
+            and smart_consent_payload.get("auto_voice_clone") is True
+        )
+        consent_allows_clone = auto_clone_requested and smart_paid_clone_confirmed
+        try:
+            from admin_settings import load_settings
+
+            _admin_for_clone = load_settings()
+            admin_clone_enabled = bool(
+                getattr(_admin_for_clone, "smart_auto_clone_enabled", True)
+            )
+            if auto_clone_requested and admin_clone_enabled and not smart_paid_clone_confirmed:
+                _smart_initial_state = {
+                    "smart_clone_credit_reserved": False,
+                    "smart_clone_reservation_deny_reason": (
+                        "paid_clone_confirmation_required"
+                    ),
+                }
+            elif consent_allows_clone and admin_clone_enabled:
+                _library_cap = (
+                    999_999
+                    if is_admin
+                    else int(
+                        getattr(
+                            _admin_for_clone,
+                            "smart_user_voice_clone_cap",
+                            30,
+                        )
+                        or 30
+                    )
+                )
+                _base_est_min = (
+                    estimated_duration_seconds / 60.0
+                    if estimated_duration_seconds
+                    else None
+                )
+                _base_credits = estimate_credits(
+                    _base_est_min,
+                    service_mode=service_mode,
+                    quality_tier=policy.get("quality_tier", "standard"),
+                )
+                _clone_cost_credits = _get_smart_clone_cost_credits()
+                await ensure_credit_buckets_for_user(db, user=user)
+                _reserve_outcome = await reserve_smart_clone_credit(
+                    db,
+                    user_id=user.id,
+                    task_id=str(request_data["job_id"]),
+                    amount_credits=_clone_cost_credits,
+                    ttl_minutes=max(
+                        _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
+                        int(
+                            getattr(
+                                _admin_for_clone,
+                                "smart_clone_create_reservation_ttl_minutes",
+                                _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
+                            )
+                            or _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES
+                        ),
+                    ),
+                    library_cap=_library_cap,
+                    required_available_credits=(
+                        int(_base_credits) + _clone_cost_credits
+                        if _base_credits > 0
+                        else None
+                    ),
+                )
+                if (
+                    _reserve_outcome.status == "reserved"
+                    and _reserve_outcome.reservation_id
+                ):
+                    _smart_clone_create_reservation_id = (
+                        _reserve_outcome.reservation_id
+                    )
+                    _smart_initial_state = {
+                        "smart_clone_credit_reserved": True,
+                        "smart_clone_reservation_id": _reserve_outcome.reservation_id,
+                    }
+                else:
+                    _smart_initial_state = {
+                        "smart_clone_credit_reserved": False,
+                        "smart_clone_reservation_deny_reason": (
+                            _reserve_outcome.deny_reason
+                            or _reserve_outcome.status
+                        ),
+                    }
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                logger.warning(
+                    "failed to rollback smart clone reservation failure "
+                    "job_id=%s user=%s",
+                    request_data.get("job_id"),
+                    getattr(user, "id", None),
+                    exc_info=True,
+                )
+            logger.warning(
+                "smart clone reservation failed before create; "
+                "continuing without paid clone job_id=%s user=%s: %s",
+                request_data.get("job_id"),
+                getattr(user, "id", None),
+                exc,
+            )
+            _smart_initial_state = {
+                "smart_clone_credit_reserved": False,
+                "smart_clone_reservation_deny_reason": "reserve_failed",
+            }
+        if _smart_initial_state is not None:
+            request_data["smart_state"] = dict(_smart_initial_state)
+
     # Phase 2a free tier — atomic daily-quota admission BEFORE the upstream
     # forward (CodeX: before expensive stages; independent of legacy quota).
     # Reserve now; consume on accept / release on reject below. The reserved
@@ -1771,17 +2057,23 @@ async def intercept_create_job(
         _free_reserved = True
 
     # Forward to upstream with modified body
-    upstream_response = await proxy_request(
-        request=request,
-        upstream_base=settings.job_api_upstream,
-        strip_prefix="/job-api",
-        override_body=json.dumps(request_data, ensure_ascii=False).encode("utf-8"),
-    )
+    try:
+        upstream_response = await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+            override_body=json.dumps(request_data, ensure_ascii=False).encode("utf-8"),
+        )
+    except Exception:
+        await _release_smart_clone_create_reservation("proxy_exception")
+        raise
 
     # --- 6. Record in PostgreSQL ---
     job_id = None
     logger.info("intercept_create_job: upstream status=%s user=%s",
                 upstream_response.status_code, user.id if user else None)
+    if upstream_response.status_code not in (200, 201, 202):
+        await _release_smart_clone_create_reservation("upstream_rejected")
     if upstream_response.status_code in (200, 201, 202) and user is not None:
         try:
             raw_body = upstream_response.body
@@ -1834,6 +2126,13 @@ async def intercept_create_job(
                         # Job API ever normalises the value.
                         display_name=job_data.get("display_name") or generated_display_name,
                         expires_at=job_expires_at,
+                        smart_state=(
+                            job_data.get("smart_state")
+                            if isinstance(job_data.get("smart_state"), dict)
+                            else request_data.get("smart_state")
+                            if isinstance(request_data.get("smart_state"), dict)
+                            else None
+                        ),
                     )
                     db.add(job)
                     # Reserve quota in the same transaction.
@@ -1847,6 +2146,7 @@ async def intercept_create_job(
                         await db.rollback()
                         # Compensate: cancel upstream job to prevent orphan
                         await _compensate_upstream_job(job_id)
+                        await _release_smart_clone_create_reservation("quota_failed")
                         return _error_response(
                             403, "quota_exhausted",
                             "免费额度已用完，无法创建任务。",
@@ -1886,11 +2186,13 @@ async def intercept_create_job(
                         except InsufficientCreditsError as exc:
                             await db.rollback()
                             await _compensate_upstream_job(job_id)
+                            await _release_smart_clone_create_reservation("base_credit_insufficient")
                             return _insufficient_credits_response(exc)
                         except Exception as exc:
                             logger.exception("credit reserve failed for job %s: %s", job_id, exc)
                             await db.rollback()
                             await _compensate_upstream_job(job_id)
+                            await _release_smart_clone_create_reservation("base_credit_reserve_failed")
                             return _error_response(
                                 500,
                                 "credit_reserve_failed",
@@ -1905,12 +2207,14 @@ async def intercept_create_job(
                     logger.info("Job %s already in DB, skipping", job_id)
             else:
                 logger.warning("No job_id in upstream response")
+                await _release_smart_clone_create_reservation("missing_job_id")
         except Exception as exc:
             logger.exception("Failed to record job %s in DB: %s", job_id, exc)
             try:
                 await db.rollback()
             except Exception:
                 pass
+            await _release_smart_clone_create_reservation("pg_record_failed")
 
     # Phase 2a free tier — settle the daily reservation: consume on upstream
     # accept, release on reject. TTL + inline-expire is the safety net for
@@ -5336,6 +5640,11 @@ async def update_source_metadata(
                         await db.commit()
                     except Exception:
                         await db.rollback()
+                    await _settle_smart_clone_reservation_from_job_state(
+                        db,
+                        job,
+                        reason="late_base_credit_insufficient",
+                    )
                     await _compensate_upstream_job(job_id)
                     return _insufficient_credits_response(exc)
                 except Exception as _e:
@@ -5344,6 +5653,11 @@ async def update_source_metadata(
                         await db.rollback()
                     except Exception:
                         pass
+                    await _settle_smart_clone_reservation_from_job_state(
+                        db,
+                        job,
+                        reason="late_base_credit_reserve_failed",
+                    )
                     await _compensate_upstream_job(job_id)
                     return _error_response(
                         500,

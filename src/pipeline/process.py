@@ -1390,6 +1390,7 @@ def _register_smart_clone_in_user_voices(
     source_speaker_name: str | None = None,
     clone_sample_seconds: float | None = None,
     clone_sample_segment_ids: object | None = None,
+    smart_clone_reservation_id: str | None = None,
     created_from: str | None = "smart_auto",
     notes: str | None = None,
 ) -> bool:
@@ -1426,6 +1427,10 @@ def _register_smart_clone_in_user_voices(
     voice_id = (voice_id or "").strip()
     if not user_id or not voice_id:
         return False
+    reservation_id = (smart_clone_reservation_id or "").strip()
+    task_id = (source_job_id or "").strip()
+    if reservation_id and not task_id:
+        return False
     api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
     if not api_key:
         return False
@@ -1434,6 +1439,9 @@ def _register_smart_clone_in_user_voices(
         "voice_id": voice_id,
         "label": label or voice_id,
     }
+    if reservation_id:
+        payload["task_id"] = task_id
+        payload["reservation_id"] = reservation_id
     if source_speaker_id:
         payload["source_speaker_id"] = source_speaker_id
     if source_job_id:
@@ -1465,8 +1473,13 @@ def _register_smart_clone_in_user_voices(
     if notes:
         payload["notes"] = notes
     try:
+        endpoint = (
+            "smart-clone/register-billed"
+            if reservation_id
+            else "user-voices/register-smart"
+        )
         resp = requests.post(
-            "http://127.0.0.1:8880/api/internal/user-voices/register-smart",
+            f"http://127.0.0.1:8880/api/internal/{endpoint}",
             json=payload,
             headers={"X-Internal-Key": api_key},
             timeout=5.0,
@@ -1477,6 +1490,43 @@ def _register_smart_clone_in_user_voices(
     except Exception:
         return False
     return bool(data.get("ok"))
+
+
+def _check_smart_clone_reservation_active(
+    *,
+    user_id: str,
+    task_id: str,
+    reservation_id: str,
+) -> bool:
+    """Return True only when Gateway confirms this reservation can fund a clone."""
+    import os
+    import requests  # type: ignore[import-not-found]
+
+    user_id = (user_id or "").strip()
+    task_id = (task_id or "").strip()
+    reservation_id = (reservation_id or "").strip()
+    if not user_id or not task_id or not reservation_id:
+        return False
+    api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    if not api_key:
+        return False
+    try:
+        resp = requests.post(
+            "http://127.0.0.1:8880/api/internal/smart-clone/reservations/check-active",
+            json={
+                "user_id": user_id,
+                "task_id": task_id,
+                "reservation_id": reservation_id,
+            },
+            headers={"X-Internal-Key": api_key},
+            timeout=5.0,
+        )
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+    except Exception:
+        return False
+    return bool(data.get("ok") and data.get("active"))
 
 
 def _is_valid_speaker_id(value: object) -> bool:
@@ -2060,6 +2110,58 @@ def _report_job_metering(
             print(f"[metering] Reported job metering to gateway: {resp.status}", flush=True)
     except Exception as e:
         print(f"[metering] Warning: failed to report job metering: {e}", flush=True)
+
+
+def _report_job_smart_state(job_id: str, smart_state: dict[str, object]) -> bool:
+    """Best-effort callback that only updates Gateway ``Job.smart_state``."""
+    import urllib.request
+
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id or not smart_state:
+        return False
+    gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
+    url = f"{gateway_base}/job-api/jobs/{normalized_job_id}/metering"
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"smart_state": smart_state}).encode("utf-8"),
+            headers=_internal_request_headers(),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            ok = 200 <= int(getattr(resp, "status", 0) or 0) < 300
+        if ok:
+            print("[smart] Reported smart_state to gateway", flush=True)
+        return ok
+    except Exception as e:
+        print(f"[smart] Warning: failed to report smart_state: {e}", flush=True)
+        return False
+
+
+def _persist_smart_clone_register_failed_state(
+    *,
+    job_id: str,
+    reservation_id: str | None,
+    failed_speakers: list[str],
+    handoff_stage: str,
+) -> bool:
+    """Persist register-failed clone handoff into Gateway DB before UI handoff.
+
+    The stdout ``[SMART_STATE]`` marker updates the Job API store. This direct
+    Gateway write closes the gap where the TTL sweeper can run before any later
+    list/get mirror imports that marker into ``Job.smart_state``.
+    """
+    state: dict[str, object] = {
+        "status": "downgraded_to_studio",
+        "reason": "clone_library_register_failed",
+        "handoff_stage": handoff_stage,
+        "failed_speakers": list(failed_speakers or []),
+    }
+    if reservation_id:
+        state["smart_clone_credit_reserved"] = True
+        state["smart_clone_reservation_id"] = reservation_id
+    return _report_job_smart_state(job_id, state)
 
 
 def _dispatch_content_compliance_admin_override_notification(
@@ -4131,15 +4233,48 @@ class ProcessPipeline:
                         _sid for _sid in _smart_main_speaker_ids
                         if _sid not in _smart_existing_voice_matches
                     ]
-                    # Phase 3: sample extraction is wasted work when EITHER
-                    # consent OR admin disallows new clone. Skip the
-                    # ffmpeg concat work so the pipeline doesn't burn I/O
-                    # on samples evaluate_voice_review will ignore.
-                    if (
+                    _smart_needs_new_clone = bool(
                         _smart_consent_allows_clone
                         and _smart_admin_clone_enabled
                         and _smart_speaker_ids_requiring_clone
-                    ):
+                    )
+                    _smart_user_id_for_mirror = str(_snap("user_id") or "")
+                    _smart_job_id_for_mirror = str(_snap("job_id") or "")
+                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
+                    if not isinstance(_smart_state_for_mirror, dict):
+                        _smart_state_for_mirror = {}
+                    _smart_clone_reservation_id_for_mirror = (
+                        str(
+                            _snap("smart_clone_reservation_id")
+                            or _smart_state_for_mirror.get(
+                                "smart_clone_reservation_id"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
+                    _smart_reservation_active_for_clone = bool(
+                        _smart_needs_new_clone
+                        and _smart_clone_reservation_id_for_mirror
+                        and _check_smart_clone_reservation_active(
+                            user_id=_smart_user_id_for_mirror,
+                            task_id=_smart_job_id_for_mirror,
+                            reservation_id=_smart_clone_reservation_id_for_mirror,
+                        )
+                    )
+                    _smart_max_new_clones_for_review = (
+                        1 if _smart_reservation_active_for_clone else 0
+                    )
+                    _smart_speaker_ids_to_extract_clone_samples = (
+                        _smart_speaker_ids_requiring_clone[
+                            :_smart_max_new_clones_for_review
+                        ]
+                    )
+                    # Phase 3: sample extraction is wasted work when EITHER
+                    # consent/admin OR paid reservation state disallows new clone.
+                    # Skip the ffmpeg concat work so no-reservation Smart jobs
+                    # can fall through to preset instead of pausing before review.
+                    if _smart_reservation_active_for_clone:
                         _smart_sample_root = (
                             final_project_dir / "smart_clone_samples"
                         )
@@ -4153,7 +4288,9 @@ class ProcessPipeline:
                             _smart_extractor = None  # type: ignore[assignment]
 
                         if _smart_extractor is not None:
-                            for _candidate_sid in _smart_speaker_ids_requiring_clone:
+                            for _candidate_sid in (
+                                _smart_speaker_ids_to_extract_clone_samples
+                            ):
                                 _speaker_lines = [
                                     ln for ln in (
                                         getattr(transcript_result, "lines", None) or []
@@ -4394,17 +4531,17 @@ class ProcessPipeline:
                     # evaluate_voice_review short-circuits to PRESET
                     # when EITHER gate is closed OR when main_speakers
                     # is empty. The gate below mirrors all conditions.
-                    _smart_needs_new_clone = bool(
-                        _smart_consent_allows_clone
-                        and _smart_admin_clone_enabled
-                        and _smart_speaker_ids_requiring_clone
-                    )
+                    _smart_quota_remaining = 0
+                    _smart_clone_provider = _build_b2_not_wired_clone_provider()
                     if (
                         _smart_consent_allows_clone
                         and _smart_admin_clone_enabled
                         and _smart_main_speakers
                     ):
-                        if _smart_needs_new_clone:
+                        if (
+                            _smart_needs_new_clone
+                            and _smart_reservation_active_for_clone
+                        ):
                             # 2026-05-16: admin role bypasses voice
                             # library cap (admin_settings.smart_user_voice_clone_cap).
                             # Smart §7.3 water-mark brake is a safety
@@ -4503,6 +4640,7 @@ class ProcessPipeline:
                         admin_clone_enabled=_smart_admin_clone_enabled,
                         admin_pause_on_possible_match=_smart_admin_pause_on_possible,
                         admin_auto_reuse_on_possible_match=_smart_admin_auto_reuse_on_possible,
+                        max_new_clones=_smart_max_new_clones_for_review,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
@@ -4692,12 +4830,7 @@ class ProcessPipeline:
                     # would have hit §7.3 brake don't silently miss it).
                     # Handoff reason below: clone_library_register_failed.
                     _smart_clone_mirror_failures: list[str] = []
-                    _smart_user_id_for_mirror = str(
-                        _snap("user_id") or ""
-                    )
-                    _smart_job_id_for_mirror = str(
-                        _snap("job_id") or ""
-                    )
+                    _smart_reserved_clone_register_failures: list[str] = []
 
                     for _dec in _smart_voice_review.decisions:
                         _sp_entry = _smart_speakers_by_id.get(_dec.speaker_id)
@@ -4860,6 +4993,9 @@ class ProcessPipeline:
                                         _dec.speaker_id
                                     )
                                 ),
+                                smart_clone_reservation_id=(
+                                    _smart_clone_reservation_id_for_mirror
+                                ),
                                 created_from="smart_auto",
                                 notes=(
                                     f"Smart auto-clone from job "
@@ -4872,6 +5008,17 @@ class ProcessPipeline:
                                 _smart_clone_mirror_failures.append(
                                     _dec.speaker_id
                                 )
+                                if _smart_clone_reservation_id_for_mirror:
+                                    _smart_reserved_clone_register_failures.append(
+                                        _dec.speaker_id
+                                    )
+                                    _sp_entry.pop("voice_id", None)
+                                    _sp_entry["auto_decision"] = (
+                                        "clone_register_failed"
+                                    )
+                                    _sp_entry["smart_clone_skipped_reason"] = (
+                                        "clone_register_failed_reserved_handoff"
+                                    )
                         elif _dec.choice == VoiceReviewChoice.REUSED:
                             _apply_smart_reused_voice_decision(
                                 speaker_entry=_sp_entry,
@@ -4940,6 +5087,83 @@ class ProcessPipeline:
                     # Prefer translation_result.segments on cache-hit re-runs
                     # (segment-level may have been edited via post-edit), fall
                     # back to transcript_result.lines on fresh runs.
+                    if _smart_reserved_clone_register_failures:
+                        print(
+                            f"[smart] reserved clone registration failed for "
+                            f"{len(_smart_reserved_clone_register_failures)} "
+                            f"speaker(s): "
+                            f"{','.join(_smart_reserved_clone_register_failures)}; "
+                            "stopping for handoff so reserved credits are not "
+                            "released after a paid provider clone.",
+                            flush=True,
+                        )
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="downgrade_handoff",
+                            decision="rejected",
+                            reason_code="clone_register_failed_reserved_handoff",
+                            evidence={
+                                "failed_speakers": list(
+                                    _smart_reserved_clone_register_failures
+                                ),
+                                "reservation_id": (
+                                    _smart_clone_reservation_id_for_mirror
+                                ),
+                            },
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                        )
+                        _persist_smart_clone_register_failed_state(
+                            job_id=str(_snap("job_id") or config.job_id or ""),
+                            reservation_id=_smart_clone_reservation_id_for_mirror,
+                            failed_speakers=list(
+                                _smart_reserved_clone_register_failures
+                            ),
+                            handoff_stage=VOICE_SELECTION_REVIEW_STAGE,
+                        )
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": "clone_library_register_failed",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                            project_dir=final_project_dir,
+                            user_message="智能版克隆计费登记失败，需要人工接管。",
+                            web_review_marker_builder=self._build_web_review_marker,
+                        )
+                        state_manager.set_stage(
+                            "voice_selection",
+                            StageStatus.RUNNING,
+                            {"execution_mode": "smart_handoff_voice_review"},
+                        )
+                        current_stage_name = None
+                        _write_usage_summary(usage_meter)
+                        _emit_smart_cost_summary_from_meter(
+                            final_project_dir,
+                            job_id=config.job_id,
+                            usage_meter=usage_meter,
+                            minutes_processed=(
+                                float(actual_duration_ms) / 60000.0
+                                if actual_duration_ms
+                                else float(
+                                    _snap("source_duration_seconds") or 0.0
+                                ) / 60.0
+                            ),
+                            credits_policy="pending_settle",
+                        )
+                        return self._build_paused_result(
+                            project_dir=final_project_dir,
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            message="智能版克隆计费登记失败，需要人工接管。",
+                        )
+
                     _dub_source = (
                         translation_result.segments
                         if translation_result is not None

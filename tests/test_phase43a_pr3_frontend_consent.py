@@ -64,6 +64,51 @@ def test_consent_payload_only_for_express():
         assert "smart" not in window.lower(), "express_consent 块不应混入 smart 语义"
 
 
+def test_smart_submission_uses_explicit_paid_clone_confirmation():
+    """Smart create payload must gate paid-clone consent on the form checkbox."""
+    src = _read(_JOBS_TS)
+    assert "confirm_paid_voice_clone_credits" in src
+    assert "smartPaidCloneConfirmed" in _read(_TYPES_TS)
+    assert "confirm_paid_voice_clone_600_credits: true" not in src
+    assert not re.search(r"confirm_paid_voice_clone_credits\s*:\s*true", src)
+    assert re.search(r"paidCloneConfirmed\s*=\s*input\.smartPaidCloneConfirmed\s*===\s*true", src)
+    assert re.search(
+        r"confirm_paid_voice_clone_credits\s*:\s*paidCloneConfirmed",
+        src,
+    ), "Smart paid clone confirmation must come from explicit form state"
+
+
+def test_smart_copy_discloses_runtime_clone_add_on_cost():
+    """The Smart mode description must consume Gateway pricing facts."""
+    src = _read(_FORM_TSX)
+    assert "不会另外扣点" not in src
+    assert "voiceCloneCostCredits" in src
+    assert "voiceCloneCostLabel" in src
+    assert "600 点" not in src
+
+
+def test_smart_paid_clone_confirmation_is_optional_but_explicit():
+    """Smart may submit without paid clone consent, but never confirms it implicitly."""
+    src = _read(_FORM_TSX)
+    assert "smartPaidCloneAccepted" in src
+    assert "setSmartPaidCloneAccepted(false)" in src
+    assert "voiceCloneCostCredits != null" in src
+    assert "smartPaidCloneConfirmed" in src
+    validation_block = re.search(
+        r"const\s+validationError\s*=\s*(?P<body>.*?)(?:\n\s*const\s+isUnlimitedConcurrency)",
+        src,
+        re.S,
+    )
+    assert validation_block, "form validation block should be present"
+    assert "smartPaidCloneAccepted" not in validation_block.group("body")
+    assert "voiceCloneCostCredits" not in validation_block.group("body")
+    assert re.search(
+        r"serviceMode\s*===\s*['\"]smart['\"]\s*&&\s*voiceCloneCostCredits\s*!=\s*null\s*\?\s*smartPaidCloneAccepted\s*:\s*false",
+        src,
+        re.S,
+    ), "submit must only confirm paid clone when Smart price is loaded and checked"
+
+
 def test_frontend_never_sends_server_confirmed_at():
     """spec §3 / DoD #10：前端绝不构造 server_confirmed_at（后端单一来源）。
     递归扫 frontend-next/src 所有 ts/tsx。"""

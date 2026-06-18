@@ -38,6 +38,7 @@ from job_intercept import (  # noqa: E402
     intercept_create_job,
     update_source_metadata,
     _error_response,
+    InsufficientCreditsError,
     PLAN_CATALOG,
 )
 
@@ -160,6 +161,8 @@ def _make_db_session(
             return names_result  # existing_names SELECT
         if "display_name like" in sql_text:
             return branch4_result  # branch-4 COUNT(*)
+        if "create_idempotency_key" in sql_text and "jobs" in sql_text:
+            return no_job_result
         if "user_voices" in sql_text:
             if track_user_voice_query is not None:
                 track_user_voice_query.append(sql_text)
@@ -168,6 +171,8 @@ def _make_db_session(
             return credits_result
         if "subscriptions" in sql_text:
             return no_subscription_result
+        if "from users" in sql_text:
+            return user_result
         # Legacy path: active-count, existing-job, user-select in order.
         legacy_call_count["n"] += 1
         if legacy_call_count["n"] == 1:
@@ -787,6 +792,65 @@ class TestUpdateSourceMetadata:
         assert resp.status_code == 400
         assert body["error"] == "no_update_fields"
 
+    def test_late_base_credit_failure_releases_smart_clone_reservation(self):
+        reservation_id = "77777777-7777-7777-7777-777777777777"
+        job_mock = SimpleNamespace(
+            job_id="job-smart-late",
+            user_id="uid-1",
+            source_duration_seconds=None,
+            actual_minutes=None,
+            metering_snapshot={"service_mode": "smart", "quality_tier": "standard"},
+            service_mode="smart",
+            role_snapshot="user",
+            smart_state={
+                "smart_clone_credit_reserved": True,
+                "smart_clone_reservation_id": reservation_id,
+            },
+            status="queued",
+            current_stage=None,
+            error_summary=None,
+        )
+        job_result = MagicMock()
+        job_result.scalar_one_or_none.return_value = job_mock
+        existing_reserve_result = MagicMock()
+        existing_reserve_result.scalar_one_or_none.return_value = None
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[job_result, existing_reserve_result])
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        req = MagicMock()
+        req.body = AsyncMock(return_value=json.dumps({
+            "source_duration_seconds": 600.0,
+        }).encode())
+
+        async def fail_reserve(*args, **kwargs):
+            raise InsufficientCreditsError(required=1000, available=100)
+
+        with patch("job_intercept.ensure_credit_buckets_for_user", new=AsyncMock()):
+            with patch("job_intercept.reserve_credits_or_raise", side_effect=fail_reserve):
+                with patch(
+                    "job_intercept.settle_smart_clone_reservation",
+                    new=AsyncMock(return_value=SimpleNamespace(status="released")),
+                ) as settle_mock:
+                    with patch(
+                        "job_intercept._compensate_upstream_job",
+                        new=AsyncMock(),
+                    ) as compensate_mock:
+                        resp = _run(update_source_metadata(req, "job-smart-late", db))
+
+        body = json.loads(resp.body)
+        assert resp.status_code == 402
+        assert body["error"] == "insufficient_credits"
+        assert job_mock.status == "failed"
+        assert job_mock.current_stage == "failed"
+        settle_mock.assert_awaited_once()
+        settle_kwargs = settle_mock.await_args.kwargs
+        assert settle_kwargs["reservation_id"] == reservation_id
+        assert settle_kwargs["service_mode"] == "smart"
+        assert settle_kwargs["smart_state_override"] == job_mock.smart_state
+        compensate_mock.assert_awaited_once_with("job-smart-late")
+
 
 # ===================================================================
 # Job API → Service → Store round-trip (snapshot fields)
@@ -1273,6 +1337,7 @@ class TestSmartVoiceQuotaPreflightGates:
         "auto_retts": True,
         "auto_multimodal_verification": True,
         "no_extra_charge_without_confirmation": True,
+        "confirm_paid_voice_clone_credits": True,
         "on_budget_exhausted": "degraded_delivery_with_report",
     }
 
@@ -1306,6 +1371,595 @@ class TestSmartVoiceQuotaPreflightGates:
             "estimated_duration_seconds": 120,
             "smart_consent": consent,
         }
+
+    def test_paid_clone_confirmation_accepts_generic_and_600_price_legacy_field(
+        self,
+        monkeypatch,
+    ):
+        import job_intercept
+
+        assert job_intercept._smart_paid_clone_confirmed({
+            "confirm_paid_voice_clone_credits": True,
+        })
+        monkeypatch.setattr(job_intercept, "_get_smart_clone_cost_credits", lambda: 600)
+        assert job_intercept._smart_paid_clone_confirmed({
+            "confirm_paid_voice_clone_600_credits": True,
+        })
+        monkeypatch.setattr(job_intercept, "_get_smart_clone_cost_credits", lambda: 700)
+        assert not job_intercept._smart_paid_clone_confirmed({
+            "confirm_paid_voice_clone_600_credits": True,
+        })
+        assert not job_intercept._smart_paid_clone_confirmed({})
+
+    def test_smart_clone_cost_respects_zero_runtime_price(self, monkeypatch):
+        import job_intercept
+        import pricing_runtime
+
+        monkeypatch.setattr(
+            pricing_runtime,
+            "get_runtime_pricing",
+            lambda: SimpleNamespace(
+                credits=SimpleNamespace(voice_clone_cost_credits=0)
+            ),
+        )
+
+        assert job_intercept._get_smart_clone_cost_credits() == 0
+
+    def test_smart_clone_cost_falls_back_when_runtime_price_is_missing(
+        self, monkeypatch
+    ):
+        import job_intercept
+        import pricing_runtime
+
+        monkeypatch.setattr(
+            pricing_runtime,
+            "get_runtime_pricing",
+            lambda: SimpleNamespace(
+                credits=SimpleNamespace(voice_clone_cost_credits=None)
+            ),
+        )
+
+        assert job_intercept._get_smart_clone_cost_credits() == 600
+
+    def test_create_smart_job_reserves_clone_credit_and_stamps_job_record(self):
+        import admin_settings as admin_mod
+        from models import Job
+
+        captured_body: dict = {}
+        captured_jobs: list = []
+        reserve_calls: list[dict] = []
+        events: list[str] = []
+        reservation_id = "11111111-1111-1111-1111-111111111111"
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success(captured_body.get("job_id", "job_missing"))
+
+        async def fake_reserve(db, **kwargs):
+            events.append("reserve")
+            reserve_calls.append(dict(kwargs))
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id=reservation_id,
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        async def fake_ensure_buckets(*args, **kwargs):
+            events.append("ensure")
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+        )
+        db.add.side_effect = lambda obj: captured_jobs.append(obj)
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            s.smart_user_voice_clone_cap = 30
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept._get_smart_clone_cost_credits",
+                                return_value=750,
+                                create=True,
+                            ):
+                                with patch(
+                                    "job_intercept.ensure_credit_buckets_for_user",
+                                    side_effect=fake_ensure_buckets,
+                                    create=True,
+                                ):
+                                    with patch(
+                                        "job_intercept.reserve_smart_clone_credit",
+                                        side_effect=fake_reserve,
+                                        create=True,
+                                    ):
+                                        resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert events[:2] == ["ensure", "reserve"]
+        assert captured_body["job_id"].startswith("job_")
+        assert len(captured_body["job_id"]) == 36
+        assert reserve_calls == [
+            {
+                "user_id": user.id,
+                "task_id": captured_body["job_id"],
+                "amount_credits": 750,
+                "ttl_minutes": 1440,
+                "library_cap": 30,
+                "required_available_credits": 950,
+            }
+        ]
+        assert captured_body["smart_state"] == {
+            "smart_clone_credit_reserved": True,
+            "smart_clone_reservation_id": reservation_id,
+        }
+        job_rows = [obj for obj in captured_jobs if isinstance(obj, Job)]
+        assert len(job_rows) == 1
+        assert job_rows[0].job_id == captured_body["job_id"]
+        assert job_rows[0].smart_state == captured_body["smart_state"]
+
+    def test_create_smart_job_requires_paid_clone_confirmation_before_reserve(self):
+        import admin_settings as admin_mod
+
+        captured_body: dict = {}
+        reserve_calls: list[dict] = []
+        track_queries: list[str] = []
+        legacy_consent = dict(self._FULL_CONSENT_BOTH_ALLOW)
+        legacy_consent.pop("confirm_paid_voice_clone_credits", None)
+        legacy_consent.pop("confirm_paid_voice_clone_600_credits", None)
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success(captured_body.get("job_id", "job_missing"))
+
+        async def fake_reserve(db, **kwargs):
+            reserve_calls.append(dict(kwargs))
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id="55555555-5555-5555-5555-555555555555",
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        req = _make_request(self._smart_request_body(legacy_consent))
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=28,
+            track_user_voice_query=track_queries,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            s.smart_user_voice_clone_cap = 30
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept.reserve_smart_clone_credit",
+                                side_effect=fake_reserve,
+                                create=True,
+                            ):
+                                resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert track_queries == []
+        assert reserve_calls == []
+        assert captured_body["smart_state"] == {
+            "smart_clone_credit_reserved": False,
+            "smart_clone_reservation_deny_reason": "paid_clone_confirmation_required",
+        }
+
+    def test_create_smart_job_releases_clone_reservation_on_upstream_conflict(self):
+        import admin_settings as admin_mod
+
+        reservation_id = "33333333-3333-3333-3333-333333333333"
+
+        async def fake_reserve(db, **kwargs):
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id=reservation_id,
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+            credit_available=1_000,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            return s
+
+        with patch("job_intercept.proxy_request", return_value=_upstream_conflict()):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept.reserve_smart_clone_credit",
+                                side_effect=fake_reserve,
+                                create=True,
+                            ):
+                                with patch(
+                                    "job_intercept.settle_smart_clone_reservation",
+                                    new_callable=AsyncMock,
+                                    create=True,
+                                ) as settle:
+                                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 409
+        settle.assert_awaited_once_with(
+            db,
+            reservation_id=reservation_id,
+            service_mode="smart",
+        )
+
+    def test_create_smart_job_releases_clone_reservation_when_base_credit_fails(self):
+        import admin_settings as admin_mod
+        from credits_service import InsufficientCreditsError
+
+        reservation_id = "44444444-4444-4444-4444-444444444444"
+
+        async def fake_reserve(db, **kwargs):
+            return SimpleNamespace(
+                status="reserved",
+                reservation_id=reservation_id,
+                deny_reason=None,
+                idempotent_hit=False,
+            )
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+            credit_available=1_000,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            return s
+
+        with patch("job_intercept.proxy_request", return_value=_upstream_success()):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch("job_intercept.estimate_credits", return_value=200):
+                                with patch(
+                                    "job_intercept.reserve_smart_clone_credit",
+                                    side_effect=fake_reserve,
+                                    create=True,
+                                ):
+                                    with patch(
+                                        "job_intercept.reserve_credits_or_raise",
+                                        new_callable=AsyncMock,
+                                    ) as reserve_base:
+                                        reserve_base.side_effect = InsufficientCreditsError(
+                                            required=200,
+                                            available=100,
+                                        )
+                                        with patch(
+                                            "job_intercept.settle_smart_clone_reservation",
+                                            new_callable=AsyncMock,
+                                            create=True,
+                                        ) as settle:
+                                            with patch(
+                                                "job_intercept._compensate_upstream_job",
+                                                new_callable=AsyncMock,
+                                            ):
+                                                resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 402
+        settle.assert_awaited_once_with(
+            db,
+            reservation_id=reservation_id,
+            service_mode="smart",
+        )
+
+    def test_create_smart_job_passes_combined_balance_guard_to_clone_reserve(self):
+        import admin_settings as admin_mod
+
+        captured_body: dict = {}
+        reserve_calls: list[dict] = []
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success(captured_body.get("job_id", "job_missing"))
+
+        async def fake_reserve(db, **kwargs):
+            reserve_calls.append(dict(kwargs))
+            return SimpleNamespace(
+                status="denied",
+                reservation_id=None,
+                deny_reason="insufficient_credits",
+                idempotent_hit=False,
+            )
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+            credit_available=700,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            s.smart_user_voice_clone_cap = 30
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch("job_intercept.estimate_credits", return_value=200):
+                                with patch(
+                                    "job_intercept.reserve_smart_clone_credit",
+                                    side_effect=fake_reserve,
+                                    create=True,
+                                ):
+                                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert len(reserve_calls) == 1
+        assert reserve_calls[0]["amount_credits"] == 600
+        assert reserve_calls[0]["required_available_credits"] == 800
+        assert captured_body["smart_state"] == {
+            "smart_clone_credit_reserved": False,
+            "smart_clone_reservation_deny_reason": "insufficient_credits",
+        }
+
+    def test_create_smart_job_rolls_back_failed_clone_reserve_before_fallback(self):
+        import admin_settings as admin_mod
+
+        captured_body: dict = {}
+        events: list[str] = []
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            events.append("proxy")
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success(captured_body.get("job_id", "job_missing"))
+
+        async def fake_ensure_buckets(*args, **kwargs):
+            events.append("ensure_buckets")
+
+        async def fake_reserve(*args, **kwargs):
+            events.append("reserve_clone")
+            raise RuntimeError("reserve flush failed")
+
+        async def fake_rollback():
+            events.append("rollback")
+
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=1,
+            credit_available=1_000,
+        )
+        db.rollback = AsyncMock(side_effect=fake_rollback)
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            s.smart_user_voice_clone_cap = 30
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept.ensure_credit_buckets_for_user",
+                                side_effect=fake_ensure_buckets,
+                                create=True,
+                            ):
+                                with patch(
+                                    "job_intercept.reserve_smart_clone_credit",
+                                    side_effect=fake_reserve,
+                                    create=True,
+                                ):
+                                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert events[:4] == [
+            "ensure_buckets",
+            "reserve_clone",
+            "rollback",
+            "proxy",
+        ]
+        assert captured_body["smart_state"] == {
+            "smart_clone_credit_reserved": False,
+            "smart_clone_reservation_deny_reason": "reserve_failed",
+        }
+
+    def test_create_smart_job_reuses_existing_create_idempotency_key_before_reserve(self):
+        import admin_settings as admin_mod
+
+        now = datetime(2026, 6, 18, 11, 30, tzinfo=timezone.utc)
+        existing_job = SimpleNamespace(
+            job_id="job_existing_retry",
+            source_type="youtube_url",
+            source_ref="https://youtube.example/watch?v=idem",
+            speakers="auto",
+            status="queued",
+            current_stage=None,
+            project_dir="/tmp/job_existing_retry",
+            display_name="existing",
+            service_mode="smart",
+            source_language="en",
+            target_language="zh-CN",
+            language_pair="en->zh-CN",
+            created_at=now,
+            updated_at=now,
+            started_at=None,
+            completed_at=None,
+            expires_at=now,
+            editing_touched_at=None,
+            copy_of_job_id=None,
+            root_job_id="job_existing_retry",
+            edit_generation=0,
+            role_snapshot="user",
+            review_gate=None,
+            error_summary=None,
+        )
+
+        async def fake_proxy(*args, **kwargs):
+            raise AssertionError("retry must not create a duplicate upstream job")
+
+        async def fake_reserve(*args, **kwargs):
+            raise AssertionError("retry must not reserve a second clone credit")
+
+        body = self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        body["create_idempotency_key"] = "idem-smart-retry"
+        req = _make_request(body)
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=99,
+            existing_job=existing_job,
+            user_for_quota=user,
+            user_voice_count=1,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_mode_enabled = True
+            s.smart_auto_clone_enabled = True
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "entitlements.get_effective_allowed_service_modes",
+                        return_value=["express", "studio", "smart"],
+                    ):
+                        with patch(
+                            "plan_catalog.get_effective_plan_gate",
+                            return_value=self._PLUS_SMART_GATE,
+                        ):
+                            with patch(
+                                "job_intercept.reserve_smart_clone_credit",
+                                side_effect=fake_reserve,
+                                create=True,
+                            ):
+                                resp = _run(intercept_create_job(req, db, user))
+
+        payload = json.loads(resp.body)
+        assert resp.status_code == 202
+        assert payload["job_id"] == existing_job.job_id
+        assert payload["idempotent"] is True
+        assert payload["job_type"] == "translation"
+        assert payload["source_type"] == existing_job.source_type
+        assert payload["source_ref"] == existing_job.source_ref
+        assert payload["output_target"] == "jianying_draft"
+        assert payload["speakers"] == existing_job.speakers
+        assert payload["progress_message"] is None
+        assert payload["created_at"] == now.isoformat()
+        assert payload["updated_at"] == now.isoformat()
+        assert payload["service_mode"] == "smart"
+        assert payload["display_name"] == "existing"
 
     def test_create_smart_job_skips_voice_quota_preflight_when_admin_auto_clone_disabled(self):
         """Admin gate False → preflight must NOT query user_voices and

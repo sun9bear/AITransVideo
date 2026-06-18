@@ -1852,6 +1852,22 @@ class TestB3DCloneSampleExtractorContract:
             f"Quota call at offset {quota_idx}, no triple gate found "
             f"before it.\nPreceding 2000 chars:\n{preceding[-2000:]}"
         )
+        default_quota_idx = preceding.rfind("_smart_quota_remaining = 0")
+        default_provider_idx = preceding.rfind(
+            "_smart_clone_provider = _build_b2_not_wired_clone_provider()"
+        )
+        assert 0 <= default_quota_idx < gate_idx, (
+            "Smart review must initialize quota to the no-new-clone default "
+            "before the clone reservation/provider gate so no-reservation "
+            "jobs can fall back without an unbound local.\n"
+            f"Preceding 2000 chars:\n{preceding[-2000:]}"
+        )
+        assert 0 <= default_provider_idx < gate_idx, (
+            "Smart review must initialize the stub provider before the clone "
+            "reservation/provider gate so missing paid-clone consent cannot "
+            "skip provider setup.\n"
+            f"Preceding 2000 chars:\n{preceding[-2000:]}"
+        )
 
         # The else branch must exist and use stub provider + 0 quota.
         # Find the matching else near the triple gate. Keep this window
@@ -1948,6 +1964,94 @@ class TestB3DCloneSampleExtractorContract:
         assert body["clone_sample_segment_ids"] == [1, 2]
         assert body["created_from"] == "smart_auto"
         assert body["notes"] == "Smart auto-clone from job j-1"
+
+    def test_p3b_billed_mirror_helper_routes_reserved_clone_to_billing_endpoint(self, monkeypatch):
+        """Reserved preview clones must register through the billed endpoint."""
+        from pipeline.process import _register_smart_clone_in_user_voices
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+        recorded = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "ok": True,
+                    "status": "billed",
+                    "reservation_id": "11111111-1111-1111-1111-111111111111",
+                }
+
+        def _fake_post(url, *, json=None, headers=None, timeout=None):
+            recorded["url"] = url
+            recorded["json"] = json
+            recorded["headers"] = headers
+            recorded["timeout"] = timeout
+            return _Resp()
+
+        import requests as _requests_mod
+        monkeypatch.setattr(_requests_mod, "post", _fake_post)
+
+        result = _register_smart_clone_in_user_voices(
+            user_id="00000000-0000-0000-0000-0000000000a1",
+            voice_id="mm_voice_reserved",
+            label="Speaker A",
+            source_speaker_id="speaker_a",
+            source_job_id="job-reserved",
+            smart_clone_reservation_id="11111111-1111-1111-1111-111111111111",
+        )
+
+        assert result is True
+        assert recorded["url"] == (
+            "http://127.0.0.1:8880/api/internal/smart-clone/register-billed"
+        )
+        assert recorded["headers"] == {"X-Internal-Key": "test-key"}
+        assert recorded["timeout"] == 5.0
+        body = recorded["json"]
+        assert body["user_id"] == "00000000-0000-0000-0000-0000000000a1"
+        assert body["task_id"] == "job-reserved"
+        assert body["reservation_id"] == "11111111-1111-1111-1111-111111111111"
+        assert body["voice_id"] == "mm_voice_reserved"
+        assert body["label"] == "Speaker A"
+        assert body["source_speaker_id"] == "speaker_a"
+
+    def test_p3b_active_reservation_helper_checks_gateway_before_clone(self, monkeypatch):
+        from pipeline.process import _check_smart_clone_reservation_active
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+        recorded = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True, "active": True, "reason": "active"}
+
+        def _fake_post(url, *, json=None, headers=None, timeout=None):
+            recorded["url"] = url
+            recorded["json"] = json
+            recorded["headers"] = headers
+            recorded["timeout"] = timeout
+            return _Resp()
+
+        import requests as _requests_mod
+        monkeypatch.setattr(_requests_mod, "post", _fake_post)
+
+        assert _check_smart_clone_reservation_active(
+            user_id="00000000-0000-0000-0000-0000000000a1",
+            task_id="job-active",
+            reservation_id="11111111-1111-1111-1111-111111111111",
+        ) is True
+        assert recorded["url"] == (
+            "http://127.0.0.1:8880/api/internal/smart-clone/reservations/check-active"
+        )
+        assert recorded["headers"] == {"X-Internal-Key": "test-key"}
+        assert recorded["timeout"] == 5.0
+        assert recorded["json"] == {
+            "user_id": "00000000-0000-0000-0000-0000000000a1",
+            "task_id": "job-active",
+            "reservation_id": "11111111-1111-1111-1111-111111111111",
+        }
 
     def test_b3e_fix_mirror_helper_returns_false_on_failures(self, monkeypatch):
         """Codex 第二十九轮 P0: ANY failure mode returns False so the
@@ -2292,9 +2396,10 @@ class TestB3DCloneSampleExtractorContract:
         lines = source[idx:].splitlines()
         # Phase 4 (2026-05-17) added per-speaker possible-match pause
         # audit loop + admin policy read, pushing the CLONED branch
-        # past the previous 900-line window. Bumped to 1100 to keep
-        # covering the mirror call without inflating it indefinitely.
-        block = "\n".join(lines[:1100])
+        # past the previous 900-line window. Bumped to 1300 to keep
+        # covering the billed mirror arguments without inflating it
+        # indefinitely.
+        block = "\n".join(lines[:1300])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (
@@ -2309,10 +2414,71 @@ class TestB3DCloneSampleExtractorContract:
             "needed to aggregate per-speaker mirror failures and "
             "escalate to handoff."
         )
+        assert "smart_clone_reservation_id=" in block, (
+            "Smart branch must pass smart_clone_reservation_id into the "
+            "mirror helper so preview clones create CloneBillingEvent rows."
+        )
+        assert "max_new_clones=" in block, (
+            "Reserved smart preview jobs must cap provider-created clones "
+            "to one reservation-backed voice."
+        )
+        assert "_check_smart_clone_reservation_active(" in block, (
+            "Smart branch must verify the reservation is active before "
+            "building the paid MiniMax provider."
+        )
+        assert "else 0" in block, (
+            "Missing or inactive reservations must cap new clones to zero."
+        )
+        sample_gate_idx = block.find("if _smart_reservation_active_for_clone:")
+        extract_idx = block.find("_smart_extractor.extract_sample(")
+        assert sample_gate_idx >= 0 and sample_gate_idx < extract_idx, (
+            "Smart branch must gate clone sample extraction on an active "
+            "reservation so no-reservation jobs can fall back to presets "
+            "instead of pausing before review."
+        )
+        capped_sample_list_idx = block.find(
+            "_smart_speaker_ids_to_extract_clone_samples"
+        )
+        assert 0 <= capped_sample_list_idx < sample_gate_idx, (
+            "Smart sample extraction must precompute a clone-cap-limited "
+            "speaker list before entering the extraction loop."
+        )
+        assert (
+            "_smart_speaker_ids_requiring_clone[\n"
+            "                            :_smart_max_new_clones_for_review"
+        ) in block, (
+            "Sample extraction must be limited to speakers that can actually "
+            "consume the one reservation-backed clone slot."
+        )
+        assert (
+            "for _candidate_sid in (\n"
+            "                                _smart_speaker_ids_to_extract_clone_samples"
+        ) in block, (
+            "Sample extraction loop must iterate over the capped cloneable "
+            "speaker list, not every speaker requiring a clone."
+        )
+        assert "_smart_reserved_clone_register_failures" in block, (
+            "Reservation-backed clone registration failures must be tracked "
+            "separately from best-effort legacy mirror failures."
+        )
+        assert "clone_register_failed_reserved_handoff" in block, (
+            "Reservation-backed clone registration failure must stop for "
+            "handoff instead of continuing with an unbilled provider voice."
+        )
+        assert 'decision_type="clone_register_failed_reserved"' not in block, (
+            "Reserved register-failed audit must use an allowed Smart "
+            "decision type so the diagnostic JSONL line is not dropped."
+        )
         assert "clone_library_register_failed" in block, (
             "Smart branch missing clone_library_register_failed reason "
             "code — Codex 第二十九轮 P0: mirror failure must surface "
             "to Studio human review so user can take action."
+        )
+
+        assert "_persist_smart_clone_register_failed_state(" in block, (
+            "Reservation-backed register failures must durably write "
+            "clone_library_register_failed to Gateway Job.smart_state before "
+            "the stdout handoff marker."
         )
 
     def test_b3f_sidecar_helper_writes_jsonl_line(self, tmp_path):

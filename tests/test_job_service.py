@@ -119,6 +119,36 @@ def test_submit_job_persists_explicit_expires_at(tmp_path: Path) -> None:
     assert service.require_job(created.job_id).expires_at == expires_at
 
 
+def test_submit_job_persists_gateway_job_id_and_initial_smart_state(
+    tmp_path: Path,
+) -> None:
+    service, _ = _build_service(
+        tmp_path,
+        plans=[{"lines": [], "returncode": 0}],
+    )
+    job_id = "job_" + "a" * 32
+    smart_state = {
+        "smart_clone_credit_reserved": True,
+        "smart_clone_reservation_id": "11111111-1111-1111-1111-111111111111",
+    }
+
+    created = service.submit_job(
+        job_id=job_id,
+        source_type="youtube_url",
+        source_ref="https://youtube.example/watch?v=smart",
+        service_mode="smart",
+        user_id="7",
+        smart_state=smart_state,
+    )
+
+    assert created.job_id == job_id
+    assert created.workspace_dir == f"projects/7/{job_id}"
+    assert created.project_dir == str(
+        (tmp_path / "projects" / "7" / job_id).resolve(strict=False)
+    )
+    assert service.require_job(job_id).smart_state == smart_state
+
+
 def test_submit_job_with_user_id_is_immune_to_yt_dlp_progress_lines(
     tmp_path: Path,
 ) -> None:

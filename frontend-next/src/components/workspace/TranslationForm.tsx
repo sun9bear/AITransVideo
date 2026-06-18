@@ -65,6 +65,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // fail-closed; the checkbox only renders when express + available.
   const [expressAutoCloneAvailable, setExpressAutoCloneAvailable] = useState(false)
   const [expressAutoVoiceClone, setExpressAutoVoiceClone] = useState(false)
+  const [smartPaidCloneAccepted, setSmartPaidCloneAccepted] = useState(false)
   // Phase 2a LAUNCH GATE: free voice-rights attestation (《民法典》1023). Must be
   // checked before a free job may be submitted; reset on mode switch.
   const [freeVoiceRightsConfirmed, setFreeVoiceRightsConfirmed] = useState(false)
@@ -98,7 +99,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // personal-voice candidate is found. Surface this in the submission
   // UI so users aren't surprised by a mid-job pause.
   const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
-
+  const [voiceCloneCostCredits, setVoiceCloneCostCredits] = useState<number | null>(null)
+  const [voiceCloneCostLoadFailed, setVoiceCloneCostLoadFailed] = useState(false)
   const sourceValidationError =
     sourceType === "youtube_url"
       ? validateYoutubeUrl(youtubeUrl)
@@ -136,6 +138,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     currentRate != null
       ? `${currentRate} 点/分钟`
       : ratesLoadFailed
+        ? "暂时无法读取"
+        : "读取中"
+  const voiceCloneCostLabel =
+    voiceCloneCostCredits != null
+      ? `${voiceCloneCostCredits} 点`
+      : voiceCloneCostLoadFailed
         ? "暂时无法读取"
         : "读取中"
   // For UI display: show the most recent active job if blocked
@@ -202,8 +210,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     getVoiceSelectionPricing()
       .then((pricing) => {
         setSmartPauseWarningEnabled(Boolean(pricing.smart_pause_warning_enabled))
+        setVoiceCloneCostCredits(pricing.voice_clone_cost_credits)
+        setVoiceCloneCostLoadFailed(false)
       })
-      .catch(() => setSmartPauseWarningEnabled(false))
+      .catch(() => {
+        setSmartPauseWarningEnabled(false)
+        setVoiceCloneCostCredits(null)
+        setVoiceCloneCostLoadFailed(true)
+      })
     // Phase 4.3a PR3: Express auto-clone availability (admin flag + allowlist).
     // Fail-closed in the client; default state is already false.
     getExpressAutoCloneAvailability()
@@ -239,6 +253,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     }
   }, [serviceMode])
 
+  useEffect(() => {
+    if (serviceMode !== "smart" || voiceCloneCostCredits == null) {
+      setSmartPaidCloneAccepted(false)
+    }
+  }, [serviceMode, voiceCloneCostCredits])
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (validationError) {
@@ -270,6 +290,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         // spec §2.6: force false unless currently in Express, so a stale
         // checkbox (mode switched away then back) can't trigger a paid clone.
         expressAutoVoiceClone: serviceMode === "express" ? expressAutoVoiceClone : false,
+        smartPaidCloneConfirmed:
+          serviceMode === "smart" && voiceCloneCostCredits != null
+            ? smartPaidCloneAccepted
+            : false,
         freeVoiceRightsConfirmed: serviceMode === "free" ? freeVoiceRightsConfirmed : false,
         sourceLanguage: sendPair ? selectedPair.source_language : undefined,
         targetLanguage: sendPair ? selectedPair.target_language : undefined,
@@ -699,7 +723,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             ) : serviceMode === "smart" ? (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                智能版按源视频时长固定扣点，当前标准为 {rateLabel}。AI 自动审核翻译并按需克隆主说话人音色，系统内部的重试、克隆、TTS 调用都计入这个固定价，不会另外扣点。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。
+                智能版按源视频时长扣点，当前基础标准为 {rateLabel}。AI 自动审核翻译并按需处理主说话人音色；若需要自动新克隆音色，会额外预扣 {voiceCloneCostLabel}，未发生新克隆时会释放。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。
               </p>
             ) : (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
@@ -780,6 +804,40 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                     <span className="block">· 该音色为本次任务临时使用，不进入你的永久音色库；系统后续会按清理策略处理</span>
                     <span className="block">· 会占用一次音色克隆配额</span>
                     <span className="block">· 失败时自动改用预设音色，不影响配音完成</span>
+                  </span>
+                </span>
+              </label>
+            </section>
+          ) : null}
+
+          {serviceMode === "smart" ? (
+            <section
+              className="rounded-xl border p-4"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--bamboo) 8%, transparent)",
+                borderColor: "color-mix(in oklab, var(--bamboo) 32%, transparent)",
+              }}
+            >
+              <label
+                className={`flex items-start gap-3 ${
+                  voiceCloneCostCredits == null ? "cursor-not-allowed opacity-70" : "cursor-pointer"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className="mt-1 h-4 w-4 shrink-0 accent-[color:var(--primary)]"
+                  checked={smartPaidCloneAccepted}
+                  disabled={
+                    isBlockedByConcurrency ||
+                    submitState === "submitting" ||
+                    voiceCloneCostCredits == null
+                  }
+                  onChange={(e) => setSmartPaidCloneAccepted(e.target.checked)}
+                />
+                <span className="block space-y-1.5">
+                  <span className="block text-sm font-medium text-foreground">确认智能版自动克隆扣点</span>
+                  <span className="block text-xs leading-relaxed text-muted-foreground">
+                    我确认：如果本次智能版需要自动新克隆主说话人音色，将额外预扣 {voiceCloneCostLabel}；未发生新克隆或任务未消耗该克隆时会释放。
                   </span>
                 </span>
               </label>

@@ -713,6 +713,29 @@ class TestAutoVoiceReviewOrchestration:
         assert choices[2] is VoiceReviewChoice.PAUSED
         assert result.outcome is VoiceReviewOutcome.PAUSED
 
+    def test_max_new_clones_routes_remaining_speakers_to_preset(self):
+        """Reserved smart-preview jobs can safely pay for only one new clone."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice, VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider(quota_remaining=100)
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a"), self._speaker("b")],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            max_new_clones=1,
+            smart_decision_id_factory=self._id_factory(),
+        )
+
+        assert len(fake.calls) == 1
+        choices = [d.choice for d in result.decisions]
+        assert choices == [VoiceReviewChoice.CLONED, VoiceReviewChoice.PRESET]
+        assert result.decisions[1].reason_code == "max_new_clones_reached_1"
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+
     def test_provider_failure_retries_then_falls_to_preset(self):
         """Plan §7.3: per-speaker clone failure budget (default 3
         attempts). Generic provider failures (NOT quota) burn the

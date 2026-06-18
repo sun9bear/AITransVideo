@@ -373,6 +373,26 @@ async def lifespan(app: FastAPI):
             "reclaim falls back to the per-reserve inline expire",
         )
 
+    # P3c (plan 2026-06-14 §4): Smart preview-clone reservation TTL settle
+    # sweeper. CodeX P3c-审核 P1 兜底——job_terminal_mirror finalizer 是 timely
+    # 主路径（marker-gated），本 sweeper 保证"任意未结算 reservation 最终都
+    # capture 或 release"，封死"reservation 建了但永不结算、600 永久挂 reserved"
+    # 漏退（marker 漏传 / job 卡死非终态 / finalizer 本轮跳过）。settle 走内部
+    # 信用 ledger（shadow_capture/release），**不调付费/外部 API**。同 Express
+    # sweeper 的 fail-safe 模式：故障不阻断 gateway 启动。create/pipeline 未接线
+    # 前无 reservation → 每 tick no-op。
+    try:
+        from smart_clone_reservation_sweeper import sweeper_loop as _smart_clone_resv_loop
+        _smart_clone_resv_task = _asyncio.create_task(
+            _smart_clone_resv_loop(), name="smart-clone-reservation-sweeper",
+        )
+        app.state.smart_clone_reservation_sweeper_task = _smart_clone_resv_task
+    except Exception:
+        logger.exception(
+            "Failed to start smart_clone_reservation_sweeper; stale smart-clone "
+            "reservations rely on the terminal-mirror finalizer only",
+        )
+
     # Phase 4.3b-C: Express temporary-voice cleanup sweeper. Deletes the
     # DashScope voice for expired temporary cosyvoice clones (paid worker call)
     # then soft-deletes the user_voices row. Distinct from the reservation
@@ -479,6 +499,10 @@ async def lifespan(app: FastAPI):
         # Phase 4.3a PR2-D: cancel the reservation TTL sweeper cleanly so
         # shutdown doesn't hang on its asyncio.sleep().
         "express_reservation_sweeper_task",
+        # P3c (plan 2026-06-14 §4): cancel the smart-clone reservation settle
+        # sweeper cleanly (CodeX P3c 复审：startup 起了 task 但 shutdown 漏 cancel
+        # → 会卡在它的 asyncio.sleep()).
+        "smart_clone_reservation_sweeper_task",
         # Phase 4.3b-C: cancel the temporary-voice cleanup sweeper on shutdown.
         "express_voice_cleanup_sweeper_task",
         # Phase 8 §T8.4 pan schedulers (CodeX P2-5: previously omitted,
