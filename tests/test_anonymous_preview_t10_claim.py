@@ -669,6 +669,7 @@ def test_where_semantics_on_real_sqlite_engine():
 # ---------------------------------------------------------------------------
 
 _CLAIM_TS = _REPO / "frontend-next" / "src" / "lib" / "api" / "claim.ts"
+_APP_SHELL_TSX = _REPO / "frontend-next" / "src" / "components" / "app-shell.tsx"
 
 
 def test_claim_ts_keeps_hint_on_retryable_failure():
@@ -701,3 +702,11 @@ def test_claim_ts_bounds_post_auth_claim_fetch():
     assert "signal: controller.signal" in src
     assert "window.setTimeout" in src
     assert "window.clearTimeout" in src
+
+
+def test_app_shell_retries_pending_claim_after_auth_redirect():
+    assert _APP_SHELL_TSX.exists(), f"app-shell.tsx 不存在: {_APP_SHELL_TSX}"
+    src = _APP_SHELL_TSX.read_text(encoding="utf-8")
+
+    assert "maybeClaimAnonPreviewAfterLogin" in src
+    assert re.search(r"useEffect\(\(\)\s*=>\s*\{[\s\S]*user[\s\S]*maybeClaimAnonPreviewAfterLogin", src)
