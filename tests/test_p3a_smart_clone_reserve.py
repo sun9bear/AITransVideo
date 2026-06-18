@@ -539,6 +539,69 @@ def test_register_bill_rechecks_library_capacity_before_billing():
     _run(go())
 
 
+def test_register_bill_expires_stale_reservations_before_capacity_check():
+    """Expired reservations must not block a valid callback from consuming its slot."""
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=1400)
+        try:
+            async with sm() as db:
+                rid = await _reserve(db, "job_r5_stale", library_cap=30)
+                now = datetime.now(timezone.utc)
+                stale_id = uuid.uuid4()
+                db.add(SmartCloneReservation(
+                    id=stale_id,
+                    user_id=_USER,
+                    task_id="job_r5_old",
+                    purpose=svc.PURPOSE,
+                    amount_credits=600,
+                    status=svc.RESERVED,
+                    created_at=now - timedelta(hours=2),
+                    updated_at=now - timedelta(hours=2),
+                    expires_at=now - timedelta(minutes=30),
+                ))
+                db.add(UserVoice(
+                    user_id=_USER,
+                    voice_id="existing_voice",
+                    label="existing",
+                    provider="minimax_voice_clone",
+                    tts_provider="minimax_tts",
+                    platform="minimax_domestic",
+                    created_from="manual_clone",
+                ))
+                await db.commit()
+
+                out = await svc.register_smart_clone_with_billing(
+                    db,
+                    user_id=_USER,
+                    task_id="job_r5_stale",
+                    reservation_id=rid,
+                    voice_id="mm_v5_stale",
+                    label="x",
+                    source_job_id="job_r5_stale",
+                    library_cap=2,
+                )
+
+                assert out.status == "billed"
+                stale = (
+                    await db.execute(
+                        select(SmartCloneReservation).where(
+                            SmartCloneReservation.id == stale_id
+                        )
+                    )
+                ).scalar_one()
+                assert stale.status == svc.EXPIRED
+                assert (
+                    await db.execute(
+                        select(UserVoice).where(UserVoice.voice_id == "mm_v5_stale")
+                    )
+                ).scalar_one_or_none() is not None
+                assert (await db.execute(select(CloneBillingEvent))).scalar_one_or_none() is not None
+        finally:
+            await sm.kw["bind"].dispose()
+
+    _run(go())
+
+
 def test_billed_reservation_does_not_double_count_next_library_reserve():
     """Registered preview clone capacity is represented by its UserVoice row."""
     async def go():

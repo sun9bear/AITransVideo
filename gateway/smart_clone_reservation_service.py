@@ -99,6 +99,7 @@ async def _expire_stale_for_user(db: AsyncSession, user_id: object, *, now: date
             SmartCloneReservation.expires_at < now,
         )
         .values(status=EXPIRED, reason_code="ttl_expired", updated_at=now)
+        .execution_options(synchronize_session=False)
     )
     return int(result.rowcount or 0)
 
@@ -451,6 +452,7 @@ async def register_smart_clone_with_billing(
     if user_pk is None:
         await db.rollback()
         return RegisterBillOutcome(status="no_active_reservation")
+    await _expire_stale_for_user(db, user_id, now=_now())
     other_reserved = await count_active_smart_reservations(
         db, user_id, exclude_reservation_id=res_pk
     )
