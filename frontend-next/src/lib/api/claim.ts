@@ -43,12 +43,17 @@ export function setAnonClaimHint(previewId: string): void {
   }
 }
 
-export function hasAnonClaimHint(): boolean {
+function getAnonClaimHint(): string | null {
   try {
-    return Boolean(window.localStorage.getItem(CLAIM_HINT_KEY))
+    const previewId = window.localStorage.getItem(CLAIM_HINT_KEY)
+    return previewId || null
   } catch {
-    return false
+    return null
   }
+}
+
+export function hasAnonClaimHint(): boolean {
+  return Boolean(getAnonClaimHint())
 }
 
 export function clearAnonClaimHint(): void {
@@ -159,16 +164,19 @@ export async function claimAnonymousPreview(): Promise<ClaimOutcome> {
  * 跳转**之前**。无论结果如何都清除 hint。
  */
 export async function maybeClaimAnonPreviewAfterLogin(): Promise<void> {
-  if (!hasAnonClaimHint()) {
+  const hintedPreviewId = getAnonClaimHint()
+  if (!hintedPreviewId) {
     return
   }
   let settled = false
   try {
     const outcome = await claimAnonymousPreview()
     settled = outcome.settled
-    // 认领成功 → 把 preview_id 传给创建页「转完整」入口（独立 key，hint 即将被清）。
-    if (outcome.claimed && outcome.preview_ids && outcome.preview_ids[0]) {
-      setAnonConvertReady(outcome.preview_ids[0])
+    // 认领成功 → 把本次浏览器最后预览的 preview_id 传给创建页「转完整」入口。
+    // /claim 可能一次绑定多个预览且返回顺序未定义；不回退到第一个 ID，避免转错原视频。
+    const claimedPreviewIds = outcome.preview_ids ?? []
+    if (outcome.claimed && claimedPreviewIds.includes(hintedPreviewId)) {
+      setAnonConvertReady(hintedPreviewId)
     }
   } catch {
     // 永不阻断登录跳转；异常视为可重试 → 保留 hint。

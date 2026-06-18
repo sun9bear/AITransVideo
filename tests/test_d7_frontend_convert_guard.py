@@ -55,6 +55,22 @@ def test_claim_ts_writes_convert_ready_on_claim_success():
     assert "setAnonConvertReady(" in body, "认领成功必须写 convert-ready 供创建页"
 
 
+def test_claim_ts_uses_hinted_preview_for_convert_ready():
+    src = _read(CLAIM_TS)
+    m = re.search(
+        r"export async function maybeClaimAnonPreviewAfterLogin[\s\S]*?\n\}", src
+    )
+    assert m, "找不到 maybeClaimAnonPreviewAfterLogin"
+    body = m.group(0)
+    # CodeX P2: claim may bind multiple previews with no ordering. The
+    # convert-ready preview must be the same preview that set the local hint,
+    # otherwise the create page can preselect the wrong original video.
+    assert "const hintedPreviewId = getAnonClaimHint()" in body
+    assert re.search(r"\.includes\(\s*hintedPreviewId\s*\)", body)
+    assert "setAnonConvertReady(hintedPreviewId)" in body
+    assert "setAnonConvertReady(outcome.preview_ids[0])" not in body
+
+
 # ---------------------------------------------------------------------------
 # 2. types/jobs.ts + jobs.ts — reuseAnonPreviewId 透传
 # ---------------------------------------------------------------------------
