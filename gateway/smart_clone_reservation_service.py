@@ -25,6 +25,7 @@ PG-only 的并发原子性（users FOR UPDATE）在 sqlite 测不了；状态机
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -524,17 +525,27 @@ class SettleOutcome:
     reservation_id: str | None = None
 
 
-async def _has_register_failed_handoff(db: AsyncSession, res: SmartCloneReservation) -> bool:
+def _is_register_failed_handoff_state(smart_state: object) -> bool:
+    if not isinstance(smart_state, Mapping):
+        return False
+    return str(smart_state.get("reason") or "") in _REGISTER_FAILED_HANDOFF_REASONS
+
+
+async def _has_register_failed_handoff(
+    db: AsyncSession,
+    res: SmartCloneReservation,
+    *,
+    smart_state_override: object | None = None,
+) -> bool:
+    if smart_state_override is not None:
+        return _is_register_failed_handoff_state(smart_state_override)
     result = await db.execute(
         select(Job.smart_state).where(
             Job.job_id == res.task_id,
             Job.user_id == res.user_id,
         )
     )
-    smart_state = result.scalar_one_or_none()
-    if not isinstance(smart_state, dict):
-        return False
-    return str(smart_state.get("reason") or "") in _REGISTER_FAILED_HANDOFF_REASONS
+    return _is_register_failed_handoff_state(result.scalar_one_or_none())
 
 
 async def settle_smart_clone_reservation(
@@ -542,6 +553,7 @@ async def settle_smart_clone_reservation(
     *,
     reservation_id: object,
     service_mode: str = "smart",
+    smart_state_override: object | None = None,
 ) -> SettleOutcome:
     """P3c — 智能版克隆 reservation 终态结算（finalizer，钱-正确性核心）.
 
@@ -589,7 +601,9 @@ async def settle_smart_clone_reservation(
         )
     ).scalar_one_or_none()
     chargeable = event is not None and bool(event.chargeable)
-    if not chargeable and await _has_register_failed_handoff(db, res):
+    if not chargeable and await _has_register_failed_handoff(
+        db, res, smart_state_override=smart_state_override
+    ):
         await db.rollback()
         return SettleOutcome(status="settlement_failed", reservation_id=str(res_pk))
 
@@ -633,7 +647,11 @@ async def settle_smart_clone_reservation(
 
 
 async def settle_smart_clone_reservations_for_task(
-    db: AsyncSession, *, task_id: str, service_mode: str = "smart"
+    db: AsyncSession,
+    *,
+    task_id: str,
+    service_mode: str = "smart",
+    smart_state_override: object | None = None,
 ) -> dict:
     """P3c 终态 finalizer 入口（plan v3 §4）—— 结算某 task 的所有 active
     (reserved/expired) smart clone reservation。
@@ -660,7 +678,10 @@ async def settle_smart_clone_reservations_for_task(
     stats = {"captured": 0, "released": 0, "settlement_failed": 0, "other": 0}
     for rid in rows:
         out = await settle_smart_clone_reservation(
-            db, reservation_id=rid, service_mode=service_mode
+            db,
+            reservation_id=rid,
+            service_mode=service_mode,
+            smart_state_override=smart_state_override,
         )
         stats[out.status if out.status in stats else "other"] += 1
     return stats

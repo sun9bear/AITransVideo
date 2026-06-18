@@ -596,6 +596,32 @@ def test_settle_blocks_release_when_reserved_register_failed_handoff():
     _run(go())
 
 
+def test_settle_for_task_uses_smart_state_override_before_db_commit():
+    """The mirror finalizer must honor merged smart_state before caller commit."""
+
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            await _reserve(db, "job_s2c")
+
+            stats = await svc.settle_smart_clone_reservations_for_task(
+                db,
+                task_id="job_s2c",
+                smart_state_override={
+                    "status": "downgraded_to_studio",
+                    "reason": "clone_library_register_failed",
+                },
+            )
+
+            assert stats["settlement_failed"] == 1
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 800 and resv == 600
+            row = (await db.execute(select(SmartCloneReservation))).scalar_one()
+            assert row.status == "reserved" and row.settled_at is None
+
+    _run(go())
+
+
 def test_settle_idempotent_no_double_capture():
     """🔥 幂等：settle 两次 → 第二次 already_settled，不双扣。"""
     async def go():

@@ -120,6 +120,7 @@ async def mirror_job_terminal_state(
         db_job.edit_generation = upstream.edit_generation
         changed = True
 
+    effective_smart_state = getattr(db_job, "smart_state", None)
     # Smart MVP P2 (plan §4.2 末段) — mirror smart_state BEFORE the settle
     # block below, so the F4 dispatcher in settle_job_credit_ledger sees
     # the latest credits_policy from the JSON store. Merge semantics
@@ -131,6 +132,7 @@ async def mirror_job_terminal_state(
     if upstream.smart_state is not None:
         merged_smart_state = dict(getattr(db_job, "smart_state", None) or {})
         merged_smart_state.update(upstream.smart_state)
+        effective_smart_state = merged_smart_state
         # Compare against the existing dict to avoid spurious changed=True
         # on a no-op poll (mirror is level-triggered and runs frequently).
         if merged_smart_state != (getattr(db_job, "smart_state", None) or {}):
@@ -148,7 +150,10 @@ async def mirror_job_terminal_state(
         # smart 预览会复用"匿名标记跳过分钟结算"的早返回路径——克隆 600 点结算
         # 不能随分钟结算一起被跳过。marker-gated + 独立 session（见 helper
         # docstring）。幂等；无 reservation → no-op。
-        await _settle_smart_clone_reservations_post_terminal(db_job)
+        await _settle_smart_clone_reservations_post_terminal(
+            db_job,
+            smart_state=effective_smart_state,
+        )
         if getattr(db_job, "is_anonymous_preview", False) is True:
             # APF P0 T8（AD-7/G2）：匿名预览 job 零结算不变量——跳过
             # settle_job_quota / settle_job_credit_ledger / cost backfill，
@@ -235,20 +240,33 @@ async def mirror_job_terminal_state(
 _SMART_CLONE_MARKER_KEYS = ("smart_clone_reservation_id", "smart_clone_credit_reserved")
 
 
-def _smart_clone_settle_needed(db_job: "Job") -> bool:
+def _smart_clone_settle_needed(
+    db_job: "Job",
+    *,
+    smart_state: object | None = None,
+) -> bool:
     """是否需为本 job 跑 smart 预览克隆 reservation 终态结算（cheap gate）。
 
     读已镜像的 ``smart_state`` marker（create/pipeline 写入），近零成本，避免对
     **无克隆**的 job 每轮 level-triggered poll 都开 session 查 DB。marker 缺失
     → False（fully inert，直到 P3-create 接线）；漏标兜底是 TTL sweeper。
     """
-    smart_state = getattr(db_job, "smart_state", None) or {}
+    smart_state = (
+        smart_state
+        if smart_state is not None
+        else getattr(db_job, "smart_state", None)
+    )
+    smart_state = smart_state or {}
     if not isinstance(smart_state, dict):
         return False
     return any(bool(smart_state.get(k)) for k in _SMART_CLONE_MARKER_KEYS)
 
 
-async def _settle_smart_clone_reservations_post_terminal(db_job: "Job") -> None:
+async def _settle_smart_clone_reservations_post_terminal(
+    db_job: "Job",
+    *,
+    smart_state: object | None = None,
+) -> None:
     """终态结算 smart 预览克隆 reservation（finalizer 单一入口，plan v3 §4）。
 
     marker-gated（``_smart_clone_settle_needed``）；真正结算在**独立
@@ -263,7 +281,7 @@ async def _settle_smart_clone_reservations_post_terminal(db_job: "Job") -> None:
     （结算一条 reservation 即 commit close）；真正的"必然结算"保证由
     ``smart_clone_reservation_sweeper`` 兜底，本路径只负责 timely。
     """
-    if not _smart_clone_settle_needed(db_job):
+    if not _smart_clone_settle_needed(db_job, smart_state=smart_state):
         return
     task_id = getattr(db_job, "job_id", None)
     if not task_id:
@@ -276,7 +294,11 @@ async def _settle_smart_clone_reservations_post_terminal(db_job: "Job") -> None:
 
         async with async_session() as settle_db:
             await settle_smart_clone_reservations_for_task(
-                settle_db, task_id=str(task_id)
+                settle_db,
+                task_id=str(task_id),
+                smart_state_override=(
+                    dict(smart_state) if isinstance(smart_state, dict) else None
+                ),
             )
     except Exception as exc:  # noqa: BLE001 — 结算故障不阻断镜像
         logger.warning(

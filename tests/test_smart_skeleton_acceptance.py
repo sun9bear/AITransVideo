@@ -648,6 +648,60 @@ class TestSmartStateMirrorChain:
             "credits_policy": "capture_full",
         }
 
+    def test_mirror_passes_merged_smart_state_snapshot_to_clone_finalizer(self):
+        """The clone finalizer runs in a separate DB session, so mirror must
+        pass the just-merged smart_state snapshot instead of relying on an
+        uncommitted Job.smart_state read from that session."""
+        from datetime import datetime, timezone
+
+        from gateway.job_terminal_mirror import mirror_job_terminal_state
+        from gateway.storage.job_store_reader import JobJsonRecord
+
+        captured = {}
+
+        async def clone_finalizer(db_job, *, smart_state=None):
+            captured["job_id"] = db_job.job_id
+            captured["smart_state"] = smart_state
+
+        db_job = SimpleNamespace(
+            job_id="job_smart_003b",
+            status="running",
+            current_stage="alignment",
+            project_dir="/projects/abc",
+            completed_at=None,
+            edit_generation=0,
+            smart_state={
+                "smart_clone_reservation_id": "rid-1",
+                "smart_clone_credit_reserved": True,
+            },
+            quota_state="reserved",
+        )
+        upstream = JobJsonRecord(
+            job_id="job_smart_003b",
+            status="failed",
+            completed_at=datetime.now(timezone.utc),
+            project_dir="/projects/abc",
+            current_stage="waiting_for_review",
+            edit_generation=0,
+            jianying_draft_zip_path=None,
+            service_mode="smart",
+            smart_state={"reason": "clone_library_register_failed"},
+        )
+        mock_db = AsyncMock()
+        with patch(
+            "gateway.job_terminal_mirror._settle_smart_clone_reservations_post_terminal",
+            new=clone_finalizer,
+        ), patch("gateway.job_terminal_mirror.settle_job_quota", new=AsyncMock()), \
+             patch("gateway.job_terminal_mirror.settle_job_credit_ledger",
+                   new=AsyncMock(return_value=[])):
+            _run(mirror_job_terminal_state(mock_db, db_job, upstream))
+
+        assert captured["job_id"] == "job_smart_003b"
+        assert captured["smart_state"] == db_job.smart_state
+        assert captured["smart_state"]["smart_clone_reservation_id"] == "rid-1"
+        assert captured["smart_state"]["smart_clone_credit_reserved"] is True
+        assert captured["smart_state"]["reason"] == "clone_library_register_failed"
+
     def test_mirror_terminal_state_no_op_when_upstream_smart_state_none(self):
         """Express/studio mirror (upstream.smart_state=None) must NOT clobber
         an existing DB smart_state — though for express/studio it's None

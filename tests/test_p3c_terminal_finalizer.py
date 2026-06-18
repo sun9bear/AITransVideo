@@ -43,8 +43,9 @@ def test_finalizer_called_in_terminal_block_before_anon_branch():
     """终态块在 anon 早返回分支**之前**调结算 helper（覆盖两路）。"""
     body = _func_src("mirror_job_terminal_state")
     assert body, "mirror_job_terminal_state 未找到"
-    call = "await _settle_smart_clone_reservations_post_terminal(db_job)"
+    call = "await _settle_smart_clone_reservations_post_terminal("
     assert call in body
+    assert "smart_state=effective_smart_state" in body
     # 必须在 TERMINAL_STATUSES 判定之后、is_anonymous_preview 早返回之前
     i_terminal = body.index("if upstream_status in TERMINAL_STATUSES:")
     i_call = body.index(call)
@@ -65,10 +66,10 @@ def test_finalizer_uses_dedicated_async_session():
 def test_finalizer_is_marker_gated():
     """结算 helper 先过 marker gate 再开 session（无克隆 job 不查 DB）。"""
     body = _func_src("_settle_smart_clone_reservations_post_terminal")
-    assert "if not _smart_clone_settle_needed(db_job):" in body
+    assert "if not _smart_clone_settle_needed(db_job, smart_state=smart_state):" in body
     # gate 在开 session 之前（短路）。用 "async with async_session()" 这条语句
     # 比位置，避免命中 docstring 里反引号包的 ``async_session()`` 提及。
-    assert body.index("if not _smart_clone_settle_needed(db_job):") < body.index("async with async_session()")
+    assert body.index("if not _smart_clone_settle_needed(") < body.index("async with async_session()")
 
 
 def test_finalizer_failure_never_blocks_mirror():
