@@ -2112,6 +2112,58 @@ def _report_job_metering(
         print(f"[metering] Warning: failed to report job metering: {e}", flush=True)
 
 
+def _report_job_smart_state(job_id: str, smart_state: dict[str, object]) -> bool:
+    """Best-effort callback that only updates Gateway ``Job.smart_state``."""
+    import urllib.request
+
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id or not smart_state:
+        return False
+    gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
+    url = f"{gateway_base}/job-api/jobs/{normalized_job_id}/metering"
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"smart_state": smart_state}).encode("utf-8"),
+            headers=_internal_request_headers(),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            ok = 200 <= int(getattr(resp, "status", 0) or 0) < 300
+        if ok:
+            print("[smart] Reported smart_state to gateway", flush=True)
+        return ok
+    except Exception as e:
+        print(f"[smart] Warning: failed to report smart_state: {e}", flush=True)
+        return False
+
+
+def _persist_smart_clone_register_failed_state(
+    *,
+    job_id: str,
+    reservation_id: str | None,
+    failed_speakers: list[str],
+    handoff_stage: str,
+) -> bool:
+    """Persist register-failed clone handoff into Gateway DB before UI handoff.
+
+    The stdout ``[SMART_STATE]`` marker updates the Job API store. This direct
+    Gateway write closes the gap where the TTL sweeper can run before any later
+    list/get mirror imports that marker into ``Job.smart_state``.
+    """
+    state: dict[str, object] = {
+        "status": "downgraded_to_studio",
+        "reason": "clone_library_register_failed",
+        "handoff_stage": handoff_stage,
+        "failed_speakers": list(failed_speakers or []),
+    }
+    if reservation_id:
+        state["smart_clone_credit_reserved"] = True
+        state["smart_clone_reservation_id"] = reservation_id
+    return _report_job_smart_state(job_id, state)
+
+
 def _dispatch_content_compliance_admin_override_notification(
     *,
     job_id: str | None,
@@ -5058,6 +5110,14 @@ class ProcessPipeline:
                                 "user_id": str(_snap("user_id") or ""),
                                 "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
                             },
+                        )
+                        _persist_smart_clone_register_failed_state(
+                            job_id=str(_snap("job_id") or config.job_id or ""),
+                            reservation_id=_smart_clone_reservation_id_for_mirror,
+                            failed_speakers=list(
+                                _smart_reserved_clone_register_failures
+                            ),
+                            handoff_stage=VOICE_SELECTION_REVIEW_STAGE,
                         )
                         emit_handoff_markers(
                             review_state_manager=review_state_manager,

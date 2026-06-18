@@ -2427,6 +2427,12 @@ class TestB3DCloneSampleExtractorContract:
             "to Studio human review so user can take action."
         )
 
+        assert "_persist_smart_clone_register_failed_state(" in block, (
+            "Reservation-backed register failures must durably write "
+            "clone_library_register_failed to Gateway Job.smart_state before "
+            "the stdout handoff marker."
+        )
+
     def test_b3f_sidecar_helper_writes_jsonl_line(self, tmp_path):
         """PR#3C-b3f: ``_emit_smart_audit`` helper appends one JSONL line
         to ``{project_dir}/audit/smart_decisions.jsonl`` with the

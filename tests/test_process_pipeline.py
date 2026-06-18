@@ -254,6 +254,55 @@ def test_report_job_metering_sends_internal_key(monkeypatch: pytest.MonkeyPatch)
     assert val == "metering-test-key-1234567890ab"
 
 
+def test_register_failed_smart_state_writeback_is_smart_state_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Register-failed clone handoff must durably reach Gateway smart_state."""
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.headers)
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("AVT_GATEWAY_URL", "http://gateway.test")
+    monkeypatch.setenv("AVT_INTERNAL_API_KEY", "smart-state-key-1234567890ab")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    ok = process_module._persist_smart_clone_register_failed_state(
+        job_id="job-smart-1",
+        reservation_id="rid-1",
+        failed_speakers=["speaker_a"],
+        handoff_stage="voice_selection_review",
+    )
+
+    assert ok is True
+    assert captured["url"] == "http://gateway.test/job-api/jobs/job-smart-1/metering"
+    header_keys = {k.lower() for k in captured["headers"]}
+    assert "x-internal-key" in header_keys
+    body = captured["body"]
+    assert set(body) == {"smart_state"}
+    assert body["smart_state"] == {
+        "status": "downgraded_to_studio",
+        "reason": "clone_library_register_failed",
+        "handoff_stage": "voice_selection_review",
+        "failed_speakers": ["speaker_a"],
+        "smart_clone_credit_reserved": True,
+        "smart_clone_reservation_id": "rid-1",
+    }
+
+
 # ===================================================================
 # ProcessPipeline source-aware ingest tests
 # ===================================================================
