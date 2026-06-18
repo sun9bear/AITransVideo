@@ -2342,10 +2342,10 @@ class TestB3DCloneSampleExtractorContract:
         lines = source[idx:].splitlines()
         # Phase 4 (2026-05-17) added per-speaker possible-match pause
         # audit loop + admin policy read, pushing the CLONED branch
-        # past the previous 900-line window. Bumped to 1150 to keep
+        # past the previous 900-line window. Bumped to 1300 to keep
         # covering the billed mirror arguments without inflating it
         # indefinitely.
-        block = "\n".join(lines[:1150])
+        block = "\n".join(lines[:1300])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (
@@ -2367,6 +2367,14 @@ class TestB3DCloneSampleExtractorContract:
         assert "max_new_clones=" in block, (
             "Reserved smart preview jobs must cap provider-created clones "
             "to one reservation-backed voice."
+        )
+        assert "_smart_reserved_clone_register_failures" in block, (
+            "Reservation-backed clone registration failures must be tracked "
+            "separately from best-effort legacy mirror failures."
+        )
+        assert "clone_register_failed_reserved_handoff" in block, (
+            "Reservation-backed clone registration failure must stop for "
+            "handoff instead of continuing with an unbilled provider voice."
         )
         assert "clone_library_register_failed" in block, (
             "Smart branch missing clone_library_register_failed reason "
