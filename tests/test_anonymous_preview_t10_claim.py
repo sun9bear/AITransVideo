@@ -139,6 +139,19 @@ def test_claim_happy_binds_records(wired):
     db.rollback.assert_not_awaited()
 
 
+def test_claim_success_rotates_anonymous_cookie(wired):
+    db = _db_bind(bound=[("p1",)], won=("h",))
+    resp = _run(api.anonymous_preview_claim(_request(), db, _user()))
+    assert resp.status_code == 200
+
+    set_cookie = resp.headers.get("set-cookie", "").lower()
+    assert "avt_anon=" in set_cookie
+    assert "max-age=0" in set_cookie or "expires=" in set_cookie
+    assert "httponly" in set_cookie
+    assert "secure" in set_cookie
+    assert "samesite=lax" in set_cookie
+
+
 def test_claim_idempotent_same_user(wired):
     # 本人重复认领：条件含 (claim_user_id IS NULL OR =本人) → record 仍命中 → claimed:true
     db = _db_bind(bound=[("p1",)], won=("h",))
@@ -676,3 +689,14 @@ def test_claim_ts_keeps_hint_on_retryable_failure():
     assert not re.search(r"finally\s*\{\s*clearAnonClaimHint", src), (
         "禁止无条件 finally { clearAnonClaimHint }——可重试失败会被清成永久丢失"
     )
+
+
+def test_claim_ts_bounds_post_auth_claim_fetch():
+    assert _CLAIM_TS.exists(), f"claim.ts 不存在: {_CLAIM_TS}"
+    src = _CLAIM_TS.read_text(encoding="utf-8")
+
+    assert "CLAIM_REQUEST_TIMEOUT_MS" in src
+    assert "AbortController" in src
+    assert "signal: controller.signal" in src
+    assert "window.setTimeout" in src
+    assert "window.clearTimeout" in src
