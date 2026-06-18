@@ -4524,6 +4524,8 @@ class ProcessPipeline:
                     _smart_max_new_clones_for_review = (
                         1 if _smart_reservation_active_for_clone else 0
                     )
+                    _smart_quota_remaining = 0
+                    _smart_clone_provider = _build_b2_not_wired_clone_provider()
                     if (
                         _smart_consent_allows_clone
                         and _smart_admin_clone_enabled

@@ -1852,6 +1852,22 @@ class TestB3DCloneSampleExtractorContract:
             f"Quota call at offset {quota_idx}, no triple gate found "
             f"before it.\nPreceding 2000 chars:\n{preceding[-2000:]}"
         )
+        default_quota_idx = preceding.rfind("_smart_quota_remaining = 0")
+        default_provider_idx = preceding.rfind(
+            "_smart_clone_provider = _build_b2_not_wired_clone_provider()"
+        )
+        assert 0 <= default_quota_idx < gate_idx, (
+            "Smart review must initialize quota to the no-new-clone default "
+            "before the clone reservation/provider gate so no-reservation "
+            "jobs can fall back without an unbound local.\n"
+            f"Preceding 2000 chars:\n{preceding[-2000:]}"
+        )
+        assert 0 <= default_provider_idx < gate_idx, (
+            "Smart review must initialize the stub provider before the clone "
+            "reservation/provider gate so missing paid-clone consent cannot "
+            "skip provider setup.\n"
+            f"Preceding 2000 chars:\n{preceding[-2000:]}"
+        )
 
         # The else branch must exist and use stub provider + 0 quota.
         # Find the matching else near the triple gate. Keep this window
