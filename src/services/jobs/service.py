@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -35,6 +36,7 @@ from services.state_manager import utc_now_iso
 
 
 SUPPORTED_MINIMAX_TTS_MODELS = {"speech-2.8-turbo", "speech-2.8-hd"}
+_GATEWAY_JOB_ID_RE = re.compile(r"^job_[0-9a-f]{32}$")
 
 
 class JobServiceError(Exception):
@@ -174,6 +176,7 @@ class JobService:
         quota_cost: int | None = None,
         quota_state: str = "none",
         create_idempotency_key: str | None = None,
+        job_id: str | None = None,
         user_id: str | None = None,
         source_content_hash: str | None = None,
         source_video_title: str | None = None,
@@ -183,6 +186,7 @@ class JobService:
         source_content_tags: object | None = None,
         display_name: str | None = None,
         expires_at: str | None = None,
+        smart_state: dict | None = None,
         smart_consent: dict | None = None,
         express_consent: dict | None = None,
         express_consent_parse_error: str | None = None,
@@ -229,7 +233,15 @@ class JobService:
         self._reap_stale_jobs()
 
         timestamp = utc_now_iso()
-        job_id = f"job_{uuid4().hex}"
+        requested_job_id = str(job_id or "").strip()
+        if requested_job_id:
+            if _GATEWAY_JOB_ID_RE.match(requested_job_id) is None:
+                raise UnsupportedJobRequestError("invalid job_id")
+            if self.store.load_job(requested_job_id) is not None:
+                raise JobConflictError(f"job already exists: {requested_job_id}")
+            job_id = requested_job_id
+        else:
+            job_id = f"job_{uuid4().hex}"
         workspace_dir = build_workspace_dir(user_id, job_id) if user_id else None
         # 2026-04-20: pre-fill project_dir as the absolute resolution of
         # workspace_dir. This closes the long-standing "stdout regex
@@ -302,6 +314,7 @@ class JobService:
             source_content_tags=source_content_tags,
             display_name=normalized_display_name,
             expires_at=normalized_expires_at,
+            smart_state=dict(smart_state) if isinstance(smart_state, dict) else None,
             # PR#3C-b3g: smart_consent passthrough — JobRecord persists,
             # pipeline reads via _snap("smart_consent") to gate
             # auto-clone / auto-translation-review paths. None for

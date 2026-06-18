@@ -55,6 +55,7 @@ from display_name_orchestrator import DisplayNameContext, compute_display_name
 from models import Job, User, UserVoice
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
+from smart_clone_reservation_service import reserve_smart_clone_credit
 from credits_service import (
     InsufficientCreditsError,
     ensure_credit_buckets_for_user, estimate_credits,
@@ -1187,6 +1188,10 @@ async def intercept_create_job(
     # 跳过登录态 allowlist）实现提权 / 绕 cap。剥离后该标记对公共路径永远为假。
     if isinstance(request_data, dict):
         request_data.pop("anonymous_preview", None)
+        request_data.pop("job_id", None)
+        request_data.pop("smart_state", None)
+        request_data.pop("smart_clone_reservation_id", None)
+        request_data.pop("smart_clone_credit_reserved", None)
 
     # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
     # pipeline code landed in src/services/smart/ + src/pipeline/process.py
@@ -1743,6 +1748,79 @@ async def intercept_create_job(
     if free_consent_payload is not None:
         request_data["free_consent"] = free_consent_payload
 
+    _smart_initial_state: dict[str, object] | None = None
+    if service_mode == "smart" and user is not None:
+        request_data["job_id"] = f"job_{_uuid.uuid4().hex}"
+        consent_allows_clone = (
+            smart_consent_payload is not None
+            and smart_consent_payload.get("auto_voice_clone") is True
+        )
+        try:
+            from admin_settings import load_settings
+
+            _admin_for_clone = load_settings()
+            admin_clone_enabled = bool(
+                getattr(_admin_for_clone, "smart_auto_clone_enabled", True)
+            )
+            if consent_allows_clone and admin_clone_enabled:
+                _library_cap = (
+                    999_999
+                    if is_admin
+                    else int(
+                        getattr(
+                            _admin_for_clone,
+                            "smart_user_voice_clone_cap",
+                            30,
+                        )
+                        or 30
+                    )
+                )
+                _reserve_outcome = await reserve_smart_clone_credit(
+                    db,
+                    user_id=user.id,
+                    task_id=str(request_data["job_id"]),
+                    amount_credits=600,
+                    ttl_minutes=int(
+                        getattr(
+                            _admin_for_clone,
+                            "express_cosyvoice_auto_clone_reservation_ttl_minutes",
+                            30,
+                        )
+                        or 30
+                    ),
+                    library_cap=_library_cap,
+                )
+                if (
+                    _reserve_outcome.status == "reserved"
+                    and _reserve_outcome.reservation_id
+                ):
+                    _smart_initial_state = {
+                        "smart_clone_credit_reserved": True,
+                        "smart_clone_reservation_id": _reserve_outcome.reservation_id,
+                    }
+                else:
+                    _smart_initial_state = {
+                        "smart_clone_credit_reserved": False,
+                        "smart_clone_reservation_deny_reason": (
+                            _reserve_outcome.deny_reason
+                            or _reserve_outcome.status
+                        ),
+                    }
+        except Exception as exc:
+            logger.warning(
+                "smart clone reservation failed before create; "
+                "continuing without paid clone job_id=%s user=%s: %s",
+                request_data.get("job_id"),
+                getattr(user, "id", None),
+                exc,
+            )
+            _smart_initial_state = {
+                "smart_clone_credit_reserved": False,
+                "smart_clone_reservation_deny_reason": "reserve_failed",
+            }
+        if _smart_initial_state is not None:
+            request_data["smart_state"] = dict(_smart_initial_state)
+
     # Phase 2a free tier — atomic daily-quota admission BEFORE the upstream
     # forward (CodeX: before expensive stages; independent of legacy quota).
     # Reserve now; consume on accept / release on reject below. The reserved
@@ -1834,6 +1912,13 @@ async def intercept_create_job(
                         # Job API ever normalises the value.
                         display_name=job_data.get("display_name") or generated_display_name,
                         expires_at=job_expires_at,
+                        smart_state=(
+                            job_data.get("smart_state")
+                            if isinstance(job_data.get("smart_state"), dict)
+                            else request_data.get("smart_state")
+                            if isinstance(request_data.get("smart_state"), dict)
+                            else None
+                        ),
                     )
                     db.add(job)
                     # Reserve quota in the same transaction.

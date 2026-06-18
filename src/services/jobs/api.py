@@ -971,6 +971,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         quota_cost=parsed_quota,
                         quota_state=str(payload.get("quota_state") or "none").strip(),
                         create_idempotency_key=str(payload["create_idempotency_key"]).strip() if payload.get("create_idempotency_key") else None,
+                        job_id=str(payload["job_id"]).strip() if payload.get("job_id") else None,
                         user_id=str(payload["user_id"]).strip() if payload.get("user_id") else None,
                         source_content_hash=str(payload["source_content_hash"]).strip() if payload.get("source_content_hash") else None,
                         source_video_title=str(payload["source_video_title"]).strip() if payload.get("source_video_title") else None,
@@ -984,6 +985,11 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         ),
                         display_name=str(payload["display_name"]).strip() if payload.get("display_name") else None,
                         expires_at=str(payload["expires_at"]).strip() if payload.get("expires_at") else None,
+                        smart_state=(
+                            payload.get("smart_state")
+                            if isinstance(payload.get("smart_state"), dict)
+                            else None
+                        ),
                         # PR#3C-b3g: smart_consent passthrough.
                         # Gateway has already validated this is non-None
                         # only when service_mode==smart and the body
