@@ -1600,7 +1600,20 @@ async def internal_smart_clone_register_billed(
             str(body.get("source_speaker_id")) if body.get("source_speaker_id") else None
         ),
         source_job_id=task_id,
+        source_type=body.get("source_type"),
+        source_ref=body.get("source_ref"),
+        source_content_hash=body.get("source_content_hash"),
+        source_video_title=body.get("source_video_title"),
+        source_speaker_name=body.get("source_speaker_name"),
+        source_speaker_name_key=body.get("source_speaker_name_key"),
+        source_published_at=_parse_optional_datetime(body.get("source_published_at")),
+        source_content_summary=body.get("source_content_summary"),
+        source_content_era=body.get("source_content_era"),
+        source_content_tags=body.get("source_content_tags"),
+        clone_sample_seconds=body.get("clone_sample_seconds"),
+        clone_sample_segment_ids=body.get("clone_sample_segment_ids"),
         target_model=(str(body.get("target_model")) if body.get("target_model") else None),
+        notes=body.get("notes"),
         library_cap=library_cap,
     )
     if outcome.status == "no_active_reservation":

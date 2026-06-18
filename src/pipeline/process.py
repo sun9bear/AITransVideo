@@ -4505,6 +4505,23 @@ class ProcessPipeline:
                             _build_b2_not_wired_clone_provider()
                         )
 
+                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
+                    if not isinstance(_smart_state_for_mirror, dict):
+                        _smart_state_for_mirror = {}
+                    _smart_clone_reservation_id_for_mirror = (
+                        str(
+                            _snap("smart_clone_reservation_id")
+                            or _smart_state_for_mirror.get(
+                                "smart_clone_reservation_id"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    )
+                    _smart_max_new_clones_for_review = (
+                        1 if _smart_clone_reservation_id_for_mirror else None
+                    )
+
                     _smart_voice_review = evaluate_voice_review(
                         main_speakers=_smart_main_speakers,
                         smart_consent=smart_consent,
@@ -4516,6 +4533,7 @@ class ProcessPipeline:
                         admin_clone_enabled=_smart_admin_clone_enabled,
                         admin_pause_on_possible_match=_smart_admin_pause_on_possible,
                         admin_auto_reuse_on_possible_match=_smart_admin_auto_reuse_on_possible,
+                        max_new_clones=_smart_max_new_clones_for_review,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
@@ -4710,19 +4728,6 @@ class ProcessPipeline:
                     )
                     _smart_job_id_for_mirror = str(
                         _snap("job_id") or ""
-                    )
-                    _smart_state_for_mirror = _snap("smart_state", {}) or {}
-                    if not isinstance(_smart_state_for_mirror, dict):
-                        _smart_state_for_mirror = {}
-                    _smart_clone_reservation_id_for_mirror = (
-                        str(
-                            _snap("smart_clone_reservation_id")
-                            or _smart_state_for_mirror.get(
-                                "smart_clone_reservation_id"
-                            )
-                            or ""
-                        ).strip()
-                        or None
                     )
 
                     for _dec in _smart_voice_review.decisions:

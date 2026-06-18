@@ -320,7 +320,10 @@ def test_register_bill_preserves_source_metadata():
                 assert uv.source_video_title == "Source Title"
                 assert uv.source_speaker_name == "Speaker A"
                 assert uv.source_speaker_name_key == "speaker a"
-                assert uv.source_published_at == published_at
+                stored_published_at = uv.source_published_at
+                if stored_published_at.tzinfo is None:
+                    stored_published_at = stored_published_at.replace(tzinfo=timezone.utc)
+                assert stored_published_at == published_at
                 assert uv.source_content_summary == "channel: test"
                 assert uv.source_content_era == "2024"
                 assert uv.source_content_tags == {"channel": "Test", "tags": ["AI"]}

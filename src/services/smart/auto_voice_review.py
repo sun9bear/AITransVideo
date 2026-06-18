@@ -201,6 +201,7 @@ def evaluate_voice_review(
     quota_safety_water_mark: int = DEFAULT_QUOTA_SAFETY_WATER_MARK,
     min_sample_seconds: float = MIN_SAMPLE_SECONDS,
     max_clone_attempts_per_speaker: int = DEFAULT_MAX_CLONE_ATTEMPTS,
+    max_new_clones: int | None = None,
     admin_clone_enabled: bool = True,
     admin_pause_on_possible_match: bool = False,
     admin_auto_reuse_on_possible_match: bool = False,
@@ -279,6 +280,8 @@ def evaluate_voice_review(
     )
     decisions: list[VoiceReviewDecision] = []
     quota_remaining = voice_library_quota_remaining
+    new_clones_used = 0
+    clone_limit = None if max_new_clones is None else max(0, int(max_new_clones))
     paused_after_speaker: bool = False
     pause_reason: str | None = None
     # Track what kind of pause first fired so the propagation cascade
@@ -451,6 +454,15 @@ def evaluate_voice_review(
             ))
             continue
 
+        if clone_limit is not None and new_clones_used >= clone_limit:
+            decisions.append(_preset_decision(
+                speaker,
+                f"max_new_clones_reached_{clone_limit}",
+                smart_decision_id_factory(),
+                metrics={"max_new_clones": clone_limit},
+            ))
+            continue
+
         # Rule 3: voice library quota at safety water mark — pause
         # this speaker AND all remaining (don't burn the last few units
         # on partial completion).
@@ -490,6 +502,7 @@ def evaluate_voice_review(
         elif decision.choice is VoiceReviewChoice.CLONED:
             # Successful clone consumed one unit.
             quota_remaining -= 1
+            new_clones_used += 1
 
     outcome = (
         VoiceReviewOutcome.PAUSED if paused_after_speaker
