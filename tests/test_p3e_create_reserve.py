@@ -74,6 +74,7 @@ def test_reserve_stamps_smart_state_marker_into_request_data():
     assert 'request_data["smart_state"]' in flat
     assert '"smart_clone_reservation_id": _smart_resv.reservation_id' in flat
     assert '"smart_clone_credit_reserved": True' in flat
+    assert '"smart_clone_reserved_credits": _SMART_CLONE_RESERVE_CREDITS' in flat
 
 
 def test_smart_preview_mode_stamped_from_preview_request_strict():

@@ -1508,12 +1508,13 @@ class TestSmartVoiceQuotaPreflightGates:
                 "amount_credits": 750,
                 "ttl_minutes": 1440,
                 "library_cap": 30,
-                "required_available_credits": 950,
+                "required_available_credits": 750,
             }
         ]
         assert captured_body["smart_state"] == {
             "smart_clone_credit_reserved": True,
             "smart_clone_reservation_id": reservation_id,
+            "smart_clone_reserved_credits": 750,
         }
         job_rows = [obj for obj in captured_jobs if isinstance(obj, Job)]
         assert len(job_rows) == 1
@@ -1788,7 +1789,7 @@ class TestSmartVoiceQuotaPreflightGates:
         assert resp.status_code == 202
         assert len(reserve_calls) == 1
         assert reserve_calls[0]["amount_credits"] == 600
-        assert reserve_calls[0]["required_available_credits"] == 800
+        assert reserve_calls[0]["required_available_credits"] == 600
         assert captured_body["smart_state"] == {
             "smart_clone_credit_reserved": False,
             "smart_clone_reservation_deny_reason": "insufficient_credits",

@@ -2153,13 +2153,15 @@ async def intercept_create_job(
 
     _smart_initial_state: dict[str, object] | None = None
     _smart_clone_create_reservation_id: str | None = None
+    _smart_clone_create_reserved_credits = 0
 
     async def _release_smart_clone_create_reservation(reason: str) -> None:
-        nonlocal _smart_clone_create_reservation_id
+        nonlocal _smart_clone_create_reservation_id, _smart_clone_create_reserved_credits
         if not _smart_clone_create_reservation_id:
             return
         reservation_id = _smart_clone_create_reservation_id
         _smart_clone_create_reservation_id = None
+        _smart_clone_create_reserved_credits = 0
         try:
             outcome = await settle_smart_clone_reservation(
                 db,
@@ -2251,7 +2253,7 @@ async def intercept_create_job(
                     ),
                     library_cap=_library_cap,
                     required_available_credits=(
-                        int(_base_credits) + _clone_cost_credits
+                        max(int(_base_credits), _clone_cost_credits)
                         if _base_credits > 0
                         else None
                     ),
@@ -2263,9 +2265,11 @@ async def intercept_create_job(
                     _smart_clone_create_reservation_id = (
                         _reserve_outcome.reservation_id
                     )
+                    _smart_clone_create_reserved_credits = int(_clone_cost_credits)
                     _smart_initial_state = {
                         "smart_clone_credit_reserved": True,
                         "smart_clone_reservation_id": _reserve_outcome.reservation_id,
+                        "smart_clone_reserved_credits": int(_clone_cost_credits),
                     }
                 else:
                     _smart_initial_state = {
@@ -2430,6 +2434,7 @@ async def intercept_create_job(
                         request_data["smart_state"] = {
                             "smart_clone_reservation_id": _smart_resv.reservation_id,
                             "smart_clone_credit_reserved": True,
+                            "smart_clone_reserved_credits": _SMART_CLONE_RESERVE_CREDITS,
                             # P3e-3 producer：smart 3min 预览标记（前端 preview_mode
                             # 请求驱动，strict is True）→ pipeline 读
                             # smart_state.smart_preview_mode → 3min teaser + 水印
@@ -2662,11 +2667,15 @@ async def intercept_create_job(
                     # reserve_credits_or_raise(0) no-op（短任务只占 600 克隆）。
                     _reserve_offset = (
                         _SMART_CLONE_RESERVE_CREDITS
-                        if (
-                            _smart_clone_reservation_id
-                            or _smart_clone_create_reservation_id
+                        if _smart_clone_reservation_id
+                        else (
+                            int(
+                                _smart_clone_create_reserved_credits
+                                or _get_smart_clone_cost_credits()
+                            )
+                            if _smart_clone_create_reservation_id
+                            else 0
                         )
-                        else 0
                     )
                     if _convert_smart_state:
                         _reserve_offset += int(
@@ -6168,10 +6177,15 @@ async def update_source_metadata(
                         # （preview_clone_credit_offset）→ R_carryover。create 已 reserve 时
                         # already_reserved 短路本块（不双减）。settle 仍权威。
                         _late_ss = dict(getattr(job, "smart_state", None) or {})
-                        _late_offset = (
-                            _SMART_CLONE_RESERVE_CREDITS
-                            if _late_ss.get("smart_clone_reservation_id") else 0
+                        _late_own_offset = int(
+                            _late_ss.get("smart_clone_reserved_credits") or 0
                         )
+                        if (
+                            _late_own_offset <= 0
+                            and _late_ss.get("smart_clone_reservation_id")
+                        ):
+                            _late_own_offset = _SMART_CLONE_RESERVE_CREDITS
+                        _late_offset = _late_own_offset
                         _late_offset += int(_late_ss.get("preview_clone_credit_offset") or 0)
                         _late_minute_reserve = max(0, late_credits - _late_offset)
                         if late_credits > 0 and not _late_is_smart_preview:

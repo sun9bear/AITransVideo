@@ -52,10 +52,9 @@ def test_db_create_reserve_reduced_by_offset():
     不再直接用 shadow_credits。offset 含 R_own(600 if reservation) + R_carryover。"""
     flat = _flat(_create_src())
     # CodeX P3：自有克隆侧用单一来源常量（非硬编码 600）
-    assert (
-        "_SMART_CLONE_RESERVE_CREDITS if ( _smart_clone_reservation_id "
-        "or _smart_clone_create_reservation_id ) else 0"
-    ) in flat
+    assert "max(int(_base_credits), _clone_cost_credits)" in flat
+    assert 'smart_clone_reserved_credits' in flat
+    assert "_smart_clone_create_reserved_credits" in flat
     assert 'preview_clone_credit_offset' in flat
     assert "_minute_reserve_credits = max(0, shadow_credits - _reserve_offset)" in flat
     # reserve 调用用净额（不是 gross shadow_credits）
@@ -67,7 +66,11 @@ def test_db_create_reserve_reduced_by_offset():
 def test_db_late_reserve_reduced_by_offset():
     """🔥🔥 late reserve（update_source_metadata）同减 offset（CodeX #3：两处都改）。"""
     flat = _flat(_late_src())
-    assert "_SMART_CLONE_RESERVE_CREDITS if _late_ss.get(\"smart_clone_reservation_id\") else 0" in flat
+    assert (
+        '_late_own_offset = int( _late_ss.get("smart_clone_reserved_credits") or 0 )'
+        in flat
+    )
+    assert "_SMART_CLONE_RESERVE_CREDITS" in flat
     assert 'preview_clone_credit_offset' in flat
     assert "_late_minute_reserve = max(0, late_credits - _late_offset)" in flat
     assert "estimated_credits=_late_minute_reserve" in flat
@@ -81,8 +84,8 @@ def test_p3_reserve_offset_single_source_constant():
     src = _JI.read_text(encoding="utf-8")
     flat = _flat(src)
     assert "_SMART_CLONE_RESERVE_CREDITS = 600" in flat
-    # create + late 两处 offset 都用常量
-    assert flat.count("_SMART_CLONE_RESERVE_CREDITS if") >= 2
+    assert "smart_clone_reserved_credits" in flat
+    assert "_smart_clone_create_reserved_credits" in flat
 
 
 def test_p1_cost_summary_backfill_propagates_carryover():
