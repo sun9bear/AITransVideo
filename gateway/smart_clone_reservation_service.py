@@ -33,7 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from credits_service import InsufficientCreditsError, reserve_credits_or_raise
-from models import CloneBillingEvent, SmartCloneReservation, User, UserVoice
+from models import CloneBillingEvent, Job, SmartCloneReservation, User, UserVoice
 
 
 RESERVED = "reserved"
@@ -42,6 +42,9 @@ RELEASED = "released"
 EXPIRED = "expired"
 
 PURPOSE = "smart_clone_minimax_600"
+_REGISTER_FAILED_HANDOFF_REASONS = frozenset({
+    "clone_library_register_failed",
+})
 
 
 def credit_reserve_reason_code(reservation_id: object) -> str:
@@ -496,6 +499,19 @@ class SettleOutcome:
     reservation_id: str | None = None
 
 
+async def _has_register_failed_handoff(db: AsyncSession, res: SmartCloneReservation) -> bool:
+    result = await db.execute(
+        select(Job.smart_state).where(
+            Job.job_id == res.task_id,
+            Job.user_id == res.user_id,
+        )
+    )
+    smart_state = result.scalar_one_or_none()
+    if not isinstance(smart_state, dict):
+        return False
+    return str(smart_state.get("reason") or "") in _REGISTER_FAILED_HANDOFF_REASONS
+
+
 async def settle_smart_clone_reservation(
     db: AsyncSession,
     *,
@@ -548,6 +564,9 @@ async def settle_smart_clone_reservation(
         )
     ).scalar_one_or_none()
     chargeable = event is not None and bool(event.chargeable)
+    if not chargeable and await _has_register_failed_handoff(db, res):
+        await db.rollback()
+        return SettleOutcome(status="settlement_failed", reservation_id=str(res_pk))
 
     if chargeable:
         await shadow_capture(

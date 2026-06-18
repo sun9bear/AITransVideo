@@ -90,6 +90,7 @@ from services.language_registry import (
 _NON_INTERACTIVE_LANGUAGE_PAIRS = frozenset({make_pair_key(LANG_ZH_CN, LANG_EN)})
 
 _SMART_PAID_CLONE_CONFIRM_FIELD = "confirm_paid_voice_clone_600_credits"
+_SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES = 24 * 60
 
 
 POST_EDIT_RESPONSE_FIELDS = (
@@ -1882,13 +1883,16 @@ async def intercept_create_job(
                         user_id=user.id,
                         task_id=str(request_data["job_id"]),
                         amount_credits=600,
-                        ttl_minutes=int(
-                            getattr(
-                                _admin_for_clone,
-                                "express_cosyvoice_auto_clone_reservation_ttl_minutes",
-                                30,
-                            )
-                            or 30
+                        ttl_minutes=max(
+                            _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
+                            int(
+                                getattr(
+                                    _admin_for_clone,
+                                    "smart_clone_create_reservation_ttl_minutes",
+                                    _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES,
+                                )
+                                or _SMART_CLONE_CREATE_RESERVATION_TTL_MINUTES
+                            ),
                         ),
                         library_cap=_library_cap,
                     )

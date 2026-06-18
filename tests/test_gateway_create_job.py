@@ -1381,7 +1381,7 @@ class TestSmartVoiceQuotaPreflightGates:
                 "user_id": user.id,
                 "task_id": captured_body["job_id"],
                 "amount_credits": 600,
-                "ttl_minutes": 30,
+                "ttl_minutes": 1440,
                 "library_cap": 30,
             }
         ]

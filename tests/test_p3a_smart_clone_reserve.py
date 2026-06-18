@@ -36,7 +36,7 @@ def _uuid_sqlite(element, compiler, **kw):  # noqa: ARG001
 
 
 from models import (  # noqa: E402
-    CloneBillingEvent, CreditsBucket, CreditsLedger, SmartCloneReservation, UserVoice,
+    CloneBillingEvent, CreditsBucket, CreditsLedger, Job, SmartCloneReservation, UserVoice,
 )
 import smart_clone_reservation_service as svc  # noqa: E402
 
@@ -71,6 +71,7 @@ async def _make_sessionmaker(*, bucket_remaining: int = 800) -> async_sessionmak
     _TEST_ENGINES.append(engine)
     async with engine.begin() as conn:
         await conn.run_sync(lambda s: _users_stub.create(s))
+        await conn.run_sync(lambda s: Job.__table__.create(s))
         await conn.run_sync(lambda s: UserVoice.__table__.create(s))
         await conn.run_sync(lambda s: SmartCloneReservation.__table__.create(s))
         await conn.run_sync(lambda s: CloneBillingEvent.__table__.create(s))
@@ -540,6 +541,38 @@ def test_settle_releases_when_no_billing_event():
             row = (await db.execute(select(SmartCloneReservation).where(
                 SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
             assert row.status == "released" and row.settled_at is not None
+    _run(go())
+
+
+def test_settle_blocks_release_when_reserved_register_failed_handoff():
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_s2b")
+            db.add(Job(
+                job_id="job_s2b",
+                user_id=_USER,
+                source_type="youtube_url",
+                source_ref="https://youtu.be/s2b",
+                title="s2b",
+                speakers="auto",
+                status="failed",
+                smart_state={
+                    "status": "downgraded_to_studio",
+                    "reason": "clone_library_register_failed",
+                },
+            ))
+            await db.commit()
+
+            out = await svc.settle_smart_clone_reservation(db, reservation_id=rid)
+
+            assert out.status == "settlement_failed"
+            rem, resv = await _bucket_remaining_reserved(db)
+            assert rem == 800 and resv == 600
+            row = (await db.execute(select(SmartCloneReservation).where(
+                SmartCloneReservation.id == __import__("uuid").UUID(rid)))).scalar_one()
+            assert row.status == "reserved" and row.settled_at is None
+
     _run(go())
 
 
