@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useRef, useState, type FormEvent } from "react"
 import Link from "next/link"
 import { toast } from "sonner"
 
+import { useSession } from "@/components/providers/session-provider"
 import { StatusBadge } from "@/components/status-badge"
 import { SmartPreviewConfirmDialog } from "@/components/workspace/SmartPreviewConfirmDialog"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
@@ -15,6 +16,7 @@ import {
   type UserEntitlements,
 } from "@/lib/api/entitlements"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
+import { clearAnonConvertReady, getAnonConvertReady, subscribeAnonConvertReady } from "@/lib/api/claim"
 import { isSmartPreviewCloneEntryEnabled } from "@/lib/api/smartPreviewClone"
 import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
@@ -42,6 +44,7 @@ export interface TranslationFormProps {
 }
 
 export function TranslationForm({ onCreated, mode, initialSourceUrl }: TranslationFormProps) {
+  const { user } = useSession()
   const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">("youtube_url")
   const [youtubeUrl, setYoutubeUrl] = useState(initialSourceUrl ?? "")
   const [uploadedFilePath, setUploadedFilePath] = useState("")
@@ -110,8 +113,18 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const smartPreviewEntryEnabled = isSmartPreviewCloneEntryEnabled()
   const [smartPreviewOpen, setSmartPreviewOpen] = useState(false)
   const [smartPreviewInput, setSmartPreviewInput] = useState<CreateTranslationJobInput | null>(null)
-  const sourceValidationError =
-    sourceType === "youtube_url"
+  // D7 匿名预览转完整：登录认领后，创建页用认领的**完整原视频**作源（免重新上传）。
+  // mount 时从 localStorage（认领成功写入 avt_anon_convert_ready）读 preview_id；非空 →
+  // 渲染认领来源 banner、跳过源校验、提交带 reuse_anonymous_preview_id（服务端覆盖 source
+  // 走正常付费流程，用户照常选模式付费）。
+  const [reuseAnonPreviewId, setReuseAnonPreviewId] = useState<string | null>(null)
+  // 双击守卫（CodeX P2）：submitState 异步，按钮禁用前的快速双击可能触发两次提交→
+  // 两个付费任务。ref 级 guard 同步拦截（普通 create + 转完整都防）。
+  const submittingRef = useRef(false)
+
+  const sourceValidationError = reuseAnonPreviewId
+    ? null
+    : sourceType === "youtube_url"
       ? validateYoutubeUrl(youtubeUrl)
       : !uploadedFilePath
         ? "请先上传视频文件。"
@@ -253,6 +266,21 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       .catch(() => setLanguageFacts([GA_DEFAULT_LANGUAGE_FACT]))
   }, [])
 
+  // D7：mount 时读认领成功写入的 preview_id（avt_anon_convert_ready）→ 进入「转完整」
+  // 模式（用认领的完整原视频作源，免重新上传）。localStorage key 在转完整成功 或
+  // 用户「更换视频」时才清，故刷新页面不丢（提交失败可重试）。
+  useEffect(() => {
+    const syncConvertReady = () => {
+      setReuseAnonPreviewId(getAnonConvertReady(user?.id))
+    }
+    const timerId = window.setTimeout(syncConvertReady, 0)
+    const unsubscribe = subscribeAnonConvertReady(syncConvertReady)
+    return () => {
+      window.clearTimeout(timerId)
+      unsubscribe()
+    }
+  }, [user?.id])
+
   // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
   // Express, or losing availability, force-resets the checkbox to false so a
   // stale opt-in can't ride into a later submit / a non-express job.
@@ -278,10 +306,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (submittingRef.current) return // 双击守卫（CodeX P2）：同步拦截快速重复提交
     if (validationError) {
       toast.error(validationError)
       return
     }
+    submittingRef.current = true
     setSubmitState("submitting")
     setCreditGateError(null)
     // PR-A part 2 §7: resolve the selected direction. Only send the language
@@ -314,9 +344,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         freeVoiceRightsConfirmed: serviceMode === "free" ? freeVoiceRightsConfirmed : false,
         sourceLanguage: sendPair ? selectedPair.source_language : undefined,
         targetLanguage: sendPair ? selectedPair.target_language : undefined,
+        // D7：有认领预览时带 reuse_anonymous_preview_id，服务端用认领的完整原视频
+        // 覆盖 source（走正常付费流程）。source 字段照常发送但被后端覆盖。
+        reuseAnonPreviewId: reuseAnonPreviewId ?? undefined,
       })
       setActiveJobs((prev) => [createdJob, ...prev])
       setSubmitState("success")
+      // 转完整成功 → 清 convert-ready key（避免返回创建页再次进入转完整模式）。
+      if (reuseAnonPreviewId) clearAnonConvertReady()
       toast.success(`任务已创建：${getJobDisplayTitle(createdJob)}`)
       // Store latest job ID for /tasks/current fallback
       try { localStorage.setItem("avt_latest_job_id", createdJob.id) } catch {}
@@ -326,6 +361,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         await loadActiveJobs(true)
       }
       setSubmitState("error")
+      // D7（CodeX P2）：转完整失败且是「预览不可复用」（认领过期/越权/源失效，
+      // anon_preview_* 系列）→ 清转完整模式 + 提示重新上传，避免卡在用不了的认领来源。
+      if (reuseAnonPreviewId && isAnonConvertRejected(error)) {
+        setReuseAnonPreviewId(null)
+        clearAnonConvertReady()
+        toast.error("该预览已无法转完整（可能已过期），请重新上传视频创建。")
+        return
+      }
       const msg = getErrorMessage(error)
       if (isCreditGateError(error)) {
         setCreditGateError(msg)
@@ -334,6 +377,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       } else {
         toast.error(msg)
       }
+    } finally {
+      submittingRef.current = false // 失败可重试；成功已 onCreated 跳转（组件卸载）
     }
   }
 
@@ -402,26 +447,55 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           {latestActiveJob ? <StatusBadge status={latestActiveJob.status} /> : null}
         </div>
         <form className="space-y-6" onSubmit={handleSubmit}>
-          {/* Source type toggle */}
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <button
-              type="button"
-              className={`min-w-0 break-keep rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "youtube_url" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
-              onClick={() => setSourceType("youtube_url")}
+          {/* D7 转完整：认领来源 banner（有认领预览时替代源选择 + 上传输入） */}
+          {reuseAnonPreviewId ? (
+            <div
+              className="rounded-xl border p-4"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--bamboo) 8%, transparent)",
+                borderColor: "color-mix(in oklab, var(--bamboo) 32%, transparent)",
+              }}
             >
-              YouTube 链接
-            </button>
-            <button
-              type="button"
-              className={`min-w-0 break-keep rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "local_video" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
-              onClick={() => setSourceType("local_video")}
-            >
-              上传视频
-            </button>
-          </div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <p className="text-sm font-medium text-foreground">使用你刚才预览的视频转完整版</p>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    将用你预览过的完整原始视频生成正式成片，无需重新上传。下面选择方案后按所选档位正常扣点创建。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="shrink-0 whitespace-nowrap text-xs text-muted-foreground transition hover:text-[color:var(--cinnabar)]"
+                  onClick={() => {
+                    setReuseAnonPreviewId(null)
+                    clearAnonConvertReady()
+                  }}
+                >
+                  改用其它视频
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                className={`min-w-0 break-keep rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "youtube_url" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
+                onClick={() => setSourceType("youtube_url")}
+              >
+                YouTube 链接
+              </button>
+              <button
+                type="button"
+                className={`min-w-0 break-keep rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "local_video" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
+                onClick={() => setSourceType("local_video")}
+              >
+                上传视频
+              </button>
+            </div>
+          )}
 
-          {/* YouTube URL input */}
-          {sourceType === "youtube_url" ? (
+          {/* YouTube URL / 上传输入（转完整模式下隐藏，源由认领的预览视频提供） */}
+          {reuseAnonPreviewId ? null : sourceType === "youtube_url" ? (
             <div className="space-y-2">
               <span className="text-xs font-medium text-muted-foreground block">YouTube 链接</span>
               <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
@@ -710,9 +784,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </div>
                     )}
                   </button>
-                ) : smartPreviewEntryEnabled ? (
+                ) : smartPreviewEntryEnabled && !reuseAnonPreviewId ? (
                   // P3e-4c：免费 / 未获 smart 的登录用户的预览入口。点击校验源 →
                   // 打开预扣确认弹窗（付费克隆的用户显式触发面）。
+                  // 转完整模式隐藏（用户已预览过，不再二次预览；源也不是 fresh upload）。
                   <div className="relative rounded-xl border border-primary/30 bg-primary/[0.05] p-4 text-left">
                     <div className="flex items-center gap-2 mb-2">
                       <span className="text-sm font-semibold text-foreground">智能版</span>
@@ -1072,6 +1147,16 @@ function isCreditGateError(error: unknown): boolean {
   if (!detail || typeof detail !== "object") return false
   const code = (detail as { error_code?: unknown }).error_code
   return typeof code === "string" && CREDIT_GATE_ERROR_CODES.has(code)
+}
+
+// D7：「预览不可复用」错误（gateway _error_response 把 code 放 body.error）。
+// anon_preview_not_found/forbidden/source_unavailable → 认领过期/越权/源失效 →
+// 转完整模式应清除并提示重新上传。
+function isAnonConvertRejected(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false
+  if (!error.payload || typeof error.payload !== "object") return false
+  const code = (error.payload as { error?: unknown }).error
+  return typeof code === "string" && code.startsWith("anon_preview")
 }
 
 function validateYoutubeUrl(value: string) {
