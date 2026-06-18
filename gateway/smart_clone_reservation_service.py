@@ -433,7 +433,12 @@ async def register_smart_clone_with_billing(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        existing_voice_id = str(existing.voice_id or "")
         await db.rollback()
+        if existing_voice_id != str(voice_id or ""):
+            return RegisterBillOutcome(
+                status="idempotency_conflict", reservation_id=str(res_pk)
+            )
         return RegisterBillOutcome(status="idempotent", reservation_id=str(res_pk))
 
     # 3. Re-lock the same user quota domain before consuming the reserved slot.
@@ -501,7 +506,27 @@ async def register_smart_clone_with_billing(
     except IntegrityError:
         # uq_clone_billing_event_reservation 竞态 → 另一并发写已成 → 幂等
         await db.rollback()
-        return RegisterBillOutcome(status="idempotent", reservation_id=str(res_pk))
+        existing_after = (
+            await db.execute(
+                select(CloneBillingEvent).where(
+                    CloneBillingEvent.reservation_id == res_pk
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_after is not None:
+            existing_voice_id = str(existing_after.voice_id or "")
+            await db.rollback()
+            if existing_voice_id == str(voice_id or ""):
+                return RegisterBillOutcome(
+                    status="idempotent", reservation_id=str(res_pk)
+                )
+            return RegisterBillOutcome(
+                status="idempotency_conflict", reservation_id=str(res_pk)
+            )
+        await db.rollback()
+        return RegisterBillOutcome(
+            status="idempotency_conflict", reservation_id=str(res_pk)
+        )
     return RegisterBillOutcome(status="billed", reservation_id=str(res_pk))
 
 

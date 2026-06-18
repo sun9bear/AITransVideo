@@ -1625,6 +1625,8 @@ async def internal_smart_clone_register_billed(
         return _json(409, {"ok": False, "error": "no_active_reservation"})
     if outcome.status == "voice_library_full":
         return _json(409, {"ok": False, "error": "voice_library_full"})
+    if outcome.status == "idempotency_conflict":
+        return _json(409, {"ok": False, "error": "idempotency_conflict"})
     return _json(200, {
         "ok": True,
         "status": outcome.status,  # "billed" | "idempotent"

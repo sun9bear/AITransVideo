@@ -413,6 +413,43 @@ def test_register_bill_idempotent_no_double():
     _run(go())
 
 
+def test_register_bill_rejects_idempotent_voice_id_mismatch():
+    async def go():
+        sm = await _make_sessionmaker(bucket_remaining=800)
+        async with sm() as db:
+            rid = await _reserve(db, "job_r2_conflict")
+            first = await svc.register_smart_clone_with_billing(
+                db,
+                user_id=_USER,
+                task_id="job_r2_conflict",
+                reservation_id=rid,
+                voice_id="mm_v2_first",
+                label="x",
+                source_job_id="job_r2_conflict",
+            )
+            second = await svc.register_smart_clone_with_billing(
+                db,
+                user_id=_USER,
+                task_id="job_r2_conflict",
+                reservation_id=rid,
+                voice_id="mm_v2_second",
+                label="x",
+                source_job_id="job_r2_conflict",
+            )
+
+            assert first.status == "billed"
+            assert second.status == "idempotency_conflict"
+            events = (await db.execute(select(CloneBillingEvent))).scalars().all()
+            assert len(events) == 1 and events[0].voice_id == "mm_v2_first"
+            assert (
+                await db.execute(
+                    select(UserVoice).where(UserVoice.voice_id == "mm_v2_second")
+                )
+            ).scalar_one_or_none() is None
+
+    _run(go())
+
+
 def test_register_bill_no_active_reservation_does_not_bill():
     """无有效 active reservation（不存在/非 reserved/不属本 task）→ 不 bill 不入库。"""
     async def go():
