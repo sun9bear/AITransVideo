@@ -240,3 +240,94 @@ def test_get_job_routes_terminal_payload_through_mirror_before_merge():
     assert upstream_record.job_id == "job_detail"
     assert upstream_record.status == "succeeded"
     db.commit.assert_awaited_once()
+
+
+def test_get_job_rolls_back_when_terminal_mirror_hook_fails():
+    import job_intercept
+
+    db_job = SimpleNamespace(
+        job_id="job_detail",
+        user_id="uid-1",
+        status="running",
+        current_stage="s5",
+        display_name="Detail job",
+        expires_at=None,
+        editing_touched_at=None,
+        copy_of_job_id=None,
+        root_job_id="job_detail",
+        edit_generation=0,
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_ScalarOneResult(db_job))
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    request = _make_request()
+    upstream = FastAPIResponse(
+        content=json.dumps({
+            "job_id": "job_detail",
+            "status": "succeeded",
+            "current_stage": "completed",
+            "completed_at": "2026-05-10T07:29:11+00:00",
+            "edit_generation": 0,
+        }).encode("utf-8"),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+    user = SimpleNamespace(id="uid-1")
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated terminal mirror failure")
+
+    with patch("job_intercept._verify_job_ownership", new=AsyncMock()), \
+         patch("job_intercept.proxy_request", new=AsyncMock(return_value=upstream)), \
+         patch("notifications_helpers.maybe_dispatch_job_transition", new=AsyncMock()), \
+         patch.object(job_intercept, "mirror_job_terminal_state", new=boom):
+        response = _run(intercept_get_job(request, "job_detail", db, user))
+
+    assert response.status_code == 200
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
+def test_get_job_rolls_back_when_terminal_hook_commit_fails():
+    import job_intercept
+
+    db_job = SimpleNamespace(
+        job_id="job_detail",
+        user_id="uid-1",
+        status="running",
+        current_stage="s5",
+        display_name="Detail job",
+        expires_at=None,
+        editing_touched_at=None,
+        copy_of_job_id=None,
+        root_job_id="job_detail",
+        edit_generation=0,
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_ScalarOneResult(db_job))
+    db.commit = AsyncMock(side_effect=RuntimeError("simulated aborted transaction"))
+    db.rollback = AsyncMock()
+    request = _make_request()
+    upstream = FastAPIResponse(
+        content=json.dumps({
+            "job_id": "job_detail",
+            "status": "succeeded",
+            "current_stage": "completed",
+            "completed_at": "2026-05-10T07:29:11+00:00",
+            "edit_generation": 0,
+        }).encode("utf-8"),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+    user = SimpleNamespace(id="uid-1")
+
+    with patch("job_intercept._verify_job_ownership", new=AsyncMock()), \
+         patch("job_intercept.proxy_request", new=AsyncMock(return_value=upstream)), \
+         patch("notifications_helpers.maybe_dispatch_job_transition", new=AsyncMock()), \
+         patch.object(job_intercept, "mirror_job_terminal_state", new=AsyncMock()):
+        response = _run(intercept_get_job(request, "job_detail", db, user))
+
+    assert response.status_code == 200
+    db.commit.assert_awaited_once()
+    db.rollback.assert_awaited_once()
