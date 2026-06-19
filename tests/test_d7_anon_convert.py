@@ -84,11 +84,21 @@ def _write_file(path: Path, data: bytes = b"full-original-upload-bytes"):
     return hashlib.sha256(data).hexdigest()
 
 
-def _resolver(monkeypatch, *, root: Path):
-    """import resolver + monkeypatch _anon_upload_root → root（使 tmp 文件视为在上传根内）。"""
+def _resolver(monkeypatch, *, root: Path, probe_duration=None):
+    """import resolver + monkeypatch _anon_upload_root → root（使 tmp 文件视为在上传根内）。
+
+    默认把**源时长探测**桩成返回 ``probe_duration``（None = 探测失败语义）——tmp 文件
+    不是真视频，真 ffprobe 会失败；桩掉避免对 ffprobe 安装 / 真视频的依赖，并使 resolver
+    测试 hermetic（不 spawn subprocess）。新增的时长用例显式传 ``probe_duration=<秒>``。
+    """
     import preview_reuse_service as prs
 
     monkeypatch.setattr(prs, "_anon_upload_root", lambda: root.resolve())
+
+    async def _fake_probe(_path):
+        return probe_duration
+
+    monkeypatch.setattr(prs, "_probe_source_duration_seconds", _fake_probe)
     return prs
 
 
@@ -349,3 +359,241 @@ def test_resolver_no_clone_settle_imports():
         for m in mods:
             for ban in banned:
                 assert ban not in m.lower(), f"preview_reuse_service 不应 import {m!r}"
+
+
+# ---------------------------------------------------------------------------
+# 4. A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX）
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_surfaces_probed_source_duration(monkeypatch, tmp_path):
+    """resolver 成功 → 把**完整源全长**（重探）放进 resolution.source_duration_seconds。"""
+    uid = uuid.uuid4()
+    f = tmp_path / "u123_video.mp4"
+    h = _write_file(f)
+    prs = _resolver(monkeypatch, root=tmp_path, probe_duration=11905.71)
+    db = _make_db(_record(uid=uid, source_hash=h, stored_path=f))
+    res, reason = _run(prs.resolve_anonymous_preview_reuse(db, user_id=uid, preview_id="prv_x"))
+    assert reason is None and res is not None
+    assert res.source_duration_seconds == 11905.71
+
+
+def test_resolve_duration_none_when_probe_fails(monkeypatch, tmp_path):
+    """探测失败（None）→ resolution 仍成功，duration=None（闸跳过、管线兜底，不误拒）。"""
+    uid = uuid.uuid4()
+    f = tmp_path / "u123_video.mp4"
+    h = _write_file(f)
+    prs = _resolver(monkeypatch, root=tmp_path, probe_duration=None)
+    db = _make_db(_record(uid=uid, source_hash=h, stored_path=f))
+    res, reason = _run(prs.resolve_anonymous_preview_reuse(db, user_id=uid, preview_id="prv_x"))
+    assert reason is None and res is not None
+    assert res.source_duration_seconds is None
+
+
+def test_probe_helper_swallows_failure(monkeypatch, tmp_path):
+    """_probe_source_duration_seconds：ok=False / 异常 / 非正值 → None（绝不抛）。"""
+    import preview_reuse_service as prs
+
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+
+    # 桩 anonymous_preview_probe.probe_source（_probe_source_duration_seconds 的 lazy
+    # import 目标 —— 调用时按属性解析，故 monkeypatch 模块属性即可生效）。
+    import anonymous_preview_probe as app
+
+    # ok=False → None
+    monkeypatch.setattr(app, "probe_source", lambda _p: {"ok": False, "duration_seconds": None})
+    assert _run(prs._probe_source_duration_seconds(f)) is None
+    # ok=True 但非正 → None
+    monkeypatch.setattr(app, "probe_source", lambda _p: {"ok": True, "duration_seconds": 0})
+    assert _run(prs._probe_source_duration_seconds(f)) is None
+    # ok=True 正值 → 返回
+    monkeypatch.setattr(app, "probe_source", lambda _p: {"ok": True, "duration_seconds": 642.0})
+    assert _run(prs._probe_source_duration_seconds(f)) == 642.0
+    # 抛异常 → None（吞）
+    def _boom(_p):
+        raise RuntimeError("ffprobe blew up")
+    monkeypatch.setattr(app, "probe_source", _boom)
+    assert _run(prs._probe_source_duration_seconds(f)) is None
+
+
+def test_over_duration_cap_pure_helper():
+    """_anon_convert_over_duration_cap 纯判定（行为级）：admin / 未知 / 边界 / 超限。"""
+    import job_intercept as ji
+
+    # 超限（11min > 10）→ 返回 (src_min, cap)
+    over = ji._anon_convert_over_duration_cap(660.0, 10, is_admin=False)
+    assert over == (11.0, 10.0)
+    # 远超（11905.71s ≈ 198.4min > 10）
+    over2 = ji._anon_convert_over_duration_cap(11905.71, 10, is_admin=False)
+    assert over2 is not None and round(over2[0], 1) == 198.4 and over2[1] == 10.0
+    # 未超（5min < 10）→ None
+    assert ji._anon_convert_over_duration_cap(300.0, 10, is_admin=False) is None
+    # 恰好等于 cap（10min == 10）→ None（严格 >）
+    assert ji._anon_convert_over_duration_cap(600.0, 10, is_admin=False) is None
+    # admin → None（豁免，即便超限）
+    assert ji._anon_convert_over_duration_cap(99999.0, 10, is_admin=True) is None
+    # 源时长未知（None）→ None（探测失败放行，管线兜底）
+    assert ji._anon_convert_over_duration_cap(None, 10, is_admin=False) is None
+    # cap 未知（None）→ None
+    assert ji._anon_convert_over_duration_cap(660.0, None, is_admin=False) is None
+    # 更高 plan cap（45min）下 11min 不超 → None
+    assert ji._anon_convert_over_duration_cap(660.0, 45, is_admin=False) is None
+
+
+def test_d7_block_has_duration_preflight_gate():
+    """D7 块结构守卫：pre-flight 时长闸调两档判定 + 渲染 helper + plan-tier/自助 cap。
+
+    扫**剥注释**的块（``_d7_block_code()``，CodeX 评审 #3）——避免断言被注释里的同名
+    字符串满足、删真分支留注释仍绿。reason 字面量已移入 _anon_convert_duration_error_
+    response，由 test_anon_convert_duration_error_response_* 行为级锁定（CodeX 评审 #4）。
+    """
+    b = _d7_block_code()
+    assert "_anon_convert_duration_block" in b, "D7 块须调两档时长判定 helper"
+    assert "_anon_convert_duration_error_response" in b, "渲染须经可测的纯 helper（#3/#4）"
+    assert "source_duration_seconds" in b, "须用 resolver 重探的源全长"
+    assert "get_effective_plan_gate" in b, "cap 取自 plan-tier（trial-aware）"
+    assert "max_duration_minutes" in b, "cap = plan max_duration_minutes"
+    assert "max_self_serve_duration_minutes" in b, "须算最高自助套餐阈值用于分流（CodeX P1）"
+    assert "minimum_self_serve_plan_for" in b, "升级须具名推荐能处理该时长的最低套餐（P1 延伸）"
+
+
+def test_max_self_serve_duration_minutes():
+    """plan_catalog.max_self_serve_duration_minutes = self_serve 套餐 cap 最大值（Pro=180）。"""
+    import plan_catalog as pc
+
+    assert pc.max_self_serve_duration_minutes() == 180
+    # 语义：free（self_serve=False）不计入；plus(45)/pro(180) 计入 → 180。
+    assert pc.PLANS["free"].self_serve is False
+    assert pc.PLANS["pro"].max_duration_minutes == 180
+
+
+def test_minimum_self_serve_plan_for():
+    """能处理给定时长的**最低**自助套餐——具名推荐，避免误导买仍跑不了的套餐（CodeX 评审 #1）。"""
+    import plan_catalog as pc
+
+    assert pc.minimum_self_serve_plan_for(5) == ("Plus", 45), "5min → 最低 Plus"
+    assert pc.minimum_self_serve_plan_for(45) == ("Plus", 45), "恰好 45min → Plus（cap≥）"
+    # 关键：45<源≤180 只有 Pro 能处理 → 推荐 Pro 而非 Plus（P1 误导根因）
+    assert pc.minimum_self_serve_plan_for(46) == ("Pro", 180), "46min → 跳过 Plus(45)，Pro"
+    assert pc.minimum_self_serve_plan_for(100) == ("Pro", 180), "100min → Pro"
+    assert pc.minimum_self_serve_plan_for(180) == ("Pro", 180), "恰好 180 → Pro"
+    # 超过最高自助套餐 → None（与 max_self_serve_duration_minutes 边界一致）
+    assert pc.minimum_self_serve_plan_for(181) is None
+    assert pc.minimum_self_serve_plan_for(pc.max_self_serve_duration_minutes() + 1) is None
+
+
+def test_anon_convert_duration_block_two_tier():
+    """_anon_convert_duration_block 两档分流（CodeX P1）：≤ 最高自助套餐=可升级；
+    > 最高自助套餐=升无可升；admin / 未知 / 未超 = 放行。"""
+    import job_intercept as ji
+
+    SS = 180  # 最高自助套餐 cap（Pro）
+    # free 用户(cap 10)、30min → 超 cap 但 ≤180 → 可升级
+    r = ji._anon_convert_duration_block(1800.0, 10, SS, is_admin=False)
+    assert r is not None and r[0] == "duration_upgrade_required" and r[1] == 30.0 and r[2] == 10.0
+    # CodeX 截图场景：free 用户、198.4min（11905.71s）> 180 → 升无可升
+    r2 = ji._anon_convert_duration_block(11905.71, 10, SS, is_admin=False)
+    assert r2 is not None and r2[0] == "duration_over_max_plan" and round(r2[1], 1) == 198.4
+    # pro 用户(cap 180)、198min > 180 → 同样升无可升（pro 已是最高自助，无可升）
+    r3 = ji._anon_convert_duration_block(11905.71, 180, SS, is_admin=False)
+    assert r3 is not None and r3[0] == "duration_over_max_plan"
+    # 恰好等于最高自助 cap（180min）→ 未超严格 >，但 user cap 也要看：free 用户 180>10
+    # 超 user cap、且 180 不 > 180（严格）→ 可升级（升到 pro 恰好够）
+    r4 = ji._anon_convert_duration_block(180 * 60.0, 10, SS, is_admin=False)
+    assert r4 is not None and r4[0] == "duration_upgrade_required"
+    # 未超 user cap（5min < 10）→ None
+    assert ji._anon_convert_duration_block(300.0, 10, SS, is_admin=False) is None
+    # admin → None（豁免）
+    assert ji._anon_convert_duration_block(99999.0, 10, SS, is_admin=True) is None
+    # 源时长未知 → None（探测失败放行）
+    assert ji._anon_convert_duration_block(None, 10, SS, is_admin=False) is None
+    # max_self_serve 不可信（0 / None）→ 超 cap 时保守归类为可升级（给 /pricing 路径）
+    assert ji._anon_convert_duration_block(11905.71, 10, 0, is_admin=False)[0] == "duration_upgrade_required"
+    assert ji._anon_convert_duration_block(11905.71, 10, None, is_admin=False)[0] == "duration_upgrade_required"
+
+
+def test_anon_convert_duration_error_response_emits_contract():
+    """行为级锁定 helper→emitted body.error 字面量契约（CodeX 评审 #4）+ 具名推荐文案
+    （CodeX 评审 #1）。前端 readDurationBlockReason 正是 key 这两个 error 字面量。"""
+    import json
+    import job_intercept as ji
+
+    # over_max（198min > 180）：error=duration_over_max_plan、文案提"联系客服"、不含套餐名/recommended_plan。
+    resp = ji._anon_convert_duration_error_response(
+        ("duration_over_max_plan", 198.4, 10),
+        max_self_serve_minutes=180,
+        recommended_plan=None,
+        plan_code="free",
+        requested_mode="express",
+    )
+    assert resp.status_code == 403
+    body = json.loads(resp.body)
+    assert body["error"] == "duration_over_max_plan", "前端 readDurationBlockReason 据此 key"
+    assert "联系客服" in body["message"] and "180" in body["message"]
+    assert "recommended_plan" not in body["detail"], "升无可升不推荐套餐"
+
+    # upgrade 且只有 Pro 能处理（100min，free cap 10）：具名 Pro/180，**不**提 Plus（P1 误导根因）。
+    resp2 = ji._anon_convert_duration_error_response(
+        ("duration_upgrade_required", 100.0, 10),
+        max_self_serve_minutes=180,
+        recommended_plan=("Pro", 180),
+        plan_code="free",
+        requested_mode="express",
+    )
+    assert resp2.status_code == 403
+    body2 = json.loads(resp2.body)
+    assert body2["error"] == "duration_upgrade_required"
+    assert "Pro" in body2["message"] and "180" in body2["message"]
+    assert "Plus" not in body2["message"], "100min Plus(45) 处理不了 → 文案不得提 Plus（CodeX P1）"
+    assert body2["detail"]["recommended_plan"] == "Pro"
+    assert body2["detail"]["recommended_plan_minutes"] == 180
+
+    # upgrade 且 Plus 够（30min）：具名 Plus/45。
+    resp3 = ji._anon_convert_duration_error_response(
+        ("duration_upgrade_required", 30.0, 10),
+        max_self_serve_minutes=180,
+        recommended_plan=("Plus", 45),
+        plan_code="free",
+        requested_mode="express",
+    )
+    body3 = json.loads(resp3.body)
+    assert body3["error"] == "duration_upgrade_required"
+    assert "Plus" in body3["message"] and "45" in body3["message"]
+
+    # recommended_plan=None（配置异常兜底）：通用文案，不崩、不具名。
+    resp4 = ji._anon_convert_duration_error_response(
+        ("duration_upgrade_required", 100.0, 10),
+        max_self_serve_minutes=0,
+        recommended_plan=None,
+        plan_code="free",
+        requested_mode="express",
+    )
+    body4 = json.loads(resp4.body)
+    assert body4["error"] == "duration_upgrade_required"
+    assert "升级套餐" in body4["message"]
+    assert "recommended_plan" not in body4["detail"]
+
+
+def test_anon_convert_duration_error_response_via_param():
+    """``via`` 默认 ``anonymous_preview_convert``（D7），smart 预览转完整路径可覆盖为
+    ``smart_preview_convert``——两路径复用同一两档渲染（reason 字面量契约一致），仅 detail
+    的 ``via`` 区分来源（观测/审计）。这是 finding #2 两路径对称复用的契约锚点。"""
+    import json
+    import job_intercept as ji
+
+    block = ("duration_over_max_plan", 198.4, 10)
+    # 默认（D7）→ anonymous_preview_convert
+    resp = ji._anon_convert_duration_error_response(
+        block, max_self_serve_minutes=180, recommended_plan=None,
+        plan_code="free", requested_mode="express",
+    )
+    assert json.loads(resp.body)["detail"]["via"] == "anonymous_preview_convert"
+    # smart 预览转完整覆盖 → smart_preview_convert；reason 字面量不变（前端单一 mapper）
+    resp2 = ji._anon_convert_duration_error_response(
+        block, max_self_serve_minutes=180, recommended_plan=None,
+        plan_code="free", requested_mode="smart", via="smart_preview_convert",
+    )
+    body2 = json.loads(resp2.body)
+    assert body2["detail"]["via"] == "smart_preview_convert"
+    assert body2["error"] == "duration_over_max_plan", "reason 契约与 D7 一致"

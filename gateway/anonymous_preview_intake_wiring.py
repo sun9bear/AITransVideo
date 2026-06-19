@@ -425,7 +425,9 @@ def build_intake_config(*, upload_root: Optional[Path] = None) -> IntakeConfig:
 
     return IntakeConfig(
         max_upload_bytes=limits.anonymous_preview_max_upload_bytes,
-        max_source_duration_seconds=limits.anonymous_preview_max_seconds,
+        # 源上传时长上限用**独立**的 source 旋钮（2026-06-16 解耦）——与预览长度
+        # (anonymous_preview_max_seconds) 分开：源可到 180min，预览仍恒 3min teaser。
+        max_source_duration_seconds=limits.anonymous_preview_max_source_seconds,
         temp_upload_dir=upload_root / "uploads" / "anonymous" if upload_root else None,
         temp_storage_available=storage_ok,
         rate_limit_global_per_day=limits.anonymous_preview_cap_global_per_day,

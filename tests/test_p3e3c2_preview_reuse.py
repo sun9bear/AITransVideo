@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import sys
 import types
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
 _JI = _REPO / "gateway" / "job_intercept.py"
@@ -388,3 +391,278 @@ def test_create_reuse_upgrade_inside_smart_entitlement_gate():
     exempt = body.index("if not _smart_preview_exempt:", gate)
     up = body.index("smart_upgrade_required", exempt)
     assert gate < exempt < up, "升级分支须嵌在 smart 门 + not exempt 块内"
+
+
+# ---------------------------------------------------------------------------
+# A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX）——消除与 D7 匿名转完整路径的
+# 不对称缺口（2026-06-16 对抗审查 finding #2）。本地源超套餐 cap 时提前拦，不建注定
+# 失败的 job；复用 D7 同款两档 helper + reason 字面量契约（前端单一 mapper 识别）。
+# ---------------------------------------------------------------------------
+
+
+def _local_preview_chain(owner, *, source_ref="/opt/x/uploads/u/full.mp4"):
+    """成功 LOCAL-源预览复用解析所需的 4 行 DB 链（Job / reservation / billing / voice）。"""
+    rid = uuid.uuid4()
+    preview_job = SimpleNamespace(
+        job_id="job_prev", user_id=owner,
+        source_type="local_video", source_ref=source_ref,
+        smart_state={"smart_preview_mode": True},
+    )
+    reservation = SimpleNamespace(
+        id=rid, status="captured", settled_at=object(),
+        captured_voice_id="vc_minimax_main", amount_credits=600,
+    )
+    billing = SimpleNamespace(reservation_id=rid, chargeable=True, voice_id="vc_minimax_main")
+    voice = SimpleNamespace(user_id=owner, voice_id="vc_minimax_main", expired_at=None)
+    return preview_job, reservation, billing, voice
+
+
+def test_resolve_probes_local_source_duration(monkeypatch):
+    """🔥 A 方案：本地源 → resolver 重探 final_path 全长，放进 source_duration_seconds。
+    （桩 _probe_source_duration_seconds 避免对 ffprobe / 真视频依赖，使测试 hermetic。）"""
+    import preview_reuse_service as prs
+
+    owner = uuid.uuid4()
+
+    async def _fake_probe(_path):
+        return 642.0
+
+    monkeypatch.setattr(prs, "_probe_source_duration_seconds", _fake_probe)
+    db = _make_db(*_local_preview_chain(owner))
+    resolution, reason = _run(
+        prs.resolve_preview_reuse(db, user_id=owner, preview_job_id="job_prev")
+    )
+    assert reason is None and resolution is not None
+    assert resolution.source_type == "local_video"
+    assert resolution.source_duration_seconds == 642.0
+
+
+def test_resolve_skips_probe_for_youtube_source(monkeypatch):
+    """🔥 YouTube 源**不**重探（既有 yt-dlp 创建期闸处理，不重复）→ source_duration_seconds
+    None，且 _probe_source_duration_seconds 绝不被调用（防对 URL 误跑 ffprobe / 双探测）。"""
+    import preview_reuse_service as prs
+
+    owner = uuid.uuid4()
+    called = {"n": 0}
+
+    async def _spy(_path):
+        called["n"] += 1
+        return 999.0
+
+    monkeypatch.setattr(prs, "_probe_source_duration_seconds", _spy)
+    rid = uuid.uuid4()
+    preview_job = SimpleNamespace(
+        job_id="job_prev", user_id=owner,
+        source_type="youtube_url", source_ref="https://youtu.be/abc",
+        smart_state={"smart_preview_mode": True},
+    )
+    reservation = SimpleNamespace(
+        id=rid, status="captured", settled_at=object(),
+        captured_voice_id="vc", amount_credits=600,
+    )
+    billing = SimpleNamespace(reservation_id=rid, chargeable=True, voice_id="vc")
+    voice = SimpleNamespace(user_id=owner, voice_id="vc", expired_at=None)
+    db = _make_db(preview_job, reservation, billing, voice)
+    resolution, reason = _run(
+        prs.resolve_preview_reuse(db, user_id=owner, preview_job_id="job_prev")
+    )
+    assert reason is None and resolution is not None
+    assert resolution.source_duration_seconds is None
+    assert called["n"] == 0, "YouTube 源不得重探（既有 yt-dlp 路径处理）"
+
+
+def test_resolve_local_duration_none_when_probe_fails(monkeypatch):
+    """🔥 本地源探测失败（None）→ resolution 仍成功、duration None（闸跳过、管线兜底，
+    绝不因探测失败误拒可转完整的源）。"""
+    import preview_reuse_service as prs
+
+    owner = uuid.uuid4()
+
+    async def _fail(_path):
+        return None
+
+    monkeypatch.setattr(prs, "_probe_source_duration_seconds", _fail)
+    db = _make_db(*_local_preview_chain(owner))
+    resolution, reason = _run(
+        prs.resolve_preview_reuse(db, user_id=owner, preview_job_id="job_prev")
+    )
+    assert reason is None and resolution is not None
+    assert resolution.source_duration_seconds is None
+
+
+def _smart_reuse_block_src() -> str:
+    """intercept_create_job 内 smart 预览复用块（``resolve_preview_reuse`` 起、D7 块
+    ``_reuse_anon_preview_id = None`` 止）——隔离断言，避免命中 D7 块同名 helper。"""
+    body = _create_src()
+    start = body.index("resolve_preview_reuse")
+    end = body.index("_reuse_anon_preview_id = None")
+    assert start < end, "smart 复用块边界异常"
+    return body[start:end]
+
+
+def _smart_reuse_block_code() -> str:
+    """剥注释后的 smart 复用块（块内字符串无 #，按行 split('#') 安全；对齐 D7
+    ``_d7_block_code()``）——避免未来注释里提及 _anon_convert_duration_block( 等误满足
+    断言、或删真分支只留注释仍绿（CodeX 评审 finding：结构扫描脆弱性）。"""
+    return "\n".join(
+        line.split("#", 1)[0] for line in _smart_reuse_block_src().splitlines()
+    )
+
+
+def test_create_reuse_has_duration_preflight_gate():
+    """🔥 smart 预览复用块加 pre-flight 时长闸：复用 D7 两档 helper + plan-tier cap +
+    resolver 重探的源全长 + via=smart_preview_convert（区分 D7 默认 via）。扫**剥注释**的
+    块代码（避免注释里的同名串满足断言）。行为正确性由下方 end-to-end 测试锁定。"""
+    flat = " ".join(_smart_reuse_block_code().split())
+    assert "_anon_convert_duration_block(" in flat, "须调两档时长判定 helper"
+    assert "_anon_convert_duration_error_response(" in flat, "渲染须经可测纯 helper"
+    assert "source_duration_seconds" in flat, "须用 resolver 重探的源全长"
+    assert "get_effective_plan_gate" in flat, "cap 取自 plan-tier（trial-aware）"
+    assert "max_self_serve_duration_minutes" in flat, "须算最高自助套餐阈值用于分流"
+    assert "minimum_self_serve_plan_for" in flat, "升级须具名推荐能处理该时长的最低套餐"
+    assert 'via="smart_preview_convert"' in flat, "smart 路径须标注 via=smart_preview_convert"
+
+
+def test_create_reuse_duration_gate_before_single_flight():
+    """🔥 顺序：时长闸（超限不建 job）必须在 single-flight job_id mint 之前——否则会先
+    建出注定失败的任务再拒，违背"不建注定失败 job"的目的。扫剥注释代码。"""
+    block = _smart_reuse_block_code()
+    gate = block.index("_anon_convert_duration_block(")
+    mint = block.index("_convert_job_id = ")
+    assert gate < mint, "时长闸须在 single-flight job_id mint 之前"
+
+
+# ---------------------------------------------------------------------------
+# end-to-end 行为：驱动 intercept_create_job 真正跑完 smart 复用闸（CodeX 复审 HIGH）。
+# 结构扫描只证"helper 名字在源里"，挡不住反转守卫 / 调换实参 / 闸恒触发等坏重构；这里
+# 真调 intercept_create_job 锁住 wiring + HARD INVARIANT #2（拒绝不建 job/不取单飞锁/
+# 不 forward）+ #3/#5（时长未知放行）。闸在任何 db.execute 之前返回，故拒绝路径 db 不被
+# 触；放行用 sentinel 证明执行流越过闸到达 single-flight，无需 mock 整条下游 create 流。
+# ---------------------------------------------------------------------------
+
+
+def _make_request(body: dict):
+    req = MagicMock()
+    req.body = AsyncMock(return_value=json.dumps(body, ensure_ascii=False).encode("utf-8"))
+    req.headers = {"content-type": "application/json"}
+    req.method = "POST"
+    req.url = MagicMock()
+    req.url.path = "/job-api/jobs"
+    req.query_params = {}
+    return req
+
+
+def _make_user(*, role="user", plan_code="free"):
+    return SimpleNamespace(
+        id="uid-1", email="u@test.com", display_name="Test",
+        role=role, plan_code=plan_code,
+        free_jobs_quota_total=5, free_jobs_quota_used=0,
+    )
+
+
+def _convert_resolution(*, duration):
+    """server-derived smart reuse resolution（绝不取自客户端）。"""
+    return SimpleNamespace(
+        preview_job_id="job_prev", voice_id="vc_main",
+        source_type="local_video", source_ref="/opt/x/uploads/u/full.mp4",
+        preview_reservation_id="rid-1", preview_credit_amount=600,
+        source_duration_seconds=duration,
+    )
+
+
+def _run_intercept_smart_reuse(resolution, *, user):
+    """跑 intercept_create_job 的 smart 复用路径：开 admin 旗 + 桩 resolver；返回
+    (response_or_exc, lock_mock, proxy_mock)。lock/proxy 桩为 AsyncMock（拒绝路径断言未调）。"""
+    import job_intercept as ji
+    import preview_reuse_service as prs
+
+    req = _make_request({"reuse_preview_job_id": "job_prev", "service_mode": "smart"})
+    db = AsyncMock()
+    lock = AsyncMock()
+    proxy = AsyncMock()
+    with patch.object(prs, "resolve_preview_reuse", AsyncMock(return_value=(resolution, None))), \
+         patch("admin_settings.load_settings",
+               return_value=SimpleNamespace(smart_preview_clone_enabled=True)), \
+         patch.object(ji, "_acquire_convert_singleflight_lock", lock), \
+         patch.object(ji, "proxy_request", proxy):
+        resp = _run(ji.intercept_create_job(req, db, user))
+    return resp, lock, proxy, db
+
+
+def test_gate_rejects_over_max_end_to_end():
+    """🔥🔥 HIGH：免费用户（cap 10）转完整 198min 本地源 → 403 duration_over_max_plan，
+    via=smart_preview_convert，**且不取单飞锁 / 不 forward / 不碰 db**（HARD INVARIANT #2）。"""
+    resp, lock, proxy, db = _run_intercept_smart_reuse(
+        _convert_resolution(duration=11905.71), user=_make_user(plan_code="free")
+    )
+    assert resp.status_code == 403
+    body = json.loads(resp.body)
+    assert body["error"] == "duration_over_max_plan"
+    assert body["detail"]["via"] == "smart_preview_convert"
+    assert "recommended_plan" not in body["detail"], "升无可升不推荐套餐"
+    lock.assert_not_called()
+    proxy.assert_not_called()
+    db.execute.assert_not_called()
+
+
+def test_gate_rejects_upgrade_required_end_to_end():
+    """🔥🔥 HIGH：免费用户（cap 10）转完整 30min 本地源 → 403 duration_upgrade_required，
+    具名推荐最低自助套餐 Plus/45（minimum_self_serve_plan_for），不取锁 / 不 forward。"""
+    resp, lock, proxy, db = _run_intercept_smart_reuse(
+        _convert_resolution(duration=1800.0), user=_make_user(plan_code="free")
+    )
+    assert resp.status_code == 403
+    body = json.loads(resp.body)
+    assert body["error"] == "duration_upgrade_required"
+    assert body["detail"]["recommended_plan"] == "Plus"
+    assert body["detail"]["recommended_plan_minutes"] == 45
+    assert body["detail"]["via"] == "smart_preview_convert"
+    lock.assert_not_called()
+    proxy.assert_not_called()
+
+
+def test_gate_allows_when_duration_unknown_end_to_end():
+    """🔥 HARD INVARIANT #3/#5：source_duration_seconds=None（YouTube / 探测失败）→ 闸放行。
+    用 sentinel 证明执行流越过闸到达 single-flight（_acquire_convert_singleflight_lock），
+    而**不**返回 403——无需 mock 整条下游 create 流。"""
+    import job_intercept as ji
+    import preview_reuse_service as prs
+
+    class _GatePassed(Exception):
+        pass
+
+    async def _sentinel(*_a, **_k):
+        raise _GatePassed()
+
+    req = _make_request({"reuse_preview_job_id": "job_prev", "service_mode": "smart"})
+    with patch.object(prs, "resolve_preview_reuse",
+                      AsyncMock(return_value=(_convert_resolution(duration=None), None))), \
+         patch("admin_settings.load_settings",
+               return_value=SimpleNamespace(smart_preview_clone_enabled=True)), \
+         patch.object(ji, "_acquire_convert_singleflight_lock", _sentinel):
+        with pytest.raises(_GatePassed):
+            _run(ji.intercept_create_job(req, AsyncMock(), _make_user(plan_code="free")))
+
+
+def test_gate_exempts_admin_end_to_end():
+    """🔥 admin 豁免（与既有创建期 duration gate 一致）：admin 转完整超长源 → 闸放行
+    （越过闸到 single-flight），即便 198min 远超任何 cap。"""
+    import job_intercept as ji
+    import preview_reuse_service as prs
+
+    class _GatePassed(Exception):
+        pass
+
+    async def _sentinel(*_a, **_k):
+        raise _GatePassed()
+
+    req = _make_request({"reuse_preview_job_id": "job_prev", "service_mode": "smart"})
+    with patch.object(prs, "resolve_preview_reuse",
+                      AsyncMock(return_value=(_convert_resolution(duration=11905.71), None))), \
+         patch("admin_settings.load_settings",
+               return_value=SimpleNamespace(smart_preview_clone_enabled=True)), \
+         patch.object(ji, "_acquire_convert_singleflight_lock", _sentinel):
+        with pytest.raises(_GatePassed):
+            _run(ji.intercept_create_job(
+                req, AsyncMock(), _make_user(role="admin", plan_code="free")
+            ))

@@ -11,6 +11,7 @@
 - speaker voice profile inference
 - multi-cut split 与 write-ahead journal
 - user-explicit LLM suggest-split
+- bulk replace 批量文本替换
 - `preview-source` cache 与 stream endpoint
 - single segment re-TTS 与 batch re-TTS
 - `overwrite / copy_as_new`
@@ -56,6 +57,7 @@ graph TD
 
     Segments --> SingleTTS["segment regenerate / draft wav"]
     Segments --> BatchTTS["editing_batch.py regenerate_all_dirty_segments"]
+    Segments --> BulkReplace["editing_bulk_replace.py"]
     Segments --> PreviewSource["preview-source cache + stream endpoint"]
     Segments --> Structural["split / speaker / text edits"]
     SplitDialog --> SuggestSplit["GET quota + POST suggest-split"]
@@ -65,6 +67,8 @@ graph TD
     Journal --> Segments
 
     VoiceOverride --> SingleTTS
+    BulkReplace --> Structural
+    BulkReplace --> BatchTTS
     Structural --> Audit["user_edit_events.jsonl"]
     SingleTTS --> Audit
     SingleTTS --> Usage["UsageMeter post_edit_resynth bucket"]
@@ -170,7 +174,15 @@ graph TD
 
 结论：批量重合成是用户编辑后的显式处理面，不会自动覆盖用户尚未接受的 draft。
 
-### 3.8 preview-source cache 继续作为独立回放侧路
+### 3.8 bulk replace 是文本批处理，不自动完成音频同步
+
+- `src/services/jobs/editing_bulk_replace.py` 将批量文本替换纳入 editing operation，而不是让前端直接改最终产物。
+- 替换命中的 segment 仍应进入 dirty / audio sync 路径，后续需要 regenerate 或 batch re-TTS。
+- bulk replace 不能绕过 `editing_audio_sync_required`，也不能让 overwrite/copy-as-new 在音频未同步时提交。
+
+结论：bulk replace 提升文本编辑效率，但仍受 post-edit 的音频同步和 commit hard gate 约束。
+
+### 3.9 preview-source cache 继续作为独立回放侧路
 
 - `POST /jobs/{jobId}/segments/{segmentId}/preview-source`
 - `GET /job-api/jobs/{jobId}/segments/{segmentId}/preview-source-audio`
@@ -178,7 +190,7 @@ graph TD
 
 结论：编辑页继续区分“试听 draft TTS”和“回放原始分段音频”。
 
-### 3.9 commit 仍然有 text/audio sync hard gate
+### 3.10 commit 仍然有 text/audio sync hard gate
 
 - `_find_text_edits_without_tts(project_dir)` 检测文本改动但没有重新合成音频的 segment。
 - 命中时抛 `EditingAudioSyncRequiredError`。
@@ -186,7 +198,7 @@ graph TD
 
 结论：post-edit text/audio sync 是提交硬约束。
 
-### 3.10 overwrite 仍会主动退休旧交付物身份
+### 3.11 overwrite 仍会主动退休旧交付物身份
 
 - overwrite 会清空旧 `jianying_draft_attempt_id / substep / fingerprint`。
 - 网关侧会调用 `invalidate_materials_pack_for_job(...)`。
@@ -195,7 +207,7 @@ graph TD
 
 结论：post-edit 后旧草稿、旧打包物、旧 R2 generation 都被视作 stale。
 
-### 3.11 post-edit re-synthesis 有单独 usage bucket
+### 3.12 post-edit re-synthesis 有单独 usage bucket
 
 - `UsageMeter` 增加 `TTS_BUCKET_POST_EDIT_RESYNTH`。
 - post-edit 单段或批量重合成可以与主流程 TTS 分开统计 provider/model、字符数、调用次数和失败。
@@ -203,7 +215,7 @@ graph TD
 
 结论：后编辑重合成已经具备成本归因入口，避免与主流水线 TTS 混算。
 
-### 3.12 CosyVoice worker routing 是 editing voice-map 的一部分
+### 3.13 CosyVoice worker routing 是 editing voice-map 的一部分
 
 - `src/services/jobs/editing_voice_map.py` 在 set voice override 时可写 `requires_worker=True` 与 `worker_target_model`。
 - `src/services/jobs/editing_commit.py` 会把 worker routing 写进 baseline `editor/segments.json`，这是后续 pipeline 重跑 TTS 的输入事实。
@@ -241,6 +253,7 @@ graph TD
 - `frontend-next/src/lib/api/editing.ts`
   - suggest-split API
   - split-many API
+  - bulk replace API
 - `src/services/jobs/editing_segments.py`
   - `split_editing_segment_many`
   - split journal reconcile
@@ -248,6 +261,9 @@ graph TD
   - LLM-backed split suggestion
 - `src/services/jobs/editing_batch.py`
   - dirty segment batch regenerate
+- `src/services/jobs/editing_bulk_replace.py`
+  - bulk text replace
+  - dirty segment marking
 - `src/services/jobs/editing_speakers.py`
   - speakers registry
 - `src/services/jobs/editing_voice_profile.py`
@@ -278,6 +294,7 @@ graph TD
 - 想改 editing 中音色复用、clone、审听入口
 - 想排查 CosyVoice clone voice 在 editing regenerate / commit / copy_as_new 后为什么没有走国内 worker
 - 想改编辑页布局、段落行、左侧当前段操作面
+- 想改 bulk replace 或批量替换后的 dirty/audio sync 规则
 - 想改 split-many、智能切点、切点拖动或 source/cn index 规则
 - 想改批量 re-TTS 或 segment status
 - 想改 editing speakers 创建、profile 推断、retry-profile

@@ -72,6 +72,13 @@ class PreviewReuseResolution:
     # ``preview_credit_amount``（取自 reservation.amount_credits，不写死 600）。
     preview_reservation_id: str
     preview_credit_amount: int
+    # A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX；对齐 D7
+    # AnonymousPreviewReuseResolution.source_duration_seconds，消除两路径不对称）：
+    # **本地源**完整全长（秒），由 resolver 对 stored final_path 重探（见
+    # ``_probe_source_duration_seconds``）。**YouTube 源恒 None**——不在此重探，由创建期
+    # 既有 yt-dlp 探测路径处理（不重复）。探测失败/非本地源 → None（转完整 wiring 的
+    # pre-flight 闸据此跳过，管线时长 gate 兜底，绝不因探测失败误拒转完整）。纯只读派生。
+    source_duration_seconds: float | None = None
 
 
 async def resolve_preview_reuse(
@@ -178,6 +185,21 @@ async def resolve_preview_reuse(
     if not source_type or not source_ref:
         return None, REASON_SOURCE_UNAVAILABLE
 
+    # 7. 完整源全长（A 方案 pre-flight 时长闸用，plan 2026-06-16）。**仅对本地源**重探：
+    #    本地 source_ref = 原始完整上传 final_path（server-authoritative，来自 Job 行非
+    #    客户端），ffprobe 只读容器元数据（毫秒级）。YouTube 源**不**在此重探——其时长由
+    #    创建期既有 yt-dlp 探测路径处理（job_intercept 创建期 duration gate），不重复探测，
+    #    故 source_duration_seconds 留 None（pre-flight 闸据此跳过 → 走既有 yt-dlp 闸）。
+    #    探测失败 → None（闸跳过、管线兜底，绝不误拒可转完整的源）。
+    #    **故意用本地 allow-list（`== "local_video"`）而非 `!= "youtube_url"`**（CodeX 复审）：
+    #    probe 必须只对**已知本地文件**源跑——绝不能把一个远端 URL 递给 ffprobe（ffprobe
+    #    会真去打开 http(s) 输入 → SSRF 风险）。今天只有 local_video / youtube_url 两种持久
+    #    source_type；未来若新增**本地**源类型，须在此显式加入本 allow-list（有意识决策，非
+    #    静默缺口）；新增**远端**源类型则保持跳过（与 youtube 一样走创建期探测）。
+    source_duration_seconds: float | None = None
+    if source_type == "local_video":
+        source_duration_seconds = await _probe_source_duration_seconds(Path(source_ref))
+
     return (
         PreviewReuseResolution(
             preview_job_id=pjid,
@@ -186,6 +208,7 @@ async def resolve_preview_reuse(
             source_ref=source_ref,
             preview_reservation_id=str(reservation.id),
             preview_credit_amount=int(getattr(reservation, "amount_credits", 0) or 0),
+            source_duration_seconds=source_duration_seconds,
         ),
         None,
     )
@@ -211,6 +234,12 @@ class AnonymousPreviewReuseResolution:
     preview_id: str
     source_type: str
     source_ref: str  # 完整原始上传绝对路径（stored_upload_path），非 teaser
+    # A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX）：**完整源全长**（秒）。
+    # 匿名 record/audit 不持久化源全长（只存 teaser ~180s 时长），故由 resolver 对
+    # stored_upload_path 重探一次（见 _probe_source_duration_seconds）。探测失败/
+    # 不可信 → None（转完整 wiring 的 pre-flight 闸据此跳过，管线时长 gate 兜底，
+    # 绝不因探测失败误拒转完整）。纯只读派生，绝不取自客户端。
+    source_duration_seconds: float | None = None
 
 
 def _normalize_hash(value: str | None) -> str:
@@ -237,6 +266,33 @@ def _anon_upload_root() -> Path:
     from anonymous_preview_upload import _resolve_project_root
 
     return (_resolve_project_root() / "uploads" / "anonymous").resolve()
+
+
+async def _probe_source_duration_seconds(path: Path) -> float | None:
+    """ffprobe **完整源全长**（秒），可信正值才返回，否则 None。
+
+    A 方案 pre-flight 时长闸（plan 2026-06-16 转化漏斗 UX）。匿名 record/audit **不**
+    持久化源全长——只存 teaser(~180s)时长——故此处对已过校验的完整源重探。``probe_source``
+    是 gateway 内纯 stdlib ffprobe 封装（匿名上传 teaser 切割就用它，故 gateway 容器必装
+    ffprobe）；它只读容器元数据（毫秒级，远小于上面整文件 sha256），且自身已校验时长
+    可信（``ok`` 为 True 时 ``duration_seconds`` 必为有限正数）。阻塞 subprocess 经
+    ``to_thread``；**任何异常/不可信吞为 None**——pre-flight 闸纯增强，绝不因探测失败
+    阻断转完整（管线 _check_duration_limit 仍兜底）。惰性 import 保持本模块导入面最小。
+    """
+    try:
+        from anonymous_preview_probe import probe_source  # noqa: PLC0415
+
+        result = await asyncio.to_thread(probe_source, path)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(result, dict) or not result.get("ok"):
+        return None
+    try:
+        dur = float(result.get("duration_seconds"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    # probe_source 的 ok 契约已保证有限正数；此处 ``> 0`` 兜底（NaN > 0 == False → None）。
+    return dur if dur > 0 else None
 
 
 async def resolve_anonymous_preview_reuse(
@@ -332,6 +388,10 @@ async def resolve_anonymous_preview_reuse(
     if _normalize_hash(actual) != expected:
         return None, REASON_ANON_SOURCE_UNAVAILABLE
 
+    # 9. 完整源全长（A 方案 pre-flight 时长闸用）。record/audit 不持久化源全长 → 对
+    #    已过校验的完整源重探一次（纯只读，失败 → None，闸跳过、管线兜底）。
+    source_duration_seconds = await _probe_source_duration_seconds(stored)
+
     # source_type 固定 "local_video"（**不**透传 rec.source_type）。CodeX P1：匿名
     # record 的 source_type 是 intake 内部值 "local_upload"（SourceType.LOCAL_UPLOAD），
     # 而正式 create 流程只归一化 local_file→local_video、**不认 local_upload**
@@ -343,6 +403,7 @@ async def resolve_anonymous_preview_reuse(
             preview_id=pid,
             source_type="local_video",
             source_ref=str(stored),
+            source_duration_seconds=source_duration_seconds,
         ),
         None,
     )

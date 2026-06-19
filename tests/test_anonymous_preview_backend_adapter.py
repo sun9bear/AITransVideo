@@ -720,6 +720,36 @@ def test_probed_duration_over_cap_returns_rejected(adapter, temp_upload_dir, con
     assert "exceeds intake cap" in record.status_reason
 
 
+def test_source_duration_over_cap_rejects_even_when_teaser_is_short(
+    adapter, temp_upload_dir, config
+):
+    def over_source_cap_probe(upload: UploadFacts) -> ProbeResult:
+        return ProbeResult(
+            duration_seconds=180.0,
+            source_duration_seconds=float(config.max_source_duration_seconds + 5),
+            source_hash=upload.source_hash,
+            media_type="video/mp4",
+            audio_present=True,
+            audio_quality_score=0.9,
+            teaser_candidate_range=(0.0, 180.0),
+            failure_reason=None,
+        )
+
+    over = replace(adapter, probe_fn=over_source_cap_probe)
+    request = _make_request()
+    upload = _make_upload(
+        temp_upload_dir,
+        duration_seconds=0.0,
+        source_hash="src_hash_source_over_cap",
+    )
+
+    record = over.handle_intake(request, upload)
+
+    assert record.status is PreviewStatus.REJECTED
+    assert "probed source duration" in record.status_reason
+    assert "exceeds intake cap" in record.status_reason
+
+
 def test_invalid_upload_extension_returns_rejected(adapter, temp_upload_dir):
     request = _make_request()
     upload = _make_upload(

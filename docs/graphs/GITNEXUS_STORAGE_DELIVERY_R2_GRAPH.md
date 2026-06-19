@@ -15,6 +15,8 @@
 - Pan archive 后的本地 project_dir / R2 artifacts 删除与恢复边界
 - CosyVoice clone sample uploader 与交付 R2 registry 的边界
 - Free tier downloadable keys、stream/eager-push 限制与水印成片交付边界
+- Anonymous Preview / Smart Preview stream-only teaser 与完整交付物边界
+- Chunked upload ready artifacts 与用户交付物 registry 的边界
 - materials pack / job subresource 写路由的 CSRF same-origin guard
 
 ## 2. 主图
@@ -24,6 +26,8 @@ graph TD
     ResultUI["Workspace / ResultMediaCard"] --> Video["publish.dubbed_video"]
     ResultUI --> Pack["materials_pack"]
     ResultUI --> JDraft["editor.jianying_draft_zip"]
+    PreviewUI["Anonymous / Smart Preview UI"] --> PreviewStream["stream-only teaser"]
+    PreviewStream --> PreviewBoundary["no materials / no editor draft / no clean artifact"]
 
     Pack --> TaskPlane["Gateway background task plane"]
     Pack --> CSRF["require_same_origin_state_change"]
@@ -39,6 +43,7 @@ graph TD
     PackZip --> DownloadKey
     FreeWatermarked --> FreeKeys["downloadable_keys free: video + poster only"]
     FreeKeys --> DownloadKey
+    PreviewBoundary -.-> PreviewDownloadBlocked["blocked from downloadable_keys"]
     DownloadKey --> Gateway["Gateway resolve"]
     Gateway --> Router["storage/backend_router.py"]
     Router --> Registry["r2_artifacts registry + download_keys_for"]
@@ -72,6 +77,8 @@ graph TD
     CosyClone["CosyVoice clone sample"] --> SampleUploader["sample_uploader OSS/R2/local-stub"]
     SampleUploader --> WorkerInput["mainland worker input object"]
     WorkerInput -.-> NotRegistry["not r2_artifacts registry"]
+    ChunkedUpload["chunked upload ready artifact"] --> Intake["preview/full intake"]
+    Intake -.-> NotRegistry
 
     EventLog["download.* / stream.* / pan.* events"] --> R2Obs["scripts/r2_observability.py"]
     PanBackup --> EventLog
@@ -161,6 +168,15 @@ graph TD
 
 结论：Free tier 的交付限制是商业边界，不只是前端隐藏按钮。
 
+### 3.10 Preview 与 chunked upload 都不是完整交付物 registry
+
+- Anonymous Preview 和 Smart Preview 都只暴露 teaser stream，不提供 materials pack、clean audio、editor draft zip 或完整下载键。
+- `reuse_anonymous_preview_id` / `reuse_preview_job_id` 转完整后，新的正式任务才进入正常 delivery/R2 registry。
+- chunked upload ready artifact 是上传传输层状态，必须继续进入 intake/admission/create flow，不应直接注册为用户交付物。
+- preview 和 chunked upload 的 TTL cleanup 不应删除正式任务已登记的 R2 artifacts。
+
+结论：上传中间件、预览 teaser 和正式交付 registry 是三层不同生命周期。
+
 ## 4. 关键证据
 
 - `gateway/r2_artifact_sweeper.py`
@@ -184,6 +200,15 @@ graph TD
   - CosyVoice clone sample upload backend
 - `src/services/r2_publisher_lib/downloadable_keys.py`
   - free downloadable key restriction
+  - preview stream-only boundary by omission from full downloadable keys
+- `gateway/anonymous_preview_api.py`
+  - anonymous preview stream/claim lifecycle
+- `gateway/anonymous_preview_chunked_api.py`
+  - anonymous chunked upload handoff
+- `gateway/chunked_upload_service.py`
+  - chunked upload TTL / ready artifact lifecycle
+- `frontend-next/src/lib/api/smartPreviewClone.ts`
+  - Smart Preview convert-to-full API boundary
 - `src/utils/free_watermark.py`
   - free watermark policy feeding publish output
 - `gateway/materials_api.py`
@@ -203,6 +228,8 @@ graph TD
 - 想改结果页下载面
 - 想加新的 downloadable key
 - 想确认 free tier 能下载/stream/eager-push 哪些 artifact
+- 想确认 anonymous preview 或 Smart Preview 为什么只有 stream-only teaser
+- 想确认 chunked upload ready artifact 为什么不是 R2 delivery registry
 - 想排查为什么成功任务没有被主动推上 R2
 - 想判断 cleanup 为什么没有删除某个过期项目
 - 想看 R2 redirect / fallback 的观测口径

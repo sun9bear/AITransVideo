@@ -9,10 +9,13 @@
 - `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
 - 主对齐路径仍然是 `DSP-first alignment`
 - Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、P5 possible-match auto-reuse、translation audit metrics、handoff、terminal reports
+- Smart Preview 是独立 teaser lane：创建前可预约 600 点 clone 成本，结果 stream-only，转完整后才进入完整 paid workflow
+- Anonymous Preview 是营销漏斗 lane：未登录 direct/chunked upload 先进 APF admission，preview teaser 不能替代正式任务
 - Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部读取 app-safe admin policy，优先使用个人音色候选，再决定是否 reuse、clone 或暂停确认
 - Express 快捷版新增可选 CosyVoice 自动克隆分支，必须满足 availability、server-confirmed consent、admin gate、reservation cap 后才会调用 worker
 - Free tier 新增时长 fail-closed、MiMo voiceclone reference stamp、free watermark 与 restricted deliverables
 - Phase 1a/1b reports 是 shadow-first 质量观测，不改变 `SemanticBlock` 和 DSP-first 主线
+- language registry / job language fields 是 workflow 的输入事实，前端不应自建第二套语言规则
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
 - `derive_effective_pipeline_mode(...)` 决定 Smart job 是否继续走自动层，还是回到 Studio 控制流
 
@@ -22,6 +25,7 @@
 graph TD
     Entry["process.py / ProjectWorkflow"] --> Snapshot["JobRecord snapshot"]
     Snapshot --> Effective["derive_effective_pipeline_mode"]
+    Snapshot --> PreviewKind["preview markers / reuse source markers"]
     Snapshot --> ExpressConsent["express_consent snapshot"]
     Snapshot --> FreeMode["service_mode = free"]
     Effective --> SmartMode["effective mode = smart"]
@@ -31,6 +35,13 @@ graph TD
     Ingestion --> Media["Media understanding"]
     Media --> Compliance["Content compliance"]
     Compliance --> Transcript["Transcript / speaker prep"]
+    PreviewKind --> AnonymousPreviewLane["anonymous preview teaser lane"]
+    PreviewKind --> SmartPreviewLane["smart preview teaser lane"]
+    AnonymousPreviewLane --> PreviewTeaser["stream-only teaser, no editor draft"]
+    SmartPreviewLane --> SmartPreviewClone["600-credit clone reservation marker"]
+    SmartPreviewClone --> PreviewTeaser
+    PreviewTeaser --> ConvertFull["convert/reuse source into full job"]
+    ConvertFull --> Transcript
     FreeMode --> FreeDurationGate["free 10-min duration fail-closed"]
     FreeDurationGate --> Transcript
     Transcript --> ExpressAutoCloneGate["Express maybe_run_express_auto_clone"]
@@ -85,7 +96,9 @@ graph TD
     VoiceIdPropagation --> Translation["Translation"]
     StudioMode --> Translation
     Translation --> SmartLLM["translator._service_mode -> llm_registry smart defaults"]
+    Translation --> LanguageFacts["language registry source/target facts"]
     SmartLLM --> SmartTranslation["Smart translation audit metrics"]
+    LanguageFacts --> SmartTranslation
     SmartTranslation --> Advisory["old strict failures become advisory reasons"]
     SmartTranslation --> Blocks["SemanticBlock chunking"]
     Advisory --> Blocks
@@ -139,7 +152,16 @@ graph TD
 
 结论：Smart job 降级后继续保留 Smart 审计事实，但控制流回到 Studio。
 
-### 3.3 Smart voice review 已经进入 workflow 主干
+### 3.3 Preview lanes 只提供 teaser 与后续正式创建入口
+
+- Anonymous Preview 在 create full job 前就经过 APF admission、probe 和 compliance，teaser 只用于营销试用。
+- Smart Preview 可以在 admin gate 后进入 600 点 clone reservation，但结果仍是 stream-only 3 分钟 teaser。
+- `reuse_anonymous_preview_id` 和 `reuse_preview_job_id` 都应由服务端解析源文件和上下文，前端只传 id。
+- 转完整之后才进入正式 paid workflow、交付物、后编辑和结算边界。
+
+结论：Preview lane 不改变 `SemanticBlock`、TTS、alignment 主线，也不能绕过正式任务权益。
+
+### 3.4 Smart voice review 已经进入 workflow 主干
 
 - eligibility gate 在 voice selection 阶段前执行，先筛出主说话人与被排除说话人。
 - pipeline 通过 app-safe `read_admin_setting` 读取 `smart_auto_clone_enabled`、`smart_reuse_user_voice_enabled`、`smart_pause_on_possible_user_voice_match`，避免 app runtime 直接依赖 Gateway-only settings loader。
@@ -156,7 +178,7 @@ graph TD
 
 结论：Smart voice review 现在是 workflow 内部的正式分支，不再只是服务模块骨架。
 
-### 3.4 Smart translation review 现在是 audit-only metrics
+### 3.5 Smart translation review 现在是 audit-only metrics
 
 - translation review 仍检查术语保留、speaker assignment、一致性、长度预算、checksum、不确定 speaker 占比、clone sample ratio。
 - 2026-05-20 后，这些检查的失败只写入 advisory metrics，不再把 Smart 拉回人工审核。
@@ -166,7 +188,7 @@ graph TD
 
 结论：Smart translation review 仍是 deterministic 质量观测点，但默认不是 human gate；Smart 全自动承诺优先。
 
-### 3.5 主对齐策略依然是 DSP-first
+### 3.6 主对齐策略依然是 DSP-first
 
 - `src/services/alignment/aligner.py` 显式使用 `ThreadPoolExecutor`。
 - paid fallback 由 semaphore 控制，不随线程数无限扩张。
@@ -174,7 +196,7 @@ graph TD
 
 结论：timing authority 仍在 deterministic 对齐链上，不交给 LLM。
 
-### 3.6 terminal 阶段写 Smart reports
+### 3.7 terminal 阶段写 Smart reports
 
 - happy-path Smart job 终态会写 `smart_quality_report.json` 和 `smart_cost_summary.json`。
 - handoff 早退路径会尽量写 cost summary，并把 handoff 原因记录到 `smart_decisions.jsonl`。
@@ -182,7 +204,7 @@ graph TD
 
 结论：Smart reporting 已经是 workflow terminal 与 handoff 路径的一部分。
 
-### 3.7 Phase 1a/1b reports 是 shadow-first 观测层
+### 3.8 Phase 1a/1b reports 是 shadow-first 观测层
 
 - `translation_quality.py` 在 shadow flag 下写 `reports/translation_quality_report.json`，只检测 wrong-script 风险，不改变翻译。
 - `output_dispatcher.py` 写 `reports/subtitle_width_report.json` 和 `output/subtitle_quality_report.json`，为字幕宽度和 cue 质量提供证据。
@@ -192,7 +214,7 @@ graph TD
 
 结论：这些 report 是 workflow 的旁路观测层，不替代 deterministic 主线和硬 gate。
 
-### 3.8 whisper gate 仍然是部署能力 + admin policy + trigger context
+### 3.9 whisper gate 仍然是部署能力 + admin policy + trigger context
 
 - 部署能力：`.[whisper]`、`INSTALL_WHISPER`、`HF_HOME`
 - admin policy：`whisper_alignment_enabled / trigger / skip_cache / model`
@@ -200,7 +222,7 @@ graph TD
 
 结论：打开 admin 开关不等于节点一定具备 whisper runtime。
 
-### 3.9 CosyVoice worker routing 已进入 TTS 主干
+### 3.10 CosyVoice worker routing 已进入 TTS 主干
 
 - `src/pipeline/process.py` 会从 review approve / voice-map enrichment 读取 `requires_worker / worker_target_model`，并写回 `DubbingSegment`。
 - `requires_worker=True` 会强制段落使用 `tts_provider="cosyvoice"`，避免 job-level provider 或旧 snapshot 把克隆音色带到 MiniMax/VolcEngine 路径。
@@ -210,7 +232,7 @@ graph TD
 
 结论：CosyVoice clone voice 已经不是普通 `voice_id`，而是带 worker routing 的 TTS 分支。
 
-### 3.10 Express 自动克隆挂在主流程，但默认失败非致命
+### 3.11 Express 自动克隆挂在主流程，但默认失败非致命
 
 - `src/pipeline/process.py` 在 Express 非交互路径中调用 `maybe_run_express_auto_clone(...)`，它是自动克隆的唯一入口。
 - `maybe_run_express_auto_clone` 先检查 admin 主开关、allowlist、server-confirmed `express_consent` 和主说话人阈值；任一失败都不构造真实 client。
@@ -220,7 +242,7 @@ graph TD
 
 结论：Express auto-clone 是 workflow 的可选增强层，不改变 `SemanticBlock`、TTS 对齐和剪映交付主线。
 
-### 3.11 Free tier 在 workflow 内是硬 gate + 窄 TTS 分支
+### 3.12 Free tier 在 workflow 内是硬 gate + 窄 TTS 分支
 
 - `process.py` 对 `service_mode == "free"` 调用 `evaluate_free_duration_cap(...)`，缺失、非数字、NaN、inf、超 10 分钟都 fail-closed。
 - free voiceclone 只在 `job_voice_strategy == "free_voiceclone"` 时调用 `stamp_segment_references(...)`，给可匹配 speaker 的 segment 写 `voiceclone_reference_path`。
@@ -234,6 +256,7 @@ graph TD
 
 - `src/pipeline/process.py`
   - `derive_effective_pipeline_mode`
+  - preview markers and source reuse markers
   - `maybe_run_express_auto_clone` 调用点
   - free duration gate / voiceclone reference stamp / watermark wiring
   - early content compliance gate
@@ -257,6 +280,14 @@ graph TD
   - Smart auto clone usage recording
 - `gateway/smart_consent.py`
   - Smart consent schema validator
+- `gateway/smart_clone_reservation_service.py`
+  - Smart preview clone reservation before provider call
+- `gateway/anonymous_preview_api.py`
+  - anonymous preview create / status / claim API
+- `src/services/anonymous_preview_admission.py`
+  - APF admission before preview job create
+- `src/services/language_registry.py`
+  - source/target language facts
 - `gateway/express_consent.py`
   - Express consent schema validator
 - `src/services/express/auto_clone.py`
@@ -311,7 +342,9 @@ graph TD
 
 - 想改 `process.py` 主流水线
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
+- 想改 anonymous preview 或 Smart preview 如何进入 teaser / convert-to-full
 - 想改 Express 自动克隆是否进入 worker clone、什么时候 fallback 到预设音色、reservation 如何消费
+- 想改 source/target language fact 如何进入 workflow
 - 想改 free job 的 10 分钟 gate、MiMo voiceclone reference、paid API fallback 或水印传递
 - 想改 Smart voice review、个人音色候选、P5 possible-match auto-reuse、弱匹配暂停、同源音色复用、translation review、handoff、terminal report
 - 想改 CosyVoice clone voice 如何进入 TTS、preview 或 segment regenerate

@@ -1,7 +1,7 @@
 """APF 限制旋钮（2026-06-11）验收测试。
 
 覆盖：
-  1. AdminSettings 6 个新字段默认值（与 env GatewaySettings 出厂默认一致）
+  1. AdminSettings APF 字段默认值（与 env GatewaySettings 出厂默认一致）
   2. _APF_LIMIT_BOUNDS validator 边界矩阵（拒 0/负数/天文数字，收边界值）
   3. ApfLimits 字段名与 GatewaySettings env 字段同名契约（消费方可当 settings 传）
   4. resolve_apf_limits：admin 值优先（含 MB→bytes 转换）/ 任何异常回落 env
@@ -42,6 +42,8 @@ class TestAdminSettingsApfLimitDefaults:
         s = AdminSettings()
         assert s.anonymous_preview_max_upload_mb == 200
         assert s.anonymous_preview_max_seconds == 180
+        # 源上传时长上限默认 30min（与预览长度解耦，2026-06-16）。
+        assert s.anonymous_preview_max_source_seconds == 1800
         assert s.anonymous_preview_cap_global_per_day == 500
         assert s.anonymous_preview_cap_per_ip == 3
         assert s.anonymous_preview_cap_per_device == 1
@@ -64,6 +66,7 @@ class TestAdminSettingsApfLimitDefaults:
 _BOUNDS = [
     ("anonymous_preview_max_upload_mb", 10, 2048),
     ("anonymous_preview_max_seconds", 30, 7200),
+    ("anonymous_preview_max_source_seconds", 180, 10800),  # 源上传时长上限（2026-06-16 解耦）
     ("anonymous_preview_cap_global_per_day", 1, 100000),
     ("anonymous_preview_cap_per_ip", 1, 1000),
     ("anonymous_preview_cap_per_device", 1, 100),
@@ -123,11 +126,12 @@ class TestApfLimitsFieldNameContract:
             "同名契约破坏（消费方无法把 limits 当 settings 传）"
         )
 
-    def test_covers_all_six_limits(self):
+    def test_covers_all_limits(self):
         from anonymous_preview_limits import ApfLimits
         assert {f.name for f in dc_fields(ApfLimits)} == {
             "anonymous_preview_max_upload_bytes",
             "anonymous_preview_max_seconds",
+            "anonymous_preview_max_source_seconds",
             "anonymous_preview_cap_global_per_day",
             "anonymous_preview_cap_per_ip",
             "anonymous_preview_cap_per_device",
@@ -145,6 +149,7 @@ class TestResolveApfLimits:
         return SimpleNamespace(
             anonymous_preview_max_upload_bytes=200 * 1024 * 1024,
             anonymous_preview_max_seconds=180,
+            anonymous_preview_max_source_seconds=1800,
             anonymous_preview_cap_global_per_day=500,
             anonymous_preview_cap_per_ip=3,
             anonymous_preview_cap_per_device=1,
@@ -161,6 +166,7 @@ class TestResolveApfLimits:
             lambda: adm.AdminSettings(
                 anonymous_preview_max_upload_mb=500,
                 anonymous_preview_max_seconds=300,
+                anonymous_preview_max_source_seconds=10800,
                 anonymous_preview_cap_global_per_day=1000,
                 anonymous_preview_cap_per_ip=10,
                 anonymous_preview_cap_per_device=2,
@@ -170,6 +176,8 @@ class TestResolveApfLimits:
         limits = limits_mod.resolve_apf_limits(self._env())
         assert limits.anonymous_preview_max_upload_bytes == 500 * 1024 * 1024
         assert limits.anonymous_preview_max_seconds == 300
+        # 源上传上限走独立旋钮（admin 值优先），证明解耦后 resolver 读对字段。
+        assert limits.anonymous_preview_max_source_seconds == 10800
         assert limits.anonymous_preview_cap_global_per_day == 1000
         assert limits.anonymous_preview_cap_per_ip == 10
         assert limits.anonymous_preview_cap_per_device == 2
@@ -234,6 +242,7 @@ class TestLimitsEndpoint:
             limits = ApfLimits(
                 anonymous_preview_max_upload_bytes=512 * 1024 * 1024,
                 anonymous_preview_max_seconds=240,
+                anonymous_preview_max_source_seconds=1800,
                 anonymous_preview_cap_global_per_day=500,
                 anonymous_preview_cap_per_ip=3,
                 anonymous_preview_cap_per_device=1,

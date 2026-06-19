@@ -293,10 +293,27 @@ class AnonymousPreviewBackendAdapter:
                     PreviewStatus.FAILED,
                     "probe duration invalid (fail closed)",
                 )
-            if duration_value > config.max_source_duration_seconds:
+            source_duration_value = getattr(
+                probe_result, "source_duration_seconds", None
+            )
+            source_duration_reason = "probed source duration"
+            if source_duration_value is None:
+                source_duration_value = duration_value
+                source_duration_reason = "probed duration"
+            elif (
+                isinstance(source_duration_value, bool)
+                or not isinstance(source_duration_value, (int, float))
+                or not math.isfinite(source_duration_value)
+                or source_duration_value <= 0
+            ):
+                raise IntakeRejected(
+                    PreviewStatus.FAILED,
+                    "probe source duration invalid (fail closed)",
+                )
+            if source_duration_value > config.max_source_duration_seconds:
                 raise IntakeRejected(
                     PreviewStatus.REJECTED,
-                    f"probed duration {probe_result.duration_seconds} "
+                    f"{source_duration_reason} {source_duration_value} "
                     f"exceeds intake cap",
                 )
             compliance_result = self._safe_compliance(probe_result)

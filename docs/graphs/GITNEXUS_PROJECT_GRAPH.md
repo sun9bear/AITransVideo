@@ -1,6 +1,6 @@
 # GitNexus 项目图谱
 
-新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-06-01`
+新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-06-16`
 
 生成方式：基于 GitNexus 最新索引、Git 历史 diff 与源代码交叉整理。
 
@@ -8,28 +8,29 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1579 |
-| 节点数 | 29,044 |
-| 关系数 | 65,983 |
-| 聚类数 | 1114 |
+| 文件数 | 1737 |
+| 节点数 | 32,849 |
+| 关系数 | 76,841 |
+| 聚类数 | 1353 |
 | 流程数 | 300 |
-| 索引提交 | `0a1f2278` |
+| 索引提交 | `ecadcb9f` |
 | 索引状态 | `up-to-date` |
 
 本轮最需要反映的结构变化：
 
-- Free tier 成为独立 service mode：`AVT_ENABLE_FREE_TIER` 控制 Gateway，Next build/runtime flag 控制入口，entitlements 将 `free` 加入 allowed service modes。
-- 免费档 launch gate 已硬化：`free_consent.voice_rights_confirmed=true` 必须在 Gateway server-side 校验通过，失败在 quota reserve 与 upstream forward 前 403。
-- 免费日配额进入专用 ledger：`free_service_daily_usage` 支持 reserve / consume / release / expire，按 Asia/Shanghai 自然日和 user 维度防并发穿透。
-- MiMo voiceclone 进入 free TTS 窄路径：reference extraction/stamp 写入 segment，`TTSGenerator` 只在 `free_voiceclone` 策略下调用 MiMo `synthesize_voiceclone`，fallback 强制回 MiMo preset。
-- 免费档交付边界补齐：10 分钟时长 fail-closed，free download/stream/eager-push 只放行水印视频与 poster，publish 通过 ffmpeg drawtext 加水印。
-- 商业/成本面同步：free=0 debit truth、admin `free_tier_voiceclone_enabled` kill switch、MiMo voiceclone spike 与 paid API guard 进入图谱。
+- 匿名预览漏斗成型：marketing trial panel、anonymous session、direct/chunked upload、APF admission、probe/compliance、stream-only teaser、post-login claim 与 `reuse_anonymous_preview_id` 转完整进入独立图谱。
+- Smart Preview clone/billing 成型：3 分钟 teaser 可在 admin gate 后走 MiniMax clone，600 点 reservation/capture/release/carryover 确保预览转完整不重复扣 clone 点。
+- Chunked upload 从单点上传升级为 Gateway 控制面：per-user/global inflight、anonymous TTL、daily GB、disk floor、ready TTL 都由 admin settings 控制。
+- 商业化支付面扩展到 Paddle MoR、WeChat Native、refund closure 与 billing reconciliation；fake payment production gate 仍保留。
+- 语言字段与 registry 进入 job/API/model：source/target language facts 由服务端暴露，前端消费 Gateway/API truth。
+- Post-edit 新增 bulk replace 能力，仍遵守编辑态同步、commit 与交付物失效边界。
+- Admin/Ops 同步 APF、chunked upload、Smart preview clone caps、payment reconciliation、rotating logs/watchdog 等运维入口。
 
 ## 2. 关键基座
 
 | 基座 | 当前主轴 | 代表文件 |
 | --- | --- | --- |
-| Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs`，Smart inline branch、Express auto-clone gate 与 Free duration/voiceclone/watermark gate 都挂在主流程中 | `src/pipeline/process.py`, `src/services/alignment/aligner.py`, `src/services/express/pipeline_clients.py`, `src/utils/free_duration_gate.py` |
+| Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs`，Smart inline branch、Smart Preview lane、Express auto-clone gate、Anonymous Preview teaser 与 Free duration/voiceclone/watermark gate 都挂在受控流程中 | `src/pipeline/process.py`, `src/services/alignment/aligner.py`, `src/services/express/pipeline_clients.py`, `src/utils/free_duration_gate.py` |
 | Smart | deterministic auto-review, consent gate, admin policy, candidate-first reuse/clone/preset, sidecar audit, Studio handoff | `src/services/smart/*`, `src/services/smart_wiring.py`, `gateway/smart_consent.py`, `src/pipeline/process.py` |
 | Smart Reports | user quality report、admin cost summary、Smart analytics、Phase 1a/1b report analysis 分离 | `src/services/smart/sidecar_emitter.py`, `src/services/smart/quality_report_synthesizer.py`, `gateway/admin_cost_api.py`, `gateway/admin_smart_analytics_api.py` |
 | Review | `waiting_for_review -> WorkspacePage panels -> resume`，Smart handoff 复用 Studio gate，voice selection 支持 candidate-first clone/reuse | `src/services/review_state.py`, `src/services/jobs/review_actions.py`, `gateway/voice_selection_api.py` |
@@ -42,8 +43,13 @@
 | CosyVoice Worker | explicit user clone, Express consented auto-clone, clone-gate, sample/source_segments, OSS/R2 uploader, HMAC mainland worker, worker-routed TTS, temporary cleanup | `gateway/cosyvoice_clone/api.py`, `gateway/mainland_voice_worker.py`, `src/services/mainland_worker/*`, `src/services/express/*`, `gateway/express_voice_cleanup_service.py`, `src/services/tts/tts_generator.py` |
 | Express Auto Clone | availability, consent, atomic reservation, pipeline auto-clone, temporary user_voices, reservation TTL and worker delete cleanup | `gateway/entitlements.py`, `gateway/express_reservation_service.py`, `gateway/express_reservation_sweeper.py`, `gateway/express_voice_cleanup_service.py`, `src/services/express/auto_clone.py`, `src/services/express/pipeline_clients.py` |
 | Free Tier | service_mode free, voice-rights consent, daily quota ledger, MiMo voiceclone, paid API guard, duration cap, watermark, restricted downloads | `gateway/free_consent.py`, `gateway/free_service_quota.py`, `src/services/tts/voiceclone_reference.py`, `src/services/tts/mimo_tts_provider.py`, `src/utils/free_duration_gate.py`, `src/utils/free_watermark.py` |
-| Admin/Ops | settings, Smart LLM defaults, Smart voice policy, Smart analytics, report analysis, Phase 1b flags, traffic, support, cost, disk cleanup/resize, R2 sweeper, Express CosyVoice control/cleanup, free voiceclone kill switch | `gateway/admin_settings.py`, `src/services/llm_registry.py`, `gateway/admin_smart_analytics_api.py`, `gateway/admin_cosyvoice_control_api.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/main.py` |
-| Metering & Settlement | `UsageMeter`, voice reuse/clone/rejection meter, MiMo v2.5/voiceclone provider usage, RMB-direct/promotional/free pricing, Smart credits policy, terminal settle, cost backfill | `src/services/usage_meter.py`, `gateway/cost_management.py`, `gateway/credits_service.py`, `gateway/job_terminal_mirror.py`, `gateway/cost_summary_backfill.py`, `src/services/gemini/translator.py`, `src/services/transcript_reviewer.py`, `src/services/tts/mimo_tts_provider.py` |
+| Anonymous Preview Funnel | marketing trial, anonymous session, direct/chunked upload, APF admission, probe/compliance, stream-only teaser, claim, convert-to-full via `reuse_anonymous_preview_id` | `gateway/anonymous_preview_api.py`, `gateway/anonymous_preview_chunked_api.py`, `gateway/anonymous_preview_intake_wiring.py`, `src/services/anonymous_preview_admission.py`, `frontend-next/src/components/marketing/anonymous-trial-panel.tsx`, `frontend-next/src/lib/api/claim.ts` |
+| Smart Preview Clone/Billing | Smart preview teaser, MiniMax clone reservation, 600 credit capture/release/carryover, preview-to-full offset, strict reservation gate | `gateway/smart_clone_reservation_service.py`, `gateway/smart_clone_reservation_sweeper.py`, `gateway/credits_service.py`, `frontend-next/src/lib/api/smartPreviewClone.ts`, `gateway/alembic/versions/037_smart_clone_reservations.py`, `gateway/alembic/versions/039_smart_clone_carryover.py` |
+| Upload & Intake | direct upload, chunked upload, anonymous TTL, daily GB, disk floor, ready TTL, intake bridge into preview/create flows | `gateway/chunked_upload_api.py`, `gateway/chunked_upload_service.py`, `gateway/anonymous_preview_chunked_api.py`, `gateway/admin_settings.py`, `frontend-next/src/lib/upload/chunkedUpload.ts` |
+| Billing Providers | plan truth, Paddle MoR, WeChat Native, refund closure, reconciliation, fake payment production guard | `gateway/plan_catalog.py`, `gateway/payment_provider_paddle.py`, `gateway/payment_provider_wechat.py`, `gateway/billing_reconciliation.py`, `gateway/payment_providers.py`, `gateway/credits_service.py` |
+| Language Facts | source/target language registry, job language fields, language facts API, frontend consumer truth | `src/services/language_registry.py`, `gateway/alembic/versions/036_job_language_fields.py`, `src/services/jobs/api.py`, `frontend-next/src/lib/api/languages.ts` |
+| Admin/Ops | settings, APF/chunked upload/Smart preview clone caps, Smart LLM defaults, Smart voice policy, Smart analytics, report analysis, Phase 1b flags, traffic, support, cost, payment reconciliation, logs/watchdog, disk cleanup/resize, R2 sweeper, Express CosyVoice control/cleanup, free voiceclone kill switch | `gateway/admin_settings.py`, `src/services/llm_registry.py`, `gateway/admin_smart_analytics_api.py`, `gateway/admin_cosyvoice_control_api.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/billing_reconciliation.py`, `gateway/main.py` |
+| Metering & Settlement | `UsageMeter`, voice reuse/clone/rejection meter, Smart preview 600 credit offset, MiMo v2.5/voiceclone provider usage, RMB-direct/promotional/free pricing, Smart credits policy, terminal settle, cost backfill | `src/services/usage_meter.py`, `gateway/cost_management.py`, `gateway/credits_service.py`, `gateway/job_terminal_mirror.py`, `gateway/cost_summary_backfill.py`, `src/services/gemini/translator.py`, `src/services/transcript_reviewer.py`, `src/services/tts/mimo_tts_provider.py` |
 | Pan Backup | admin-only Baidu Pan archive/restore, BackupRecord state machine, schedulers, residue cleanup, observability | `gateway/pan/*`, `gateway/background_task_reconciler.py`, `frontend-next/src/lib/api/pan.ts`, `scripts/r2_observability.py` |
 | Offline Evaluation | `smart_shadow_eval / sim`, Phase 1a baseline, Phase 1b report summaries, quality/cost reports | `scripts/smart_shadow_eval_collector.py`, `scripts/smart_shadow_sim_aggregator.py`, `src/services/phase1b_report_summary.py` |
 
@@ -55,6 +61,8 @@
 - Express CosyVoice Auto-Clone 图：`docs/graphs/GITNEXUS_EXPRESS_COSYVOICE_AUTO_CLONE_GRAPH.md`
 - Free Tier 图：`docs/graphs/GITNEXUS_FREE_TIER_GRAPH.md`
 - Smart 自动审核图：`docs/graphs/GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
+- Anonymous Preview Funnel 图：`docs/graphs/GITNEXUS_ANONYMOUS_PREVIEW_FUNNEL_GRAPH.md`
+- Smart Preview Clone / Billing 图：`docs/graphs/GITNEXUS_SMART_PREVIEW_CLONE_BILLING_GRAPH.md`
 - 剪映草稿交付图：`docs/graphs/GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
 - 审核流图：`docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
 - 编辑 / 后处理图：`docs/graphs/GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
@@ -71,11 +79,23 @@
 graph TD
     Marketing["Marketing / Pricing / FAQ / SEO"] --> PlansSSR["SSR plans + trial facts"]
     Marketing --> AuthFront["Phone + Email auth"]
+    Marketing --> AnonymousTrial["Anonymous trial panel"]
+    AnonymousTrial --> AnonymousSession["anonymous_session cookie"]
+    AnonymousSession --> AnonymousUpload["direct / chunked anonymous upload"]
+    AnonymousUpload --> AnonymousAdmission["APF admission + probe + compliance"]
+    AnonymousAdmission --> AnonymousPreviewJob["anonymous preview sentinel job"]
+    AnonymousPreviewJob --> AnonymousTeaser["stream-only teaser"]
+    AnonymousTeaser --> AnonymousClaimHint["post-login claim hint"]
 
     Workspace["Workspace / Projects / Result UI"] --> FrontApi["Frontend API / hooks"]
     TranslationForm["TranslationForm service_mode selector"] --> FrontApi
     TranslationForm --> ExpressConsentUI["Express auto-clone availability + consent checkbox"]
     TranslationForm --> FreeTierUI["Free tier entry + voice-rights consent"]
+    TranslationForm --> SmartPreviewUI["Smart preview confirm + result card"]
+    AnonymousClaimHint --> AuthFront
+    AnonymousClaimHint --> AnonymousClaimApi["anonymous preview claim"]
+    AnonymousClaimApi --> TranslationForm
+    SmartPreviewUI --> SmartPreviewApi["smartPreviewClone API"]
     ReviewUI["Review panels + SmartAutoDecisionPanel"] --> FrontApi
     EditUI["Post-edit UI"] --> FrontApi
     VoiceCloneUI["CosyVoice clone modal + source segment picker"] --> FrontApi
@@ -91,6 +111,10 @@ graph TD
 
     Gateway --> Billing["plan / trial / credits / payment"]
     Gateway --> Entitlements["entitlements / allowed service modes"]
+    Gateway --> AnonymousPreviewPlane["anonymous preview / claim / intake"]
+    Gateway --> ChunkedUploadPlane["chunked upload control plane"]
+    Gateway --> SmartPreviewClonePlane["smart clone reservation plane"]
+    Gateway --> LanguageFacts["language registry facts"]
     Gateway --> SmartConsent["smart_consent validator"]
     Gateway --> FreeConsent["free_consent validator"]
     Gateway --> FreeQuota["free_service_daily_usage quota ledger"]
@@ -106,8 +130,22 @@ graph TD
     Gateway --> ExpressTempCleanup["Express temporary voice cleanup"]
     Gateway --> MainlandWorkerAdmin["mainland worker admin status/healthz"]
     Gateway --> Proxy["ownership + subresource proxy"]
+    Billing --> PaymentProviders["Paddle / WeChat / fake payment providers"]
+    PaymentProviders --> Reconciliation["billing reconciliation + refund closure"]
+    Reconciliation --> Billing
+    LanguageFacts --> FrontApi
+    AnonymousPreviewPlane --> AnonymousAdmission
+    ChunkedUploadPlane --> AnonymousUpload
+    SmartPreviewApi --> SmartPreviewClonePlane
+    SmartPreviewClonePlane --> SmartCloneReservations["smart_clone_reservations 600-credit rows"]
+    SmartCloneReservations --> SmartPreviewSurface["smart preview teaser surface"]
 
     JobApi --> Workflow["process.py / ProjectWorkflow"]
+    AnonymousPreviewJob --> JobApi
+    SmartPreviewClonePlane --> JobApi
+    SmartPreviewSurface --> SmartPreviewUI
+    SmartPreviewUI --> SmartPreviewConvert["convert preview to full"]
+    SmartPreviewConvert --> JobApi
     Workflow --> EffectiveMode["derive_effective_pipeline_mode"]
     EffectiveMode --> SmartPlane["Smart auto review"]
     EffectiveMode --> StudioFlow["Studio review flow"]
@@ -261,6 +299,8 @@ graph TD
     Shadow --> Ops
 
     Settlement --> Billing
+    SmartCloneReservations --> Settlement
+    SmartPreviewConvert --> Settlement
     Entitlements --> TranslationForm
     SupportPlane --> AppShell
     Ops --> AdminUI
@@ -429,16 +469,54 @@ graph TD
 
 结论：Free tier 是可售漏斗的一部分，但其合规确认、日配额、MiMo voiceclone、时长、水印和交付限制都必须保留硬边界。
 
+### 5.15 Anonymous Preview Funnel 已经从 marketing widget 进入可追踪漏斗
+
+- `frontend-next/src/components/marketing/anonymous-trial-panel.tsx` 负责未登录试用、上传、轮询、失败重试与登录后 claim hint。
+- `gateway/anonymous_preview_api.py`、`anonymous_preview_chunked_api.py` 与 `anonymous_preview_intake_wiring.py` 把 direct/chunked upload 接入 preview intake。
+- `src/services/anonymous_preview_admission.py`、`anonymous_preview_rate_limit.py`、`anonymous_preview_probe.py`、`anonymous_preview_compliance.py` 在创建 preview job 前做 APF admission、限流、媒体探测与合规预检。
+- `frontend-next/src/lib/api/claim.ts` 只保存非敏感 `avt_anon_convert_ready` hint；真正的 source 复用由 `gateway/job_intercept.py` 通过 `reuse_anonymous_preview_id` 服务端完成。
+- 匿名预览仍是 stream-only teaser，不进入 materials pack、剪映草稿、clean download 或完整后编辑面。
+
+结论：匿名预览是可归因的拉新漏斗，不是匿名用户绕过正式权益和下载边界的完整任务。
+
+### 5.16 Smart Preview clone/billing 是独立财务链路
+
+- `frontend-next/src/lib/api/smartPreviewClone.ts`、`SmartPreviewConfirmDialog.tsx` 与 `SmartPreviewResultCard.tsx` 把 Smart preview 创建、结果展示和转完整分成独立 UI/API 层。
+- `gateway/smart_clone_reservation_service.py` 通过 600 点 reservation 约束 MiniMax clone，覆盖 daily global cap、inflight cap、billing event idempotency。
+- migration 037/038/039 分别补 reservation 表、daily cap 索引和 carryover single-use marker。
+- `gateway/credits_service.py` 处理 preview clone capture/release、preview minute release，以及 full job 对 preview 600 点 clone charge 的一次性 offset。
+- `gateway/job_terminal_mirror.py` 与 sweeper 负责 terminal settle / expire 补偿，避免 provider 调用和 ledger 状态漂移。
+
+结论：Smart Preview 不是“便宜 Smart 完整任务”，而是 stream-only teaser 加受 reservation 保护的克隆成本链路。
+
+### 5.17 商业化支付面扩展到 Paddle / WeChat / reconciliation
+
+- `gateway/payment_provider_paddle.py` 与 `gateway/payment_provider_wechat.py` 接入真实支付 provider path。
+- `gateway/billing_reconciliation.py` 负责订单/支付状态的补偿式 reconciliation。
+- refund closure 与 fake payment production gate 仍留在 Gateway 商业事实层，前端不能自建支付状态真源。
+
+结论：支付接入从 fake/dev 验证推进到多 provider + reconciliation，但 plan、trial、entitlement、ledger 仍以 Gateway 为真源。
+
+### 5.18 语言事实和 post-edit bulk replace 成为新横切面
+
+- `src/services/language_registry.py` 与 migration 036 让 job source/target language fields 成为后端事实。
+- 前端语言选择和展示应消费 API/Gateway facts，不重新发明语言规则。
+- `src/services/jobs/editing_bulk_replace.py` 把批量替换纳入 post-edit 操作模型，仍要尊重编辑态同步、commit、audio sync 和交付物失效。
+
+结论：多语言和批量编辑都已经进入正式模型，后续任务要优先读语言 registry 与 editing 图，而不是只改前端文案。
+
 ## 6. 按任务选图
 
 - 要看 CosyVoice clone、clone-gate、source_segments、mainland worker、HMAC、worker routing、`requires_worker` TTS dispatch，读 `GITNEXUS_COSYVOICE_MAINLAND_WORKER_GRAPH.md`
 - 要看 Express 自动克隆、availability、consent、reservation、临时音色 cleanup、manual cleanup CLI，读 `GITNEXUS_EXPRESS_COSYVOICE_AUTO_CLONE_GRAPH.md`
 - 要看 Free tier、voice-rights consent、daily quota、MiMo voiceclone、duration cap、watermark、restricted downloads，读 `GITNEXUS_FREE_TIER_GRAPH.md`
+- 要看 Anonymous Preview Funnel、direct/chunked upload、APF admission、claim、convert-to-full、`reuse_anonymous_preview_id`，读 `GITNEXUS_ANONYMOUS_PREVIEW_FUNNEL_GRAPH.md`
+- 要看 Smart Preview 3 分钟 teaser、MiniMax clone、600 点 reservation/carryover、预览转完整抵扣，读 `GITNEXUS_SMART_PREVIEW_CLONE_BILLING_GRAPH.md`
 - 要看 Smart 自动审核、consent、P5 possible-match auto-reuse、voice reuse/clone quota、handoff、quality report、cost summary，读 `GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md`
-- 要看 phone/email auth、trial、pricing truth、Smart/Express/Free entry/entitlement/consent/weak-match warning、payment production gate、CSRF，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
-- 要看 Smart/Studio post-edit 修改入口、multi-cut、智能切点和编辑态克隆/复用音色，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
+- 要看 phone/email auth、trial、pricing truth、Smart/Smart Preview/Express/Free entry/entitlement/consent/weak-match warning、Paddle/WeChat/reconciliation、payment production gate、CSRF，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 要看 Smart/Studio post-edit 修改入口、multi-cut、bulk replace、智能切点和编辑态克隆/复用音色，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
 - 要看 admin disk cleanup/resize、Smart voice policy、Smart analytics、report analysis、Phase 1b flags、Smart LLM model config、Express CosyVoice control/cleanup、free voiceclone kill switch、cost summary admin page、settlement backfill、CSRF/polling/生产安全运维面，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
-- 要看 Smart sidecar、UsageMeter、MiMo v2.5/voiceclone usage/cost、voice reuse/clone/rejection metering、RMB-direct/promotional/free pricing、Phase 1a/1b reports、shadow eval、质量与成本，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
+- 要看 Smart sidecar、UsageMeter、Smart Preview 600 点 offset、MiMo v2.5/voiceclone usage/cost、voice reuse/clone/rejection metering、RMB-direct/promotional/free pricing、Phase 1a/1b reports、shadow eval、质量与成本，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
 - 要看 review UI、candidate-first voice selection、Smart 弱匹配暂停与决策摘要，读 `GITNEXUS_REVIEW_GRAPH.md`
 - 要看 workflow 内核、DSP-first 对齐、voice_id 传播与 cue pipeline，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
 - 要看百度网盘归档/恢复、Pan OAuth、BackupRecord 状态机、调度器、stale/residue/orphan cleanup，读 `GITNEXUS_PAN_BACKUP_GRAPH.md`

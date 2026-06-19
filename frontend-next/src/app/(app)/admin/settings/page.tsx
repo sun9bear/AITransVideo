@@ -123,6 +123,7 @@ interface AdminSettings {
   // resolver 转字节）。
   anonymous_preview_max_upload_mb: number
   anonymous_preview_max_seconds: number
+  anonymous_preview_max_source_seconds: number
   anonymous_preview_cap_global_per_day: number
   anonymous_preview_cap_per_ip: number
   anonymous_preview_cap_per_device: number
@@ -255,6 +256,7 @@ const DEFAULT_SETTINGS: AdminSettings = {
   // 必须与 gateway/admin_settings.py Pydantic 默认值严格一致。
   anonymous_preview_max_upload_mb: 200,
   anonymous_preview_max_seconds: 180,
+  anonymous_preview_max_source_seconds: 1800,
   anonymous_preview_cap_global_per_day: 500,
   anonymous_preview_cap_per_ip: 3,
   anonymous_preview_cap_per_device: 1,
@@ -412,6 +414,7 @@ const CHUNKED_UPLOAD_FIELDS: Array<{
 // APF 限制旋钮的输入框元数据：边界与 gateway _APF_LIMIT_BOUNDS 一致。
 const APF_LIMIT_FIELDS: Array<{
   key: 'anonymous_preview_max_upload_mb' | 'anonymous_preview_max_seconds'
+    | 'anonymous_preview_max_source_seconds'
     | 'anonymous_preview_cap_global_per_day' | 'anonymous_preview_cap_per_ip'
     | 'anonymous_preview_cap_per_device' | 'anonymous_preview_cap_per_source'
   label: string
@@ -430,11 +433,19 @@ const APF_LIMIT_FIELDS: Array<{
   },
   {
     key: 'anonymous_preview_max_seconds',
-    label: '预览时长上限',
+    label: '预览长度（广告/交付）',
     unit: '秒',
     min: 30,
     max: 7200,
-    description: '生成的预览只取视频前 N 秒（180 = 前 3 分钟）。同时影响前端面板提示文案。',
+    description: '匿名用户看到的预览长度（180 = 前 3 分钟），影响 /limits 面板文案。实际 teaser 恒裁 3 分钟，建议保持 180。源视频上传时长上限是下方独立项。',
+  },
+  {
+    key: 'anonymous_preview_max_source_seconds',
+    label: '源视频上传时长上限',
+    unit: '秒',
+    min: 180,
+    max: 10800,
+    description: '匿名用户可上传的最长源视频（1800 = 30 分钟，10800 = 180 分钟）。与预览长度独立：源可更长，预览仍只取前 3 分钟。超限上传被拒并提示更换视频。',
   },
   {
     key: 'anonymous_preview_cap_global_per_day',
