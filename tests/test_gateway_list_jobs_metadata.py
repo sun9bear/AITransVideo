@@ -189,6 +189,60 @@ def test_list_jobs_pages_after_user_filtering_and_strips_upstream_query():
     assert proxy_mock.call_args.kwargs["override_query"] == ""
 
 
+def test_list_jobs_rolls_back_when_terminal_mirror_fails():
+    import job_intercept
+
+    upstream_job = {
+        "job_id": "job_1",
+        "status": "succeeded",
+        "current_stage": "completed",
+        "completed_at": "2026-05-10T07:29:11+00:00",
+    }
+    db_row = SimpleNamespace(
+        job_id="job_1",
+        status="running",
+        current_stage="s5",
+        display_name=None,
+        expires_at=None,
+        editing_touched_at=None,
+        copy_of_job_id=None,
+        root_job_id="job_1",
+        edit_generation=0,
+    )
+
+    db = AsyncMock()
+    calls = {"n": 0}
+
+    async def execute(_stmt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _AllResult([("job_1",)])
+        return _ScalarsResult([db_row])
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated list mirror failure")
+
+    db.execute = execute
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    request = _make_request()
+    user = SimpleNamespace(id="uid-1")
+    upstream = FastAPIResponse(
+        content=json.dumps({"jobs": [upstream_job]}).encode("utf-8"),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+
+    with patch("job_intercept.proxy_request", new=AsyncMock(return_value=upstream)), \
+         patch.object(job_intercept, "mirror_job_terminal_state", new=boom):
+        response = _run(intercept_list_jobs(request, db, user))
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["jobs"][0]["job_id"] == "job_1"
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+
+
 def test_get_job_routes_terminal_payload_through_mirror_before_merge():
     import job_intercept
 
