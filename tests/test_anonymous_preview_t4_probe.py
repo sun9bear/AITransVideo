@@ -370,6 +370,7 @@ class TestBuildProbeFnUnit:
         result, source_hash = self._run_probe(True, 300.0, 0, "179.5")
         assert result.failure_reason is None
         assert result.duration_seconds == pytest.approx(179.5, abs=1e-6)
+        assert result.source_duration_seconds == pytest.approx(300.0, abs=1e-6)
         assert result.source_hash == source_hash
         assert result.audio_present is True
         # teaser_candidate_range should be (0, duration)

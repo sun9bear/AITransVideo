@@ -409,7 +409,8 @@ def build_probe_fn(
     5. Return ``ProbeResult(duration_seconds=teaser_dur, source_hash=<passthrough>,
        media_type=container_format, audio_present=...,
        audio_quality_score=0.0,
-       teaser_candidate_range=(0.0, teaser_dur))``.
+       teaser_candidate_range=(0.0, teaser_dur),
+       source_duration_seconds=src_duration)``.
 
     ``source_hash`` is passed in externally (from the upload layer) and is
     echoed back unchanged on ``ProbeResult.source_hash`` — per AD-1 the
@@ -438,11 +439,12 @@ def build_probe_fn(
                 teaser_candidate_range=(0.0, 0.0),
                 failure_reason=src_probe["failure_reason"],
             )
+        source_duration = float(src_probe["duration_seconds"])
 
         # Step 2 — cut teaser（软上限：静音对齐切点，产品裁定 2026-06-12）
         cut_at = choose_teaser_cut_seconds(
             source_path,
-            src_probe.get("duration_seconds"),
+            source_duration,
             float(max_teaser_seconds),
         )
         dest_path = teaser_dest_for(source_path)
@@ -456,6 +458,7 @@ def build_probe_fn(
                 audio_quality_score=0.0,
                 teaser_candidate_range=(0.0, 0.0),
                 failure_reason=teaser.failure_reason,
+                source_duration_seconds=source_duration,
             )
 
         teaser_dur = teaser.duration_seconds  # already validated by cut_teaser
@@ -484,6 +487,7 @@ def build_probe_fn(
                 audio_quality_score=0.0,
                 teaser_candidate_range=(0.0, teaser_dur),
                 failure_reason=_REASON_DURATION_CAP,
+                source_duration_seconds=source_duration,
             )
 
         return ProbeResult(
@@ -494,6 +498,7 @@ def build_probe_fn(
             audio_quality_score=1.0,
             teaser_candidate_range=(0.0, teaser_dur),
             failure_reason=None,
+            source_duration_seconds=source_duration,
         )
 
     return _probe

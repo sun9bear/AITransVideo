@@ -176,6 +176,11 @@ class ProbeResult:
     audio_quality_score: float
     teaser_candidate_range: Tuple[float, float]
     failure_reason: Optional[str] = None
+    # Optional original-source duration. ``duration_seconds`` remains the
+    # canonical teaser/preview duration for PreviewRecord; callers that cut a
+    # teaser before admission can populate this field so source-duration caps
+    # are enforced against the original upload.
+    source_duration_seconds: Optional[float] = None
 
 
 @dataclass
