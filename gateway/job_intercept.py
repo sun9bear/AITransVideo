@@ -90,6 +90,14 @@ from services.language_registry import (
 # never silently skip review.
 _NON_INTERACTIVE_LANGUAGE_PAIRS = frozenset({make_pair_key(LANG_ZH_CN, LANG_EN)})
 
+
+async def _rollback_quietly(db: AsyncSession, *, context: str) -> None:
+    try:
+        await db.rollback()
+    except Exception:
+        logger.debug("%s rollback failed", context, exc_info=True)
+
+
 _SMART_PAID_CLONE_CONFIRM_FIELDS = (
     "confirm_paid_voice_clone_credits",
     "confirm_paid_voice_clone_600_credits",
@@ -1388,6 +1396,7 @@ async def intercept_list_jobs(
 
         # Sync status from upstream to DB + settle quota on terminal transitions
         upstream_by_id = {j.get("job_id"): j for j in all_jobs if j.get("job_id")}
+        mirror_failed = False
         for jid in user_job_ids:
             db_job = user_jobs.get(jid)
             upstream_job = upstream_by_id.get(jid)
@@ -1457,11 +1466,23 @@ async def intercept_list_jobs(
                             ),
                         )
                 except Exception:
-                    pass
-        try:
-            await db.commit()
-        except Exception:
-            await db.rollback()
+                    mirror_failed = True
+                    logger.warning(
+                        "list_jobs terminal mirror failed for job %s; rolling back",
+                        jid,
+                        exc_info=True,
+                    )
+                    await _rollback_quietly(
+                        db,
+                        context="list_jobs terminal mirror",
+                    )
+                    break
+        if not mirror_failed:
+            try:
+                await db.commit()
+            except Exception:
+                logger.warning("list_jobs commit failed; rolling back", exc_info=True)
+                await _rollback_quietly(db, context="list_jobs commit")
 
         # Only return jobs that belong to this user in DB
         filtered_jobs = [
@@ -1504,6 +1525,7 @@ async def intercept_list_jobs(
         )
     except Exception as exc:
         import traceback
+        await _rollback_quietly(db, context="list_jobs filter")
         print(f"[GATEWAY] ❌ Failed to filter jobs: {exc}", flush=True)
         print(f"[GATEWAY] ❌ Traceback: {traceback.format_exc()}", flush=True)
         return upstream_response
@@ -3219,7 +3241,15 @@ async def intercept_get_job(
             # because the surrounding handler returns through several paths.
             await db.commit()
         except Exception:
-            logger.debug("job detail mirror/notification hook failed", exc_info=True)
+            logger.warning(
+                "job detail mirror/notification hook failed for job %s; rolling back",
+                job_id,
+                exc_info=True,
+            )
+            await _rollback_quietly(
+                db,
+                context="job detail mirror/notification hook",
+            )
         payload = _merge_gateway_job_metadata(payload, db_job)
         # Plan §10.4 deepening: redact progress_message + error_summary.message
         # for non-admin. Admin path is no-op inside the helper.
@@ -3230,6 +3260,7 @@ async def intercept_get_job(
             headers={"content-type": "application/json"},
         )
     except Exception:
+        await _rollback_quietly(db, context="job detail metadata merge")
         logger.exception("Failed to merge gateway metadata for job %s", job_id)
         return upstream_response
 
