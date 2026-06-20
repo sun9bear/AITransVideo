@@ -21,6 +21,7 @@ import sys
 import uuid as _uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 # Make src/ importable for any future helpers that legitimately live in
@@ -142,6 +143,15 @@ POST_EDIT_RESPONSE_FIELDS = (
     "root_job_id",
     "edit_generation",
     "role_snapshot",
+)
+
+GATEWAY_JOB_METADATA_SNAPSHOT_FIELDS = (
+    "status",
+    "current_stage",
+    *POST_EDIT_RESPONSE_FIELDS,
+    "source_language",
+    "target_language",
+    "language_pair",
 )
 
 JOB_LIST_DEFAULT_LIMIT = 20
@@ -378,6 +388,17 @@ def _merge_gateway_job_metadata(upstream_job: dict, db_job: Job | None) -> dict:
         if value is not None:
             merged[lang_field] = value
     return merged
+
+
+def _snapshot_gateway_job_metadata(db_job: Job | None) -> SimpleNamespace | None:
+    if db_job is None:
+        return None
+    return SimpleNamespace(
+        **{
+            field: getattr(db_job, field, None)
+            for field in GATEWAY_JOB_METADATA_SNAPSHOT_FIELDS
+        }
+    )
 
 
 def _job_create_response_payload_from_db_job(job: Job, *, idempotent: bool = False) -> dict:
@@ -1369,17 +1390,20 @@ async def intercept_list_jobs(
         # does not always carry (`display_name`, `expires_at`, cleanup status).
         result_user = await db.execute(select(Job).where(Job.user_id == user.id))
         user_jobs: dict[str, Job] = {}
+        user_job_snapshots: dict[str, SimpleNamespace] = {}
         user_job_ids: set[str] = set()
         try:
             scalar_rows = result_user.scalars().all()
         except Exception:
             scalar_rows = None
         if isinstance(scalar_rows, list):
-            user_jobs = {
-                row.job_id: row
-                for row in scalar_rows
-                if getattr(row, "job_id", None)
-            }
+            for row in scalar_rows:
+                row_job_id = getattr(row, "job_id", None)
+                if row_job_id:
+                    user_jobs[row_job_id] = row
+                    snapshot = _snapshot_gateway_job_metadata(row)
+                    if snapshot is not None:
+                        user_job_snapshots[row_job_id] = snapshot
             user_job_ids = set(user_jobs)
         if not user_job_ids:
             # Compatibility for tests / older adapters that still return rows
@@ -1397,6 +1421,7 @@ async def intercept_list_jobs(
         # Sync status from upstream to DB + settle quota on terminal transitions
         upstream_by_id = {j.get("job_id"): j for j in all_jobs if j.get("job_id")}
         mirror_failed = False
+        use_snapshot_metadata = False
         for jid in user_job_ids:
             db_job = user_jobs.get(jid)
             upstream_job = upstream_by_id.get(jid)
@@ -1411,6 +1436,9 @@ async def intercept_list_jobs(
                         db_job = result_job.scalar_one_or_none()
                         if db_job is not None:
                             user_jobs[jid] = db_job
+                            snapshot = _snapshot_gateway_job_metadata(db_job)
+                            if snapshot is not None:
+                                user_job_snapshots[jid] = snapshot
                     if db_job is not None:
                         if db_job.status == "purged":
                             # Gateway cleanup is authoritative. A stale Job API
@@ -1467,6 +1495,7 @@ async def intercept_list_jobs(
                         )
                 except Exception:
                     mirror_failed = True
+                    use_snapshot_metadata = True
                     logger.warning(
                         "list_jobs terminal mirror failed for job %s; rolling back",
                         jid,
@@ -1481,12 +1510,14 @@ async def intercept_list_jobs(
             try:
                 await db.commit()
             except Exception:
+                use_snapshot_metadata = True
                 logger.warning("list_jobs commit failed; rolling back", exc_info=True)
                 await _rollback_quietly(db, context="list_jobs commit")
 
         # Only return jobs that belong to this user in DB
+        metadata_jobs = user_job_snapshots if use_snapshot_metadata else user_jobs
         filtered_jobs = [
-            _merge_gateway_job_metadata(j, user_jobs.get(j.get("job_id")))
+            _merge_gateway_job_metadata(j, metadata_jobs.get(j.get("job_id")))
             for j in all_jobs
             if j.get("job_id") in user_job_ids
         ]
@@ -3217,12 +3248,14 @@ async def intercept_get_job(
             select(Job).where(Job.job_id == job_id, Job.user_id == user.id)
         )
         db_job = result.scalar_one_or_none()
+        db_job_snapshot = _snapshot_gateway_job_metadata(db_job)
         # Plan 2026-05-08 §16: emit notification first while the Gateway row
         # still has the previous status, then route the upstream payload through
         # the same mirror helper used by list-jobs and the R2 sweeper. This
         # keeps terminal status + quota + credit settlement behind one
         # idempotent entrypoint; the notification helper is intentionally
         # notification-only and must not write db_job.status.
+        use_snapshot_metadata = False
         try:
             upstream_status = payload.get("status") if isinstance(payload, dict) else None
             from notifications_helpers import maybe_dispatch_job_transition
@@ -3241,6 +3274,7 @@ async def intercept_get_job(
             # because the surrounding handler returns through several paths.
             await db.commit()
         except Exception:
+            use_snapshot_metadata = True
             logger.warning(
                 "job detail mirror/notification hook failed for job %s; rolling back",
                 job_id,
@@ -3250,7 +3284,8 @@ async def intercept_get_job(
                 db,
                 context="job detail mirror/notification hook",
             )
-        payload = _merge_gateway_job_metadata(payload, db_job)
+        metadata_job = db_job_snapshot if use_snapshot_metadata else db_job
+        payload = _merge_gateway_job_metadata(payload, metadata_job)
         # Plan §10.4 deepening: redact progress_message + error_summary.message
         # for non-admin. Admin path is no-op inside the helper.
         _redact_job_record_in_place(payload, user)
