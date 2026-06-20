@@ -483,6 +483,17 @@ def select_cosyvoice_voice_match(
     persona = (persona_style or "").lower().strip()
     energy = (energy_level or "").lower().strip()
 
+    # PR-E slice 3 (fail-closed defense): CosyVoice is Chinese-only. Routing
+    # (get_fallback_provider) + the matchable migration keep a non-zh dub away from
+    # CosyVoice; if one still reaches here the voice would be Chinese, so warn loudly
+    # to make the misroute visible. The zh path is unchanged (byte-identical).
+    if target_language and target_language not in ("zh-CN", "zh"):
+        logger.warning(
+            "[CosyVoice-matcher] non-zh target_language=%s reached CosyVoice (Chinese-only); "
+            "voice would be Chinese — check routing/matchable (PR-E)",
+            target_language,
+        )
+
     # --- Step 1: Load voice pool ---
     endpoint_mode = get_runtime_endpoint_mode()
     pool = list_matchable_cosyvoice_voices(target_language=target_language)

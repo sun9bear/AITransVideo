@@ -1247,7 +1247,10 @@ class TTSGenerator:
 
         # --- Fallback provider ---
         voice_clone_enabled = bool(getattr(segment, "voice_id", None))
-        fallback = get_fallback_provider(provider, voice_clone_enabled)
+        # PR-E slice 3: pass the dub target language so a non-zh dub never falls back
+        # to the Chinese-only CosyVoice (fail-closed). Default (no attr → zh) unchanged.
+        _seg_target_language = getattr(segment, "target_language", None)
+        fallback = get_fallback_provider(provider, voice_clone_enabled, _seg_target_language)
         if fallback:
             # T7: user-visible warning AND structured log for traceability.
             # The primary provider here is the one the user selected (e.g.
