@@ -25,6 +25,13 @@ from services.gemini.translator import (
 
 _NON_SPOKEN_CHAR_PATTERN = re.compile(r"[^\u4e00-\u9fff\u3400-\u4dbfa-zA-Z0-9]")
 
+#: Mean spoken chars (letters+digits, no spaces) per English word, used to convert
+#: the pipeline's CHARACTER-based rewrite bounds into the WORD budget the Latin
+#: prompt + self-check use. PROVISIONAL (v3 line 128/216 defers per-language cps
+#: recalibration); kept consistent with LanguageDescriptor.spoken_units_per_second
+#: (en 2.6 words/s * 4.7 chars/word ~= 12.2 chars/s, the measured English char-rate).
+_LATIN_CHARS_PER_WORD = 4.7
+
 
 class GeminiRewriter:
     def __init__(
@@ -89,6 +96,15 @@ class GeminiRewriter:
             self.chars_per_second,
         )
 
+    def _to_target_budget_units(self, char_count: int) -> int:
+        """Convert a CHARACTER-based budget bound (computed by the pipeline from the
+        char-rate cps) into the TARGET spoken unit. CJK → unchanged (byte-identical).
+        Latin → words (÷ mean chars/word), so the prompt label, the model's word
+        self-check, and the pipeline's char guard all stay mutually consistent."""
+        if self._target_is_latin:
+            return max(1, round(char_count / _LATIN_CHARS_PER_WORD))
+        return char_count
+
     def rewrite_for_duration(
         self,
         cn_text: str,
@@ -136,11 +152,13 @@ class GeminiRewriter:
         if target_lower_chars is None:
             target_lower_chars = max(1, int(target_chars * min_ratio))
         else:
-            target_lower_chars = max(1, int(target_lower_chars))
+            target_lower_chars = max(1, self._to_target_budget_units(int(target_lower_chars)))
         if target_upper_chars is None:
             target_upper_chars = max(target_lower_chars, int(target_chars * max_ratio))
         else:
-            target_upper_chars = max(target_lower_chars, int(target_upper_chars))
+            target_upper_chars = max(
+                target_lower_chars, self._to_target_budget_units(int(target_upper_chars))
+            )
         prompt = self._build_rewrite_prompt(
             normalized_text,
             direction=direction,
@@ -189,8 +207,9 @@ class GeminiRewriter:
         normalized_text = (cn_text or "").strip()
         if not normalized_text:
             return normalized_text
-        lower_chars = max(1, int(target_lower_chars))
-        upper_chars = max(lower_chars, int(target_upper_chars))
+        # CHAR-based bounds from the pipeline → TARGET spoken unit (Latin: words).
+        lower_chars = max(1, self._to_target_budget_units(int(target_lower_chars)))
+        upper_chars = max(lower_chars, self._to_target_budget_units(int(target_upper_chars)))
         prompt = self._build_short_content_compact_prompt(
             normalized_text,
             source_text=source_text,

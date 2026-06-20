@@ -111,3 +111,65 @@ def test_units_per_second_latin_uses_word_rate_not_char_cps() -> None:
     r = GeminiRewriter(t, chars_per_second=4.5, chars_per_second_by_speaker={"A": 13.0})
     assert r._spoken_units_per_second("A") == 2.6
     assert r._spoken_units_per_second("Z") == 2.6
+
+
+# ── char-bound → word-budget conversion (CodeX P2 part 2) ────────────────────
+
+def test_to_target_budget_units_cjk_passthrough() -> None:
+    # CJK bounds from the pipeline are already char counts → unchanged (byte-identical).
+    r = _rewriter("en", "zh-CN")
+    assert r._to_target_budget_units(60) == 60
+    assert r._to_target_budget_units(1) == 1
+
+
+def test_to_target_budget_units_latin_converts_chars_to_words() -> None:
+    r = _rewriter("zh-CN", "en")
+    assert r._to_target_budget_units(47) == round(47 / 4.7)  # 10
+    assert r._to_target_budget_units(66) == round(66 / 4.7)  # 14
+    assert r._to_target_budget_units(0) == 1  # floor never below 1
+
+
+def test_rewrite_for_duration_latin_prompt_renders_word_bounds_not_char_bounds() -> None:
+    # The pipeline passes CHAR bounds (47-66). For a Latin target the prompt must
+    # show the WORD budget (~10-14), so the label, the model's word self-check, and
+    # the pipeline's char guard stay consistent — not the raw 47/66 char counts.
+    r = _rewriter("zh-CN", "en")
+    captured: dict[str, str] = {}
+
+    def _fake_call(task_name, prompt, json_mode=False):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return "a rewritten english sentence"
+
+    r._call_task_with_usage_phase = _fake_call  # type: ignore[assignment]
+    r.rewrite_for_duration_with_profile(
+        "hello there world",
+        actual_duration_ms=6000,
+        target_duration_ms=4000,
+        source_text="你好",
+        target_lower_chars=47,
+        target_upper_chars=66,
+    )
+    prompt = captured["prompt"]
+    assert "10~14" in prompt  # converted word band
+    assert "47" not in prompt and "66" not in prompt  # raw char bounds gone
+
+
+def test_rewrite_for_duration_cjk_prompt_keeps_char_bounds_byte_identical() -> None:
+    r = _rewriter("en", "zh-CN")
+    captured: dict[str, str] = {}
+
+    def _fake_call(task_name, prompt, json_mode=False):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return "改写后的中文"
+
+    r._call_task_with_usage_phase = _fake_call  # type: ignore[assignment]
+    r.rewrite_for_duration_with_profile(
+        "你好世界你好世界",
+        actual_duration_ms=6000,
+        target_duration_ms=4000,
+        source_text="hello",
+        target_lower_chars=47,
+        target_upper_chars=66,
+    )
+    prompt = captured["prompt"]
+    assert "47~66" in prompt  # CJK bounds untouched
