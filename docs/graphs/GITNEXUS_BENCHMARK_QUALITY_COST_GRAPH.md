@@ -51,7 +51,12 @@ graph TD
     Review["translation review / voice selection"] --> UserAudit["user_edit_events.jsonl"]
     PostEdit["editing actions / commit"] --> UserAudit
     Runner["process_runner / Job API"] --> JobEvents["JobEvent stream"]
+    Runner --> Watchdog["wall-clock watchdog"]
+    Watchdog --> JobEvents
     PanExec["pan backup / restore / cleanup"] --> PanEvents["pan.* event_log"]
+    AnonymousPreview["anonymous preview / APF"] --> ApfUsage["anonymous_preview_daily_usage"]
+    AnonymousPreview --> JobEvents
+    PaymentProviders["Paddle / WeChat"] --> PaymentRecon["billing_reconciliation"]
 
     Smart["Smart auto review"] --> SmartDecision["smart_decisions.jsonl"]
     Smart --> SmartQuality["smart_quality_report.json"]
@@ -88,6 +93,7 @@ graph TD
     BillingRecon --> Settlement
     Settlement --> Backfill["cost_summary_backfill.py"]
     Backfill --> SmartCost
+    PaymentRecon --> Settlement
 
     Usage --> ProviderModel["tts provider/model breakdown"]
     Usage --> VoiceMetrics["voice_clone / voice_reuse / candidate_rejected metrics"]

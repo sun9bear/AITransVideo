@@ -409,6 +409,7 @@ graph TD
 - 想排查 CosyVoice clone 为什么不可用、为什么必须用户显式触发
 - 想改候选音色确认、弱匹配暂停提示、非计费候选拒绝审计
 - 想改 fake payment、生产支付门禁、CSRF 同源保护
+- 想改 Paddle、WeChat、refund closure 或 billing reconciliation
 - 想确认 Smart 全自动产品承诺与 translation review audit-only 的边界
 - 想改 privacy / terms 等平台审核页面
 - 想改 phone 或 email 注册登录

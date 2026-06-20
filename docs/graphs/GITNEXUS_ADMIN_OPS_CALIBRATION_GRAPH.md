@@ -148,6 +148,7 @@ graph TD
     Security --> StartupGuard["validate_production_safety"]
     Security --> FakePaymentGate["fake payment dev/test default"]
     PollingGov["usePollingTask + visibility-aware admin heartbeat"] --> AdminUI
+    Logs["rotating_log + process runner watchdog"] --> AdminUI
     PanAdmin --> PanStatus["status / quota / credentials"]
     PanAdmin --> PanBackups["backup list / manifest / restore / delete"]
     PanAdmin --> PanBatch["single + batch backup enqueue"]

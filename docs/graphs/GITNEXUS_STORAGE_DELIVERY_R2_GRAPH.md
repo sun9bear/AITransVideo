@@ -52,6 +52,7 @@ graph TD
 
     MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
     Sweeper --> Mirror["mirror_job_terminal_state"]
+    Sweeper --> SkipAnon["skip anonymous preview jobs"]
     Mirror --> PG["Gateway PG mirror + smart_state + settle"]
     Sweeper --> Publisher["r2_publisher.py"]
     Publisher --> Keys["jobs/{job_id}/g{edit_generation}/..."]

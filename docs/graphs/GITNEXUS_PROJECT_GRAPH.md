@@ -34,9 +34,9 @@
 | Smart | deterministic auto-review, consent gate, admin policy, candidate-first reuse/clone/preset, sidecar audit, Studio handoff | `src/services/smart/*`, `src/services/smart_wiring.py`, `gateway/smart_consent.py`, `src/pipeline/process.py` |
 | Smart Reports | user quality report、admin cost summary、Smart analytics、Phase 1a/1b report analysis 分离 | `src/services/smart/sidecar_emitter.py`, `src/services/smart/quality_report_synthesizer.py`, `gateway/admin_cost_api.py`, `gateway/admin_smart_analytics_api.py` |
 | Review | `waiting_for_review -> WorkspacePage panels -> resume`，Smart handoff 复用 Studio gate，voice selection 支持 candidate-first clone/reuse | `src/services/review_state.py`, `src/services/jobs/review_actions.py`, `gateway/voice_selection_api.py` |
-| Editing | Smart/Studio `enter-edit -> editing speakers -> split-many / suggest-split -> regenerate -> batch -> commit` | `src/services/jobs/editing_segments.py`, `src/services/jobs/editing_split_suggest.py`, `src/services/jobs/editing_batch.py`, `src/services/jobs/editing_commit.py` |
-| Delivery | `materials_pack / generate_video / editor.jianying_draft_zip / R2 registry / parity`，free 只暴露水印视频与 poster | `gateway/storage/backend_router.py`, `gateway/r2_artifact_sweeper.py`, `src/services/r2_publisher_lib/r2_parity.py`, `src/services/r2_publisher_lib/downloadable_keys.py` |
-| Commercialization | Gateway owns plan, trial, pricing, entitlement, Smart/Express/Free availability, consent, fixed price/free=0, payment provider policy and production safety | `gateway/plan_catalog.py`, `gateway/entitlements.py`, `gateway/credits_service.py`, `gateway/job_intercept.py`, `gateway/payment_providers.py`, `gateway/express_consent.py`, `gateway/free_consent.py` |
+| Editing | Smart/Studio `enter-edit -> editing speakers -> split-many / suggest-split -> bulk replace -> regenerate -> batch -> commit` | `src/services/jobs/editing_segments.py`, `src/services/jobs/editing_split_suggest.py`, `src/services/jobs/editing_bulk_replace.py`, `src/services/jobs/editing_batch.py`, `src/services/jobs/editing_commit.py` |
+| Delivery | `materials_pack / generate_video / editor.jianying_draft_zip / R2 registry / parity`，free 只暴露水印视频与 poster，anonymous preview 只暴露 stream-only teaser | `gateway/storage/backend_router.py`, `gateway/r2_artifact_sweeper.py`, `src/services/r2_publisher_lib/r2_parity.py`, `src/services/r2_publisher_lib/downloadable_keys.py` |
+| Commercialization | Gateway owns plan, trial, pricing, entitlement, Smart/Express/Free availability, consent, fixed price/free=0, Paddle/WeChat provider policy, reconciliation and production safety | `gateway/plan_catalog.py`, `gateway/entitlements.py`, `gateway/credits_service.py`, `gateway/job_intercept.py`, `gateway/payment_provider_paddle.py`, `gateway/payment_provider_wechat.py`, `gateway/billing_reconciliation.py`, `gateway/payment_providers.py`, `gateway/express_consent.py`, `gateway/free_consent.py` |
 | Auth | phone + email registration, reset, session | `gateway/auth_phone.py`, `gateway/auth_email.py`, `frontend-next/src/components/auth/*` |
 | Security | CSRF same-origin guard, production env validation, fake payment production gate | `gateway/csrf.py`, `gateway/main.py`, `gateway/startup_checks.py`, `gateway/payment_providers.py` |
 | Calibration | manual / clone-after / review-preflight / Smart clone mirror / candidate matching / source metadata | `gateway/user_voice_api.py`, `gateway/user_voice_service.py`, `gateway/voice_calibration_hook.py`, `gateway/voice_calibration_review_preflight.py` |
@@ -110,6 +110,8 @@ graph TD
     FrontApi --> JobApi["Job API / artifacts / tasks"]
 
     Gateway --> Billing["plan / trial / credits / payment"]
+    Billing --> PaymentProviders["Paddle / WeChat / fake providers"]
+    PaymentProviders --> BillingRecon["billing_reconciliation"]
     Gateway --> Entitlements["entitlements / allowed service modes"]
     Gateway --> AnonymousPreviewPlane["anonymous preview / claim / intake"]
     Gateway --> ChunkedUploadPlane["chunked upload control plane"]
@@ -227,6 +229,7 @@ graph TD
     UserVoiceWorkerRow --> VoiceCandidates
 
     EditUI --> EditingPlane["Smart/Studio edit / speakers / split / regenerate / batch / commit"]
+    EditingPlane --> BulkReplace["editing_bulk_replace"]
     EditingPlane --> CloneModal
     EditingPlane --> SplitMany["SplitSegmentDialog + split-many journal"]
     EditingPlane --> SuggestSplit["LLM suggest-split explicit button"]
@@ -246,6 +249,7 @@ graph TD
     PackTask --> Delivery["downloads / R2 / local fallback"]
     JDraftTask --> Delivery
     VideoTask --> Delivery
+    AnonymousStream --> AnonymousDeliveryBoundary["no R2 / no materials / no editor draft"]
     Delivery --> FreeDownloadGate["free download/stream/eager-push restricted keys"]
 
     MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
@@ -519,4 +523,4 @@ graph TD
 - 要看 Smart sidecar、UsageMeter、Smart Preview 600 点 offset、MiMo v2.5/voiceclone usage/cost、voice reuse/clone/rejection metering、RMB-direct/promotional/free pricing、Phase 1a/1b reports、shadow eval、质量与成本，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
 - 要看 review UI、candidate-first voice selection、Smart 弱匹配暂停与决策摘要，读 `GITNEXUS_REVIEW_GRAPH.md`
 - 要看 workflow 内核、DSP-first 对齐、voice_id 传播与 cue pipeline，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
-- 要看百度网盘归档/恢复、Pan OAuth、BackupRecord 状态机、调度器、stale/residue/orphan cleanup，读 `GITNEXUS_PAN_BACKUP_GRAPH.md`
+- 要看百度网盘归档/恢复、Pan OAuth、BackupRecord 状态机、rollback archive attempt、调度器、stale/residue/orphan cleanup，读 `GITNEXUS_PAN_BACKUP_GRAPH.md`

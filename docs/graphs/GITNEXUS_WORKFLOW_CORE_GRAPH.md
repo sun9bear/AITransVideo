@@ -14,6 +14,7 @@
 - Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部读取 app-safe admin policy，优先使用个人音色候选，再决定是否 reuse、clone 或暂停确认
 - Express 快捷版新增可选 CosyVoice 自动克隆分支，必须满足 availability、server-confirmed consent、admin gate、reservation cap 后才会调用 worker
 - Free tier 新增时长 fail-closed、MiMo voiceclone reference stamp、free watermark 与 restricted deliverables
+- Anonymous Preview 新增未登录 teaser lane：APF intake/admission 先行，pipeline 标记 `anonymous_preview` 后只产出 stream-only teaser
 - Phase 1a/1b reports 是 shadow-first 质量观测，不改变 `SemanticBlock` 和 DSP-first 主线
 - language registry / job language fields 是 workflow 的输入事实，前端不应自建第二套语言规则
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
@@ -27,6 +28,7 @@ graph TD
     Snapshot --> Effective["derive_effective_pipeline_mode"]
     Snapshot --> PreviewKind["preview markers / reuse source markers"]
     Snapshot --> ExpressConsent["express_consent snapshot"]
+    Snapshot --> AnonymousPreview["anonymous_preview marker"]
     Snapshot --> FreeMode["service_mode = free"]
     Effective --> SmartMode["effective mode = smart"]
     Effective --> StudioMode["effective mode = studio"]
@@ -290,6 +292,10 @@ graph TD
   - source/target language facts
 - `gateway/express_consent.py`
   - Express consent schema validator
+- `gateway/anonymous_preview_api.py`
+  - anonymous preview create/status/stream
+- `src/services/anonymous_preview_admission.py`
+  - APF admission before workflow
 - `src/services/express/auto_clone.py`
   - Express reserve / clone / register / consume orchestration
 - `src/services/express/pipeline_clients.py`
@@ -341,6 +347,7 @@ graph TD
 ## 5. 什么时候优先读这张图
 
 - 想改 `process.py` 主流水线
+- 想改 anonymous preview teaser lane、Pass3 skip 或 preset-only 限制
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
 - 想改 anonymous preview 或 Smart preview 如何进入 teaser / convert-to-full
 - 想改 Express 自动克隆是否进入 worker clone、什么时候 fallback 到预设音色、reservation 如何消费
