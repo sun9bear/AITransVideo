@@ -88,3 +88,26 @@ def test_rewrite_prompt_tail_chinese_for_default() -> None:
     r = _rewriter("en", "zh-CN")
     p = r._build_rewrite_prompt("你好世界", "shrink", 5, 3)
     assert "最终只输出改写后的中文文本" in p
+
+
+# ── rate unit consistency (CodeX PR-CD P2) ──────────────────────────────────
+
+def test_units_per_second_cjk_is_byte_identical_calibrated() -> None:
+    # CJK target keeps the legacy calibrated-or-default char-rate exactly.
+    t = GeminiTranslator(api_key="k")
+    t._translate_source_language = "en"
+    t._translate_target_language = "zh-CN"
+    r = GeminiRewriter(t, chars_per_second=4.5, chars_per_second_by_speaker={"A": 5.0})
+    assert r._spoken_units_per_second("A") == 5.0  # calibrated wins
+    assert r._spoken_units_per_second("Z") == 4.5  # default fallback
+
+
+def test_units_per_second_latin_uses_word_rate_not_char_cps() -> None:
+    # Latin target must NOT use the char-based per-voice cps (wrong unit); it uses
+    # the language word-rate (descriptor default 2.6 wps) regardless of calibration.
+    t = GeminiTranslator(api_key="k")
+    t._translate_source_language = "zh-CN"
+    t._translate_target_language = "en"
+    r = GeminiRewriter(t, chars_per_second=4.5, chars_per_second_by_speaker={"A": 13.0})
+    assert r._spoken_units_per_second("A") == 2.6
+    assert r._spoken_units_per_second("Z") == 2.6

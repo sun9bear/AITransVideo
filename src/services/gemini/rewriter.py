@@ -47,6 +47,11 @@ class GeminiRewriter:
         self._target_language = getattr(translator, "_translate_target_language", "zh-CN")
         _tgt_desc = get_language_descriptor(self._target_language)
         self._target_is_latin = _tgt_desc is not None and _tgt_desc.script_family == "latin"
+        # Latin targets need a word-rate (the probe calibrates char-rate only, so
+        # the per-voice cps is the wrong unit for a word budget). Default 2.6 wps.
+        self._target_units_per_second_default = (
+            _tgt_desc.spoken_units_per_second if _tgt_desc is not None else 2.6
+        )
         self.rewrite_prompt_template = self._select_rewrite_template(
             get_effective_rewrite_prompt_template(rewrite_prompt_template)
         )
@@ -70,6 +75,19 @@ class GeminiRewriter:
         if self._target_is_latin:
             return len(re.findall(r"[A-Za-z0-9']+", text or ""))
         return len(_NON_SPOKEN_CHAR_PATTERN.sub("", text or ""))
+
+    def _spoken_units_per_second(self, speaker_id: str | None) -> float:
+        """Rate mapping a duration to a TARGET-unit budget, in the SAME unit as
+        :meth:`_spoken_units`. CJK → the per-voice calibrated char-rate (legacy,
+        byte-identical). Latin → the language word-rate constant: the probe
+        calibrates char-rate only, so the per-voice cps is the wrong unit for a
+        word budget and must not be used here (see CodeX PR-CD P2)."""
+        if self._target_is_latin:
+            return self._target_units_per_second_default
+        return self.chars_per_second_by_speaker.get(
+            str(speaker_id).strip(),
+            self.chars_per_second,
+        )
 
     def rewrite_for_duration(
         self,
@@ -109,10 +127,7 @@ class GeminiRewriter:
             return normalized_text
 
         current_chars = self._spoken_units(normalized_text)
-        chars_per_second = self.chars_per_second_by_speaker.get(
-            str(speaker_id).strip(),
-            self.chars_per_second,
-        )
+        chars_per_second = self._spoken_units_per_second(speaker_id)
         target_chars = max(1, int(target_duration_ms / 1000 * chars_per_second))
         direction = "shrink" if actual_duration_ms > target_duration_ms else "expand"
         change_pct = abs(actual_duration_ms - target_duration_ms) / target_duration_ms * 100

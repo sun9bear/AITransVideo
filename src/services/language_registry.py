@@ -170,11 +170,18 @@ class LanguageDescriptor:
     language: str
     script_family: str  # SCRIPT_LATIN | SCRIPT_CJK
     spoken_unit: str  # SPOKEN_UNIT_WORD | SPOKEN_UNIT_CHAR
+    #: Default spoken units (per :attr:`spoken_unit`) per second, for mapping a
+    #: target duration to a target length when no per-voice calibration applies.
+    #: zh-CN = 4.5 chars/s (byte-identical with the legacy rewriter default). en =
+    #: 2.6 words/s (~156 wpm) — PROVISIONAL, re-measure at GA (the probe currently
+    #: calibrates char-rate only, so Latin targets use this constant, not the
+    #: char-based per-voice cps). Keep this unit consistent with ``spoken_unit``.
+    spoken_units_per_second: float = 4.5
 
 
 _LANGUAGE_DESCRIPTORS: dict[str, LanguageDescriptor] = {
-    LANG_EN: LanguageDescriptor(LANG_EN, SCRIPT_LATIN, SPOKEN_UNIT_WORD),
-    LANG_ZH_CN: LanguageDescriptor(LANG_ZH_CN, SCRIPT_CJK, SPOKEN_UNIT_CHAR),
+    LANG_EN: LanguageDescriptor(LANG_EN, SCRIPT_LATIN, SPOKEN_UNIT_WORD, 2.6),
+    LANG_ZH_CN: LanguageDescriptor(LANG_ZH_CN, SCRIPT_CJK, SPOKEN_UNIT_CHAR, 4.5),
 }
 
 
