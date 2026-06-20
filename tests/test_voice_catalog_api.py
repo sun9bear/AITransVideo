@@ -152,6 +152,11 @@ class TestVoiceCatalogModel:
         }
         assert expected.issubset(col_names), f"Missing: {expected - col_names}"
 
+    def test_voice_catalog_has_compatible_target_languages_column(self) -> None:
+        # PR-E matchable migration (alembic 042): dub target-language compatibility.
+        cols = {c.name for c in VoiceCatalog.__table__.columns}
+        assert "compatible_target_languages" in cols
+
     def test_voice_label_has_fk_to_catalog(self) -> None:
         table = VoiceLabel.__table__
         fks = {fk.target_fullname for fk in table.foreign_keys}
@@ -791,6 +796,60 @@ class TestInternalVoiceCatalog:
         assert data["voices"][0]["age_group"] == "young"
         assert data["voices"][0]["persona_style"] == "warm"
         assert data["voices"][0]["energy_level"] == "medium"
+
+    # --- PR-E matchable migration: target-language filter (kill switch) ---
+
+    def _setup_db_capture(self, voice_app, voices, labels=None):
+        """Like _setup_db_for_internal but captures the first (voices) query."""
+        db = voice_app.state.mock_db
+        labels = labels or []
+        captured: dict = {}
+        voices_result = MagicMock()
+        voices_result.scalars.return_value.all.return_value = voices
+        label_result = MagicMock()
+        label_result.scalars.return_value.all.return_value = labels
+        call_count = {"n": 0}
+
+        async def smart_execute(query, *a, **k):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                captured["query"] = query
+                return voices_result
+            return label_result
+
+        db.execute = smart_execute
+        return captured
+
+    def test_internal_endpoint_target_language_filter_off_by_default(self, voice_app, client) -> None:
+        # Kill switch OFF (default) → legacy query, no language predicate (byte-identical).
+        captured = self._setup_db_capture(voice_app, [_make_voice(voice_id="zh_test_1")])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0&target_language=zh-CN",
+            headers=self._HDR,
+        )
+        assert resp.status_code == 200
+        # The column appears once in the SELECT list; OFF means no extra WHERE predicate.
+        assert str(captured["query"]).count("compatible_target_languages") == 1
+
+    def test_internal_endpoint_target_language_filter_on(self, voice_app, client, monkeypatch) -> None:
+        # Kill switch ON → query gains compatible_target_languages @> [target], so a zh
+        # dub never returns en voices (the "止血" assertion).
+        import admin_settings
+
+        class _S:
+            voice_catalog_target_language_filter_enabled = True
+
+        monkeypatch.setattr(admin_settings, "load_settings", lambda: _S())
+        captured = self._setup_db_capture(voice_app, [_make_voice(voice_id="zh_test_1")])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0&target_language=zh-CN",
+            headers=self._HDR,
+        )
+        assert resp.status_code == 200
+        # SELECT list (1) + the WHERE @> predicate (1) → at least 2 occurrences.
+        _sql = str(captured["query"])
+        assert _sql.count("compatible_target_languages") >= 2
+        assert "compatible_target_languages @>" in _sql
 
     def test_internal_endpoint_no_user_auth_required(self, voice_app, client) -> None:
         """Internal endpoint should work without a user session (only shared-secret)."""

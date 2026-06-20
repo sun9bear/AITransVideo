@@ -36,6 +36,12 @@ class VoiceCatalog(Base):
     language: Mapped[str] = mapped_column(String(20), nullable=False, server_default="zh")
     scene: Mapped[str | None] = mapped_column(String(50), nullable=True)
     matchable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    # --- Target-language compatibility (PR-E matchable migration, alembic 042) ---
+    # Which DUB *target* languages this voice supports (distinct from ``language``,
+    # the voice's own spoken language). NULL / empty ⇒ legacy → the language-aware
+    # catalog query treats it as zh-CN-only. Drives the ``voice_catalog_target_
+    # language_filter_enabled`` kill-switched query so a zh dub never returns en voices.
+    compatible_target_languages: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     verify_status: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     verify_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     source: Mapped[str] = mapped_column(String(50), nullable=False, server_default="manual")

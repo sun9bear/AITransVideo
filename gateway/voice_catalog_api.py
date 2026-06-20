@@ -143,6 +143,7 @@ async def internal_voice_catalog(
     provider: str = Query(..., description="Provider name"),
     resource_id: str | None = Query(None, description="Resource ID (e.g. seed-tts-1.0). Optional for CosyVoice."),
     endpoint_mode: str | None = Query(None, description="Endpoint mode filter (international/mainland). CosyVoice only."),
+    target_language: str | None = Query(None, description="Dub target language (e.g. zh-CN / en). Filters by compatible_target_languages when the kill switch is on. PR-E."),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Return matchable + verified voices for app runtime.
@@ -167,6 +168,19 @@ async def internal_voice_catalog(
     if endpoint_mode:
         # Filter CosyVoice by endpoint_modes array containing this mode
         query = query.where(VoiceCatalog.provider_config.op("@>")({"endpoint_modes": [endpoint_mode]}))
+    # PR-E matchable migration (kill switch): when enabled, also require the voice to
+    # declare the requested dub target language, so a zh dub never returns en voices
+    # (and vice versa). Default OFF → legacy matchable-only query (byte-identical).
+    # The kill switch gates THIS legacy query directly per plan Phase 5 (B).
+    if target_language:
+        from admin_settings import load_settings as _load_admin_settings
+
+        if getattr(
+            _load_admin_settings(), "voice_catalog_target_language_filter_enabled", False
+        ):
+            query = query.where(
+                VoiceCatalog.compatible_target_languages.op("@>")([target_language])
+            )
     result = await db.execute(query)
     voices = result.scalars().all()
 
