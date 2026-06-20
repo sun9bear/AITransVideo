@@ -3436,6 +3436,8 @@ class ProcessPipeline:
                         mode=job_service_mode,
                         skip_pass1=False,
                         usage_meter=usage_meter,
+                        source_language=self._language_profile.source_language,
+                        target_language=self._language_profile.target_language,
                     )
 
                     if review_result is not None:
