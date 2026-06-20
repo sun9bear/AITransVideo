@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
@@ -178,9 +178,22 @@ async def internal_voice_catalog(
         if getattr(
             _load_admin_settings(), "voice_catalog_target_language_filter_enabled", False
         ):
-            query = query.where(
-                VoiceCatalog.compatible_target_languages.op("@>")([target_language])
+            _matches_target = VoiceCatalog.compatible_target_languages.op("@>")(
+                [target_language]
             )
+            # re-CodeX P2: rows with the column still NULL (un-backfilled / newly seeded
+            # before a stamp lands) are legacy zh-CN-only. Include them ONLY for a zh-CN
+            # target so enabling the switch never silently drops zh voices; a non-zh
+            # target still excludes NULL (an unstamped row is not known to be that language).
+            if target_language == "zh-CN":
+                query = query.where(
+                    or_(
+                        _matches_target,
+                        VoiceCatalog.compatible_target_languages.is_(None),
+                    )
+                )
+            else:
+                query = query.where(_matches_target)
     result = await db.execute(query)
     voices = result.scalars().all()
 

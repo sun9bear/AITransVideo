@@ -3894,6 +3894,10 @@ class ProcessPipeline:
                 except Exception as exc:
                     print(f"[S4-probe] 探针翻译异常（非致命）：{exc}")
                     # logger removed — process.py uses print() for logging
+            # PR-E slice 6 (re-CodeX P2): stamp probe segments BEFORE probe TTS so a
+            # non-zh probe gets the right provider language hints + fail-closed fallback
+            # during calibration (the main-path stamp at translate() runs too late for probe).
+            self._stamp_segment_target_language(_probe_segments)
 
             # B': probe 段补说话人画像（gender/age_group/persona_style/energy_level +
             # voice_description + structure 角色）。translator.translate_probe 创建的、以及

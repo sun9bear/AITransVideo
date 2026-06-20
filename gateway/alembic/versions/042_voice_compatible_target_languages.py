@@ -50,7 +50,15 @@ def upgrade() -> None:
         UPDATE voice_catalog
         SET compatible_target_languages =
             CASE
-                WHEN lower(coalesce(language, '')) LIKE 'en%' THEN '["en"]'::jsonb
+                -- English voices across providers: VolcEngine ``language='en'`` /
+                -- ``voice_id`` like ``en_*``; MiniMax localizes ``language='英语'`` with
+                -- ``English_*`` voice ids (re-CodeX P1 — these were mis-backfilled to zh).
+                WHEN lower(coalesce(language, '')) LIKE 'en%'
+                     OR lower(coalesce(language, '')) = 'english'
+                     OR coalesce(language, '') = '英语'
+                     OR voice_id LIKE 'en\_%' ESCAPE '\'
+                     OR voice_id LIKE 'English%'
+                THEN '["en"]'::jsonb
                 ELSE '["zh-CN"]'::jsonb
             END
         WHERE compatible_target_languages IS NULL

@@ -31,6 +31,31 @@ logger = logging.getLogger(__name__)
 # Public API
 # ---------------------------------------------------------------------------
 
+# PR-E slice 1 (re-CodeX P1): VolcEngine voice_id language families. Chinese clones
+# are ``ICL_zh_*``; English seed-tts voices are ``en_*`` (e.g. en_male_tim_uranus_bigtts)
+# and rarely ``ICL_en_*``. The catalog ``language`` field is the robust signal when
+# present (MiniMax-style localized "英语" included for safety).
+_VOLC_LANG_PREFIXES: dict[str, tuple[str, ...]] = {"en": ("en_", "ICL_en_")}
+_VOLC_LANG_META: dict[str, tuple[str, ...]] = {"en": ("en", "英语", "english")}
+
+
+def _volc_voice_matches_target(voice: dict, lang_code: str) -> bool:
+    """Whether a VolcEngine catalog voice serves the target language.
+
+    zh keeps the EXACT legacy ``ICL_zh_`` prefix test (byte-identical — no language
+    metadata widening). Non-zh matches the language's voice_id prefix families or the
+    catalog ``language`` metadata.
+    """
+    vid = str(voice.get("voice_id", "") or "")
+    if lang_code == "zh":
+        return vid.startswith("ICL_zh_")
+    prefixes = _VOLC_LANG_PREFIXES.get(lang_code, (f"{lang_code}_", f"ICL_{lang_code}_"))
+    if any(vid.startswith(p) for p in prefixes):
+        return True
+    meta = _VOLC_LANG_META.get(lang_code, (lang_code,))
+    return str(voice.get("language", "") or "").strip().lower() in meta
+
+
 def select_volcengine_voice_match(
     *,
     resource_id: str,
@@ -51,7 +76,16 @@ def select_volcengine_voice_match(
     5. Return top-scored voice + remaining as backups
     """
     pool = get_voices_for_resource(resource_id, target_language=target_language)
+    _lang_code = (target_language or "zh-CN").split("-")[0].lower()
     default_voice = get_default_voice_id(resource_id)
+    # PR-E re-CodeX P2: the resource default is a Chinese voice. For a non-zh target
+    # derive the no-gender fallback from the target-language pool so an English dub
+    # without reviewer gender isn't voiced in Chinese. zh keeps the legacy default.
+    if _lang_code != "zh":
+        default_voice = next(
+            (v["voice_id"] for v in pool if _volc_voice_matches_target(v, _lang_code)),
+            default_voice,
+        )
 
     if not gender:
         logger.info("[VolcEngine-matcher] No gender, fallback=%s (resource=%s)", default_voice, resource_id)
@@ -88,13 +122,10 @@ def select_volcengine_voice_match(
             )
 
     # --- Step 1b: Language filter — prefer voices in the TARGET language ---
-    # VolcEngine voice_ids encode language as an ``ICL_{code}_`` prefix. Default
-    # (None / zh-CN) → "ICL_zh_" (byte-identical legacy); a Latin target like en →
-    # "ICL_en_" so an English dub does not get forced onto Chinese voices. Falls
-    # back to the full candidate set when no voice matches the target prefix.
-    _lang_code = (target_language or "zh-CN").split("-")[0].lower()
-    _lang_prefix = f"ICL_{_lang_code}_"
-    lang_candidates = [v for v in candidates if v["voice_id"].startswith(_lang_prefix)]
+    # zh → the legacy ICL_zh_ family (byte-identical); en → the en_ / ICL_en_ seed-tts
+    # families + catalog language metadata (re-CodeX P1 — ICL_en_ alone matched nothing,
+    # leaking zh voices). Falls back to the full candidate set when nothing matches.
+    lang_candidates = [v for v in candidates if _volc_voice_matches_target(v, _lang_code)]
     if lang_candidates:
         candidates = lang_candidates
 

@@ -851,6 +851,42 @@ class TestInternalVoiceCatalog:
         assert _sql.count("compatible_target_languages") >= 2
         assert "compatible_target_languages @>" in _sql
 
+    def test_internal_endpoint_zh_target_includes_null_compat_rows(self, voice_app, client, monkeypatch) -> None:
+        # re-CodeX P2: zh-CN + switch ON also includes un-backfilled NULL rows
+        # (legacy zh-CN-only), so enabling the switch never silently drops zh voices.
+        import admin_settings
+
+        class _S:
+            voice_catalog_target_language_filter_enabled = True
+
+        monkeypatch.setattr(admin_settings, "load_settings", lambda: _S())
+        captured = self._setup_db_capture(voice_app, [_make_voice(voice_id="zh_test_1")])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0&target_language=zh-CN",
+            headers=self._HDR,
+        )
+        assert resp.status_code == 200
+        assert "compatible_target_languages IS NULL" in str(captured["query"])
+
+    def test_internal_endpoint_en_target_excludes_null_compat_rows(self, voice_app, client, monkeypatch) -> None:
+        # A non-zh target must NOT widen to NULL rows — an unstamped row is not known
+        # to be that language.
+        import admin_settings
+
+        class _S:
+            voice_catalog_target_language_filter_enabled = True
+
+        monkeypatch.setattr(admin_settings, "load_settings", lambda: _S())
+        captured = self._setup_db_capture(voice_app, [_make_voice(voice_id="en_test_1")])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-2.0&target_language=en",
+            headers=self._HDR,
+        )
+        assert resp.status_code == 200
+        _sql = str(captured["query"])
+        assert "compatible_target_languages @>" in _sql
+        assert "compatible_target_languages IS NULL" not in _sql
+
     def test_internal_endpoint_no_user_auth_required(self, voice_app, client) -> None:
         """Internal endpoint should work without a user session (only shared-secret)."""
         voice_app.state.mock_user = None
