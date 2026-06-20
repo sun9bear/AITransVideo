@@ -17,6 +17,8 @@
 - CosyVoice clone 的用户显式付费触发、allowlist/GA gate 与 worker runtime gate
 - Express CosyVoice 自动克隆的 availability、consent、admin allowlist、reservation cap 与临时音色 cleanup
 - Free tier 的 feature flag、voice-rights consent、free=0 pricing、daily quota 与交付限制
+- Anonymous Preview 的未登录试用入口、APF caps、stream-only teaser 与 Phase 4 claim placeholder
+- Paddle MoR、WeChat Native、refund closure、billing reconciliation
 - entitlements 与 allowed service modes
 - trial 发放边界
 - fake payment production gate
@@ -34,6 +36,9 @@ graph TD
     FAQ --> FaqLd["FaqJsonLd / FAQPage"]
     Home --> SiteLd["SiteJsonLd"]
     Home --> Legal["privacy / terms pages"]
+    Home --> AnonymousTrial["anonymous trial launcher/panel"]
+    AnonymousTrial --> AnonymousPreview["anonymous preview upload/create/status/stream"]
+    AnonymousPreview --> AnonymousBoundary["stream-only teaser / no full deliverables"]
 
     Robots["robots.ts"] --> Crawlers["search + AI crawlers"]
     Sitemap["sitemap.ts"] --> Crawlers
@@ -102,7 +107,11 @@ graph TD
     AdminExpressPolicy --> ExpressReservation
 
     Billing["billing / checkout"] --> PaymentProviders["payment_providers"]
+    PaymentProviders --> Paddle["Paddle MoR"]
+    PaymentProviders --> WeChat["WeChat Native"]
+    PaymentProviders --> Reconciliation["billing_reconciliation"]
     PaymentProviders --> FakeGate["fake payment dev/test default"]
+    Reconciliation --> RefundClosure["refund closure"]
     FakeGate --> ProdSafety["AVT_ENV production safety"]
     Billing --> CSRF
 
@@ -259,6 +268,23 @@ graph TD
 
 结论：Free tier 是拉新漏斗，不是“无约束的免费 Express”；它的 consent、quota、voiceclone、duration、watermark 和 artifact 限制都是商业事实的一部分。
 
+### 3.16 Anonymous Preview 是未登录试用，不是匿名完整任务
+
+- 匿名预览入口在 marketing anonymous trial panel，不依赖登录 session。
+- APF caps、daily usage、probe/prescreen/compliance 在创建 preview job 前保护成本与合规。
+- 预览只返回 stream-only teaser，不开放完整下载、materials pack、editor draft 或后编辑。
+- `claim_user_id` / `claim_token_placeholder` 当前仍是 Phase 4 留行，不应在商业图里当作已上线认领/转完整。
+
+结论：Anonymous Preview 降低试用门槛，但商业和交付边界仍比正式任务更窄。
+
+### 3.17 Paddle / WeChat / reconciliation 是真实支付接入层
+
+- Paddle MoR 和 WeChat Native provider 进入 Gateway payment provider 层。
+- `billing_reconciliation.py` 负责异步支付状态、订单状态和 ledger 的补偿式收敛。
+- refund closure 仍通过 Gateway 状态落地；前端和 provider callback 不能成为唯一真源。
+
+结论：真实支付 provider 增加后，Gateway 仍是 plan、entitlement、billing 和 ledger 的最终裁决层。
+
 ## 4. 关键证据
 
 - `gateway/plan_catalog.py`
@@ -285,6 +311,16 @@ graph TD
   - Free voice-rights consent schema and server confirmation
 - `gateway/free_service_quota.py`
   - Free daily quota reserve / consume / release
+- `gateway/anonymous_preview_api.py`
+  - anonymous preview upload/create/status/stream
+- `gateway/anonymous_preview_limits.py`
+  - APF admin/env limits resolver
+- `gateway/payment_provider_paddle.py`
+  - Paddle MoR provider
+- `gateway/payment_provider_wechat.py`
+  - WeChat Native provider
+- `gateway/billing_reconciliation.py`
+  - payment status reconciliation
 - `gateway/admin_settings.py`
   - Smart voice policy settings
   - Express CosyVoice auto-clone policy settings
@@ -340,6 +376,7 @@ graph TD
 ## 5. 什么时候优先读这张图
 
 - 想改 pricing / trial / billing truth
+- 想改 Anonymous Preview 试用入口、APF caps 或 stream-only 商业边界
 - 想改 Smart 可售入口、固定价、allowed service modes
 - 想改 Express auto-clone availability、consent、allowlist、reservation cap 或临时音色 cleanup
 - 想改 Free tier 入口、free=0 pricing、voice-rights consent、daily quota 或免费交付限制
@@ -348,6 +385,7 @@ graph TD
 - 想排查 CosyVoice clone 为什么不可用、为什么必须用户显式触发
 - 想改候选音色确认、弱匹配暂停提示、非计费候选拒绝审计
 - 想改 fake payment、生产支付门禁、CSRF 同源保护
+- 想改 Paddle、WeChat、refund closure 或 billing reconciliation
 - 想确认 Smart 全自动产品承诺与 translation review audit-only 的边界
 - 想改 privacy / terms 等平台审核页面
 - 想改 phone 或 email 注册登录

@@ -15,6 +15,8 @@
 - Pan archive 后的本地 project_dir / R2 artifacts 删除与恢复边界
 - CosyVoice clone sample uploader 与交付 R2 registry 的边界
 - Free tier downloadable keys、stream/eager-push 限制与水印成片交付边界
+- Anonymous Preview stream-only teaser、R2 sweeper skip 与完整交付物边界
+- Chunked upload ready/claim lifecycle 与交付 registry 的边界
 - materials pack / job subresource 写路由的 CSRF same-origin guard
 
 ## 2. 主图
@@ -24,6 +26,8 @@ graph TD
     ResultUI["Workspace / ResultMediaCard"] --> Video["publish.dubbed_video"]
     ResultUI --> Pack["materials_pack"]
     ResultUI --> JDraft["editor.jianying_draft_zip"]
+    AnonymousPreview["Anonymous Preview UI"] --> AnonymousStream["stream-only teaser"]
+    AnonymousStream --> AnonymousBoundary["no R2 / no materials / no editor draft"]
 
     Pack --> TaskPlane["Gateway background task plane"]
     Pack --> CSRF["require_same_origin_state_change"]
@@ -47,6 +51,7 @@ graph TD
 
     MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
     Sweeper --> Mirror["mirror_job_terminal_state"]
+    Sweeper --> SkipAnon["skip anonymous preview jobs"]
     Mirror --> PG["Gateway PG mirror + smart_state + settle"]
     Sweeper --> Publisher["r2_publisher.py"]
     Publisher --> Keys["jobs/{job_id}/g{edit_generation}/..."]
@@ -72,6 +77,9 @@ graph TD
     CosyClone["CosyVoice clone sample"] --> SampleUploader["sample_uploader OSS/R2/local-stub"]
     SampleUploader --> WorkerInput["mainland worker input object"]
     WorkerInput -.-> NotRegistry["not r2_artifacts registry"]
+    ChunkedUpload["chunked upload ready final file"] --> Claim["job create claim_upload"]
+    Claim --> UploadLifecycle["uploads lifecycle, not r2_artifacts"]
+    UploadLifecycle -.-> NotRegistry
 
     EventLog["download.* / stream.* / pan.* events"] --> R2Obs["scripts/r2_observability.py"]
     PanBackup --> EventLog
@@ -161,6 +169,15 @@ graph TD
 
 结论：Free tier 的交付限制是商业边界，不只是前端隐藏按钮。
 
+### 3.10 Anonymous Preview 和 chunked upload 不进入完整交付 registry
+
+- `anonymous_preview_stream` 是 local stream-only proxy，不走 R2 redirect。
+- `r2_artifact_sweeper.py` 跳过 `is_anonymous_preview` job，避免把 teaser 当成正式 artifact push。
+- registered-user chunked upload complete 后是 ready final file，job create 成功后 `claim_upload` 回写 job id；它仍属于 upload 生命周期，不是 R2 artifact registry。
+- anonymous chunked upload complete 后一次性进入 APF intake，不保留 ready/claim 语义。
+
+结论：teaser stream、upload final file、R2 delivery artifact 是三种不同生命周期。
+
 ## 4. 关键证据
 
 - `gateway/r2_artifact_sweeper.py`
@@ -184,6 +201,14 @@ graph TD
   - CosyVoice clone sample upload backend
 - `src/services/r2_publisher_lib/downloadable_keys.py`
   - free downloadable key restriction
+- `gateway/anonymous_preview_api.py`
+  - anonymous preview stream-only proxy
+- `gateway/r2_artifact_sweeper.py`
+  - skip anonymous preview jobs
+- `gateway/chunked_upload_store.py`
+  - ready/claim lifecycle
+- `gateway/chunked_upload_sweeper.py`
+  - ready/unclaimed cleanup
 - `src/utils/free_watermark.py`
   - free watermark policy feeding publish output
 - `gateway/materials_api.py`
@@ -203,6 +228,8 @@ graph TD
 - 想改结果页下载面
 - 想加新的 downloadable key
 - 想确认 free tier 能下载/stream/eager-push 哪些 artifact
+- 想确认 anonymous preview 为什么只有 stream-only teaser
+- 想判断 chunked upload ready/final file 为什么不是 R2 delivery artifact
 - 想排查为什么成功任务没有被主动推上 R2
 - 想判断 cleanup 为什么没有删除某个过期项目
 - 想看 R2 redirect / fallback 的观测口径

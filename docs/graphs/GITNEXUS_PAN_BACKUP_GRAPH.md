@@ -12,6 +12,7 @@
 - `BackupRecord` 与 `Job.status` 双状态机
 - tar manifest、安全打包、上传三重校验、恢复安全解包
 - HTTP feature gate、全局非阻塞 advisory lock、tar staging tmp dir 与 free-space preflight
+- rollback archive attempt 受控恢复入口
 - archive scanner、stale reaper、orphan cleanup、residue cleanup
 - pan 事件、通知、R2 observability
 - Admin dashboard / backups list / 项目列表批量备份
@@ -39,6 +40,7 @@ graph TD
     AdminApi --> EnqueueBackup["POST /backups"]
     AdminApi --> EnqueueBatch["POST /backups/batch"]
     AdminApi --> EnqueueRestore["POST /restores"]
+    AdminApi --> RollbackArchive["rollback archive attempt"]
     AdminApi --> DeleteBackup["DELETE /backups/{id}"]
 
     EnqueueBackup --> EnqueueHelper["pan/_enqueue.py"]
@@ -88,6 +90,7 @@ graph TD
     PanSchedulers --> TokenRefresh["token_refresh every 6h"]
     PanSchedulers --> OrphanCleanup["orphan_cleanup weekly"]
     PanSchedulers --> StaleReaper["stale_reaper every 30m"]
+    RollbackArchive --> StaleReaper
     ArchiveScanner --> EnqueueHelper
     TokenRefresh --> Credentials
     StaleReaper --> Residue
@@ -186,6 +189,14 @@ graph TD
 
 结论：不要把 `archiving -> archived` 提前放回 stale reaper；那会破坏 residue cleanup 的前置条件。
 
+### 3.10 rollback archive attempt 是受控恢复入口
+
+- rollback archive attempt 用于救援卡住的归档尝试，而不是让操作者直接手改 DB。
+- 它必须尊重 BackupRecord、Job status、本地/R2 residue 和 advisory lock 语义。
+- rollback 后仍由 scheduler、stale reaper、residue cleanup 继续接管补偿。
+
+结论：Pan 卡住时优先走受控 rollback / stale reaper，不要直接删目录或翻状态。
+
 ## 4. 关键证据
 
 - `gateway/pan/admin_api.py`
@@ -218,6 +229,8 @@ graph TD
   - stale uploading/restoring recovery
   - post-commit archiving forward-resolve
   - residue cleanup enqueue contract
+- `gateway/pan/status_mutator.py`
+  - rollback archive attempt status mutation
 - `gateway/pan/_feature_gate.py`
   - HTTP API feature gate
 - `gateway/pan/_lock_keys.py`
@@ -247,6 +260,7 @@ graph TD
 - 想排查 `archiving / archived / restoring` 状态
 - 想排查 `BackupRecord.uploading / uploaded / restoring / restored / failed`
 - 想改 auto-archive、stale reaper、orphan cleanup、residue cleanup
+- 想处理 archiving 卡住、rollback archive attempt 或手动恢复归档尝试
 - 想排查全局锁等待、DB pool 被占、lock 泄漏、tar staging 空间不足或 tail probe 超时
 - 想确认 R2 artifacts 和本地 project dir 什么时候会被删除
 - 想接入 pan.* observability 或通知
