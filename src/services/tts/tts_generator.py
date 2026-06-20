@@ -1107,6 +1107,9 @@ class TTSGenerator:
             )
 
         # --- 3. Call provider with mismatch retry ---
+        # PR-E slice 4: pass the dub target language so VolcEngine can hint
+        # explicit_language for a non-zh dub (default zh → omitted → byte-identical).
+        _vc_target_language = getattr(segment, "target_language", None)
         try:
             audio_bytes = vc_synthesize(
                 text=tts_text,
@@ -1114,6 +1117,7 @@ class TTSGenerator:
                 resource_id=resource_id,
                 model=model,
                 speech_rate=speech_rate_param,
+                target_language=_vc_target_language,
             )
         except Exception as exc:
             if voice_id != fallback_voice and _is_volcengine_voice_resource_mismatch(exc):
@@ -1131,6 +1135,7 @@ class TTSGenerator:
                     resource_id=resource_id,
                     model=model,
                     speech_rate=speech_rate_param,
+                    target_language=_vc_target_language,
                 )
             else:
                 raise
@@ -1573,6 +1578,11 @@ class TTSGenerator:
                 "sample_rate": 24000,
             },
         }
+        # PR-E slice 4: hint the dub language for a non-zh target (MiniMax
+        # language_boost). Default zh / no target → key omitted → byte-identical.
+        _mm_target = getattr(segment, "target_language", None)
+        if _mm_target and _mm_target.split("-")[0].lower() == "en":
+            payload["language_boost"] = "English"
 
         response_payload = _post_json(
             endpoint=endpoint,
