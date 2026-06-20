@@ -12834,8 +12834,8 @@ class ProcessPipeline:
                 display_name=display_name_a,
                 voice_id_b=voice_id_b,
                 display_name_b=display_name_b,
-                source_language=self._language_profile.source_language,
-                target_language=self._language_profile.target_language,
+                source_language=_probe_profile.source_language,
+                target_language=_probe_profile.target_language,
             )
         finally:
             setattr(translator, "_metering_usage_context", previous_phase)

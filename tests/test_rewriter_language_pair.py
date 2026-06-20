@@ -90,6 +90,25 @@ def test_rewrite_prompt_tail_chinese_for_default() -> None:
     assert "最终只输出改写后的中文文本" in p
 
 
+def test_rewrite_prompt_direction_labels_english_for_en_target() -> None:
+    # re-CodeX P2: the direction label/instruction must also be English for a Latin
+    # target — no Chinese 缩短/扩充 leaking into the English template.
+    r = _rewriter("zh-CN", "en")
+    p_shrink = r._build_rewrite_prompt("Hello world", "shrink", 5, 3)
+    assert "shorten" in p_shrink
+    assert "缩短" not in p_shrink and "删减冗余词汇" not in p_shrink
+    p_expand = r._build_rewrite_prompt("Hi", "expand", 2, 5)
+    assert "expand" in p_expand
+    assert "扩充" not in p_expand
+
+
+def test_rewrite_prompt_direction_labels_chinese_for_default() -> None:
+    r = _rewriter("en", "zh-CN")
+    p = r._build_rewrite_prompt("你好世界", "shrink", 5, 3)
+    assert "缩短" in p
+    assert "shorten" not in p
+
+
 # ── rate unit consistency (CodeX PR-CD P2) ──────────────────────────────────
 
 def test_units_per_second_cjk_is_byte_identical_calibrated() -> None:

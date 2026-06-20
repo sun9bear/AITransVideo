@@ -333,11 +333,19 @@ class GeminiRewriter:
         strict_retry_reason: str = "",
     ) -> str:
         if direction == "shrink":
-            direction_desc = "缩短"
-            instruction = "删减冗余词汇、连接词，精简表达"
+            if self._target_is_latin:
+                direction_desc = "shorten"
+                instruction = "remove redundant words and connectors; tighten the phrasing"
+            else:
+                direction_desc = "缩短"
+                instruction = "删减冗余词汇、连接词，精简表达"
         else:
-            direction_desc = "扩充"
-            instruction = "把隐含意思说得更完整，增加适当口语化过渡语"
+            if self._target_is_latin:
+                direction_desc = "expand"
+                instruction = "state the implied meaning more fully; add natural spoken transitions"
+            else:
+                direction_desc = "扩充"
+                instruction = "把隐含意思说得更完整，增加适当口语化过渡语"
 
         normalized_source_text = (source_text or "").strip() or "未提供"
 
