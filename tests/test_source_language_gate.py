@@ -164,9 +164,16 @@ def test_resolve_profile_both_absent_defaults_to_ga() -> None:
     assert ProcessPipeline._resolve_job_language_profile("", "  ") is DEFAULT_LANGUAGE_PAIR_PROFILE
 
 
-def test_resolve_profile_canonical_pairs() -> None:
+def test_resolve_profile_default_pair_is_runnable() -> None:
     assert ProcessPipeline._resolve_job_language_profile("en", "zh-CN").is_default is True
-    assert ProcessPipeline._resolve_job_language_profile("zh-CN", "en").language_pair == "zh-CN->en"
+
+
+def test_resolve_profile_supported_but_not_ready_fails_closed() -> None:
+    # zh-CN->en is a SUPPORTED pair but pipeline_ready=False (PR-CD/E/F pending).
+    # The pipeline must refuse it (defense-in-depth vs a direct Job API submission
+    # that bypasses the Gateway 409), not run a half-adapted English->Chinese path.
+    with pytest.raises(ValueError, match="尚未就绪"):
+        ProcessPipeline._resolve_job_language_profile("zh-CN", "en")
 
 
 @pytest.mark.parametrize(

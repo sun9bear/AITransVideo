@@ -8706,7 +8706,7 @@ class ProcessPipeline:
         raw_source_language: object,
         raw_target_language: object,
     ) -> "LanguagePairProfile":
-        """Resolve a job's raw source/target language snapshot to a profile.
+        """Resolve a job's raw source/target language snapshot to a *runnable* profile.
 
         * **Both fields absent** (None / empty / whitespace — legacy job or no
           snapshot) → the GA default ``en->zh-CN`` profile, byte-identical to the
@@ -8714,9 +8714,18 @@ class ProcessPipeline:
         * **At least one field present but the resulting pair is unsupported** →
           fail-closed ``ValueError``. We never silently run a foreign source
           through the English pipeline (e.g. a job stamped ``source_language='fr'``
-          must NOT default to ``en->zh-CN``). PR-A's Gateway gate already rejects
-          unsupported pairs at create time, so this branch is defense-in-depth for
-          a pre-gating job or a direct pipeline invocation.
+          must NOT default to ``en->zh-CN``).
+        * **Supported but ``pipeline_ready=False``** (e.g. ``zh-CN->en`` while
+          PR-CD/E/F are not yet landed) → fail-closed ``ValueError``. The Gateway
+          create-path returns 409 for such pairs, but a direct Job API /
+          JobService submission (or a ``copy_as_new`` of a pre-existing row)
+          could persist a supported-but-not-ready pair without that check. Since
+          replacing the English-only gate made the source/transcript gates accept
+          the not-ready source language, the pipeline MUST itself refuse here —
+          otherwise it would feed e.g. Chinese into the still English->Chinese
+          translator/TTS and burn paid APIs on a half-adapted path. ``pipeline_ready``
+          is a code constant (only a pipeline PR flips it), so this is the
+          last-line code gate that an ops mistake can never bypass.
         """
         has_source = bool(raw_source_language and str(raw_source_language).strip())
         has_target = bool(raw_target_language and str(raw_target_language).strip())
@@ -8732,6 +8741,11 @@ class ProcessPipeline:
                 f"source_language={raw_source_language!r}, "
                 f"target_language={raw_target_language!r}。"
                 "请确认任务的源/目标语言为受支持的组合。"
+            )
+        if not resolved.pipeline_ready:
+            raise ValueError(
+                f"语言对 {resolved.language_pair} 尚未就绪（pipeline_ready=False），"
+                "管线拒绝执行以避免半适配的错误产出。"
             )
         return resolved
 
