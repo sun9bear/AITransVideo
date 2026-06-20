@@ -226,9 +226,9 @@ __SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__8. Preserve spoken rhythm (m
 9. Translate each segment independently but keep cross-segment coherence.
 10. Output JSON only, no other text.
 
-Per-segment metadata (by constraint strength):
-**Hard constraints**: target_duration_seconds; target_chars (suggested target length for this segment); min_chars ~ max_chars (the ±15% band — keep the translation within it).
-**Reference**: source_words_per_second (source pace); voice_chars_per_second (chosen voice synthesis speed, reference only); target_chars_hint (== target_chars).
+Per-segment metadata (by constraint strength). IMPORTANT: for this English voice-over the *_chars fields are ENGLISH WORD counts (spoken units), NOT characters — keep your output within the WORD band:
+**Hard constraints**: target_duration_seconds; target_chars (suggested target WORD count for this segment); min_chars ~ max_chars (the ±15% band, in ENGLISH WORDS — keep the translation within it).
+**Reference**: source_words_per_second (source pace); voice_chars_per_second (chosen voice synthesis speed, reference only); target_chars_hint (== target_chars, in words).
 
 输入（JSON数组）：
 __GROUPS_JSON__
@@ -1789,13 +1789,29 @@ class GeminiTranslator:
             for g in groups
         ]
         groups_json = json.dumps(llm_groups, ensure_ascii=False, indent=2)
-        strict_length_instruction = (
-            "12. 字数提醒：上一次翻译未达到 min_chars ~ max_chars 的字数要求。"
-            "如果偏长，请精简表达、删除冗余修饰；如果偏短，请适度补充细节、展开表述。"
-            "请严格将译文字数控制在 min_chars 到 max_chars 范围内。\n"
-            if strict_length_control
-            else ""
+        _strict_tgt_desc = get_language_descriptor(
+            getattr(self, "_translate_target_language", "zh-CN")
         )
+        _strict_target_is_latin = (
+            _strict_tgt_desc is not None and _strict_tgt_desc.script_family == "latin"
+        )
+        if not strict_length_control:
+            strict_length_instruction = ""
+        elif _strict_target_is_latin:
+            # For an English target the *_chars budget is measured in WORDS; keep the
+            # strict reminder English + word-framed so it matches the word validator.
+            strict_length_instruction = (
+                "12. Length reminder: the previous translation missed the min_chars ~ "
+                "max_chars budget, which for this English voice-over is counted in WORDS. "
+                "If it was too long, tighten and drop redundancy; if too short, add detail. "
+                "Keep the English word count strictly within min_chars ~ max_chars.\n"
+            )
+        else:
+            strict_length_instruction = (
+                "12. 字数提醒：上一次翻译未达到 min_chars ~ max_chars 的字数要求。"
+                "如果偏长，请精简表达、删除冗余修饰；如果偏短，请适度补充细节、展开表述。"
+                "请严格将译文字数控制在 min_chars 到 max_chars 范围内。\n"
+            )
         speaker_ids = {str(group.get("speaker_id", "")).strip() for group in groups}
         speaker_instruction = (
             "9. 这是双人访谈，请区分两个说话人的语气、措辞和交流关系。\n"

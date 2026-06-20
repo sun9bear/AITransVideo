@@ -82,3 +82,37 @@ def test_parser_prefers_target_text_over_cn_text() -> None:
     resp = json.dumps([{"segment_id": 1, "target_text": "Hello", "cn_text": "ignored"}])
     out = t._parse_response(resp, [{"segment_id": 1}])
     assert out[0]["cn_text"] == "Hello"
+
+
+# ── length budget unit labelling (re-CodeX P2) ──────────────────────────────
+
+_GROUPS = [{"segment_id": 1, "speaker_id": "A", "source_text": "你好世界",
+            "target_chars": 10, "min_chars": 8, "max_chars": 12}]
+
+
+def test_en_target_prompt_labels_budget_as_words() -> None:
+    t = _translator()
+    t._translate_source_language = "zh-CN"
+    t._translate_target_language = "en"
+    p = t._build_prompt(_GROUPS, strict_length_control=False)
+    assert "ENGLISH WORD counts" in p  # the *_chars fields are words, not chars
+
+
+def test_en_target_strict_length_reminder_is_english_word_framed() -> None:
+    t = _translator()
+    t._translate_source_language = "zh-CN"
+    t._translate_target_language = "en"
+    p = t._build_prompt(_GROUPS, strict_length_control=True)
+    assert "WORDS" in p
+    assert "字数提醒" not in p  # no Chinese strict text in the English prompt
+
+
+def test_default_pair_strict_length_reminder_chinese_byte_identical() -> None:
+    t = _translator()  # default en->zh-CN
+    p = t._build_prompt(
+        [{"segment_id": 1, "speaker_id": "A", "source_text": "hello",
+          "target_chars": 10, "min_chars": 8, "max_chars": 12}],
+        strict_length_control=True,
+    )
+    assert "字数提醒" in p
+    assert "ENGLISH WORD counts" not in p
