@@ -13,6 +13,7 @@ from services.gemini.translator import (
     DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
     GeminiTranslator,
     _TRANSLATION_PROMPT_TEMPLATE_ZH_EN,
+    _count_source_words,
 )
 
 
@@ -133,3 +134,21 @@ def test_supported_aliases_resolve_to_canonical_for_dispatch() -> None:
         assert prof.target_language == "en"
     t = _translator()
     assert t._select_translation_template("zh-CN", "en") is _TRANSLATION_PROMPT_TEMPLATE_ZH_EN
+
+
+# ── CJK source unit counting incl. mixed-script (re-CodeX P2) ────────────────
+
+def test_count_source_words_latin_byte_identical() -> None:
+    assert _count_source_words("hello there world", "latin") == 3
+    assert _count_source_words("hello there world") == 3  # default latin
+
+
+def test_count_source_words_cjk_pure_ideographs() -> None:
+    assert _count_source_words("你好世界", "cjk") == 4
+
+
+def test_count_source_words_cjk_includes_latin_and_digits() -> None:
+    # OpenAI + GPT + 4 (3 Latin/digit tokens) + 发布了 (3 Han) = 6
+    assert _count_source_words("OpenAI GPT-4 发布了", "cjk") == 6
+    # A Latin-only backchannel in a CJK source must not collapse to 0
+    assert _count_source_words("OK", "cjk") == 1

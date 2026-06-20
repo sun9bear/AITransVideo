@@ -2733,7 +2733,13 @@ def _count_source_words(source_text: str, source_script: str = "latin") -> int:
     Chinese source produces a non-zero count instead of ~0 (which would collapse
     the whole length budget)."""
     if source_script == "cjk":
-        return sum(1 for ch in (source_text or "") if "一" <= ch <= "鿿")
+        han = sum(1 for ch in (source_text or "") if "一" <= ch <= "鿿")
+        # Mixed-script CJK transcripts carry Latin terms / numbers (OpenAI, GPT-4,
+        # an "OK" backchannel) that are spoken source units too. Count them so the
+        # English word budget isn't undercounted, and a Latin-only segment isn't ~0
+        # (which would collapse the budget to the duration fallback). (re-CodeX P2)
+        latin_tokens = len(re.findall(r"[A-Za-z0-9']+", source_text or ""))
+        return han + latin_tokens
     return len(re.findall(r"[A-Za-z0-9']+", source_text))
 
 
