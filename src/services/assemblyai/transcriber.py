@@ -73,12 +73,14 @@ class AssemblyAITranscriber:
         output_dir: str,
         speaker_labels: bool = False,
         speakers_expected: int | None = None,
+        language: str = DEFAULT_LANGUAGE_CODE,
     ) -> TranscriptResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
 
         config = _build_transcription_config(
             self._aai,
+            language=language,
             speaker_labels=speaker_labels,
             speakers_expected=speakers_expected,
         )
@@ -259,18 +261,44 @@ def _coerce_positive_float(value: object, *, default: float) -> float:
     return numeric_value
 
 
+# Per-source-language AssemblyAI config (PR-B). Keyed by the platform's canonical
+# language code (en / zh-CN). The English profile is byte-identical to the legacy
+# hard-coded config (AssemblyAI code "en", disfluencies on, English filler-word
+# prompt). Other languages map to their AssemblyAI ``language_code`` and drop the
+# English-specific filler prompt + disfluencies, which are not meaningful there.
+# NOTE: the non-English speech-model / disfluency capabilities still need real
+# AssemblyAI verification (plan Phase 0 capability matrix); zh-CN is inert in
+# production until the zh-CN->en pair is flipped pipeline_ready.
+_ASR_PROFILE_BY_LANGUAGE: dict[str, dict[str, Any]] = {
+    "en": {"language_code": "en", "disfluencies": True, "prompt": DEFAULT_TRANSCRIPTION_PROMPT},
+    "zh-CN": {"language_code": "zh", "disfluencies": False, "prompt": None},
+}
+
+
+def _asr_profile_for_language(language: str | None) -> dict[str, Any]:
+    """Resolve a canonical source language to its AssemblyAI config profile.
+    Unknown / empty → the English profile (byte-identical default)."""
+    return _ASR_PROFILE_BY_LANGUAGE.get(
+        str(language or "").strip() or DEFAULT_LANGUAGE_CODE,
+        _ASR_PROFILE_BY_LANGUAGE["en"],
+    )
+
+
 def _build_transcription_config(
     aai: Any,
     *,
+    language: str = DEFAULT_LANGUAGE_CODE,
     speaker_labels: bool,
     speakers_expected: int | None,
 ) -> Any:
+    profile = _asr_profile_for_language(language)
     kwargs: dict[str, Any] = {
-        "language_code": DEFAULT_LANGUAGE_CODE,
+        "language_code": profile["language_code"],
         "speaker_labels": speaker_labels,
-        "disfluencies": True,
-        "prompt": DEFAULT_TRANSCRIPTION_PROMPT,
+        "disfluencies": profile["disfluencies"],
     }
+    if profile["prompt"] is not None:
+        kwargs["prompt"] = profile["prompt"]
     if speaker_labels and speakers_expected is not None:
         kwargs["speakers_expected"] = int(speakers_expected)
 
