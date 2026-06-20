@@ -474,11 +474,20 @@ def _internal_headers() -> dict[str, str]:
     return {"X-Internal-Key": key} if key else {}
 
 
-def _fetch_from_gateway(resource_id: str) -> tuple[list[VoiceEntry], str, frozenset[str]]:
-    """Fetch voice catalog from Gateway internal API (synchronous)."""
+def _fetch_from_gateway(
+    resource_id: str, target_language: str | None = None
+) -> tuple[list[VoiceEntry], str, frozenset[str]]:
+    """Fetch voice catalog from Gateway internal API (synchronous).
+
+    ``target_language`` lets the Gateway pre-filter by compatible_target_languages
+    when its kill switch is on (PR-E slice 2b); ignored when off (byte-identical).
+    """
+    params: dict[str, str] = {"provider": "volcengine", "resource_id": resource_id}
+    if target_language:
+        params["target_language"] = target_language
     resp = _requests.get(
         _GATEWAY_URL,
-        params={"provider": "volcengine", "resource_id": resource_id},
+        params=params,
         timeout=5.0,
         headers=_internal_headers(),
     )
@@ -500,15 +509,23 @@ def _get_cached(resource_id: str) -> tuple[list[VoiceEntry], str, frozenset[str]
     return None
 
 
-def _load_dynamic(resource_id: str) -> tuple[list[VoiceEntry], str, frozenset[str]]:
-    """Load from Gateway with cache + static fallback."""
-    cached = _get_cached(resource_id)
+def _load_dynamic(
+    resource_id: str, target_language: str | None = None
+) -> tuple[list[VoiceEntry], str, frozenset[str]]:
+    """Load from Gateway with cache + static fallback.
+
+    PR-E slice 2b: a non-default target_language gets its own cache entry +
+    forwards to the Gateway. The default (None) keeps the bare resource_id key →
+    byte-identical cache behavior.
+    """
+    cache_key = resource_id if not target_language else f"{resource_id}:{target_language}"
+    cached = _get_cached(cache_key)
     if cached:
         return cached
 
     try:
-        voices, default_vid, all_ids = _fetch_from_gateway(resource_id)
-        _cache[resource_id] = (voices, default_vid, all_ids, time.time())
+        voices, default_vid, all_ids = _fetch_from_gateway(resource_id, target_language)
+        _cache[cache_key] = (voices, default_vid, all_ids, time.time())
         return voices, default_vid, all_ids
     except Exception as exc:
         _logger.warning("Gateway voice-catalog 不可用 (%s), fallback 到静态列表", exc)
@@ -522,12 +539,16 @@ def _load_dynamic(resource_id: str) -> tuple[list[VoiceEntry], str, frozenset[st
 # Public API — same signatures, now dynamic
 # ===================================================================
 
-def get_voices_for_resource(resource_id: str) -> list[VoiceEntry]:
+def get_voices_for_resource(
+    resource_id: str, target_language: str | None = None
+) -> list[VoiceEntry]:
     """Return the matchable voice pool for a given resource_id.
 
-    Phase 3: reads from Gateway DB with 60s cache + static fallback.
+    Phase 3: reads from Gateway DB with 60s cache + static fallback. PR-E slice 2b:
+    ``target_language`` forwards to the Gateway for kill-switched language pre-filter
+    (ignored when off → byte-identical).
     """
-    voices, _, _ = _load_dynamic(resource_id)
+    voices, _, _ = _load_dynamic(resource_id, target_language)
     return voices
 
 

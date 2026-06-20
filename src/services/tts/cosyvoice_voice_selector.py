@@ -485,7 +485,7 @@ def select_cosyvoice_voice_match(
 
     # --- Step 1: Load voice pool ---
     endpoint_mode = get_runtime_endpoint_mode()
-    pool = list_matchable_cosyvoice_voices()
+    pool = list_matchable_cosyvoice_voices(target_language=target_language)
 
     # --- Step 1b: Detect static fallback ---
     # Static catalog entries lack Gateway-provided demographic tags

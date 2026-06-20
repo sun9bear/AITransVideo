@@ -60,16 +60,24 @@ def _resolve_language(target_language: str | None) -> str:
     return target_language.strip()
 
 
-def _load_minimax_pool() -> list[dict]:
-    """Load matchable MiniMax voices from Gateway (with static fallback)."""
+def _load_minimax_pool(target_language: str | None = None) -> list[dict]:
+    """Load matchable MiniMax voices from Gateway (with static fallback).
+
+    ``target_language`` is forwarded so the Gateway can pre-filter by
+    compatible_target_languages when its kill switch is on (PR-E slice 2b). When
+    the switch is off the Gateway ignores it → identical pool (byte-identical).
+    """
     try:
         import os
         import requests
         key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
         headers = {"X-Internal-Key": key} if key else {}
+        params = {"provider": "minimax"}
+        if target_language:
+            params["target_language"] = target_language
         resp = requests.get(
             "http://127.0.0.1:8880/api/internal/voice-catalog",
-            params={"provider": "minimax"},
+            params=params,
             timeout=3.0,
             headers=headers,
         )
@@ -134,7 +142,7 @@ def select_minimax_voice_match(
     lang = _resolve_language(target_language)
 
     # --- Step 1: Load pool ---
-    pool = _load_minimax_pool()
+    pool = _load_minimax_pool(target_language)
 
     # --- Step 2: Language filter (critical) ---
     lang_pool = [v for v in pool if v.get("language") == lang]

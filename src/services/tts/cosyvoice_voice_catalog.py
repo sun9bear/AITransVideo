@@ -198,11 +198,20 @@ def _internal_headers() -> dict[str, str]:
     return {"X-Internal-Key": key} if key else {}
 
 
-def _fetch_cosyvoice_from_gateway(endpoint_mode: str | None = None) -> tuple[list[dict], str]:
-    """Fetch CosyVoice catalog from Gateway internal API."""
+def _fetch_cosyvoice_from_gateway(
+    endpoint_mode: str | None = None, target_language: str | None = None
+) -> tuple[list[dict], str]:
+    """Fetch CosyVoice catalog from Gateway internal API.
+
+    ``target_language`` lets the Gateway pre-filter by compatible_target_languages
+    when its kill switch is on (PR-E slice 2b); ignored by the Gateway when off
+    (byte-identical).
+    """
     params: dict[str, str] = {"provider": "cosyvoice"}
     if endpoint_mode:
         params["endpoint_mode"] = endpoint_mode
+    if target_language:
+        params["target_language"] = target_language
 
     resp = _requests.get(_GATEWAY_URL, params=params, timeout=5.0, headers=_internal_headers())
     resp.raise_for_status()
@@ -210,14 +219,20 @@ def _fetch_cosyvoice_from_gateway(endpoint_mode: str | None = None) -> tuple[lis
     return data["voices"], data["default_voice_id"]
 
 
-def _load_cosyvoice_dynamic(cache_key: str, endpoint_mode: str | None = None) -> list[dict]:
-    """Load from Gateway with cache + static fallback."""
+def _load_cosyvoice_dynamic(
+    cache_key: str, endpoint_mode: str | None = None, target_language: str | None = None
+) -> list[dict]:
+    """Load from Gateway with cache + static fallback.
+
+    NOTE: callers MUST fold ``target_language`` into ``cache_key`` so a language-
+    filtered pool is never reused across pairs (same class as the PR-CD cache fix).
+    """
     cached = _cosy_cache.get(cache_key)
     if cached and (_time.time() - cached[2]) < _CACHE_TTL:
         return cached[0]
 
     try:
-        voices, default_vid = _fetch_cosyvoice_from_gateway(endpoint_mode)
+        voices, default_vid = _fetch_cosyvoice_from_gateway(endpoint_mode, target_language)
         _cosy_cache[cache_key] = (voices, default_vid, _time.time())
         return voices
     except Exception as exc:
@@ -231,12 +246,17 @@ def _load_cosyvoice_dynamic(cache_key: str, endpoint_mode: str | None = None) ->
 # Public API — same signatures, now dynamic
 # ---------------------------------------------------------------------------
 
-def list_matchable_cosyvoice_voices() -> list[dict[str, str | bool]]:
+def list_matchable_cosyvoice_voices(
+    target_language: str | None = None,
+) -> list[dict[str, str | bool]]:
     """Return only voices in the B1 active matching pool (matchable=True).
 
-    Phase 3: reads from Gateway DB with 60s cache + static fallback.
+    Phase 3: reads from Gateway DB with 60s cache + static fallback. PR-E slice 2b:
+    ``target_language`` is folded into the cache key + forwarded to the Gateway so a
+    language-filtered pool is never reused across pairs (kill-switched server-side).
     """
-    return _load_cosyvoice_dynamic("all_matchable")
+    cache_key = f"all_matchable:{target_language or ''}"
+    return _load_cosyvoice_dynamic(cache_key, target_language=target_language)
 
 
 def list_endpoint_available_voices(mode: str) -> list[dict[str, str | bool]]:

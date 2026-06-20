@@ -50,7 +50,7 @@ def select_volcengine_voice_match(
     4. Score ALL candidates via combined_rerank
     5. Return top-scored voice + remaining as backups
     """
-    pool = get_voices_for_resource(resource_id)
+    pool = get_voices_for_resource(resource_id, target_language=target_language)
     default_voice = get_default_voice_id(resource_id)
 
     if not gender:
