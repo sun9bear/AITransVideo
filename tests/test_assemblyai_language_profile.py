@@ -122,6 +122,15 @@ def test_ends_sentence_cjk_full_width() -> None:
     assert _ends_sentence("end.", "cjk") is True  # ASCII still recognized in CJK text
 
 
+def test_ends_sentence_cjk_with_full_width_closers() -> None:
+    # Terminator followed by a Chinese closing quote/bracket must still count
+    # (CodeX P3): 。" / ？】 / ！」 etc., else sentences merge.
+    assert _ends_sentence("他说。”", "cjk") is True
+    assert _ends_sentence("真的吗？】", "cjk") is True
+    assert _ends_sentence("不行！」", "cjk") is True
+    assert _ends_sentence("结束。）", "cjk") is True
+
+
 # ── _join_tokens — script-aware joining ────────────────────────────────────
 
 def test_join_tokens_latin_byte_identical() -> None:

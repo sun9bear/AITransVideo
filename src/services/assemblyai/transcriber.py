@@ -299,7 +299,7 @@ def _script_for_language(language: str | None) -> str:
 # Full-width (CJK) sentence terminators, plus ASCII ones for mixed text. Used to
 # detect sentence boundaries in a CJK word stream — the Latin pattern's bare
 # ``[.?!;]`` never matches 。！？；.
-CJK_SENTENCE_END_PATTERN = re.compile(r"[。！？；.?!;][\"')\]]*$")
+CJK_SENTENCE_END_PATTERN = re.compile(r"[。！？；.?!;][\"')\]”’』」】）》]*$")
 
 
 def _build_transcription_config(
