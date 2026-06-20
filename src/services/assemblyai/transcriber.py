@@ -122,7 +122,7 @@ class AssemblyAITranscriber:
         result = TranscriptResult(
             lines=lines,
             total_duration_ms=_extract_total_duration_ms(transcript, raw_payload, lines),
-            language=_extract_language(transcript, raw_payload),
+            language=_extract_language(transcript, raw_payload, default_language=language),
             raw_response_path=str(raw_response_path),
             structured_transcript_path=str(structured_transcript_path),
         )
@@ -783,7 +783,9 @@ def _speaker_id_from_label(speaker_label: str) -> str:
     return f"speaker_{normalized}"
 
 
-def _extract_language(transcript: Any, raw_payload: Any) -> str:
+def _extract_language(
+    transcript: Any, raw_payload: Any, default_language: str = DEFAULT_LANGUAGE_CODE
+) -> str:
     for candidate in (
         getattr(transcript, "language_code", None),
         getattr(transcript, "language", None),
@@ -798,7 +800,10 @@ def _extract_language(transcript: Any, raw_payload: Any) -> str:
             if normalized is not None:
                 return normalized
 
-    return DEFAULT_LANGUAGE_CODE
+    # Fail-closed on missing provider metadata: fall back to the REQUESTED source
+    # language, never a blind 'en' (which would make PR-W's transcript gate reject
+    # a valid zh-CN transcript as a provider mismatch). en request → byte-identical.
+    return default_language
 
 
 def _extract_total_duration_ms(

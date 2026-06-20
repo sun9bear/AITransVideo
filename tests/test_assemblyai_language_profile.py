@@ -8,12 +8,15 @@ captures the built config; no network, no paid API.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from services.assemblyai.transcriber import (
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_TRANSCRIPTION_PROMPT,
     _asr_profile_for_language,
     _build_transcription_config,
     _ends_sentence,
+    _extract_language,
     _join_tokens,
     _script_for_language,
 )
@@ -118,3 +121,23 @@ def test_join_tokens_latin_byte_identical() -> None:
 def test_join_tokens_cjk_no_spaces() -> None:
     assert _join_tokens(["这", "是", "中", "文", "。"], "cjk") == "这是中文。"
     assert " " not in _join_tokens(["你", "好", "世", "界"], "cjk")
+
+
+# ── _extract_language — missing metadata fail-closes to requested source ────
+
+def test_extract_language_uses_provider_value_when_present() -> None:
+    t = SimpleNamespace(language_code="zh", language=None)
+    assert _extract_language(t, {}, default_language="en") == "zh"
+
+
+def test_extract_language_missing_defaults_to_en_byte_identical() -> None:
+    t = SimpleNamespace(language_code=None, language=None)
+    assert _extract_language(t, {}) == "en"  # legacy default preserved
+
+
+def test_extract_language_missing_defaults_to_requested_source() -> None:
+    # The fix: a zh-CN request with no provider language must NOT become "en"
+    # (which PR-W's transcript gate would reject as a provider mismatch).
+    t = SimpleNamespace(language_code=None, language=None)
+    assert _extract_language(t, {}, default_language="zh-CN") == "zh-CN"
+    assert _extract_language(t, {"foo": "bar"}, default_language="zh-CN") == "zh-CN"
