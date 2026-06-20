@@ -91,6 +91,42 @@ __GROUPS_JSON__
   }
 ]"""
 
+# zh-CN -> en probe-translation variant (by-feel, no min/max char constraints).
+# Same token contract as PROBE_TRANSLATION_PROMPT_TEMPLATE; output stays cn_text
+# (canonical container, holds English here). lang_pair_marker: zh-CN->en
+_PROBE_TRANSLATION_PROMPT_TEMPLATE_ZH_EN = """You are a professional video dubbing translator. Translate the Chinese video transcript into natural, fluent English voice-over text.
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 来源：__YOUTUBE_URL__
+__GLOSSARY_SECTION__
+These translations feed an English TTS dub; the goal is for the English dub duration to roughly match the original Chinese duration. Note:
+1. Each segment has target_duration_seconds (original duration); translate so the spoken English length naturally approaches it.
+2. Judge the English length from the source pace and information density, not a character formula.
+3. Prefer concise, idiomatic English over literal translation that overruns.
+4. Translate Chinese names to their common English forms; keep already-English names.
+5. The result is for voice-over: natural, spoken English.
+__SPEAKER_INSTRUCTION__6. Keep natural spoken fillers when present to preserve the original rhythm.
+9. Translate each segment independently but keep coherence.
+10. Output JSON only, no other text.
+
+输入（JSON数组）：
+__GROUPS_JSON__
+
+请输出JSON数组，格式如下（只输出JSON，不要markdown代码块）：
+[
+  {
+    "segment_id": 1,
+    "cn_text": "translated English text"
+  }
+]"""
+
+#: Probe-translation template per language pair. Default en->zh-CN resolves via
+#: get_effective_probe_translation_prompt_template (override-or-PROBE, byte-identical).
+_PROBE_TEMPLATE_BY_PAIR: dict[tuple[str, str], str] = {
+    ("zh-CN", "en"): _PROBE_TRANSLATION_PROMPT_TEMPLATE_ZH_EN,
+}
+
 REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN = "__TTS_CN_TEXT__"
 REWRITE_PROMPT_TEMPLATE_SOURCE_TEXT_TOKEN = "__SOURCE_TEXT__"
 REWRITE_PROMPT_TEMPLATE_DIRECTION_TOKEN = "__DIRECTION_DESC__"
@@ -802,6 +838,8 @@ class GeminiTranslator:
         display_name: str = "Speaker A",
         voice_id_b: str | None = None,
         display_name_b: str | None = None,
+        source_language: str = "en",
+        target_language: str = "zh-CN",
     ) -> list[DubbingSegment]:
         """Translate probe segments without char constraints for TTS calibration.
 
@@ -809,6 +847,10 @@ class GeminiTranslator:
         so the LLM translates by feel guided only by target_duration_seconds.
         No checkpointing, no length retry — probe batches are small (≤10 segments).
         """
+        # Probe may run before translate(); stash the pair so prompt selection
+        # dispatches correctly. Default en->zh-CN → byte-identical.
+        self._translate_source_language = source_language
+        self._translate_target_language = target_language
         groups = _build_probe_groups(lines)
         if not groups:
             return []
@@ -860,6 +902,22 @@ class GeminiTranslator:
             )
         return segments
 
+    def _select_probe_template(self, source_language: str, target_language: str) -> str:
+        """Pick the probe-translation template. Default en->zh-CN → the configured
+        template (admin override or PROBE, byte-identical). Non-default → honor the
+        override only when it declares the pair (§2.3 fail-closed), else registry."""
+        configured = get_effective_probe_translation_prompt_template()
+        if source_language == "en" and target_language == "zh-CN":
+            return configured
+        if (
+            configured != PROBE_TRANSLATION_PROMPT_TEMPLATE
+            and f"{source_language}->{target_language}" in configured
+        ):
+            return configured
+        return _PROBE_TEMPLATE_BY_PAIR.get(
+            (source_language, target_language), PROBE_TRANSLATION_PROMPT_TEMPLATE
+        )
+
     def _build_probe_prompt(
         self,
         groups: list[dict],
@@ -881,7 +939,10 @@ class GeminiTranslator:
             glossary_section = f"\n术语表（请严格遵循以下翻译）：\n{glossary_lines}\n"
         normalized_video_title = _normalize_optional_text(video_title) or "未提供"
         normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
-        effective_template = get_effective_probe_translation_prompt_template()
+        effective_template = self._select_probe_template(
+            getattr(self, "_translate_source_language", "en"),
+            getattr(self, "_translate_target_language", "zh-CN"),
+        )
         return (
             effective_template
             .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
