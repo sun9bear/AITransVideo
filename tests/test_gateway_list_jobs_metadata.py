@@ -73,6 +73,17 @@ class _ScalarOneResult:
         return self._row
 
 
+class _ExpiringJob:
+    def __init__(self, **values):
+        self._values = values
+        self.expired = False
+
+    def __getattr__(self, name):
+        if self.expired:
+            raise RuntimeError(f"expired ORM attribute: {name}")
+        return self._values.get(name)
+
+
 def test_list_jobs_merges_gateway_metadata_and_preserves_purged_status():
     upstream_job = {
         "job_id": "job_1",
@@ -243,6 +254,75 @@ def test_list_jobs_rolls_back_when_terminal_mirror_fails():
     db.commit.assert_not_awaited()
 
 
+def test_list_jobs_uses_snapshot_metadata_after_rollback_expires_orm_instances():
+    import job_intercept
+
+    upstream_jobs = [
+        {
+            "job_id": "job_1",
+            "status": "succeeded",
+            "current_stage": "completed",
+            "display_name": None,
+        },
+        {
+            "job_id": "other_user_job",
+            "status": "succeeded",
+            "current_stage": "completed",
+        },
+    ]
+    db_row = _ExpiringJob(
+        job_id="job_1",
+        status="running",
+        current_stage="s5",
+        display_name="Owned detail",
+        expires_at=None,
+        editing_touched_at=None,
+        copy_of_job_id=None,
+        root_job_id="job_1",
+        edit_generation=0,
+        role_snapshot=None,
+        source_language="en",
+        target_language="zh-CN",
+        language_pair="en:zh-CN",
+    )
+
+    db = AsyncMock()
+    calls = {"n": 0}
+
+    async def execute(_stmt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _AllResult([("job_1",), ("other_user_job",)])
+        return _ScalarsResult([db_row])
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated list mirror failure")
+
+    async def expire_on_rollback():
+        db_row.expired = True
+
+    db.execute = execute
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock(side_effect=expire_on_rollback)
+    request = _make_request()
+    user = SimpleNamespace(id="uid-1")
+    upstream = FastAPIResponse(
+        content=json.dumps({"jobs": upstream_jobs}).encode("utf-8"),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+
+    with patch("job_intercept.proxy_request", new=AsyncMock(return_value=upstream)), \
+         patch.object(job_intercept, "mirror_job_terminal_state", new=boom):
+        response = _run(intercept_list_jobs(request, db, user))
+
+    payload = json.loads(response.body)
+    assert [job["job_id"] for job in payload["jobs"]] == ["job_1"]
+    assert payload["jobs"][0]["display_name"] == "Owned detail"
+    assert payload["jobs"][0]["language_pair"] == "en:zh-CN"
+    db.rollback.assert_awaited_once()
+
+
 def test_get_job_routes_terminal_payload_through_mirror_before_merge():
     import job_intercept
 
@@ -384,4 +464,61 @@ def test_get_job_rolls_back_when_terminal_hook_commit_fails():
 
     assert response.status_code == 200
     db.commit.assert_awaited_once()
+    db.rollback.assert_awaited_once()
+
+
+def test_get_job_uses_snapshot_metadata_after_rollback_expires_orm_instance():
+    import job_intercept
+
+    db_job = _ExpiringJob(
+        job_id="job_detail",
+        user_id="uid-1",
+        status="running",
+        current_stage="s5",
+        display_name="Detail job",
+        expires_at=None,
+        editing_touched_at=None,
+        copy_of_job_id=None,
+        root_job_id="job_detail",
+        edit_generation=0,
+        role_snapshot=None,
+        source_language="en",
+        target_language="zh-CN",
+        language_pair="en:zh-CN",
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_ScalarOneResult(db_job))
+    db.commit = AsyncMock()
+
+    async def expire_on_rollback():
+        db_job.expired = True
+
+    db.rollback = AsyncMock(side_effect=expire_on_rollback)
+    request = _make_request()
+    upstream = FastAPIResponse(
+        content=json.dumps({
+            "job_id": "job_detail",
+            "status": "succeeded",
+            "current_stage": "completed",
+            "completed_at": "2026-05-10T07:29:11+00:00",
+            "edit_generation": 0,
+            "display_name": None,
+        }).encode("utf-8"),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+    user = SimpleNamespace(id="uid-1")
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated terminal mirror failure")
+
+    with patch("job_intercept._verify_job_ownership", new=AsyncMock()), \
+         patch("job_intercept.proxy_request", new=AsyncMock(return_value=upstream)), \
+         patch("notifications_helpers.maybe_dispatch_job_transition", new=AsyncMock()), \
+         patch.object(job_intercept, "mirror_job_terminal_state", new=boom):
+        response = _run(intercept_get_job(request, "job_detail", db, user))
+
+    payload = json.loads(response.body)
+    assert payload["display_name"] == "Detail job"
+    assert payload["language_pair"] == "en:zh-CN"
     db.rollback.assert_awaited_once()
