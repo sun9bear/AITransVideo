@@ -237,6 +237,41 @@ __SOURCE_TEXT__
 
 改写后的文本："""
 
+# English-target rewrite variant (zh-CN->en). Same token contract as
+# DEFAULT_REWRITE_PROMPT_TEMPLATE; rewrites the English dub text for duration fit.
+# The "字" (Chinese-char) wording becomes spoken length / words. lang_pair_marker: zh-CN->en
+_REWRITE_PROMPT_TEMPLATE_ZH_EN = """You are a professional video-dubbing rewrite editor for English voice-over.
+
+Task: __DIRECTION_DESC__ the current text so it better fits the target dub duration.
+
+Current text (__CURRENT_CHARS__ units):
+__TTS_CN_TEXT__
+
+Source transcript (reference, do NOT re-translate):
+__SOURCE_TEXT__
+
+Target length: about __TARGET_CHARS__ units (aim for __TARGET_LOWER_CHARS__~__TARGET_UPPER_CHARS__).
+Target duration band: aim for __TARGET_LOWER_RATIO_PCT__%~__TARGET_UPPER_RATIO_PCT__% of the target duration.
+You currently need to __DIRECTION_DESC__ by about __CHANGE_PCT__%.
+
+Rules:
+1. Keep the meaning unchanged; do not add or drop core information.
+2. __DIRECTION_INSTRUCTION__
+3. Keep it natural and spoken, suitable for voice-over.
+4. Use the source transcript to make sure no core information is lost.
+5. When expanding, you may recover important details that were omitted.
+6. This adjusts the length of the current English text, not a re-translation — stay close to its core meaning.
+7. Output only the rewritten English text, no explanation.
+
+Rewritten text:"""
+
+#: Rewrite prompt template per TARGET language (the dub text being rewritten).
+#: Default zh-CN → the exact legacy Chinese template (byte-identical).
+_REWRITE_TEMPLATE_BY_TARGET: dict[str, str] = {
+    "zh-CN": DEFAULT_REWRITE_PROMPT_TEMPLATE,
+    "en": _REWRITE_PROMPT_TEMPLATE_ZH_EN,
+}
+
 _STRONG_LINE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+")
 _WEAK_LINE_SPLIT_PATTERN = re.compile(r"(?<=[,;])\s+")
 

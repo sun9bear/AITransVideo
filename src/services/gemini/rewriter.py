@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 
+from services.language_registry import get_language_descriptor
 from services.gemini.translator import (
+    DEFAULT_REWRITE_PROMPT_TEMPLATE,
     GeminiTranslator,
     REWRITE_PROMPT_TEMPLATE_CHANGE_PCT_TOKEN,
     REWRITE_PROMPT_TEMPLATE_CURRENT_CHARS_TOKEN,
@@ -16,6 +18,7 @@ from services.gemini.translator import (
     REWRITE_PROMPT_TEMPLATE_TARGET_UPPER_RATIO_PCT_TOKEN,
     REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN,
     TranslationError,
+    _REWRITE_TEMPLATE_BY_TARGET,
     get_effective_rewrite_prompt_template,
 )
 
@@ -38,10 +41,35 @@ class GeminiRewriter:
             str(speaker_id): float(value)
             for speaker_id, value in (chars_per_second_by_speaker or {}).items()
         }
-        self.rewrite_prompt_template = get_effective_rewrite_prompt_template(
-            rewrite_prompt_template
+        # Language pair from the translator (set during translate()). Default
+        # en->zh-CN → Chinese rewrite + char counting, byte-identical.
+        self._source_language = getattr(translator, "_translate_source_language", "en")
+        self._target_language = getattr(translator, "_translate_target_language", "zh-CN")
+        _tgt_desc = get_language_descriptor(self._target_language)
+        self._target_is_latin = _tgt_desc is not None and _tgt_desc.script_family == "latin"
+        self.rewrite_prompt_template = self._select_rewrite_template(
+            get_effective_rewrite_prompt_template(rewrite_prompt_template)
         )
         self.usage_phase = usage_phase
+
+    def _select_rewrite_template(self, configured: str) -> str:
+        """Pick the rewrite template for the dub's TARGET language. Default
+        zh-CN → the configured template (override or DEFAULT, byte-identical). A
+        non-default target honors an admin override only when it declares the
+        canonical 'src->tgt' key (§2.3 fail-closed), else the per-target template."""
+        if self._target_language == "zh-CN":
+            return configured
+        marker = f"{self._source_language}->{self._target_language}"
+        if configured != DEFAULT_REWRITE_PROMPT_TEMPLATE and marker in configured:
+            return configured
+        return _REWRITE_TEMPLATE_BY_TARGET.get(self._target_language, DEFAULT_REWRITE_PROMPT_TEMPLATE)
+
+    def _spoken_units(self, text: str) -> int:
+        """Spoken-length unit for the TARGET language: CJK → per-char (legacy,
+        byte-identical), Latin → word count (matches the word-based budget)."""
+        if self._target_is_latin:
+            return len(re.findall(r"[A-Za-z0-9']+", text or ""))
+        return len(_NON_SPOKEN_CHAR_PATTERN.sub("", text or ""))
 
     def rewrite_for_duration(
         self,
@@ -80,7 +108,7 @@ class GeminiRewriter:
         if target_duration_ms <= 0:
             return normalized_text
 
-        current_chars = len(_NON_SPOKEN_CHAR_PATTERN.sub("", normalized_text))
+        current_chars = self._spoken_units(normalized_text)
         chars_per_second = self.chars_per_second_by_speaker.get(
             str(speaker_id).strip(),
             self.chars_per_second,
@@ -183,8 +211,8 @@ class GeminiRewriter:
             if self.usage_phase:
                 setattr(self.translator, "_metering_usage_context", previous_phase)
 
-    @staticmethod
     def _build_short_content_compact_prompt(
+        self,
         cn_text: str,
         *,
         source_text: str,
@@ -193,9 +221,37 @@ class GeminiRewriter:
         target_upper_chars: int,
         strict_retry_reason: str = "",
     ) -> str:
-        current_chars = len(_NON_SPOKEN_CHAR_PATTERN.sub("", cn_text or ""))
-        source = (source_text or "").strip() or "未提供"
+        current_chars = self._spoken_units(cn_text or "")
         target_seconds = max(0.0, target_duration_ms / 1000.0)
+        if self._target_is_latin:
+            source = (source_text or "").strip() or "(none)"
+            prompt = (
+                "You are a video-dubbing voice-over compression editor. Compress the "
+                "English text below into natural, short, directly speakable English, for a "
+                "very short real-content segment.\n\n"
+                f"Source transcript: {source}\n"
+                f"Current English: {cn_text}\n"
+                f"Target slot: about {target_seconds:.1f} seconds\n"
+                f"Current spoken units: {current_chars}\n"
+                f"Target spoken units: {target_lower_chars}~{target_upper_chars}\n\n"
+                "Compression rules:\n"
+                "1. Keep only the core meaning; you may drop pleasantries, fillers, repeated subjects, weak connectors and verbal pauses.\n"
+                "2. Turn questions into short forms; merge consecutive questions into one core question.\n"
+                "3. For short answers, keep the conclusion, comparison target, stance and action.\n"
+                "4. Always keep numbers, negations, key proper nouns, company/product names, time and directional judgments.\n"
+                "5. Add no explanation or background; do not change the speaker's stance.\n"
+                "6. Before output, self-check the spoken-unit count (count words, ignore punctuation/spaces/newlines).\n"
+                f"7. The final text must land within {target_lower_chars}~{target_upper_chars} spoken units.\n\n"
+                "Output only the compressed English voice-over text — no explanation, counts, quotes or alternatives."
+            )
+            if strict_retry_reason:
+                prompt += (
+                    "\n\nStrict retry: the previous output failed the length guard "
+                    f"({strict_retry_reason}). This time you MUST satisfy the lower and upper "
+                    "bounds above; do not rewrite in the wrong direction, and add no explanation."
+                )
+            return prompt
+        source = (source_text or "").strip() or "未提供"
         prompt = (
             "你是视频配音口播压缩编辑。请把下面的中文翻译压缩成自然、短促、可直接配音的中文，"
             "用于一个很短的真实内容段。\n\n"
@@ -274,6 +330,23 @@ class GeminiRewriter:
             .replace(REWRITE_PROMPT_TEMPLATE_TARGET_UPPER_RATIO_PCT_TOKEN, f"{target_upper_ratio_pct:.0f}")
             .replace(REWRITE_PROMPT_TEMPLATE_CHANGE_PCT_TOKEN, f"{change_pct:.0f}")
         )
+        if self._target_is_latin:
+            prompt = (
+                f"{rendered_prompt}\n\n"
+                "Length constraint: before output, self-check the spoken-unit count once "
+                "(count words, ignore punctuation/spaces/newlines). "
+                f"The final text must land within {target_lower_chars}~{target_upper_chars} spoken units. "
+                "If it would fall below the lower bound, keep necessary information and natural spoken connectors; "
+                "if above the upper bound, keep compressing redundant phrasing. "
+                "Output only the rewritten English text — no counts, explanation or quotes."
+            )
+            if strict_retry_reason:
+                prompt += (
+                    "\n\nStrict retry: the previous output failed the length guard "
+                    f"({strict_retry_reason}). This time you MUST satisfy the lower and upper "
+                    "bounds above; do not rewrite in the wrong direction, and add no explanation."
+                )
+            return prompt
         prompt = (
             f"{rendered_prompt}\n\n"
             "字数硬约束：输出前请自行按 spoken-char 口径检查一次，"
