@@ -153,3 +153,31 @@ def test_cjk_pattern_splits_chinese_sentences() -> None:
         _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT[SCRIPT_CJK],
     )
     assert pieces is not None and len(pieces) == 2
+
+
+def test_latin_target_split_preserves_inter_sentence_space() -> None:
+    # Latin target: grouped sentences must keep a space ("First. Second."), not
+    # collapse to "First.Second." (the CodeX round-3 bug). joiner=" " for Latin.
+    import re
+    pipeline = ProcessPipeline()
+    pieces = pipeline._split_text_for_failed_segment(
+        "First sentence one here. Second sentence two here. Third sentence three here.",
+        _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT[SCRIPT_LATIN],
+        " ",
+    )
+    assert pieces is not None and len(pieces) == 2
+    for chunk in pieces:
+        assert not re.search(r"\.[A-Za-z]", chunk), f"lost inter-sentence space: {chunk!r}"
+
+
+def test_cjk_target_split_adds_no_space() -> None:
+    # CJK target with the default empty joiner must not introduce spaces.
+    pipeline = ProcessPipeline()
+    pieces = pipeline._split_text_for_failed_segment(
+        "第一句话在这里。第二句话紧随其后。第三句话到此结束。",
+        _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT[SCRIPT_CJK],
+        "",
+    )
+    assert pieces is not None
+    for chunk in pieces:
+        assert " " not in chunk, f"unexpected space in CJK chunk: {chunk!r}"

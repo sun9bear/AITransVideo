@@ -10755,8 +10755,14 @@ class ProcessPipeline:
             _src_desc.script_family if _src_desc is not None else SCRIPT_LATIN,
             FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
         )
+        # Re-join separator for the TARGET split: a Latin target needs a space
+        # between sentences ("First. Second."), a CJK target must NOT add one
+        # ("句一。句二。"). Default pair (CJK target) → "" → byte-identical. The
+        # source split keeps the legacy "" joiner so the default (English) source
+        # chunks are unchanged; a zh source is CJK and also wants "".
+        _target_joiner = " " if (_tgt_desc is not None and _tgt_desc.script_family == SCRIPT_LATIN) else ""
 
-        cn_chunks = self._split_text_for_failed_segment(cn_text, _target_pattern)
+        cn_chunks = self._split_text_for_failed_segment(cn_text, _target_pattern, _target_joiner)
         if cn_chunks is None:
             return None
 
@@ -11733,7 +11739,9 @@ class ProcessPipeline:
             return "align_review_needed"
         return "align_done"
 
-    def _split_text_for_failed_segment(self, text: str, pattern: re.Pattern[str]) -> list[str] | None:
+    def _split_text_for_failed_segment(
+        self, text: str, pattern: re.Pattern[str], joiner: str = ""
+    ) -> list[str] | None:
         normalized_text = text.strip()
         if not normalized_text:
             return None
@@ -11766,8 +11774,8 @@ class ProcessPipeline:
         if best_index is None:
             return None
 
-        left_text = "".join(pieces[: best_index + 1]).strip()
-        right_text = "".join(pieces[best_index + 1 :]).strip()
+        left_text = joiner.join(pieces[: best_index + 1]).strip()
+        right_text = joiner.join(pieces[best_index + 1 :]).strip()
         if not left_text or not right_text:
             return None
         return [left_text, right_text]
