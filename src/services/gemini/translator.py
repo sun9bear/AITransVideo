@@ -664,16 +664,18 @@ class GeminiTranslator:
         source_language: str = "en",
         target_language: str = "zh-CN",
     ) -> TranslationResult:
-        # Stash the job language pair so _build_prompt / template selection can
-        # dispatch on it without threading through every batch helper. Default
-        # en->zh-CN → byte-identical legacy behavior.
-        self._translate_source_language = source_language
-        self._translate_target_language = target_language
+        # Resolve to CANONICAL codes first, then stash them, so _build_prompt /
+        # _build_translation_fingerprint / template selection (which compare exact
+        # canonical strings) dispatch correctly even when a caller passes an alias
+        # ("中文" / "English" / "EN"). resolve_language_pair fail-closes to None for
+        # an unsupported pair → default profile keeps the byte-identical en->zh-CN path.
+        _seg_lp_profile = resolve_language_pair(source_language, target_language) or DEFAULT_LANGUAGE_PAIR_PROFILE
+        self._translate_source_language = _seg_lp_profile.source_language
+        self._translate_target_language = _seg_lp_profile.target_language
         # Per-pair length ratio + whether the target is CJK (drives the voice-cps
         # metadata). Default en->zh-CN → ratio 1.8 / target CJK → byte-identical.
-        _seg_lp_profile = resolve_language_pair(source_language, target_language) or DEFAULT_LANGUAGE_PAIR_PROFILE
         _seg_target_cps_ratio = _seg_lp_profile.natural_length_ratio
-        _seg_tgt_desc = get_language_descriptor(target_language)
+        _seg_tgt_desc = get_language_descriptor(self._translate_target_language)
         _seg_target_is_cjk = _seg_tgt_desc is not None and _seg_tgt_desc.script_family == "cjk"
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -847,10 +849,15 @@ class GeminiTranslator:
         so the LLM translates by feel guided only by target_duration_seconds.
         No checkpointing, no length retry — probe batches are small (≤10 segments).
         """
-        # Probe may run before translate(); stash the pair so prompt selection
-        # dispatches correctly. Default en->zh-CN → byte-identical.
-        self._translate_source_language = source_language
-        self._translate_target_language = target_language
+        # Probe may run before translate(); stash the CANONICAL pair so prompt
+        # selection dispatches correctly even for aliases. Fail-closed to default.
+        # Default en->zh-CN → byte-identical.
+        _probe_lp_profile = (
+            resolve_language_pair(source_language, target_language)
+            or DEFAULT_LANGUAGE_PAIR_PROFILE
+        )
+        self._translate_source_language = _probe_lp_profile.source_language
+        self._translate_target_language = _probe_lp_profile.target_language
         groups = _build_probe_groups(lines)
         if not groups:
             return []

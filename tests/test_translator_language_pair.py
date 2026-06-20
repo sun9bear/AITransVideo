@@ -116,3 +116,20 @@ def test_default_pair_strict_length_reminder_chinese_byte_identical() -> None:
     )
     assert "字数提醒" in p
     assert "ENGLISH WORD counts" not in p
+
+
+# ── language code canonicalization before dispatch (re-CodeX P2) ─────────────
+
+def test_supported_aliases_resolve_to_canonical_for_dispatch() -> None:
+    # translate()/translate_probe() canonicalize via resolve_language_pair before
+    # template/fingerprint dispatch, so a caller passing a supported-pair alias
+    # ("中文"/"English"/"EN") still hits the zh->en template + canonical identity.
+    from services.language_registry import resolve_language_pair
+
+    for src, tgt in [("中文", "English"), ("zh", "EN"), ("Chinese", "en")]:
+        prof = resolve_language_pair(src, tgt)
+        assert prof is not None, (src, tgt)
+        assert prof.source_language == "zh-CN"
+        assert prof.target_language == "en"
+    t = _translator()
+    assert t._select_translation_template("zh-CN", "en") is _TRANSLATION_PROMPT_TEMPLATE_ZH_EN
