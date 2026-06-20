@@ -3363,6 +3363,32 @@ class ProcessPipeline:
             voice_id_b = normalized_voice_b
             segments_path = (final_project_dir / "translation" / "segments.json").resolve(strict=False)
             s3_cache_hit = segments_path.exists()
+            if s3_cache_hit:
+                # Pair-aware cache guard (re-CodeX P2, v3 §2.5/F): a project dir reused
+                # across language pairs must not serve stale wrong-language translation.
+                # Missing marker == legacy default en->zh-CN (so existing default jobs
+                # still hit → byte-identical).
+                _cache_pair_marker = (
+                    final_project_dir / "translation" / ".language_pair"
+                ).resolve(strict=False)
+                try:
+                    _cached_pair = (
+                        _cache_pair_marker.read_text(encoding="utf-8").strip()
+                        if _cache_pair_marker.exists()
+                        else "en->zh-CN"
+                    )
+                except Exception:
+                    _cached_pair = "en->zh-CN"
+                _current_pair = (
+                    f"{self._language_profile.source_language}->"
+                    f"{self._language_profile.target_language}"
+                )
+                if _cached_pair != _current_pair:
+                    print(
+                        f"[S3] translation cache language-pair mismatch "
+                        f"({_cached_pair} != {_current_pair}); re-translating"
+                    )
+                    s3_cache_hit = False
             speaker_name_a_is_placeholder = self._is_default_placeholder_speaker_name(
                 speaker_id="speaker_a",
                 speaker_name=speaker_name_a,
@@ -5984,6 +6010,24 @@ class ProcessPipeline:
                     source_language=self._language_profile.source_language,
                     target_language=self._language_profile.target_language,
                 )
+                # Pair-aware translation cache marker (re-CodeX P2, v3 §2.5/F): record
+                # the canonical pair next to segments.json so a later run that reuses
+                # this project dir with a different pair re-translates instead of serving
+                # stale wrong-language text. Default en->zh-CN writes nothing → a missing
+                # marker means the legacy default pair (byte-identical, no new artifact).
+                if not self._language_profile.is_default:
+                    try:
+                        _pair_marker = (
+                            final_project_dir / "translation" / ".language_pair"
+                        ).resolve(strict=False)
+                        _pair_marker.parent.mkdir(parents=True, exist_ok=True)
+                        _pair_marker.write_text(
+                            f"{self._language_profile.source_language}->"
+                            f"{self._language_profile.target_language}",
+                            encoding="utf-8",
+                        )
+                    except Exception as _exc:
+                        print(f"[S3] language-pair cache marker write skipped (non-fatal): {_exc}")
                 # Phase 4.1 E.5 (Codex 2026-05-25 三签字版本 HC#5)：translate()
                 # 创建的 fresh DubbingSegment 没有 tts_provider / worker routing
                 # 字段。原 manual loop 只设了 tts_provider，**不覆盖** worker
@@ -12666,6 +12710,8 @@ class ProcessPipeline:
         glossary: dict[str, str] | None,
         video_title: str,
         youtube_url: str,
+        source_language: str = "en",
+        target_language: str = "zh-CN",
     ) -> str:
         """Build a fingerprint for probe translation cache invalidation.
 
@@ -12682,6 +12728,11 @@ class ProcessPipeline:
             "video_title": video_title or "",
             "youtube_url": youtube_url or "",
         }
+        # Default en->zh-CN adds nothing → byte-identical legacy fingerprint (no paid
+        # re-probe of existing caches); a non-default pair keys the probe cache by pair
+        # so an en->zh probe is never reused for zh->en. (re-CodeX P2 + v3 §2.5/F)
+        if not (source_language == "en" and target_language == "zh-CN"):
+            payload["language_pair"] = f"{source_language}->{target_language}"
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return _hl.sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -12816,6 +12867,8 @@ class ProcessPipeline:
             glossary=glossary,
             video_title=video_title,
             youtube_url=youtube_url,
+            source_language=_probe_profile.source_language,
+            target_language=_probe_profile.target_language,
         )
 
         # Try loading from cache (for resume after voice selection pause)
