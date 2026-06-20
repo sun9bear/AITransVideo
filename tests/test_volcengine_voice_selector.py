@@ -225,3 +225,34 @@ class TestResultStructure:
 
 
     # B2 rerank tests migrated to tests/test_voice_reranker.py
+
+
+# ===================================================================
+# Target-language preference (PR-E slice 1)
+# ===================================================================
+
+class TestTargetLanguage:
+    def test_zh_target_byte_identical_to_default(self) -> None:
+        # target_language None / "zh-CN" both map to the "ICL_zh_" preference →
+        # identical selection (byte-identical legacy behavior).
+        kwargs = dict(
+            resource_id=RESOURCE_ID_1_0,
+            gender="female",
+            age_group="middle",
+            persona_style="professional",
+        )
+        r_default = select_volcengine_voice_match(**kwargs)
+        r_zh = select_volcengine_voice_match(**kwargs, target_language="zh-CN")
+        assert r_default.voice_id == r_zh.voice_id
+        assert r_default.backup_voices == r_zh.backup_voices
+
+    def test_en_target_returns_valid_voice(self) -> None:
+        # A Latin target prefers "ICL_en_" voices but must still return a valid voice
+        # (falls back to the full candidate set when the catalog has no en voices).
+        r = select_volcengine_voice_match(
+            resource_id=RESOURCE_ID_1_0,
+            gender="female",
+            target_language="en",
+        )
+        assert r.voice_id
+        assert is_voice_in_resource(r.voice_id, RESOURCE_ID_1_0)

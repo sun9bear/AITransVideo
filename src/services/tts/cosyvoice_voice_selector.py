@@ -441,6 +441,7 @@ def select_cosyvoice_voice_match(
     energy_level: str | None = None,
     is_childlike: bool = False,
     target_chars_per_second: float | None = None,
+    target_language: str | None = None,
 ) -> SharedVoiceMatchResult:
     """Select the best CosyVoice voice using shared combined_rerank.
 

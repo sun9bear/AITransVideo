@@ -39,6 +39,7 @@ def select_volcengine_voice_match(
     persona_style: str | None = None,
     energy_level: str | None = None,
     target_chars_per_second: float | None = None,
+    target_language: str | None = None,
 ) -> VoiceMatchResult:
     """Select the best VolcEngine voice using shared combined_rerank.
 
@@ -86,10 +87,16 @@ def select_volcengine_voice_match(
                 len(candidates) - len(childlike_extras), len(childlike_extras),
             )
 
-    # --- Step 1b: Language filter — prefer Chinese voices ---
-    zh_candidates = [v for v in candidates if v["voice_id"].startswith("ICL_zh_")]
-    if zh_candidates:
-        candidates = zh_candidates
+    # --- Step 1b: Language filter — prefer voices in the TARGET language ---
+    # VolcEngine voice_ids encode language as an ``ICL_{code}_`` prefix. Default
+    # (None / zh-CN) → "ICL_zh_" (byte-identical legacy); a Latin target like en →
+    # "ICL_en_" so an English dub does not get forced onto Chinese voices. Falls
+    # back to the full candidate set when no voice matches the target prefix.
+    _lang_code = (target_language or "zh-CN").split("-")[0].lower()
+    _lang_prefix = f"ICL_{_lang_code}_"
+    lang_candidates = [v for v in candidates if v["voice_id"].startswith(_lang_prefix)]
+    if lang_candidates:
+        candidates = lang_candidates
 
     if not candidates:
         logger.info(
