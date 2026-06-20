@@ -850,6 +850,11 @@ async def add_user_voice(
     # ---- Phase 4.3a (migration 031): 临时音色生命周期（spec §6.3.1） ----
     is_temporary: bool = False,
     temporary_expires_at: datetime | None = None,
+    # ---- PR-E slice 5b (migration 043): dub target-language compatibility ----
+    # Stamp which target languages this cloned voice supports. None → column stays
+    # NULL → language-aware matching treats it as zh-CN-only (legacy / byte-identical).
+    # Metadata ONLY — this never changes whether/which clone runs (paid-API rule).
+    compatible_target_languages: list | None = None,
     # ---- P3b (CodeX 钱-正确性 #2): commit=False 让调用方控制完整事务 ----
     # smart 预览克隆的 register+bill 须在**单一事务**内同时写 billing event +
     # 入 user_voices（钱的事实与音色入库原子）。默认 True 保持既有调用方不变。
@@ -919,6 +924,10 @@ async def add_user_voice(
         # revive 时必须能 long-term↔temporary 双向切换；非 temp 强制清 ts 防 stale。
         existing.is_temporary = is_temporary
         existing.temporary_expires_at = effective_temporary_expires_at
+        # PR-E slice 5b: stamp the dub target-language compatibility on re-clone, but
+        # only when the caller provides it — never clobber an existing value with None.
+        if compatible_target_languages is not None:
+            existing.compatible_target_languages = compatible_target_languages
         if commit:
             await db.commit()
         else:
@@ -962,6 +971,8 @@ async def add_user_voice(
         # Phase 4.3a §6.3.1：临时音色生命周期（非 temp 强制清 ts 防 stale）
         is_temporary=is_temporary,
         temporary_expires_at=effective_temporary_expires_at,
+        # PR-E slice 5b: dub target-language compatibility (None → NULL → zh-CN legacy)
+        compatible_target_languages=compatible_target_languages,
     )
     db.add(voice)
     if commit:
