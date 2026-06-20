@@ -2358,11 +2358,20 @@ def legacy_review_transcript_single_pass(
     mode: str = "studio",
     usage_meter: Any | None = None,
 ) -> ReviewResult | None:
-    """Legacy single-pass review (fallback path).
+    """Legacy single-pass review — CONFIRMED DEAD CODE (multilingual ruling, v3 §1).
 
-    This is the original ``review_transcript()`` logic preserved as-is.
-    Called when the three-pass orchestrator encounters a failure in Pass 1
-    or Pass 2, ensuring the pipeline always has a working fallback.
+    ⚠️ No production caller. ``review_transcript()`` catches a three-pass failure
+    and returns ``None`` (it does NOT fall back here); MiMo is dispatched inside
+    the three passes. The only remaining references are unit tests that exercise
+    this function directly. The old "called on Pass 1/2 failure" contract above
+    is stale.
+
+    Multilingual ruling (PR-H): this path is **English-only and deliberately NOT
+    language-adapted** — it is unreachable for any non-default pair, so a
+    ``zh-CN->en`` job never executes it. Full removal (function + its tests +
+    REVIEW_PROMPT_TEMPLATE export + the English-hardcoded legacy prompt constants)
+    is recommended but deferred to a standalone cleanup PR; it is out of scope for
+    the multilingual change and not a runtime liability while inert.
 
     Parameters
     ----------
