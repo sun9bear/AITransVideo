@@ -68,6 +68,16 @@ from services.assemblyai.transcriber import (
     TranscriptionError,
     load_assemblyai_config,
 )
+from services.language_registry import (
+    DEFAULT_LANGUAGE_PAIR_PROFILE,
+    DEFAULT_SOURCE_LANGUAGE,
+    DEFAULT_TARGET_LANGUAGE,
+    SCRIPT_CJK,
+    SCRIPT_LATIN,
+    get_language_descriptor,
+    normalize_language,
+    resolve_language_pair,
+)
 from services.gemini.rewriter import GeminiRewriter
 from services.gemini.translator import (
     DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
@@ -2917,6 +2927,39 @@ class ProcessPipeline:
             job_voice_strategy = 'preset_mapping'
         self._current_service_mode = job_service_mode  # for recovery paths
 
+        # --- Multilingual language pair (PR-W) ------------------------
+        # Resolve the job's source/target language to a registry profile and
+        # stash it (plus per-side descriptors) on the instance so the
+        # language-aware helpers (source gate, failed-segment split, voice pool
+        # builder, probe counting) can dispatch on it. The create-path Gateway
+        # gate (PR-A) already rejected unsupported / not-yet-ready pairs with
+        # 4xx, so anything reaching here is the GA default (en->zh-CN) or a
+        # ``pipeline_ready`` pair. ``resolve_language_pair`` is fail-closed
+        # (None for unknown), so a legacy job that predates the language fields
+        # — or any unexpected value — falls back to the GA default profile and
+        # therefore behaves byte-identically to today's en->zh-CN pipeline.
+        _job_source_language = _snap('source_language', DEFAULT_SOURCE_LANGUAGE)
+        _job_target_language = _snap('target_language', DEFAULT_TARGET_LANGUAGE)
+        self._language_profile = (
+            resolve_language_pair(_job_source_language, _job_target_language)
+            or DEFAULT_LANGUAGE_PAIR_PROFILE
+        )
+        self._source_language_descriptor = (
+            get_language_descriptor(self._language_profile.source_language)
+            or get_language_descriptor(DEFAULT_SOURCE_LANGUAGE)
+        )
+        self._target_language_descriptor = (
+            get_language_descriptor(self._language_profile.target_language)
+            or get_language_descriptor(DEFAULT_TARGET_LANGUAGE)
+        )
+        if not self._language_profile.is_default:
+            print(
+                f"[PIPELINE] Language pair: {self._language_profile.language_pair} "
+                f"(source={self._language_profile.source_language}, "
+                f"target={self._language_profile.target_language})",
+                flush=True,
+            )
+
         # Smart MVP P2 (plan §6.0.6 / Codex 第八轮 F3) — derive the
         # effective pipeline mode that smart-aware branches should
         # consult. ``job_service_mode`` (raw from JobRecord) stays the
@@ -3145,7 +3188,7 @@ class ProcessPipeline:
                 f"[S0] 音频实际时长：{round(actual_duration_ms / 1000, 2)}秒"
                 f"（yt-dlp报告：{round(download_result.duration_ms / 1000, 2)}秒）"
             )
-            self._enforce_english_source_language(download_result)
+            self._enforce_source_language(download_result)
 
             # --- 套餐时长限制 (snapshot-based, Gateway 主检查的安全网) ---
             _check_duration_limit(
@@ -3233,7 +3276,7 @@ class ProcessPipeline:
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
             if transcript_result.lines:
-                self._enforce_english_transcript_language(transcript_result)
+                self._enforce_transcript_language(transcript_result)
 
             if transcript_path.exists() and not transcript_result.lines:
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
@@ -8590,35 +8633,76 @@ class ProcessPipeline:
             pass
         raise ValueError("说话人数量范围为 1-10 或 auto。")
 
-    def _enforce_english_source_language(self, download_result: DownloadResult) -> None:
+    def _enforce_source_language(self, download_result: DownloadResult) -> None:
+        """Validate the video's source-language metadata against the job's
+        expected source language.
+
+        Fail-open when metadata is absent (local uploads carry none) — preserved
+        from the legacy gate. For the GA default pair (``en->zh-CN``) this is
+        byte-identical to the legacy English-only gate, including the exact log
+        line and error message.
+        """
+        profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
         source_language = str(getattr(download_result, "language", "") or "").strip()
         if not source_language:
             return
-        if _is_english_language_code(source_language):
-            print(f"[S0] 视频源语言元数据：{source_language}")
+        if profile.is_default:
+            if _is_english_language_code(source_language):
+                print(f"[S0] 视频源语言元数据：{source_language}")
+                return
+            raise ValueError(
+                "当前只支持英文视频翻译。"
+                f"视频源语言元数据为 {source_language!r}，请确认输入的视频是英文内容。"
+            )
+        expected = profile.source_language
+        if normalize_language(source_language) == expected:
+            print(f"[S0] 视频源语言元数据：{source_language}（期望源语言 {expected}）")
             return
         raise ValueError(
-            "当前只支持英文视频翻译。"
-            f"视频源语言元数据为 {source_language!r}，请确认输入的视频是英文内容。"
+            f"任务源语言为 {expected}，但视频源语言元数据为 {source_language!r}，"
+            "请确认输入视频与所选源语言一致。"
         )
 
-    def _enforce_english_transcript_language(
+    def _enforce_transcript_language(
         self,
         transcript_result: TranscriptResult,
     ) -> None:
+        """Validate the transcript's language against the job's expected source
+        language. Byte-identical to the legacy English-only gate for the GA
+        default pair; script-aware for non-default pairs.
+        """
+        profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
         explicit_language = str(getattr(transcript_result, "language", "") or "").strip()
-        if explicit_language and not _is_english_language_code(explicit_language):
-            if explicit_language.lower() not in {"auto", "unknown", "und", "undefined"}:
-                raise ValueError(
-                    "当前只支持英文视频翻译。"
-                    f"转录服务检测到语言为 {explicit_language!r}，请确认输入的视频是英文内容。"
-                )
+        _provider_skip = {"auto", "unknown", "und", "undefined"}
 
+        if profile.is_default:
+            if explicit_language and not _is_english_language_code(explicit_language):
+                if explicit_language.lower() not in _provider_skip:
+                    raise ValueError(
+                        "当前只支持英文视频翻译。"
+                        f"转录服务检测到语言为 {explicit_language!r}，请确认输入的视频是英文内容。"
+                    )
+            detected_language = self._detect_transcript_language(transcript_result.lines)
+            if detected_language != "en":
+                raise ValueError(
+                    "当前只支持英文视频翻译。检测到转录稿语言为非英文"
+                    "（英文字符占比过低）。请确认输入的视频是英文内容。"
+                )
+            return
+
+        # --- source-aware path (non-default pair) ---
+        expected = profile.source_language
+        if explicit_language and explicit_language.lower() not in _provider_skip:
+            if normalize_language(explicit_language) != expected:
+                raise ValueError(
+                    f"任务源语言为 {expected}，但转录服务检测到语言为 {explicit_language!r}，"
+                    "请确认输入视频与所选源语言一致。"
+                )
         detected_language = self._detect_transcript_language(transcript_result.lines)
-        if detected_language != "en":
+        if detected_language != expected:
             raise ValueError(
-                "当前只支持英文视频翻译。检测到转录稿语言为非英文"
-                "（英文字符占比过低）。请确认输入的视频是英文内容。"
+                f"检测到转录稿语言与任务源语言 {expected} 不一致（脚本字符占比过低）。"
+                "请确认输入视频与所选源语言一致。"
             )
 
     def _detect_transcript_language(
@@ -8627,14 +8711,36 @@ class ProcessPipeline:
         sample_limit: int = 20,
         english_threshold: float = 0.6,
     ) -> str:
-        """Detect language from early transcript lines. Returns 'en' or 'unknown'."""
+        """Detect whether early transcript lines match the job's source script.
+
+        Returns the matched canonical source language (``"en"`` for the GA
+        default) or ``"unknown"``. For a Latin-script source (including the GA
+        default) this is byte-identical to the legacy English-ratio detection,
+        including the exact log line. For a CJK-script source it measures the
+        CJK character ratio instead.
+        """
+        profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        descriptor = getattr(self, "_source_language_descriptor", None)
         sample_lines = lines[:sample_limit]
         combined_text = " ".join(
             str(line.source_text).strip() for line in sample_lines if line.source_text
         )
         if not combined_text:
-            return "en"  # Empty transcript, let downstream handle it
+            # Empty transcript, let downstream handle it (no false rejection).
+            return "en" if profile.is_default else profile.source_language
 
+        if descriptor is not None and descriptor.script_family == SCRIPT_CJK:
+            cjk_chars = sum(1 for ch in combined_text if "一" <= ch <= "鿿")
+            non_space = sum(1 for ch in combined_text if not ch.isspace())
+            if non_space == 0:
+                return profile.source_language  # no scorable chars, skip detection
+            cjk_ratio = cjk_chars / non_space
+            print(
+                f"[S1] 语言检测：中文字符占比 {cjk_ratio:.0%}（阈值 {english_threshold:.0%}）"
+            )
+            return profile.source_language if cjk_ratio >= english_threshold else "unknown"
+
+        # Latin-script source (GA default) — byte-identical legacy logic.
         ascii_letters = sum(1 for ch in combined_text if ch.isascii() and ch.isalpha())
         total_letters = sum(1 for ch in combined_text if ch.isalpha())
         if total_letters == 0:

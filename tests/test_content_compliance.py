@@ -182,7 +182,7 @@ def test_chinese_source_language_is_blocked_before_translation() -> None:
     pipeline = ProcessPipeline()
 
     with pytest.raises(ValueError, match="\u5f53\u524d\u53ea\u652f\u6301\u82f1\u6587\u89c6\u9891\u7ffb\u8bd1"):
-        pipeline._enforce_english_source_language(SimpleNamespace(language="zh-CN"))
+        pipeline._enforce_source_language(SimpleNamespace(language="zh-CN"))
 
 
 def test_chinese_transcript_text_is_blocked_even_when_language_field_is_en() -> None:
@@ -196,4 +196,4 @@ def test_chinese_transcript_text_is_blocked_even_when_language_field_is_en() -> 
     )
 
     with pytest.raises(ValueError, match="\u68c0\u6d4b\u5230\u8f6c\u5f55\u7a3f\u8bed\u8a00\u4e3a\u975e\u82f1\u6587"):
-        pipeline._enforce_english_transcript_language(transcript)
+        pipeline._enforce_transcript_language(transcript)
