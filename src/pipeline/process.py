@@ -74,6 +74,7 @@ from services.language_registry import (
     DEFAULT_TARGET_LANGUAGE,
     SCRIPT_CJK,
     SCRIPT_LATIN,
+    LanguagePairProfile,
     get_language_descriptor,
     normalize_language,
     resolve_language_pair,
@@ -2938,11 +2939,8 @@ class ProcessPipeline:
         # (None for unknown), so a legacy job that predates the language fields
         # — or any unexpected value — falls back to the GA default profile and
         # therefore behaves byte-identically to today's en->zh-CN pipeline.
-        _job_source_language = _snap('source_language', DEFAULT_SOURCE_LANGUAGE)
-        _job_target_language = _snap('target_language', DEFAULT_TARGET_LANGUAGE)
-        self._language_profile = (
-            resolve_language_pair(_job_source_language, _job_target_language)
-            or DEFAULT_LANGUAGE_PAIR_PROFILE
+        self._language_profile = self._resolve_job_language_profile(
+            _snap('source_language'), _snap('target_language')
         )
         self._source_language_descriptor = (
             get_language_descriptor(self._language_profile.source_language)
@@ -8633,6 +8631,40 @@ class ProcessPipeline:
             pass
         raise ValueError("说话人数量范围为 1-10 或 auto。")
 
+    @staticmethod
+    def _resolve_job_language_profile(
+        raw_source_language: object,
+        raw_target_language: object,
+    ) -> "LanguagePairProfile":
+        """Resolve a job's raw source/target language snapshot to a profile.
+
+        * **Both fields absent** (None / empty / whitespace — legacy job or no
+          snapshot) → the GA default ``en->zh-CN`` profile, byte-identical to the
+          pre-multilingual pipeline.
+        * **At least one field present but the resulting pair is unsupported** →
+          fail-closed ``ValueError``. We never silently run a foreign source
+          through the English pipeline (e.g. a job stamped ``source_language='fr'``
+          must NOT default to ``en->zh-CN``). PR-A's Gateway gate already rejects
+          unsupported pairs at create time, so this branch is defense-in-depth for
+          a pre-gating job or a direct pipeline invocation.
+        """
+        has_source = bool(raw_source_language and str(raw_source_language).strip())
+        has_target = bool(raw_target_language and str(raw_target_language).strip())
+        if not has_source and not has_target:
+            return DEFAULT_LANGUAGE_PAIR_PROFILE
+        resolved = resolve_language_pair(
+            raw_source_language if has_source else DEFAULT_SOURCE_LANGUAGE,
+            raw_target_language if has_target else DEFAULT_TARGET_LANGUAGE,
+        )
+        if resolved is None:
+            raise ValueError(
+                "不支持的语言对："
+                f"source_language={raw_source_language!r}, "
+                f"target_language={raw_target_language!r}。"
+                "请确认任务的源/目标语言为受支持的组合。"
+            )
+        return resolved
+
     def _enforce_source_language(self, download_result: DownloadResult) -> None:
         """Validate the video's source-language metadata against the job's
         expected source language.
@@ -8731,10 +8763,16 @@ class ProcessPipeline:
 
         if descriptor is not None and descriptor.script_family == SCRIPT_CJK:
             cjk_chars = sum(1 for ch in combined_text if "一" <= ch <= "鿿")
-            non_space = sum(1 for ch in combined_text if not ch.isspace())
-            if non_space == 0:
+            # Denominator = letter-like chars only (CJK ideographs + Latin
+            # letters; both are ``isalpha``), excluding digits / punctuation /
+            # whitespace. A Chinese interview peppered with English names and
+            # numbers ("OpenAI GPT-5 2026 Q2 ARR …") must not be falsely judged
+            # non-Chinese because those tokens inflate the denominator. Mirrors
+            # the Latin branch's ascii_letters/total_letters ratio.
+            total_letters = sum(1 for ch in combined_text if ch.isalpha())
+            if total_letters == 0:
                 return profile.source_language  # no scorable chars, skip detection
-            cjk_ratio = cjk_chars / non_space
+            cjk_ratio = cjk_chars / total_letters
             print(
                 f"[S1] 语言检测：中文字符占比 {cjk_ratio:.0%}（阈值 {english_threshold:.0%}）"
             )

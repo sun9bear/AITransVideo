@@ -269,6 +269,17 @@ DEFAULT_LANGUAGE_PAIR_PROFILE: LanguagePairProfile = SUPPORTED_LANGUAGE_PAIRS[
     DEFAULT_LANGUAGE_PAIR
 ]
 
+#: Pairs whose ``natural_length_ratio`` is still a PROVISIONAL estimate that has
+#: not been measured from real fixtures (plan §3.4 / Phase 0). Hard invariant: a
+#: pair listed here MUST NOT be ``pipeline_ready=True``. Flipping such a pair GA
+#: requires first removing it from this set — which forces a conscious
+#: calibration step rather than letting an un-measured ratio (e.g. ``zh-CN->en``
+#: at the 2026-04-15 ``0.55`` estimate) silently become a production parameter.
+#: ``test_language_registry`` enforces the invariant.
+RATIO_CALIBRATION_PENDING: frozenset[str] = frozenset(
+    {make_pair_key(LANG_ZH_CN, LANG_EN)}
+)
+
 
 def resolve_language_pair(
     source_language: Optional[str],
