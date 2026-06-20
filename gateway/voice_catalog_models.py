@@ -41,7 +41,12 @@ class VoiceCatalog(Base):
     # the voice's own spoken language). NULL / empty ⇒ legacy → the language-aware
     # catalog query treats it as zh-CN-only. Drives the ``voice_catalog_target_
     # language_filter_enabled`` kill-switched query so a zh dub never returns en voices.
-    compatible_target_languages: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null=True: an omitted value persists as SQL NULL (not a JSONB ``null``
+    # scalar), so the legacy "NULL == zh-CN-only" predicate / IS NULL match holds for
+    # rows inserted via the ORM without a value (re-CodeX P2).
+    compatible_target_languages: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     verify_status: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     verify_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     source: Mapped[str] = mapped_column(String(50), nullable=False, server_default="manual")

@@ -621,6 +621,8 @@ class TTSGenerator:
                 persona_style=persona,
                 energy_level=energy,
                 voice_description=voice_desc,
+                # PR-E re-CodeX P2: drive language-aware selection in the main path.
+                target_language=getattr(segment, "target_language", None),
                 target_chars_per_second=(
                     float(getattr(segment, "target_chars_per_second", 0.0)) or None
                 ),
@@ -1043,6 +1045,8 @@ class TTSGenerator:
                 persona_style=getattr(segment, "persona_style", None),
                 energy_level=getattr(segment, "energy_level", None),
                 voice_description=getattr(segment, "voice_description", None),
+                # PR-E re-CodeX P2: drive language-aware selection in the main path.
+                target_language=getattr(segment, "target_language", None),
                 target_chars_per_second=(
                     float(getattr(segment, "target_chars_per_second", 0.0)) or None
                 ),
