@@ -3363,6 +3363,7 @@ class ProcessPipeline:
             voice_id_b = normalized_voice_b
             segments_path = (final_project_dir / "translation" / "segments.json").resolve(strict=False)
             s3_cache_hit = segments_path.exists()
+            _translation_pair_mismatch = False
             if s3_cache_hit:
                 # Pair-aware cache guard (re-CodeX P2, v3 §2.5/F): a project dir reused
                 # across language pairs must not serve stale wrong-language translation.
@@ -3389,6 +3390,7 @@ class ProcessPipeline:
                         f"({_cached_pair} != {_current_pair}); re-translating"
                     )
                     s3_cache_hit = False
+                    _translation_pair_mismatch = True
             speaker_name_a_is_placeholder = self._is_default_placeholder_speaker_name(
                 speaker_id="speaker_a",
                 speaker_name=speaker_name_a,
@@ -3407,7 +3409,12 @@ class ProcessPipeline:
             # S2 cache: if review already ran (e.g. pipeline resumed after
             # translation_config_review), restore results instead of re-running.
             s2_result_path = (final_project_dir / "transcript" / "s2_review_result.json").resolve(strict=False)
-            s2_cache_hit = s2_result_path.exists() and not s3_cache_hit
+            # A pair-mismatch project dir must also drop the old pair's S2 review —
+            # glossary/title direction is pair-specific (PR-H), so reusing it would feed
+            # stale pair facts into the new translation. (re-CodeX P2)
+            s2_cache_hit = (
+                s2_result_path.exists() and not s3_cache_hit and not _translation_pair_mismatch
+            )
 
             if s3_cache_hit:
                 print("[S2] Translation cache hit, skipping review.")
@@ -6015,19 +6022,24 @@ class ProcessPipeline:
                 # this project dir with a different pair re-translates instead of serving
                 # stale wrong-language text. Default en->zh-CN writes nothing → a missing
                 # marker means the legacy default pair (byte-identical, no new artifact).
-                if not self._language_profile.is_default:
-                    try:
-                        _pair_marker = (
-                            final_project_dir / "translation" / ".language_pair"
-                        ).resolve(strict=False)
+                try:
+                    _pair_marker = (
+                        final_project_dir / "translation" / ".language_pair"
+                    ).resolve(strict=False)
+                    if self._language_profile.is_default:
+                        # Default writes no marker; clear any stale non-default marker
+                        # so later default resumes hit the cache (missing == default).
+                        # (re-CodeX P2)
+                        _pair_marker.unlink(missing_ok=True)
+                    else:
                         _pair_marker.parent.mkdir(parents=True, exist_ok=True)
                         _pair_marker.write_text(
                             f"{self._language_profile.source_language}->"
                             f"{self._language_profile.target_language}",
                             encoding="utf-8",
                         )
-                    except Exception as _exc:
-                        print(f"[S3] language-pair cache marker write skipped (non-fatal): {_exc}")
+                except Exception as _exc:
+                    print(f"[S3] language-pair cache marker update skipped (non-fatal): {_exc}")
                 # Phase 4.1 E.5 (Codex 2026-05-25 三签字版本 HC#5)：translate()
                 # 创建的 fresh DubbingSegment 没有 tts_provider / worker routing
                 # 字段。原 manual loop 只设了 tts_provider，**不覆盖** worker
