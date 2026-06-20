@@ -72,6 +72,8 @@ from services.language_registry import (
     DEFAULT_LANGUAGE_PAIR_PROFILE,
     DEFAULT_SOURCE_LANGUAGE,
     DEFAULT_TARGET_LANGUAGE,
+    LANG_EN,
+    LANG_ZH_CN,
     SCRIPT_CJK,
     SCRIPT_LATIN,
     LanguagePairProfile,
@@ -352,6 +354,15 @@ SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_MIN_TARGET_MS = 30_000
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.35
 FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;])\s*")
 FAILED_SEGMENT_SOURCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?;])\s+")
+# Script-aware split patterns for failed-segment repair. CJK text splits on
+# full-width sentence punctuation (no required trailing space); Latin text splits
+# on ASCII sentence punctuation followed by whitespace. The GA default pair
+# (target=CJK cn_text, source=Latin) maps to exactly the two legacy constants
+# above, so default-pair splitting is byte-identical.
+_FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT = {
+    SCRIPT_CJK: FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN,
+    SCRIPT_LATIN: FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
+}
 
 T = TypeVar("T")
 
@@ -2833,6 +2844,21 @@ def _content_compliance_peer_cost_rank_delta() -> int:
 def _is_english_language_code(language_code: str) -> bool:
     normalized = str(language_code or "").strip().lower().replace("_", "-")
     return normalized == "en" or normalized.startswith("en-")
+
+
+def _minimax_language_matches_target(voice_language: str, target_language: str) -> bool:
+    """Does a MiniMax voice's catalog ``language`` tag match the job's target?
+
+    Byte-identical to the legacy hard-coded Chinese filter for the GA default
+    target (``zh-CN`` → Mandarin/Cantonese). ``en`` → MiniMax's ``"英语"`` tag.
+    This provider-specific tag mapping is a PR-W de-Chinese seam; PR-E will
+    replace it with ``voice_catalog.compatible_target_languages``.
+    """
+    if target_language == LANG_ZH_CN:
+        return voice_language in ("中文-普通话", "中文-粤语")
+    if target_language == LANG_EN:
+        return voice_language == "英语"
+    return False
 
 
 class ProcessPipeline:
@@ -8271,6 +8297,15 @@ class ProcessPipeline:
         speaker_structure_profiles: dict[str, dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Build pending payload for voice_selection_review stage."""
+        # Target-language-aware voice pool (PR-W de-Chinese). For the GA default
+        # (zh-CN target, CJK) every provider filter below stays byte-identical;
+        # a non-CJK target (e.g. en) gets target-language voices instead of being
+        # hard-restricted to Chinese (finding A: a foreign-target review page /
+        # Smart auto-match must not see only Chinese voices).
+        _profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        _target_language = _profile.target_language
+        _target_desc = getattr(self, "_target_language_descriptor", None)
+        _target_is_cjk = _target_desc is not None and _target_desc.script_family == SCRIPT_CJK
         speaker_structure_profiles = (
             speaker_structure_profiles
             or self._build_speaker_structure_profiles(
@@ -8327,6 +8362,12 @@ class ProcessPipeline:
                 }
 
             if prov == "volcengine":
+                # VolcEngine non-Chinese-target voices need the
+                # compatible_target_languages + matchable migration (PR-E). Until
+                # then a non-CJK target gets no VolcEngine candidates rather than
+                # Chinese ones (de-Chinese: no contamination, no broken voice).
+                if not _target_is_cjk:
+                    return voices, display_map
                 from services.tts.volcengine_voice_catalog import get_voices_for_resource, RESOURCE_ID_1_0, RESOURCE_ID_2_0
                 rid = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
                 pool = get_voices_for_resource(rid)
@@ -8340,6 +8381,11 @@ class ProcessPipeline:
                     voices.append(_voice_dict(v, vid, lbl))
 
             elif prov == "cosyvoice":
+                # CosyVoice is a Chinese-only pool; it cannot read a non-CJK
+                # target. Offer no candidates for such targets (PR-E decides if
+                # any cross-lingual CosyVoice voice is ever eligible).
+                if not _target_is_cjk:
+                    return voices, display_map
                 from services.tts.cosyvoice_endpoint_config import get_runtime_endpoint_mode, is_voice_available
                 from services.tts.cosyvoice_voice_catalog import list_matchable_cosyvoice_voices
                 ep_mode = get_runtime_endpoint_mode()
@@ -8354,7 +8400,9 @@ class ProcessPipeline:
             elif prov == "minimax":
                 from services.tts.minimax_voice_selector import _load_minimax_pool
                 for v in _load_minimax_pool():
-                    if v.get("language") not in ("中文-普通话", "中文-粤语"):
+                    if not _minimax_language_matches_target(
+                        str(v.get("language", "")), _target_language
+                    ):
                         continue
                     vid = str(v.get("voice_id", ""))
                     lbl = str(v.get("display_name", v.get("name", vid)))
@@ -8458,11 +8506,18 @@ class ProcessPipeline:
                     _speaker_dur_ms_totals.get(_line.speaker_id, 0) + _d
                 )
         speaker_target_cps: dict[str, float] = {}
-        for _sid, _words in _speaker_word_totals.items():
-            _dur_s = _speaker_dur_ms_totals.get(_sid, 0) / 1000.0
-            if _dur_s > 0:
-                _wps = _words / _dur_s
-                speaker_target_cps[_sid] = round(_wps * 1.8, 2)
+        # The voice-catalog cps is calibrated in Chinese hanzi/sec, so the speed
+        # dimension is only comparable when the TARGET is CJK. For a non-CJK
+        # target (e.g. en) leave cps empty → reranker speed dimension disabled
+        # (plan §Phase 4.1: zh->en relies on DSP/rewrite for duration matching,
+        # not speed scoring). Default pair (zh-CN target, ratio 1.8) is
+        # byte-identical to the legacy ``round(_wps * 1.8, 2)``.
+        if _target_is_cjk:
+            for _sid, _words in _speaker_word_totals.items():
+                _dur_s = _speaker_dur_ms_totals.get(_sid, 0) / 1000.0
+                if _dur_s > 0:
+                    _wps = _words / _dur_s
+                    speaker_target_cps[_sid] = round(_wps * _profile.natural_length_ratio, 2)
 
         # Get speaker profiles: prefer explicit speaker_styles, fallback to segment attributes
         speaker_profiles: dict[str, dict[str, str]] = {}
@@ -10652,13 +10707,29 @@ class ProcessPipeline:
         if not cn_text:
             return None
 
-        cn_chunks = self._split_text_for_failed_segment(cn_text, FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN)
+        # Script-aware split: cn_text carries the TARGET language, source_text the
+        # SOURCE language. Pick each split pattern by its script family so an
+        # English target splits on ASCII '.' (not full-width 。) and a Chinese
+        # source splits on full-width punctuation. Default pair (target CJK /
+        # source Latin) resolves to the two legacy constants → byte-identical.
+        _tgt_desc = getattr(self, "_target_language_descriptor", None)
+        _src_desc = getattr(self, "_source_language_descriptor", None)
+        _target_pattern = _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT.get(
+            _tgt_desc.script_family if _tgt_desc is not None else SCRIPT_CJK,
+            FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN,
+        )
+        _source_pattern = _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT.get(
+            _src_desc.script_family if _src_desc is not None else SCRIPT_LATIN,
+            FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
+        )
+
+        cn_chunks = self._split_text_for_failed_segment(cn_text, _target_pattern)
         if cn_chunks is None:
             return None
 
         source_chunks = self._split_text_for_failed_segment(
             segment.source_text,
-            FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
+            _source_pattern,
         )
         if source_chunks is None or len(source_chunks) != len(cn_chunks):
             source_chunks = [segment.source_text for _ in cn_chunks]
@@ -12309,9 +12380,17 @@ class ProcessPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _count_source_words(text: str) -> int:
-        """Count spoken words in source text (same logic as translator.py)."""
+    def _count_source_words(text: str, source_script: str = SCRIPT_LATIN) -> int:
+        """Count spoken units in source text for probe sizing.
+
+        Latin (default) → word-like tokens, byte-identical to the legacy English
+        count (and translator.py). CJK → per-ideograph count, so a Chinese source
+        yields non-zero probe candidates instead of silently collapsing to an
+        empty probe set (the Latin regex matches ~0 tokens in Chinese text).
+        """
         import re as _re
+        if source_script == SCRIPT_CJK:
+            return sum(1 for ch in (text or "") if "一" <= ch <= "鿿")
         return len(_re.findall(r"[A-Za-z0-9']+", text or ""))
 
     @staticmethod
@@ -12387,6 +12466,7 @@ class ProcessPipeline:
     def _select_probe_segments(
         lines: list[TranscriptLine],
         *,
+        source_script: str = SCRIPT_LATIN,
         min_words: int = 20,
         max_words: int = 100,
         min_duration_ms: int = 3_000,
@@ -12410,7 +12490,8 @@ class ProcessPipeline:
         if len(lines) <= 2:
             return []
 
-        _count_words = ProcessPipeline._count_source_words
+        def _count_words(_t: str) -> int:
+            return ProcessPipeline._count_source_words(_t, source_script)
 
         # Build candidate pool: skip first/last, apply word + duration filters
         def _filter_candidates(
@@ -12624,7 +12705,11 @@ class ProcessPipeline:
         Returns list of DubbingSegments with cn_text populated.
         Caches result with fingerprint for resume.
         """
-        probe_lines = self._select_probe_segments(transcript_lines)
+        _probe_src_desc = getattr(self, "_source_language_descriptor", None)
+        probe_lines = self._select_probe_segments(
+            transcript_lines,
+            source_script=_probe_src_desc.script_family if _probe_src_desc is not None else SCRIPT_LATIN,
+        )
         if not probe_lines:
             print("[S4-probe] 无满足条件的探针段落")
             return []
