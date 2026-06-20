@@ -5975,6 +5975,8 @@ class ProcessPipeline:
                     speaker_voices=_speaker_voices if effective_speakers > 2 else None,
                     chars_per_second=_probe_chars_per_second,
                     chars_per_second_by_speaker=_probe_chars_per_second_by_speaker or None,
+                    source_language=self._language_profile.source_language,
+                    target_language=self._language_profile.target_language,
                 )
                 # Phase 4.1 E.5 (Codex 2026-05-25 三签字版本 HC#5)：translate()
                 # 创建的 fresh DubbingSegment 没有 tts_provider / worker routing

@@ -158,6 +158,55 @@ __GROUPS_JSON__
     "cn_text": "翻译后的中文文本"
   }
 ]"""
+
+# zh-CN -> en translation prompt. Mirrors DEFAULT_TRANSLATION_PROMPT_TEMPLATE's
+# token contract (__VIDEO_TITLE__ / __YOUTUBE_URL__ / __GLOSSARY_SECTION__ /
+# __SPEAKER_INSTRUCTION__ / __STRICT_LENGTH_INSTRUCTION__ / __GROUPS_JSON__) so
+# _build_prompt works unchanged, but translates Chinese -> English dubbing text.
+# The output field stays ``cn_text`` (the canonical target-text container, plan
+# v3 §4.3 — here it holds English). Per-segment length budget values
+# (target_chars/min_chars/max_chars) come from the groups JSON (set by the
+# language-pair length profile, PR-CD slice 3). lang_pair_marker: zh-CN->en
+_TRANSLATION_PROMPT_TEMPLATE_ZH_EN = """You are a professional video dubbing translator. Translate the Chinese video transcript into natural, fluent English voice-over text.
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 来源：__YOUTUBE_URL__
+__GLOSSARY_SECTION__
+These translations feed an English TTS dub; the core goal is for the English dub duration to roughly match the original Chinese segment duration. Note:
+1. Each segment is tagged with target_duration_seconds (original duration); translate so the spoken English length naturally approaches it.
+2. Do not pad to hit a character count mechanically — judge the English length from the source pace and information density.
+3. Prefer concise, idiomatic English over literal word-for-word translation that overruns the duration.
+4. For dense source content, use compact English that preserves the core information.
+5. The result is for voice-over: write spoken, natural English, not written-subtitle style.
+6. Translate Chinese personal names to their common English forms (e.g. 埃隆·马斯克 -> Elon Musk, 萨姆·奥特曼 -> Sam Altman); keep already-English names as-is.
+7. For companies / products / models, use the established English name.
+__SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__8. Preserve spoken rhythm (matters for TTS duration matching): when the source has fillers, hesitations or repetition, keep natural English equivalents ("well", "you know", "I mean", "I'd say", "uh", "kind of") rather than stripping them — over-tightening makes the dub far shorter than target and forces stretching later.
+9. Translate each segment independently but keep cross-segment coherence.
+10. Output JSON only, no other text.
+
+Per-segment metadata (by constraint strength):
+**Hard constraints**: target_duration_seconds; target_chars (suggested target length for this segment); min_chars ~ max_chars (the ±15% band — keep the translation within it).
+**Reference**: source_words_per_second (source pace); voice_chars_per_second (chosen voice synthesis speed, reference only); target_chars_hint (== target_chars).
+
+输入（JSON数组）：
+__GROUPS_JSON__
+
+请输出JSON数组，格式如下（只输出JSON，不要markdown代码块）：
+[
+  {
+    "segment_id": 1,
+    "cn_text": "translated English text"
+  }
+]"""
+
+#: Translation prompt template per language pair. Default (en->zh-CN) is the exact
+#: legacy DEFAULT_TRANSLATION_PROMPT_TEMPLATE; zh-CN->en translates to English.
+_TRANSLATION_TEMPLATE_BY_PAIR: dict[tuple[str, str], str] = {
+    ("en", "zh-CN"): DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
+    ("zh-CN", "en"): _TRANSLATION_PROMPT_TEMPLATE_ZH_EN,
+}
+
 DEFAULT_REWRITE_PROMPT_TEMPLATE = """你是专业的中文配音文本改写专家。
 
 任务：对当前文本进行__DIRECTION_DESC__，使其更适合目标配音时长。
@@ -536,7 +585,14 @@ class GeminiTranslator:
         speaker_voices: dict[str, str] | None = None,
         chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
         chars_per_second_by_speaker: dict[str, float] | None = None,
+        source_language: str = "en",
+        target_language: str = "zh-CN",
     ) -> TranslationResult:
+        # Stash the job language pair so _build_prompt / template selection can
+        # dispatch on it without threading through every batch helper. Default
+        # en->zh-CN → byte-identical legacy behavior.
+        self._translate_source_language = source_language
+        self._translate_target_language = target_language
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
         output_path = (output_root / "segments.json").resolve(strict=False)
@@ -1573,6 +1629,27 @@ class GeminiTranslator:
         "voice_chars_per_second",
     })
 
+    def _select_translation_template(self, source_language: str, target_language: str) -> str:
+        """Pick the translation prompt template for the job's language pair.
+
+        Default pair (en->zh-CN): the configured template (admin override or
+        DEFAULT) — byte-identical to the legacy path. Non-default pair: honor the
+        admin override ONLY when it declares the canonical ``"src->tgt"`` key
+        (§2.3 fail-closed), otherwise the per-pair registry template — never reuse
+        the en->zh override/default for a different direction.
+        """
+        if source_language == "en" and target_language == "zh-CN":
+            return self.translation_prompt_template
+        override = self.translation_prompt_template
+        if (
+            override != DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+            and f"{source_language}->{target_language}" in override
+        ):
+            return override
+        return _TRANSLATION_TEMPLATE_BY_PAIR.get(
+            (source_language, target_language), DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+        )
+
     def _build_prompt(
         self,
         groups: list[dict],
@@ -1609,7 +1686,10 @@ class GeminiTranslator:
         normalized_video_title = _normalize_optional_text(video_title) or "未提供"
         normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
         return (
-            self.translation_prompt_template
+            self._select_translation_template(
+                getattr(self, "_translate_source_language", "en"),
+                getattr(self, "_translate_target_language", "zh-CN"),
+            )
             .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
             .replace(TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN, normalized_youtube_url)
             .replace(TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN, glossary_section)
@@ -1642,7 +1722,10 @@ class GeminiTranslator:
                 raise TranslationError(f"Gemini response contains duplicate segment_id: {segment_id}")
             translated_by_id[segment_id] = {
                 "segment_id": segment_id,
-                "cn_text": _normalize_optional_text(item.get("cn_text")) or "",
+                # Accept ``target_text`` as an alias for ``cn_text`` (plan v3 §4.5);
+                # cn_text stays the canonical container (§4.3). en->zh-CN output
+                # uses cn_text → byte-identical.
+                "cn_text": _normalize_optional_text(item.get("target_text") or item.get("cn_text")) or "",
             }
 
         if set(translated_by_id) != set(expected_segment_ids):
