@@ -13,6 +13,9 @@ from services.assemblyai.transcriber import (
     DEFAULT_TRANSCRIPTION_PROMPT,
     _asr_profile_for_language,
     _build_transcription_config,
+    _ends_sentence,
+    _join_tokens,
+    _script_for_language,
 )
 
 
@@ -78,3 +81,40 @@ def test_build_config_unknown_language_falls_back_to_english() -> None:
     cfg = _build_transcription_config(_FakeAai(), language="fr", speaker_labels=False, speakers_expected=None)
     assert cfg.kwargs["language_code"] == "en"
     assert cfg.kwargs["prompt"] == DEFAULT_TRANSCRIPTION_PROMPT
+
+
+# ── script family ──────────────────────────────────────────────────────────
+
+def test_script_for_language() -> None:
+    assert _script_for_language("en") == "latin"
+    assert _script_for_language("zh-CN") == "cjk"
+    for raw in (None, "", "fr"):
+        assert _script_for_language(raw) == "latin"  # default
+
+
+# ── _ends_sentence — script-aware sentence boundary ────────────────────────
+
+def test_ends_sentence_latin_byte_identical() -> None:
+    assert _ends_sentence("end.") is True
+    assert _ends_sentence("middle") is False
+    assert _ends_sentence("句。") is False  # full-width invisible to the Latin pattern
+
+
+def test_ends_sentence_cjk_full_width() -> None:
+    assert _ends_sentence("句。", "cjk") is True
+    assert _ends_sentence("问？", "cjk") is True
+    assert _ends_sentence("中间", "cjk") is False
+    assert _ends_sentence("end.", "cjk") is True  # ASCII still recognized in CJK text
+
+
+# ── _join_tokens — script-aware joining ────────────────────────────────────
+
+def test_join_tokens_latin_byte_identical() -> None:
+    # '.' is attached punctuation (no leading space); "'s" attaches as a clitic.
+    assert _join_tokens(["Hello", "world", "."]) == "Hello world."
+    assert _join_tokens(["It", "'s", "fine"]) == "It's fine"
+
+
+def test_join_tokens_cjk_no_spaces() -> None:
+    assert _join_tokens(["这", "是", "中", "文", "。"], "cjk") == "这是中文。"
+    assert " " not in _join_tokens(["你", "好", "世", "界"], "cjk")

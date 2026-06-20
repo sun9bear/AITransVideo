@@ -117,7 +117,7 @@ class AssemblyAITranscriber:
         raw_payload = _extract_raw_payload(transcript)
         _write_json(raw_response_path, raw_payload)
 
-        lines = _build_transcript_lines(transcript, speaker_labels=speaker_labels)
+        lines = _build_transcript_lines(transcript, speaker_labels=speaker_labels, language=language)
         structured_transcript_path = (output_root / "transcript.json").resolve(strict=False)
         result = TranscriptResult(
             lines=lines,
@@ -270,8 +270,8 @@ def _coerce_positive_float(value: object, *, default: float) -> float:
 # AssemblyAI verification (plan Phase 0 capability matrix); zh-CN is inert in
 # production until the zh-CN->en pair is flipped pipeline_ready.
 _ASR_PROFILE_BY_LANGUAGE: dict[str, dict[str, Any]] = {
-    "en": {"language_code": "en", "disfluencies": True, "prompt": DEFAULT_TRANSCRIPTION_PROMPT},
-    "zh-CN": {"language_code": "zh", "disfluencies": False, "prompt": None},
+    "en": {"language_code": "en", "disfluencies": True, "prompt": DEFAULT_TRANSCRIPTION_PROMPT, "script": "latin"},
+    "zh-CN": {"language_code": "zh", "disfluencies": False, "prompt": None, "script": "cjk"},
 }
 
 
@@ -282,6 +282,18 @@ def _asr_profile_for_language(language: str | None) -> dict[str, Any]:
         str(language or "").strip() or DEFAULT_LANGUAGE_CODE,
         _ASR_PROFILE_BY_LANGUAGE["en"],
     )
+
+
+def _script_for_language(language: str | None) -> str:
+    """Script family ("latin" / "cjk") of a canonical source language.
+    Drives word-stream sentence-end detection + token joining."""
+    return _asr_profile_for_language(language)["script"]
+
+
+# Full-width (CJK) sentence terminators, plus ASCII ones for mixed text. Used to
+# detect sentence boundaries in a CJK word stream — the Latin pattern's bare
+# ``[.?!;]`` never matches 。！？；.
+CJK_SENTENCE_END_PATTERN = re.compile(r"[。！？；.?!;][\"')\]]*$")
 
 
 def _build_transcription_config(
@@ -316,7 +328,10 @@ _MERGE_MAX_DURATION_MS = 30_000  # merge sentences until 30s
 _MERGE_PAUSE_THRESHOLD_MS = 1_500  # split on pauses > 1.5s
 
 
-def _build_transcript_lines(transcript: Any, *, speaker_labels: bool) -> list[TranscriptLine]:
+def _build_transcript_lines(
+    transcript: Any, *, speaker_labels: bool, language: str = DEFAULT_LANGUAGE_CODE
+) -> list[TranscriptLine]:
+    script = _script_for_language(language)
     if speaker_labels:
         utterances = list(getattr(transcript, "utterances", []) or [])
         if utterances:
@@ -344,7 +359,7 @@ def _build_transcript_lines(transcript: Any, *, speaker_labels: bool) -> list[Tr
     if sentences:
         raw_lines = _build_lines_from_sentences(sentences, speaker_labels=speaker_labels)
     if not raw_lines:
-        raw_lines, _ = _build_lines_from_words(words, speaker_labels=speaker_labels)
+        raw_lines, _ = _build_lines_from_words(words, speaker_labels=speaker_labels, script=script)
 
     if len(raw_lines) <= 1:
         return raw_lines
@@ -660,7 +675,9 @@ def _build_lines_from_utterances(utterances: list[Any]) -> list[TranscriptLine]:
     return lines
 
 
-def _build_lines_from_words(words: list[Any], *, speaker_labels: bool) -> tuple[list[TranscriptLine], bool]:
+def _build_lines_from_words(
+    words: list[Any], *, speaker_labels: bool, script: str = "latin"
+) -> tuple[list[TranscriptLine], bool]:
     if not words:
         return [], False
 
@@ -675,7 +692,7 @@ def _build_lines_from_words(words: list[Any], *, speaker_labels: bool) -> tuple[
         nonlocal buffer_tokens, start_ms, end_ms, current_speaker_label
         if not buffer_tokens:
             return
-        source_text = _join_tokens(buffer_tokens)
+        source_text = _join_tokens(buffer_tokens, script)
         if source_text:
             normalized_start_ms = 0 if start_ms is None else start_ms
             normalized_end_ms = normalized_start_ms if end_ms is None else max(normalized_start_ms, end_ms)
@@ -721,7 +738,7 @@ def _build_lines_from_words(words: list[Any], *, speaker_labels: bool) -> tuple[
 
         buffer_tokens.append(token)
         end_ms = word_end
-        if _ends_sentence(token):
+        if _ends_sentence(token, script):
             saw_sentence_punctuation = True
             flush()
 
@@ -729,13 +746,19 @@ def _build_lines_from_words(words: list[Any], *, speaker_labels: bool) -> tuple[
     return lines, saw_sentence_punctuation
 
 
-def _ends_sentence(token: str) -> bool:
-    return bool(SENTENCE_END_PATTERN.search(token))
+def _ends_sentence(token: str, script: str = "latin") -> bool:
+    pattern = CJK_SENTENCE_END_PATTERN if script == "cjk" else SENTENCE_END_PATTERN
+    return bool(pattern.search(token))
 
 
-def _join_tokens(tokens: list[str]) -> str:
+def _join_tokens(tokens: list[str], script: str = "latin") -> str:
     if not tokens:
         return ""
+
+    if script == "cjk":
+        # CJK has no inter-word spaces; concatenate tokens directly. (Embedded
+        # Latin runs are an edge case left to GA refinement.)
+        return re.sub(r"\s+", "", "".join(tokens)).strip()
 
     assembled = tokens[0]
     for token in tokens[1:]:
