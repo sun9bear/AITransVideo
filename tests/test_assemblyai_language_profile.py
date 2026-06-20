@@ -13,13 +13,19 @@ from types import SimpleNamespace
 from services.assemblyai.transcriber import (
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_TRANSCRIPTION_PROMPT,
+    TranscriptLine,
     _asr_profile_for_language,
     _build_transcription_config,
     _ends_sentence,
     _extract_language,
     _join_tokens,
+    _normalize_lines_for_script,
     _script_for_language,
 )
+
+
+def _tl(text: str) -> TranscriptLine:
+    return TranscriptLine(index=1, start_ms=0, end_ms=1000, speaker_id="s", speaker_label="S", source_text=text)
 
 
 class _FakeConfig:
@@ -72,12 +78,18 @@ def test_build_config_english_explicit_byte_identical() -> None:
     assert cfg.kwargs["speakers_expected"] == 3
 
 
-def test_build_config_chinese_drops_english_prompt() -> None:
+def test_build_config_chinese_drops_english_prompt_and_speech_models() -> None:
     cfg = _build_transcription_config(_FakeAai(), language="zh-CN", speaker_labels=True, speakers_expected=2)
     assert cfg.kwargs["language_code"] == "zh"
     assert cfg.kwargs["disfluencies"] is False
     assert "prompt" not in cfg.kwargs  # no English filler prompt for a zh source
+    assert "speech_models" not in cfg.kwargs  # English-coupled models omitted for zh
     assert cfg.kwargs["speakers_expected"] == 2
+
+
+def test_build_config_english_keeps_speech_models() -> None:
+    cfg = _build_transcription_config(_FakeAai(), language="en", speaker_labels=False, speakers_expected=None)
+    assert "speech_models" in cfg.kwargs  # byte-identical: English keeps the default models
 
 
 def test_build_config_unknown_language_falls_back_to_english() -> None:
@@ -141,3 +153,23 @@ def test_extract_language_missing_defaults_to_requested_source() -> None:
     t = SimpleNamespace(language_code=None, language=None)
     assert _extract_language(t, {}, default_language="zh-CN") == "zh-CN"
     assert _extract_language(t, {"foo": "bar"}, default_language="zh-CN") == "zh-CN"
+
+
+# ── _normalize_lines_for_script — merge/split no-space rule for CJK ─────────
+
+def test_normalize_lines_latin_unchanged() -> None:
+    lines = [_tl("First sentence. Second sentence.")]
+    out = _normalize_lines_for_script(lines, "latin")
+    assert out is lines  # byte-identical: same object, no rewrite for Latin
+
+
+def test_normalize_lines_cjk_strips_inter_token_spaces() -> None:
+    # merge/split rebuilders space-joined Chinese — must be collapsed.
+    out = _normalize_lines_for_script([_tl("第一句 第二句 第三句")], "cjk")
+    assert out[0].source_text == "第一句第二句第三句"
+
+
+def test_normalize_lines_cjk_no_space_unchanged() -> None:
+    line = _tl("这是中文。")
+    out = _normalize_lines_for_script([line], "cjk")
+    assert out[0].source_text == "这是中文。"

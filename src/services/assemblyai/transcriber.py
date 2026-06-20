@@ -270,8 +270,14 @@ def _coerce_positive_float(value: object, *, default: float) -> float:
 # AssemblyAI verification (plan Phase 0 capability matrix); zh-CN is inert in
 # production until the zh-CN->en pair is flipped pipeline_ready.
 _ASR_PROFILE_BY_LANGUAGE: dict[str, dict[str, Any]] = {
-    "en": {"language_code": "en", "disfluencies": True, "prompt": DEFAULT_TRANSCRIPTION_PROMPT, "script": "latin"},
-    "zh-CN": {"language_code": "zh", "disfluencies": False, "prompt": None, "script": "cjk"},
+    # speech_models is English-coupled (the universal-* models). Keep it for en
+    # (byte-identical); omit for zh-CN (None) so AssemblyAI picks its own
+    # supported model rather than being forced through an unverified English list.
+    # The exact zh model set is a Phase-0 capability-matrix item.
+    "en": {"language_code": "en", "disfluencies": True, "prompt": DEFAULT_TRANSCRIPTION_PROMPT,
+           "script": "latin", "speech_models": DEFAULT_SPEECH_MODELS},
+    "zh-CN": {"language_code": "zh", "disfluencies": False, "prompt": None,
+              "script": "cjk", "speech_models": None},
 }
 
 
@@ -314,13 +320,16 @@ def _build_transcription_config(
     if speaker_labels and speakers_expected is not None:
         kwargs["speakers_expected"] = int(speakers_expected)
 
-    try:
-        return aai.TranscriptionConfig(
-            **kwargs,
-            speech_models=list(DEFAULT_SPEECH_MODELS),
-        )
-    except TypeError:
-        return aai.TranscriptionConfig(**kwargs)
+    speech_models = profile.get("speech_models")
+    if speech_models:
+        try:
+            return aai.TranscriptionConfig(
+                **kwargs,
+                speech_models=list(speech_models),
+            )
+        except TypeError:
+            return aai.TranscriptionConfig(**kwargs)
+    return aai.TranscriptionConfig(**kwargs)
 
 
 _MAX_SINGLE_UTTERANCE_DURATION_MS = 45_000  # 45 seconds — split overlong utterances
@@ -346,10 +355,14 @@ def _build_transcript_lines(
             if is_multi_speaker:
                 # 多说话人：始终使用 utterances 保留说话人信息
                 # 对超长 utterance 做机械拆分，但不丢弃 speaker 标签
-                return _build_lines_from_utterances_with_split(utterances)
+                return _normalize_lines_for_script(
+                    _build_lines_from_utterances_with_split(utterances), script
+                )
 
             if _utterances_well_segmented(utterances):
-                return _build_lines_from_utterances(utterances)
+                return _normalize_lines_for_script(
+                    _build_lines_from_utterances(utterances), script
+                )
 
     # 单说话人或无 utterances — build sentence-level lines, then 3-layer split
     words = list(getattr(transcript, "words", []) or [])
@@ -362,7 +375,7 @@ def _build_transcript_lines(
         raw_lines, _ = _build_lines_from_words(words, speaker_labels=speaker_labels, script=script)
 
     if len(raw_lines) <= 1:
-        return raw_lines
+        return _normalize_lines_for_script(raw_lines, script)
 
     # Merge sentences into reasonable segments using _merge_short_lines first,
     # then apply 3-layer mechanical split (same as multi-speaker path)
@@ -379,7 +392,7 @@ def _build_transcript_lines(
     ]
     result = _apply_3layer_split(merged_lines, all_words)
     print(f"[S1] 单说话人 3 层拆分: {len(raw_lines)} sentences → {len(merged_lines)} merged → {len(result)} lines")
-    return result
+    return _normalize_lines_for_script(result, script)
 
 
 ## _try_llm_segmentation removed — LLM semantic split now handled by
@@ -770,6 +783,30 @@ def _join_tokens(tokens: list[str], script: str = "latin") -> str:
             continue
         assembled += f" {token}"
     return re.sub(r"\s+", " ", assembled).strip()
+
+
+def _normalize_lines_for_script(lines: list[TranscriptLine], script: str) -> list[TranscriptLine]:
+    """Centralized no-space rule for a CJK source.
+
+    The merge / 3-layer-split rebuilders join word/line pieces with spaces (correct
+    for Latin). For a CJK source that reintroduces spaces between Chinese
+    characters/sentences, polluting the transcript fed to S2/translation. Applied
+    at every ``_build_transcript_lines`` exit, this strips inter-token whitespace
+    from each line's ``source_text`` for a CJK source. Latin → returned unchanged
+    (byte-identical). Mirrors ``_join_tokens``'s CJK behavior; embedded Latin runs
+    are the same GA-refinement edge.
+    """
+    if script != "cjk":
+        return lines
+    from dataclasses import replace as _dc_replace
+
+    normalized: list[TranscriptLine] = []
+    for line in lines:
+        collapsed = re.sub(r"\s+", "", line.source_text or "")
+        normalized.append(
+            _dc_replace(line, source_text=collapsed) if collapsed != line.source_text else line
+        )
+    return normalized
 
 
 def _speaker_id_from_label(speaker_label: str) -> str:
