@@ -12,6 +12,11 @@ import time
 from typing import Any
 
 from services.assemblyai.transcriber import TranscriptLine
+from services.language_registry import (
+    DEFAULT_LANGUAGE_PAIR_PROFILE,
+    get_language_descriptor,
+    resolve_language_pair,
+)
 from services.llm import LLMProviderError, LLMRouter
 from services.llm_registry import (
     MODEL_REGISTRY as _MODEL_REGISTRY,
@@ -593,6 +598,12 @@ class GeminiTranslator:
         # en->zh-CN → byte-identical legacy behavior.
         self._translate_source_language = source_language
         self._translate_target_language = target_language
+        # Per-pair length ratio + whether the target is CJK (drives the voice-cps
+        # metadata). Default en->zh-CN → ratio 1.8 / target CJK → byte-identical.
+        _seg_lp_profile = resolve_language_pair(source_language, target_language) or DEFAULT_LANGUAGE_PAIR_PROFILE
+        _seg_target_cps_ratio = _seg_lp_profile.natural_length_ratio
+        _seg_tgt_desc = get_language_descriptor(target_language)
+        _seg_target_is_cjk = _seg_tgt_desc is not None and _seg_tgt_desc.script_family == "cjk"
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
         output_path = (output_root / "segments.json").resolve(strict=False)
@@ -613,6 +624,8 @@ class GeminiTranslator:
             max_segment_duration_ms=max_segment_duration_ms,
             chars_per_second=chars_per_second,
             chars_per_second_by_speaker=chars_per_second_by_speaker,
+            source_language=source_language,
+            target_language=target_language,
         )
 
         # Save glossary to translation/glossary.json for reference
@@ -704,7 +717,13 @@ class GeminiTranslator:
             # the runtime auto-match path in tts_generator can pass it into
             # VoiceMatchRequest. Falls back to 0.0 when source_wps is unknown.
             _src_wps = float(group.get("source_words_per_second") or 0.0)
-            _target_cps = round(_src_wps * 1.8, 3) if _src_wps > 0 else 0.0
+            # voice cps is comparable to the (hanzi/sec) catalog only when the
+            # target is CJK; disable it for a non-CJK target (v3 Phase 4.2).
+            _target_cps = (
+                round(_src_wps * _seg_target_cps_ratio, 3)
+                if (_src_wps > 0 and _seg_target_is_cjk)
+                else 0.0
+            )
             segments.append(
                 DubbingSegment(
                     segment_id=segment_id,
@@ -871,6 +890,14 @@ class GeminiTranslator:
                 for group in groups
             ],
         }
+        # v3 §2.5/F: the DEFAULT pair adds NOTHING to the payload, so its
+        # fingerprint is byte-identical to the pre-multilingual one (no spurious
+        # cache miss → no paid re-translation of existing en->zh checkpoints).
+        # A non-default pair appends its key to avoid cross-direction cache reuse.
+        _fp_src = getattr(self, "_translate_source_language", "en")
+        _fp_tgt = getattr(self, "_translate_target_language", "zh-CN")
+        if not (_fp_src == "en" and _fp_tgt == "zh-CN"):
+            payload["language_pair"] = f"{_fp_src}->{_fp_tgt}"
         serialized_payload = json.dumps(
             payload,
             ensure_ascii=False,
@@ -1793,6 +1820,14 @@ class GeminiTranslator:
         return False
 
     def _count_cn_chars(self, text: str) -> int:
+        # Length-gate unit must match the target unit of the budget (min/max_chars).
+        # CJK target (default): per-char count (byte-identical legacy). Latin
+        # target: word count, since the budget is target_chars = source \u00d7 ratio in
+        # English *words* \u2014 counting letters would be ~5x off and always retry.
+        target_language = getattr(self, "_translate_target_language", "zh-CN")
+        desc = get_language_descriptor(target_language)
+        if desc is not None and desc.script_family == "latin":
+            return len(re.findall(r"[A-Za-z0-9']+", text or ""))
         clean = re.sub(r"[^\u4e00-\u9fff\u3400-\u4dbfa-zA-Z0-9]", "", text)
         return len(clean)
 
@@ -2322,6 +2357,8 @@ def _build_groups(
     max_segment_duration_ms: int,
     chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
     chars_per_second_by_speaker: dict[str, float] | None = None,
+    source_language: str = "en",
+    target_language: str = "zh-CN",
 ) -> list[dict[str, object]]:
     """Build translation groups from transcript lines.
 
@@ -2336,6 +2373,14 @@ def _build_groups(
     """
     if not lines:
         return []
+
+    # Language-pair length profile (default en->zh-CN → ratio 1.8 / Latin source,
+    # i.e. the exact legacy numbers, so target_chars/min/max and the translation
+    # fingerprint are byte-identical for the default pair).
+    _lp_profile = resolve_language_pair(source_language, target_language) or DEFAULT_LANGUAGE_PAIR_PROFILE
+    _length_ratio = _lp_profile.natural_length_ratio
+    _src_desc = get_language_descriptor(source_language)
+    _source_script = _src_desc.script_family if _src_desc is not None else "latin"
 
     groups: list[dict[str, object]] = []
     for segment_id, line in enumerate(lines, start=1):
@@ -2363,7 +2408,7 @@ def _build_groups(
 
     for group in groups:
         source_text = str(group["source_text"])
-        source_word_count = _count_source_words(source_text)
+        source_word_count = _count_source_words(source_text, _source_script)
         target_duration_ms = int(group["target_duration_ms"])
         source_words_per_second = 0.0
         if target_duration_ms > 0 and source_word_count > 0:
@@ -2399,6 +2444,7 @@ def _build_groups(
             density_factor=density_factor,
             chars_per_second=effective_cps,
             source_word_count=source_word_count,
+            ratio=_length_ratio,
         )
         min_chars, max_chars = _estimate_target_char_range(target_chars)
         group["reference_words_per_second"] = round(reference_words_per_second, 3)
@@ -2414,7 +2460,7 @@ def _build_groups(
         # original content density", NOT a hard constraint. min/max_chars
         # remain the binding duration envelope.
         source_word_count = int(group.get("source_word_count") or 0)
-        group["target_chars_hint"] = max(1, int(round(source_word_count * 1.8)))
+        group["target_chars_hint"] = max(1, int(round(source_word_count * _length_ratio)))
         # Record the effective chars/sec used to derive min/max, so the LLM
         # can see why the envelope is what it is. Comes from either the
         # voice_catalog pre-calibrated value (Phase 1) or probe calibration.
@@ -2562,7 +2608,13 @@ def _estimate_target_chars(
     return max(1, int(target_duration_ms / 1000 * chars_per_second))
 
 
-def _count_source_words(source_text: str) -> int:
+def _count_source_words(source_text: str, source_script: str = "latin") -> int:
+    """Count source spoken units. Latin (default) → word-like tokens
+    (byte-identical to the legacy English count); CJK → per-ideograph count, so a
+    Chinese source produces a non-zero count instead of ~0 (which would collapse
+    the whole length budget)."""
+    if source_script == "cjk":
+        return sum(1 for ch in (source_text or "") if "一" <= ch <= "鿿")
     return len(re.findall(r"[A-Za-z0-9']+", source_text))
 
 
@@ -2632,6 +2684,7 @@ def _estimate_dynamic_target_chars(
     density_factor: float,
     chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
     source_word_count: int = 0,
+    ratio: float = _ENGLISH_TO_CHINESE_CHAR_RATIO,
 ) -> int:
     """Plan C: target_chars = source_word_count × 1.8 (×density), independent of voice_cps.
 
@@ -2645,7 +2698,7 @@ def _estimate_dynamic_target_chars(
     voice physical speed.
     """
     if source_word_count > 0:
-        natural_chars = source_word_count * _ENGLISH_TO_CHINESE_CHAR_RATIO
+        natural_chars = source_word_count * ratio
         return max(1, int(round(natural_chars * density_factor)))
     # Fallback: probe groups (no source_word_count yet) or empty text.
     base_target_chars = _estimate_target_chars(target_duration_ms, chars_per_second)
