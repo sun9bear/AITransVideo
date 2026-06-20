@@ -99,6 +99,25 @@ def test_select_probe_segments_latin_mode_on_chinese_is_empty() -> None:
     assert picked == []
 
 
+def test_select_probe_segments_cjk_truncates_long_spaceless_turn() -> None:
+    # A single very long, space-less Chinese turn exceeds max_words, so the only
+    # candidate must go through the truncation fallback. The CJK branch truncates
+    # by character; the legacy whitespace truncation could not shrink a one-token
+    # Chinese turn and the probe would be skipped (CodeX P2).
+    long_zh = "这是一段非常长的中文访谈内容用于测试探针截断" * 30  # space-less, >max_words
+    lines = [
+        TranscriptLine(index=0, start_ms=0, end_ms=2000, speaker_id="s",
+                       speaker_label="S", source_text="开场白。"),
+        TranscriptLine(index=1, start_ms=2000, end_ms=120000, speaker_id="s",
+                       speaker_label="S", source_text=long_zh),
+        TranscriptLine(index=2, start_ms=120000, end_ms=122000, speaker_id="s",
+                       speaker_label="S", source_text="结尾。"),
+    ]
+    picked = ProcessPipeline._select_probe_segments(lines, source_script=SCRIPT_CJK)
+    assert picked, "a long space-less CJK turn must be truncated into a usable probe"
+    assert any(len(p.source_text) < len(long_zh) for p in picked)
+
+
 # ── Failed-segment split pattern dispatch by script family ─────────────────
 
 def test_split_pattern_map_default_is_byte_identical() -> None:

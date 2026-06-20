@@ -23,7 +23,6 @@ from pipeline.process import ProcessPipeline
 from services.assemblyai.transcriber import TranscriptLine, TranscriptResult
 from services.language_registry import (
     DEFAULT_LANGUAGE_PAIR_PROFILE,
-    get_language_descriptor,
     resolve_language_pair,
 )
 
@@ -50,13 +49,15 @@ def _transcript(text: str, *, language: str = "") -> TranscriptResult:
 
 
 def _pipeline_for(source_language: str, target_language: str) -> ProcessPipeline:
-    """Build a pipeline with the language profile wired as the body would."""
+    """Build a pipeline with the language profile wired as run() would.
+
+    Only ``_language_profile`` is set — the language-aware helpers derive their
+    per-side script descriptors from it on demand (single source of truth).
+    """
     pipeline = ProcessPipeline()
     profile = resolve_language_pair(source_language, target_language)
     assert profile is not None, f"unsupported test pair {source_language}->{target_language}"
     pipeline._language_profile = profile
-    pipeline._source_language_descriptor = get_language_descriptor(profile.source_language)
-    pipeline._target_language_descriptor = get_language_descriptor(profile.target_language)
     return pipeline
 
 
@@ -178,6 +179,21 @@ def test_resolve_profile_canonical_pairs() -> None:
     ],
 )
 def test_resolve_profile_explicit_unsupported_fails_closed(src, tgt) -> None:
+    with pytest.raises(ValueError, match="不支持的语言对"):
+        ProcessPipeline._resolve_job_language_profile(src, tgt)
+
+
+@pytest.mark.parametrize(("src", "tgt"), [("en", None), ("en", ""), (None, "zh-CN"), ("  ", "zh-CN")])
+def test_resolve_profile_partial_present_resolves_to_default(src, tgt) -> None:
+    # One end present and consistent with the GA default, the other absent →
+    # GA default (matches the Gateway create-path's "incomplete → default pair").
+    assert ProcessPipeline._resolve_job_language_profile(src, tgt).is_default is True
+
+
+@pytest.mark.parametrize(("src", "tgt"), [("zh-CN", None), (None, "en")])
+def test_resolve_profile_partial_unresolvable_fails_closed(src, tgt) -> None:
+    # A lone source/target that does not form a supported pair with the default
+    # other end fails closed rather than silently defaulting to en->zh.
     with pytest.raises(ValueError, match="不支持的语言对"):
         ProcessPipeline._resolve_job_language_profile(src, tgt)
 

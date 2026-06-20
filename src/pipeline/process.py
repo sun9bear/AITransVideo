@@ -2955,26 +2955,19 @@ class ProcessPipeline:
         self._current_service_mode = job_service_mode  # for recovery paths
 
         # --- Multilingual language pair (PR-W) ------------------------
-        # Resolve the job's source/target language to a registry profile and
-        # stash it (plus per-side descriptors) on the instance so the
-        # language-aware helpers (source gate, failed-segment split, voice pool
-        # builder, probe counting) can dispatch on it. The create-path Gateway
-        # gate (PR-A) already rejected unsupported / not-yet-ready pairs with
-        # 4xx, so anything reaching here is the GA default (en->zh-CN) or a
-        # ``pipeline_ready`` pair. ``resolve_language_pair`` is fail-closed
-        # (None for unknown), so a legacy job that predates the language fields
-        # — or any unexpected value — falls back to the GA default profile and
-        # therefore behaves byte-identically to today's en->zh-CN pipeline.
+        # Resolve the job's source/target language to a registry profile and stash
+        # it on the instance so the language-aware helpers (source gate,
+        # failed-segment split, voice pool builder, probe counting) can dispatch on
+        # it. Those helpers derive per-side script descriptors from this profile
+        # on demand (single source of truth) rather than from cached instance
+        # fields, so they stay correct even when called directly (bypassing run()).
+        # The create-path Gateway gate (PR-A) already rejected unsupported /
+        # not-yet-ready pairs with 4xx, so anything reaching here is the GA default
+        # (en->zh-CN) or a ``pipeline_ready`` pair. ``_resolve_job_language_profile``
+        # is fail-closed: absent fields → GA default (byte-identical), present but
+        # unsupported → ValueError (never silently run a foreign source as en->zh).
         self._language_profile = self._resolve_job_language_profile(
             _snap('source_language'), _snap('target_language')
-        )
-        self._source_language_descriptor = (
-            get_language_descriptor(self._language_profile.source_language)
-            or get_language_descriptor(DEFAULT_SOURCE_LANGUAGE)
-        )
-        self._target_language_descriptor = (
-            get_language_descriptor(self._language_profile.target_language)
-            or get_language_descriptor(DEFAULT_TARGET_LANGUAGE)
         )
         if not self._language_profile.is_default:
             print(
@@ -8304,8 +8297,22 @@ class ProcessPipeline:
         # Smart auto-match must not see only Chinese voices).
         _profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
         _target_language = _profile.target_language
-        _target_desc = getattr(self, "_target_language_descriptor", None)
+        # Derive descriptors from the PROFILE (single source of truth), not the
+        # per-run instance fields — so a direct helper call (e.g. a future Studio
+        # enter-edit refresh, or a unit test) that bypasses run() still gets the
+        # correct script for the default pair. Using the instance field's None
+        # fallback here would flip the default zh-CN target to "not CJK" and
+        # return empty Chinese pools (regression caught by both reviewers).
+        _target_desc = (
+            get_language_descriptor(_target_language)
+            or get_language_descriptor(DEFAULT_TARGET_LANGUAGE)
+        )
         _target_is_cjk = _target_desc is not None and _target_desc.script_family == SCRIPT_CJK
+        _src_desc = (
+            get_language_descriptor(_profile.source_language)
+            or get_language_descriptor(DEFAULT_SOURCE_LANGUAGE)
+        )
+        _src_script = _src_desc.script_family if _src_desc is not None else SCRIPT_LATIN
         speaker_structure_profiles = (
             speaker_structure_profiles
             or self._build_speaker_structure_profiles(
@@ -8450,6 +8457,13 @@ class ProcessPipeline:
             prov: str, gender: str, age_group: str, persona: str, energy: str,
             target_chars_per_second: float | None = None,
         ) -> dict[str, object] | None:
+            # Suppress auto-match when this provider contributes no voices for the
+            # job's target language (e.g. VolcEngine/CosyVoice for a non-CJK
+            # target). Otherwise the resolver could return a voice that is not in
+            # the (de-Chinese-filtered) available_voices, and the frontend would
+            # preselect a voice the user can't see / that mismatches the target.
+            if not all_providers.get(prov, {}).get("available_voices"):
+                return None
             try:
                 from services.tts.voice_match_resolver import resolve_voice_match
                 from services.tts.voice_match_types import VoiceMatchRequest
@@ -8467,6 +8481,7 @@ class ProcessPipeline:
                     persona_style=persona,
                     energy_level=energy,
                     target_chars_per_second=target_chars_per_second,
+                    target_language=_target_language,
                 ))
                 dmap = all_display_maps.get(prov, {})
                 matched_name = dmap.get(result.voice_id, result.voice_id)
@@ -8496,7 +8511,7 @@ class ProcessPipeline:
         _speaker_word_totals: dict[str, int] = {}
         _speaker_dur_ms_totals: dict[str, int] = {}
         for _line in transcript_result.lines:
-            _w = self._count_source_words(_line.source_text or "")
+            _w = self._count_source_words(_line.source_text or "", _src_script)
             _d = max(0, int(_line.end_ms - _line.start_ms))
             if _w > 0 and _d > 0:
                 _speaker_word_totals[_line.speaker_id] = (
@@ -8807,7 +8822,9 @@ class ProcessPipeline:
         CJK character ratio instead.
         """
         profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
-        descriptor = getattr(self, "_source_language_descriptor", None)
+        # Derive from the profile (SoT), robust to direct helper calls that bypass
+        # run(); for the default en source this resolves to the Latin descriptor.
+        descriptor = get_language_descriptor(profile.source_language)
         sample_lines = lines[:sample_limit]
         combined_text = " ".join(
             str(line.source_text).strip() for line in sample_lines if line.source_text
@@ -10712,8 +10729,10 @@ class ProcessPipeline:
         # English target splits on ASCII '.' (not full-width 。) and a Chinese
         # source splits on full-width punctuation. Default pair (target CJK /
         # source Latin) resolves to the two legacy constants → byte-identical.
-        _tgt_desc = getattr(self, "_target_language_descriptor", None)
-        _src_desc = getattr(self, "_source_language_descriptor", None)
+        # Descriptors come from the profile (SoT), robust to direct helper calls.
+        _split_profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        _tgt_desc = get_language_descriptor(_split_profile.target_language)
+        _src_desc = get_language_descriptor(_split_profile.source_language)
         _target_pattern = _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT.get(
             _tgt_desc.script_family if _tgt_desc is not None else SCRIPT_CJK,
             FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN,
@@ -12552,11 +12571,21 @@ class ProcessPipeline:
                 # Proportional truncation (will be refined with word timestamps later)
                 import re as _re
                 target_wc = min(truncate_words, total_wc)
-                words_list = _re.findall(r"\S+", best.source_text or "")
-                # Try to break at sentence boundary near target_wc
-                truncated_text = _truncate_at_sentence(words_list, target_wc)
-                actual_wc = len(truncated_text.split())
-                ratio = actual_wc / max(len(words_list), 1)
+                if source_script == SCRIPT_CJK:
+                    # CJK has no whitespace word tokens — a long Chinese turn is a
+                    # single ``\S+`` token, so the legacy whitespace truncation
+                    # would not shrink it and the synthetic segment would still be
+                    # skipped by max_words_per_speaker. Truncate by character and
+                    # measure with the CJK-aware counter instead.
+                    truncated_text = (best.source_text or "")[:target_wc]
+                    actual_wc = _count_words(truncated_text)
+                    ratio = actual_wc / max(total_wc, 1)
+                else:
+                    words_list = _re.findall(r"\S+", best.source_text or "")
+                    # Try to break at sentence boundary near target_wc
+                    truncated_text = _truncate_at_sentence(words_list, target_wc)
+                    actual_wc = len(truncated_text.split())
+                    ratio = actual_wc / max(len(words_list), 1)
                 orig_dur = best.end_ms - best.start_ms
                 adj_dur = max(int(orig_dur * ratio), min_duration_ms)
                 adj_end_ms = best.start_ms + adj_dur
@@ -12705,7 +12734,8 @@ class ProcessPipeline:
         Returns list of DubbingSegments with cn_text populated.
         Caches result with fingerprint for resume.
         """
-        _probe_src_desc = getattr(self, "_source_language_descriptor", None)
+        _probe_profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        _probe_src_desc = get_language_descriptor(_probe_profile.source_language)
         probe_lines = self._select_probe_segments(
             transcript_lines,
             source_script=_probe_src_desc.script_family if _probe_src_desc is not None else SCRIPT_LATIN,
