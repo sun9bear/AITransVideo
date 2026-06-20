@@ -152,3 +152,18 @@ def test_count_source_words_cjk_includes_latin_and_digits() -> None:
     assert _count_source_words("OpenAI GPT-4 发布了", "cjk") == 6
     # A Latin-only backchannel in a CJK source must not collapse to 0
     assert _count_source_words("OK", "cjk") == 1
+
+
+# ── DubbingSegment per-segment target_language (PR-E slice 6) ────────────────
+
+def test_dubbing_segment_has_target_language_default_none() -> None:
+    from services.gemini.translator import DubbingSegment
+
+    seg = DubbingSegment(
+        segment_id=1, speaker_id="A", display_name="A", voice_id="v",
+        start_ms=0, end_ms=1000, target_duration_ms=1000,
+        source_text="hi", cn_text="你好",
+    )
+    assert seg.target_language is None  # default → zh-CN legacy (byte-identical)
+    seg.target_language = "en"
+    assert seg.target_language == "en"

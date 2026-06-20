@@ -384,6 +384,10 @@ class DubbingSegment:
     target_duration_ms: int
     source_text: str
     cn_text: str
+    # Dub target language (PR-E slice 6). None → zh-CN (the language-aware TTS hooks
+    # in tts_generator / fallback all treat None and "zh-CN" identically → byte-identical
+    # default). Populated by the pipeline from its resolved language profile.
+    target_language: str | None = None
     tts_audio_path: str | None = None
     aligned_audio_path: str | None = None
     actual_duration_ms: int = 0

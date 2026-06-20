@@ -6044,6 +6044,8 @@ class ProcessPipeline:
                     source_language=self._language_profile.source_language,
                     target_language=self._language_profile.target_language,
                 )
+                # PR-E slice 6: stamp the dub target language onto fresh segments too.
+                self._stamp_segment_target_language(translation_result.segments)
                 # Pair-aware translation cache marker (re-CodeX P2, v3 §2.5/F): record
                 # the canonical pair next to segments.json so a later run that reuses
                 # this project dir with a different pair re-translates instead of serving
@@ -9042,11 +9044,27 @@ class ProcessPipeline:
             seg = DubbingSegment(**filtered)
             _backfill_legacy_tts_input_cn_text(seg)
             segments.append(seg)
+        self._stamp_segment_target_language(segments)
         return TranslationResult(
             segments=segments,
             total_segments=_coerce_int(payload.get("total_segments"), default=len(segments)),
             output_path=str(segments_path.resolve(strict=False)),
         )
+
+    def _stamp_segment_target_language(self, segments: list[DubbingSegment]) -> None:
+        """PR-E slice 6: record the dub target language on each segment so the
+        language-aware TTS hooks (fail-closed fallback / VolcEngine explicit_language /
+        MiniMax language_boost) read it via ``getattr(segment, 'target_language')``.
+
+        A missing profile or a zh-CN target leaves the legacy zh behavior unchanged
+        (those hooks treat None / "zh-CN" identically → byte-identical default).
+        """
+        profile = getattr(self, "_language_profile", None)
+        if profile is None:
+            return
+        target_language = getattr(profile, "target_language", None)
+        for seg in segments:
+            seg.target_language = target_language
 
     @staticmethod
     def _apply_transcript_dubbing_modes_to_segments(
