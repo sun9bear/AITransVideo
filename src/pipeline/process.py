@@ -3248,6 +3248,12 @@ class ProcessPipeline:
                 )
             translator = GeminiTranslator(**translator_kwargs)
             translator._service_mode = job_service_mode  # enables llm_registry model selection
+            # Seed the language pair at construction so it is set even when the
+            # translate()/translate_probe() calls are skipped (s3 cache hit / resume).
+            # Otherwise GeminiRewriter would read unset attrs and fall back to
+            # en->zh-CN for a cached non-default job (re-CodeX P2).
+            translator._translate_source_language = self._language_profile.source_language
+            translator._translate_target_language = self._language_profile.target_language
             _set_usage_meter_if_supported(translator, usage_meter)
 
             transcript_path = (final_project_dir / "transcript" / "transcript.json").resolve(strict=False)
