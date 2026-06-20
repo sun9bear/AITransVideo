@@ -159,6 +159,13 @@ class GeminiRewriter:
             target_upper_chars = max(
                 target_lower_chars, self._to_target_budget_units(int(target_upper_chars))
             )
+        if self._target_is_latin:
+            # target_chars uses the fixed word-rate (2.6 wps) while explicit bounds
+            # are ÷ _LATIN_CHARS_PER_WORD from the per-voice char-rate; when that rate
+            # != ~12.2 the two diverge and the prompt could show a target outside its
+            # own band. Clamp the displayed target into the band (re-CodeX P2). CJK is
+            # untouched (target_chars already sits inside its char-based band).
+            target_chars = max(target_lower_chars, min(target_chars, target_upper_chars))
         prompt = self._build_rewrite_prompt(
             normalized_text,
             direction=direction,

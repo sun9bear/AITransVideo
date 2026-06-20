@@ -192,3 +192,29 @@ def test_rewrite_for_duration_cjk_prompt_keeps_char_bounds_byte_identical() -> N
     )
     prompt = captured["prompt"]
     assert "47~66" in prompt  # CJK bounds untouched
+
+
+def test_rewrite_latin_target_clamped_into_converted_band() -> None:
+    # re-CodeX P2: target_chars (fixed 2.6 wps) must not exceed the ÷4.7-converted
+    # explicit band, or the prompt would say "about 10 units" while "aim for 4~5".
+    r = _rewriter("zh-CN", "en")
+    captured: dict[str, str] = {}
+
+    def _fake_call(task_name, prompt, json_mode=False):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return "a rewritten english sentence"
+
+    r._call_task_with_usage_phase = _fake_call  # type: ignore[assignment]
+    # duration 4000ms → 2.6 wps target_chars=10; char-bounds 19~24 → ÷4.7 → 4~5.
+    r.rewrite_for_duration_with_profile(
+        "hello world foo bar",
+        actual_duration_ms=8000,
+        target_duration_ms=4000,
+        source_text="x",
+        target_lower_chars=19,
+        target_upper_chars=24,
+    )
+    prompt = captured["prompt"]
+    assert "about 5 units" in prompt  # target clamped into the 4~5 band
+    assert "about 10 units" not in prompt
+    assert "4~5" in prompt
