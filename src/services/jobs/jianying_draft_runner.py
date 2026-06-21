@@ -1494,7 +1494,15 @@ class JianyingDraftRunner:
 
         source_video_path = artifact_index.get("source.original_video", "")
         dubbed_audio_path = artifact_index.get("editor.dubbed_audio_complete", "")
-        subtitle_path = artifact_index.get("editor.subtitles", "")
+        # PR-F: prefer the explicit TARGET (dub-language) subtitle, falling back to the
+        # legacy editor.subtitles key for pre-slice-4 manifests. editor.subtitles is
+        # already the dub-language file (subtitles_zh.srt == cue.text == TARGET), and
+        # subtitles_target.srt is a byte copy of it, so the en->zh draft is byte-identical;
+        # the explicit key just makes a non-default (zh->en) draft honestly target-sourced.
+        subtitle_path = (
+            artifact_index.get("editor.subtitles_target")
+            or artifact_index.get("editor.subtitles", "")
+        )
         ambient_audio_path = artifact_index.get("editor.ambient_audio") or None
 
         project_title = job.display_name or job.job_id

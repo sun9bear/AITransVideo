@@ -174,8 +174,8 @@ def test_filenames_identical_between_paths(tmp_path: Path) -> None:
     output_segs = _make_output(tmp_path / "with_segs", cues=[])
     writer = EditorPackageWriter()
 
-    zh_c, en_c, bi_c = writer._write_srt(output_cues)
-    zh_s, en_s, bi_s = writer._write_srt(output_segs)
+    zh_c, en_c, bi_c = writer._write_srt(output_cues)[:3]  # PR-F 5-tuple
+    zh_s, en_s, bi_s = writer._write_srt(output_segs)[:3]
 
     assert Path(zh_c).name == Path(zh_s).name == "subtitles_zh.srt"
     assert Path(en_c).name == Path(en_s).name == "subtitles_en.srt"
@@ -192,7 +192,7 @@ def test_zh_srt_content_matches_write_zh_srt(tmp_path: Path) -> None:
     output = _make_output(tmp_path, cues=[cue])
     writer = EditorPackageWriter()
 
-    zh_path, _, _ = writer._write_srt(output)
+    zh_path, _, _ = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     actual_content = Path(zh_path).read_text(encoding="utf-8")
     expected_content = write_zh_srt([cue])
@@ -209,7 +209,7 @@ def test_en_srt_content_matches_write_en_srt(tmp_path: Path) -> None:
     output = _make_output(tmp_path, cues=[cue])
     writer = EditorPackageWriter()
 
-    _, en_path, _ = writer._write_srt(output)
+    _, en_path, _ = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     actual_content = Path(en_path).read_text(encoding="utf-8")
     expected_content = write_en_srt([cue])
@@ -226,7 +226,7 @@ def test_bilingual_srt_content_matches_write_bilingual_srt(tmp_path: Path) -> No
     output = _make_output(tmp_path, cues=[cue])
     writer = EditorPackageWriter()
 
-    _, _, bi_path = writer._write_srt(output)
+    _, _, bi_path = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     actual_content = Path(bi_path).read_text(encoding="utf-8")
     expected_content = write_bilingual_srt([cue])
@@ -262,7 +262,7 @@ def test_cues_take_precedence_when_both_present(tmp_path: Path) -> None:
     assert output.segments[0].cn_text == "你好世界。"
     writer = EditorPackageWriter()
 
-    zh_path, _, _ = writer._write_srt(output)
+    zh_path, _, _ = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     content = Path(zh_path).read_text(encoding="utf-8")
     # Cue text should appear
@@ -281,7 +281,7 @@ def test_single_cue_produces_one_srt_entry(tmp_path: Path) -> None:
     output = _make_output(tmp_path, cues=[cue])
     writer = EditorPackageWriter()
 
-    zh_path, en_path, bi_path = writer._write_srt(output)
+    zh_path, en_path, bi_path = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     zh_content = Path(zh_path).read_text(encoding="utf-8")
     en_content = Path(en_path).read_text(encoding="utf-8")
@@ -318,7 +318,7 @@ def test_cross_hour_timing_produces_correct_srt_time(tmp_path: Path) -> None:
     output = _make_output(tmp_path, cues=[cue])
     writer = EditorPackageWriter()
 
-    zh_path, en_path, _ = writer._write_srt(output)
+    zh_path, en_path, _ = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     zh_content = Path(zh_path).read_text(encoding="utf-8")
     en_content = Path(en_path).read_text(encoding="utf-8")
@@ -350,7 +350,7 @@ def test_compat_subtitles_srt_matches_zh_for_canonical_path(tmp_path: Path) -> N
     output = _make_output(tmp_path, cues=[cue])
     writer = EditorPackageWriter()
 
-    zh_path, _, _ = writer._write_srt(output)
+    zh_path, _, _ = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     compat_path = Path(output.output_dir) / "output" / "subtitles.srt"
     assert compat_path.read_text(encoding="utf-8") == Path(zh_path).read_text(encoding="utf-8")
@@ -368,7 +368,7 @@ def test_prf_source_target_srt_written_for_canonical_path(tmp_path: Path) -> Non
     output = _make_output(tmp_path, cues=[cue])
     writer = EditorPackageWriter()
 
-    zh_path, en_path, _ = writer._write_srt(output)
+    zh_path, en_path, _ = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     out_dir = Path(output.output_dir) / "output"
     target_path = out_dir / "subtitles_target.srt"
@@ -385,7 +385,7 @@ def test_prf_source_target_srt_written_for_segment_path(tmp_path: Path) -> None:
     output = _make_output(tmp_path, cues=[])
     writer = EditorPackageWriter()
 
-    zh_path, en_path, _ = writer._write_srt(output)
+    zh_path, en_path, _ = writer._write_srt(output)[:3]  # PR-F: _write_srt now returns a 5-tuple (+source/target)
 
     out_dir = Path(output.output_dir) / "output"
     target_path = out_dir / "subtitles_target.srt"

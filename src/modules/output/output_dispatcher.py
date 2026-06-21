@@ -271,6 +271,15 @@ class OutputDispatcher:
         artifact_index.register("editor.subtitles", result.subtitles_path)
         artifact_index.register("editor.subtitles_en", result.subtitles_en_path)
         artifact_index.register("editor.subtitles_bilingual", result.subtitles_bilingual_path)
+        # PR-F: explicit script-neutral keys. editor.subtitles_target == cue.text (the dub
+        # TARGET), editor.subtitles_source == cue.en_text (the SOURCE). For en->zh these
+        # point at byte-identical copies of subtitles(zh)/subtitles_en; for non-default
+        # pairs they carry the correct language under an honest name. Additive — the legacy
+        # editor.subtitles / editor.subtitles_en keys are unchanged.
+        if result.subtitles_target_path:
+            artifact_index.register("editor.subtitles_target", result.subtitles_target_path)
+        if result.subtitles_source_path:
+            artifact_index.register("editor.subtitles_source", result.subtitles_source_path)
         artifact_index.register("editor.alignment_report", result.alignment_report_path)
         artifact_index.register("editor.segments_dir", result.segments_dir)
 

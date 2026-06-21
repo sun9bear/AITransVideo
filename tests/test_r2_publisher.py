@@ -340,6 +340,33 @@ def test_filename_for_non_jianying_keys_unchanged(tmp_path):
     assert _filename_for("editor.subtitles", "myvid", p) == "myvid_zh.srt"
     assert _filename_for("editor.subtitles_en", "myvid", p) == "myvid_en.srt"
     assert _filename_for("editor.subtitles_bilingual", "myvid", p) == "myvid_bilingual.srt"
+    # PR-F: script-neutral subtitle keys get honest *_target.srt / *_source.srt names.
+    assert _filename_for("editor.subtitles_target", "myvid", p) == "myvid_target.srt"
+    assert _filename_for("editor.subtitles_source", "myvid", p) == "myvid_source.srt"
+
+
+def test_prf_script_neutral_subtitle_keys_content_type_and_allowlists():
+    """PR-F: editor.subtitles_target/source are text/plain, in the Studio allow-lists +
+    eager-push set, and NOT exposed to Express/Free."""
+    from services.r2_publisher_lib.downloadable_keys import (
+        content_type_for,
+        STUDIO_ALLOWED_ARTIFACT_KEYS,
+        STUDIO_ALLOWED_DOWNLOAD_KEYS,
+        EAGER_PUSH_TO_R2_KEYS_STUDIO,
+        EXPRESS_ALLOWED_DOWNLOAD_KEYS,
+        EAGER_PUSH_TO_R2_KEYS_EXPRESS,
+        FREE_ALLOWED_DOWNLOAD_KEYS,
+    )
+
+    for key in ("editor.subtitles_target", "editor.subtitles_source"):
+        assert content_type_for(key) == "text/plain; charset=utf-8"
+        assert key in STUDIO_ALLOWED_ARTIFACT_KEYS
+        assert key in STUDIO_ALLOWED_DOWNLOAD_KEYS
+        assert key in EAGER_PUSH_TO_R2_KEYS_STUDIO
+        # Express / Free must NOT gain subtitle access via the new keys.
+        assert key not in EXPRESS_ALLOWED_DOWNLOAD_KEYS
+        assert key not in EAGER_PUSH_TO_R2_KEYS_EXPRESS
+        assert key not in FREE_ALLOWED_DOWNLOAD_KEYS
 
 
 def test_jianying_delta_push_only_touches_jianying(fake_r2, tmp_path):

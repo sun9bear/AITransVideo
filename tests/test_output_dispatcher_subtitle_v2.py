@@ -44,6 +44,8 @@ def _make_fake_editor_result(tmp_path: Path) -> ProjectOutputResult:
         background_sounds_path=str(tmp_path / "output" / "background_sounds.txt"),
         alignment_report_path=str(tmp_path / "output" / "alignment_report.md"),
         needs_review_count=0,
+        subtitles_source_path=str(tmp_path / "output" / "subtitles_source.srt"),
+        subtitles_target_path=str(tmp_path / "output" / "subtitles_target.srt"),
     )
 
 
@@ -189,6 +191,58 @@ def test_dispatcher_registers_subtitle_artifacts(tmp_path: Path) -> None:
     assert report_artifact is not None, "editor.subtitle_quality_report should be registered"
     assert cues_artifact.endswith("subtitle_cues.json")
     assert report_artifact.endswith("subtitle_quality_report.json")
+
+
+def test_dispatcher_registers_script_neutral_subtitle_keys(tmp_path: Path) -> None:
+    """PR-F: dispatch registers editor.subtitles_target (dub/TARGET) and
+    editor.subtitles_source (SOURCE) from the writer result, additive to the legacy keys."""
+    aligned_audio = tmp_path / "aligned.wav"
+    aligned_audio.write_bytes(b"RIFF")
+    project = _build_localized_project(aligned_audio)
+    artifact_index = ArtifactIndex()
+    fake_backend = _FakeEditorBackend(tmp_path)
+
+    dispatcher = OutputDispatcher(editor_backend=fake_backend)
+    dispatcher.dispatch(
+        project,
+        artifact_index,
+        OutputRequest(targets=[OutputTarget.EDITOR], output_dir=str(tmp_path)),
+    )
+
+    target = artifact_index.get("editor.subtitles_target")
+    source = artifact_index.get("editor.subtitles_source")
+    assert target is not None and target.endswith("subtitles_target.srt")
+    assert source is not None and source.endswith("subtitles_source.srt")
+    # Legacy keys still present (additive).
+    assert artifact_index.get("editor.subtitles") is not None
+    assert artifact_index.get("editor.subtitles_en") is not None
+
+
+def test_dispatcher_skips_script_neutral_keys_when_paths_empty(tmp_path: Path) -> None:
+    """Defaulted-empty source/target paths (legacy writer result) → keys NOT registered,
+    so old code paths stay byte-identical."""
+    aligned_audio = tmp_path / "aligned.wav"
+    aligned_audio.write_bytes(b"RIFF")
+    project = _build_localized_project(aligned_audio)
+    artifact_index = ArtifactIndex()
+
+    class _LegacyBackend(_FakeEditorBackend):
+        def write(self, output):
+            super().write(output)
+            r = _make_fake_editor_result(self._tmp_path)
+            r.subtitles_source_path = ""
+            r.subtitles_target_path = ""
+            return r
+
+    dispatcher = OutputDispatcher(editor_backend=_LegacyBackend(tmp_path))
+    dispatcher.dispatch(
+        project,
+        artifact_index,
+        OutputRequest(targets=[OutputTarget.EDITOR], output_dir=str(tmp_path)),
+    )
+
+    assert artifact_index.get("editor.subtitles_target") is None
+    assert artifact_index.get("editor.subtitles_source") is None
 
 
 def test_subtitle_width_report_is_flagged_and_not_registered(

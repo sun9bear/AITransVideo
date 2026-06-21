@@ -54,7 +54,13 @@ class EditorPackageWriter:
         segment_paths = self._copy_segment_files(output)
         dubbed_audio_path = self._compose_full_audio(output, segment_paths)
         ambient_audio_path = self._export_ambient_audio(output)
-        subtitles_zh_path, subtitles_en_path, subtitles_bilingual_path = self._write_srt(output)
+        (
+            subtitles_zh_path,
+            subtitles_en_path,
+            subtitles_bilingual_path,
+            subtitles_source_path,
+            subtitles_target_path,
+        ) = self._write_srt(output)
         background_sounds_path = self._detect_background_sounds(output)
         alignment_report_path = self._write_alignment_report(output)
 
@@ -69,6 +75,8 @@ class EditorPackageWriter:
             background_sounds_path=background_sounds_path,
             alignment_report_path=alignment_report_path,
             needs_review_count=sum(1 for segment in output.segments if segment.needs_review),
+            subtitles_source_path=subtitles_source_path,
+            subtitles_target_path=subtitles_target_path,
         )
 
     def _copy_segment_files(self, output: ProjectOutput) -> dict[int, str]:
@@ -316,14 +324,15 @@ class EditorPackageWriter:
         tmp_path.replace(output_path)
         print("[S6] 完整配音响度校正完成")
 
-    def _write_srt(self, output: ProjectOutput) -> tuple[str, str, str]:
-        """Write 3 SRT files (zh, en, bilingual) and return their paths.
+    def _write_srt(self, output: ProjectOutput) -> tuple[str, str, str, str, str]:
+        """Write SRT files and return their paths.
 
         Routes to canonical-cue path when output.subtitle_cues is non-empty,
         otherwise falls back to the segment-based path.
 
-        Also writes subtitles.srt as a copy of zh for backward compatibility.
-        Returns (zh_path, en_path, bilingual_path).
+        Also writes subtitles.srt as a copy of zh for backward compatibility, plus the
+        PR-F script-neutral subtitles_source/target.srt.
+        Returns (zh_path, en_path, bilingual_path, source_path, target_path).
 
         2026-04-21 plan §12 / D8 contract — **do not add caching here**.
         This method is the single convergence point for commit-triggered
@@ -341,7 +350,7 @@ class EditorPackageWriter:
             return self._write_srt_from_canonical_cues(output)
         return self._write_srt_from_segments(output)
 
-    def _write_srt_from_canonical_cues(self, output: ProjectOutput) -> tuple[str, str, str]:
+    def _write_srt_from_canonical_cues(self, output: ProjectOutput) -> tuple[str, str, str, str, str]:
         """Write 3 SRT files using canonical SubtitleCue list via T7 srt_writer.
 
         Canonical path: output.subtitle_cues is non-empty. Calls
@@ -373,11 +382,13 @@ class EditorPackageWriter:
         shutil.copy2(zh_path, compat_path)
 
         # PR-F: script-neutral source/target SRT (see _write_source_target_srt_copies).
-        self._write_source_target_srt_copies(output_root, zh_path, en_path)
+        source_path, target_path = self._write_source_target_srt_copies(
+            output_root, zh_path, en_path
+        )
 
-        return (zh_path, en_path, bilingual_path)
+        return (zh_path, en_path, bilingual_path, source_path, target_path)
 
-    def _write_srt_from_segments(self, output: ProjectOutput) -> tuple[str, str, str]:
+    def _write_srt_from_segments(self, output: ProjectOutput) -> tuple[str, str, str, str, str]:
         """Write 3 SRT files using the legacy segment-based slice path.
 
         Fallback path used when output.subtitle_cues is empty. Builds
@@ -412,9 +423,11 @@ class EditorPackageWriter:
         shutil.copy2(zh_path, compat_path)
 
         # PR-F: script-neutral source/target SRT (see _write_source_target_srt_copies).
-        self._write_source_target_srt_copies(output_root, zh_path, en_path)
+        source_path, target_path = self._write_source_target_srt_copies(
+            output_root, zh_path, en_path
+        )
 
-        return (zh_path, en_path, bilingual_path)
+        return (zh_path, en_path, bilingual_path, source_path, target_path)
 
     @staticmethod
     def _write_source_target_srt_copies(
