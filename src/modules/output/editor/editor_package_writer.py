@@ -366,7 +366,9 @@ class EditorPackageWriter:
             bilingual_text, output_path=output_root / "subtitles_bilingual.srt"
         )
 
-        # Backward compat: subtitles.srt = zh copy
+        # Backward compat: subtitles.srt = the zh file, which is cue.text == the dub
+        # (TARGET) language regardless of pair (the "zh" name is legacy). So this stays
+        # the target subtitle for non-default pairs too — byte-identical for en->zh.
         compat_path = output_root / "subtitles.srt"
         shutil.copy2(zh_path, compat_path)
 
@@ -403,7 +405,9 @@ class EditorPackageWriter:
             all_slices, lang="bilingual", output_path=output_root / "subtitles_bilingual.srt"
         )
 
-        # Backward compat: subtitles.srt = zh copy
+        # Backward compat: subtitles.srt = the zh file, which is cue.text == the dub
+        # (TARGET) language regardless of pair (the "zh" name is legacy). So this stays
+        # the target subtitle for non-default pairs too — byte-identical for en->zh.
         compat_path = output_root / "subtitles.srt"
         shutil.copy2(zh_path, compat_path)
 
