@@ -37,6 +37,19 @@ import { formatDurationSeconds, formatMs } from "@/lib/format"
 
 // ---------- helpers ----------
 
+// PR-G: subtitle textarea auto-size, script-aware. CJK glyphs are ~2x wide so
+// ~40 fit a row; Latin ~80. Pick the divisor from the text's OWN script rather
+// than the source/target slot, so a non-default pair (e.g. zh source / en target)
+// sizes correctly. For the en->zh default (en source / zh target) this yields the
+// legacy 80 / 40 — byte-identical.
+const _CJK_RE = /[㐀-鿿豈-﫿぀-ヿ가-힯]/g
+function rowsForText(text: string): number {
+  const len = text.length || 1
+  const cjk = (text.match(_CJK_RE) || []).length
+  const perRow = cjk * 2 >= len ? 40 : 80 // CJK-dominant → 40, else Latin-width 80
+  return Math.max(1, Math.ceil(len / perRow))
+}
+
 function isPreTtsLengthWarningStatus(status: SegmentStatus): boolean {
   return status === "text_dirty" || status === "voice_dirty" || status === "tts_failed"
 }
@@ -458,7 +471,7 @@ export function SegmentRow({
         {/* English source — inline editable */}
         <textarea
           className="w-full text-[10.5px] leading-snug text-muted-foreground font-sans bg-transparent border-0 resize-none p-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40 focus-visible:ring-offset-0 rounded"
-          rows={Math.max(1, Math.ceil((localSource.length || 1) / 80))}
+          rows={rowsForText(localSource)}
           value={localSource}
           disabled={buttonsDisabled}
           onChange={(e) => setLocalSource(e.currentTarget.value)}
@@ -473,7 +486,7 @@ export function SegmentRow({
         {/* Chinese translation — primary edit target */}
         <textarea
           className="w-full text-[12px] leading-relaxed text-foreground bg-transparent border-0 resize-none p-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40 focus-visible:ring-offset-0 rounded"
-          rows={Math.max(1, Math.ceil((localText.length || 1) / 40))}
+          rows={rowsForText(localText)}
           value={localText}
           disabled={buttonsDisabled}
           onChange={(e) => setLocalText(e.currentTarget.value)}
