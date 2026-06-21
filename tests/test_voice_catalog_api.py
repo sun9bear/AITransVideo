@@ -887,6 +887,26 @@ class TestInternalVoiceCatalog:
         assert "compatible_target_languages @>" in _sql
         assert "compatible_target_languages IS NULL" not in _sql
 
+    def test_internal_endpoint_zh_null_fallback_excludes_english_rows(self, voice_app, client, monkeypatch) -> None:
+        # re-CodeX P2: the zh-CN NULL fallback must NOT pull in un-stamped rows whose
+        # provider language marks them English (else an admin-added en voice leaks into
+        # a Chinese dub). The NULL branch is gated by a language-based exclusion.
+        import admin_settings
+
+        class _S:
+            voice_catalog_target_language_filter_enabled = True
+
+        monkeypatch.setattr(admin_settings, "load_settings", lambda: _S())
+        captured = self._setup_db_capture(voice_app, [_make_voice(voice_id="zh_test_1")])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0&target_language=zh-CN",
+            headers=self._HDR,
+        )
+        assert resp.status_code == 200
+        _sql = str(captured["query"]).lower()
+        assert "compatible_target_languages is null" in _sql
+        assert "voice_catalog.language" in _sql  # NULL branch gated by the language column
+
     def test_internal_endpoint_no_user_auth_required(self, voice_app, client) -> None:
         """Internal endpoint should work without a user session (only shared-secret)."""
         voice_app.state.mock_user = None

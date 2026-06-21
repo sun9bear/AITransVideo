@@ -854,6 +854,14 @@ async def add_user_voice(
     # Stamp which target languages this cloned voice supports. None → column stays
     # NULL → language-aware matching treats it as zh-CN-only (legacy / byte-identical).
     # Metadata ONLY — this never changes whether/which clone runs (paid-API rule).
+    #
+    # NOTE (re-CodeX round 3, first-release known limitation): the 5 clone callers
+    # (manual / Express auto / Smart auto / register-smart / smart-preview) currently
+    # leave this None, which is CORRECT for every shipping clone (all en→zh, target
+    # zh-CN). Explicit non-zh stamping lands with the en-clone flow, which must first
+    # resolve cross-lingual clone capability (whether a zh-cloned voice may TTS en) —
+    # a clone-provider concern outside PR-E's voice-routing scope. The mechanism here
+    # is ready for that day.
     compatible_target_languages: list | None = None,
     # ---- P3b (CodeX 钱-正确性 #2): commit=False 让调用方控制完整事务 ----
     # smart 预览克隆的 register+bill 须在**单一事务**内同时写 billing event +
