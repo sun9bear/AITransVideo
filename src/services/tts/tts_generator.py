@@ -627,6 +627,15 @@ class TTSGenerator:
                     float(getattr(segment, "target_chars_per_second", 0.0)) or None
                 ),
             ))
+            # PR-E re-CodeX P2: a fail_closed match must actually abort — returning the
+            # (Chinese) fallback voice_id here would let _generate_one_cosyvoice synthesize
+            # wrong-language audio. zh never produces a fail_closed reason → byte-identical.
+            if str(match_result.match_reason or "").startswith("fail_closed"):
+                raise TTSGenerationError(
+                    f"CosyVoice has no voice for target_language="
+                    f"{getattr(segment, 'target_language', None)!r}; failing closed "
+                    f"({match_result.match_reason})"
+                )
             voice = match_result.voice_id
             confidence = match_result.match_confidence
             resolution_source = f"resolver({match_result.match_reason})"
@@ -1051,6 +1060,15 @@ class TTSGenerator:
                     float(getattr(segment, "target_chars_per_second", 0.0)) or None
                 ),
             ))
+            # PR-E re-CodeX P2: a fail_closed match must abort, not synthesize the
+            # (Chinese) fallback voice for a non-zh target. zh never fail_closes →
+            # byte-identical.
+            if str(match_result.match_reason or "").startswith("fail_closed"):
+                raise TTSGenerationError(
+                    f"VolcEngine has no voice for target_language="
+                    f"{getattr(segment, 'target_language', None)!r}; failing closed "
+                    f"({match_result.match_reason})"
+                )
             voice_id = match_result.voice_id
             confidence = match_result.match_confidence
             resolution_source = f"resolver({match_result.match_reason})"

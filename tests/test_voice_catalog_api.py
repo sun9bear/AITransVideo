@@ -157,6 +157,22 @@ class TestVoiceCatalogModel:
         cols = {c.name for c in VoiceCatalog.__table__.columns}
         assert "compatible_target_languages" in cols
 
+    def test_infer_compatible_target_languages(self) -> None:
+        # PR-E re-CodeX P2: catalog write paths stamp this from language / voice_id,
+        # mirroring the migration 042 en-detection.
+        from voice_catalog_service import _infer_compatible_target_languages as _infer
+
+        # English by language (incl. localized MiniMax) or voice_id convention
+        assert _infer("en", "x") == ["en"]
+        assert _infer("English", "x") == ["en"]
+        assert _infer("英语", "x") == ["en"]
+        assert _infer("zh", "en_male_tim_uranus_bigtts") == ["en"]
+        assert _infer("zh", "English_voice") == ["en"]
+        # everything else → zh-CN
+        assert _infer("zh", "ICL_zh_x") == ["zh-CN"]
+        assert _infer(None, "zh_female_x") == ["zh-CN"]
+        assert _infer("", "endao_zh") == ["zh-CN"]  # 'en' prefix word but not 'en_'
+
     def test_voice_label_has_fk_to_catalog(self) -> None:
         table = VoiceLabel.__table__
         fks = {fk.target_fullname for fk in table.foreign_keys}
