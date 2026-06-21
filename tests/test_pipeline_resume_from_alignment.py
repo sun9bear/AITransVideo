@@ -28,6 +28,7 @@ import ast
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -105,6 +106,42 @@ def test_run_without_resume_from_does_not_dispatch_to_resume_method(tmp_path: Pa
 # ===================================================================
 # Runtime fail-fast — resume method refuses obviously-bad inputs
 # ===================================================================
+
+
+def test_resume_publish_dispatch_defaults_language_profile_when_run_init_is_bypassed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resume_from=alignment enters publish before run() seeds _language_profile."""
+
+    captured: dict[str, object] = {}
+
+    class FakeOutputDispatcher:
+        def dispatch(self, localized_project, artifact_index, request):
+            captured["localized_project"] = localized_project
+            captured["artifact_index"] = artifact_index
+            captured["request"] = request
+            return SimpleNamespace(manifest_path=str(tmp_path / "manifest.json"))
+
+    monkeypatch.setattr("pipeline.process.OutputDispatcher", FakeOutputDispatcher)
+
+    pipeline = ProcessPipeline()
+    assert not hasattr(pipeline, "_language_profile")
+
+    localized_project = object()
+    artifact_index = object()
+    result = pipeline._dispatch_process_output_bundle(
+        project_dir=tmp_path,
+        build_result=SimpleNamespace(
+            localized_project=localized_project,
+            artifact_index=artifact_index,
+        ),
+    )
+
+    assert result.manifest_path == str(tmp_path / "manifest.json")
+    assert captured["localized_project"] is localized_project
+    assert captured["artifact_index"] is artifact_index
+    assert captured["request"].target_language == "zh-CN"
 
 
 def test_resume_fail_fast_when_project_dir_missing() -> None:

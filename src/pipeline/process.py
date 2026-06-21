@@ -11428,6 +11428,9 @@ class ProcessPipeline:
         build_result: WorkflowBuildResult,
         watermark_text: str | None = None,
     ) -> OutputBundleResult:
+        language_profile = getattr(
+            self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE
+        )
         return OutputDispatcher().dispatch(
             build_result.localized_project,
             build_result.artifact_index,
@@ -11442,7 +11445,7 @@ class ProcessPipeline:
                 # PR-F: forward the dub target language so the cue pipeline routes
                 # per-script. Default (en->zh-CN) → "zh-CN" → byte-identical whisper path.
                 target_language=getattr(
-                    self._language_profile, "target_language", None
+                    language_profile, "target_language", None
                 ),
             ),
         )
