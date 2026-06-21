@@ -1250,6 +1250,7 @@ def _install_single_speaker_pipeline_mocks(
             output_dir: str,
             speaker_labels: bool = False,
             speakers_expected: int | None = None,
+            language: str = "en",
         ) -> TranscriptResult:
             if capture is not None:
                 capture["transcribe_audio_path"] = audio_path
@@ -1450,6 +1451,7 @@ def _install_dual_speaker_pipeline_mocks(
             output_dir: str,
             speaker_labels: bool = False,
             speakers_expected: int | None = None,
+            language: str = "en",
         ) -> TranscriptResult:
             del audio_path
             assert speaker_labels is expected_speaker_labels

@@ -3275,6 +3275,7 @@ class ProcessPipeline:
                     str(final_project_dir / "transcript"),
                     speaker_labels=normalized_speakers == "auto" or (isinstance(normalized_speakers, int) and normalized_speakers >= 2),
                     speakers_expected=normalized_speakers if isinstance(normalized_speakers, int) and normalized_speakers >= 2 else None,
+                    language=self._language_profile.source_language,
                 )
                 usage_meter.record_llm(
                     task="s1_gemini_transcribe",
@@ -3295,6 +3296,7 @@ class ProcessPipeline:
                     str(final_project_dir / "transcript"),
                     speaker_labels=normalized_speakers == "auto" or (isinstance(normalized_speakers, int) and normalized_speakers >= 2),
                     speakers_expected=normalized_speakers if isinstance(normalized_speakers, int) and normalized_speakers >= 2 else None,
+                    language=self._language_profile.source_language,
                 )
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
