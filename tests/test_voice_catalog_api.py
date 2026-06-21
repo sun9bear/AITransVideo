@@ -167,6 +167,7 @@ class TestVoiceCatalogModel:
         assert _infer("English", "x") == ["en"]
         assert _infer("英语", "x") == ["en"]
         assert _infer("zh", "en_male_tim_uranus_bigtts") == ["en"]
+        assert _infer("zh", "ICL_en_clone") == ["en"]  # ICL_en_ prefix (re-CodeX round 12)
         assert _infer("zh", "English_voice") == ["en"]
         # everything else → zh-CN
         assert _infer("zh", "ICL_zh_x") == ["zh-CN"]

@@ -194,6 +194,7 @@ async def internal_voice_catalog(
                     _lang == "english",
                     func.coalesce(VoiceCatalog.language, "") == "英语",
                     VoiceCatalog.voice_id.like("en\\_%", escape="\\"),
+                    VoiceCatalog.voice_id.like("ICL\\_en\\_%", escape="\\"),
                     VoiceCatalog.voice_id.like("English%"),
                 )
                 query = query.where(

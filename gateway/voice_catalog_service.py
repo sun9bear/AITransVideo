@@ -236,6 +236,7 @@ def _infer_compatible_target_languages(
         or lang == "english"
         or (language or "").strip() == "英语"
         or vid[:3] == "en_"
+        or vid.startswith("ICL_en_")
         or vid.startswith("English")
     ):
         return ["en"]

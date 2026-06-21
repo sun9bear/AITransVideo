@@ -1143,6 +1143,17 @@ class TTSGenerator:
             )
         except Exception as exc:
             if voice_id != fallback_voice and _is_volcengine_voice_resource_mismatch(exc):
+                # PR-E re-CodeX P2: fallback_voice is the Chinese resource default. For a
+                # non-zh target, retrying with it (even with the language hint) would emit a
+                # wrong-language voice, bypassing the fail-closed selector — so fail closed
+                # (non-retryable) instead. zh keeps the legacy mismatch-retry (byte-identical).
+                _mr_lang = (_vc_target_language or "zh-CN").split("-")[0].lower()
+                if _mr_lang != "zh":
+                    raise TTSGenerationError(
+                        f"VolcEngine voice/resource mismatch for target_language="
+                        f"{_vc_target_language!r}; failing closed instead of retrying with the "
+                        f"Chinese default (resource {resource_id})"
+                    ) from exc
                 print(
                     f"[VolcEngine] Voice {voice_id} / resource {resource_id} mismatch; "
                     f"retrying with default {fallback_voice}",

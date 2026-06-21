@@ -57,6 +57,7 @@ def upgrade() -> None:
                      OR lower(coalesce(language, '')) = 'english'
                      OR coalesce(language, '') = '英语'
                      OR left(voice_id, 3) = 'en_'
+                     OR left(voice_id, 7) = 'ICL_en_'
                      OR voice_id LIKE 'English%'
                 THEN '["en"]'::jsonb
                 ELSE '["zh-CN"]'::jsonb
