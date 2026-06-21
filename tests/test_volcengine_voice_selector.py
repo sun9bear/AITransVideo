@@ -231,6 +231,29 @@ class TestResultStructure:
 # Target-language preference (PR-E slice 1)
 # ===================================================================
 
+class TestVoiceMatchesTarget:
+    # PR-E re-CodeX P1: VolcEngine voice_id language families.
+    @staticmethod
+    def _m(voice, lang):
+        from services.tts.volcengine_voice_selector import _volc_voice_matches_target
+        return _volc_voice_matches_target(voice, lang)
+
+    def test_zh_only_icl_zh_byte_identical(self) -> None:
+        # zh keeps the EXACT legacy ICL_zh_ test — no widening to zh_* or language meta.
+        assert self._m({"voice_id": "ICL_zh_x"}, "zh") is True
+        assert self._m({"voice_id": "zh_female_x"}, "zh") is False
+        assert self._m({"voice_id": "en_male_tim_uranus_bigtts"}, "zh") is False
+
+    def test_en_matches_seedtts_and_icl_and_language_meta(self) -> None:
+        assert self._m({"voice_id": "en_male_tim_uranus_bigtts"}, "en") is True
+        assert self._m({"voice_id": "ICL_en_x"}, "en") is True
+        # localized MiniMax-style language metadata also counts
+        assert self._m({"voice_id": "zz", "language": "英语"}, "en") is True
+        assert self._m({"voice_id": "zz", "language": "en"}, "en") is True
+        # a Chinese voice must not match en
+        assert self._m({"voice_id": "ICL_zh_x", "language": "zh"}, "en") is False
+
+
 class TestTargetLanguage:
     def test_zh_target_byte_identical_to_default(self) -> None:
         # target_language None / "zh-CN" both map to the "ICL_zh_" preference →
