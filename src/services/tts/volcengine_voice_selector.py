@@ -145,21 +145,21 @@ def select_volcengine_voice_match(
     # leaking zh voices). Falls back to the full candidate set when nothing matches.
     lang_candidates = [v for v in candidates if _volc_voice_matches_target(v, _lang_code)]
     if _lang_code != "zh" and not lang_candidates:
-        # re-CodeX P2 (fail-closed, v3 D): a non-zh target with NO target-language
-        # candidate must NOT be scored against the Chinese pool — that would voice an
-        # English dub in Chinese. Return the target-aware default (an en voice if the
-        # pool has any) with a clear low-confidence reason. The matchable migration +
-        # get_fallback_provider keep VolcEngine out of the en path upstream; this is the
-        # last-line defense. zh is unaffected (it intentionally falls back to all below).
-        logger.warning(
-            "[VolcEngine-matcher] no %s candidates (gender=%s, resource=%s); failing "
-            "closed to %s instead of a Chinese voice",
+        # re-CodeX P2: an in-language voice EXISTS for this resource (the top guard already
+        # fail-closed the "no target voice at all" case), just not in this gender bucket.
+        # ``default_voice`` is the target-language default, so fall back to it as a normal
+        # LOW-CONFIDENCE match — NOT fail_closed: aborting would needlessly fail a dub that
+        # has a usable in-language voice. (The Chinese pool is never scored for a non-zh
+        # target.) zh is unaffected (it intentionally falls back to the full set below).
+        logger.info(
+            "[VolcEngine-matcher] no %s voice for gender=%s (resource=%s); using in-language "
+            "default %s",
             _lang_code, g, resource_id, default_voice,
         )
         return VoiceMatchResult(
             voice_id=default_voice,
-            match_reason=f"fail_closed(no_{_lang_code}_voice,resource={resource_id})",
-            match_score=0.15,
+            match_reason=f"fallback(no_{_lang_code}_{g}_voice,resource={resource_id})",
+            match_score=0.20,
             match_confidence="low",
             backup_voices=(),
         )

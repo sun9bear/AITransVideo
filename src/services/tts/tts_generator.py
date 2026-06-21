@@ -1861,7 +1861,10 @@ def _is_retryable_tts_error(error_obj: TTSGenerationError) -> bool:
 
 def _is_non_retryable_tts_input_error(error_obj: TTSGenerationError) -> bool:
     message = str(error_obj)
-    return "segment.cn_text is required" in message
+    # Deterministic failures retrying cannot fix: a missing cn_text input, and a PR-E
+    # language fail-closed (no target-language voice / Chinese-only provider for a non-zh
+    # dub). Classifying fail-closed non-retryable avoids the 5-minute final-retry stall.
+    return "segment.cn_text is required" in message or "failing closed" in message
 
 
 def _normalize_optional_text(value: object) -> str | None:
