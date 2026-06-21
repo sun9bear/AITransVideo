@@ -740,6 +740,8 @@ def review_transcript(
     mode: str = "studio",
     skip_pass1: bool = False,
     usage_meter: Any | None = None,
+    source_language: str = "en",
+    target_language: str = "zh-CN",
 ) -> ReviewResult | None:
     """Unified entry point for LLM transcript review.
 
@@ -762,6 +764,8 @@ def review_transcript(
             mode=mode,
             skip_pass1=skip_pass1,
             usage_meter=usage_meter,
+            source_language=source_language,
+            target_language=target_language,
         )
     except _PassFailure as exc:
         logger.warning("[S2] Pass %s failed after retries: %s", exc.pass_name, exc)
@@ -924,6 +928,8 @@ def _orchestrate_three_pass(
     mode: str = "studio",
     skip_pass1: bool = False,
     usage_meter: Any | None = None,
+    source_language: str = "en",
+    target_language: str = "zh-CN",
 ) -> ReviewResult | None:
     """Internal orchestrator: Pass 1 (speakers) → Pass 2 (text) → aggregate.
 
@@ -1039,6 +1045,8 @@ def _orchestrate_three_pass(
         review_model=pass2_model,
         debug_output_dir=debug_output_dir,
         usage_meter=usage_meter,
+        source_language=source_language,
+        target_language=target_language,
     )
 
     # Apply Pass 2 corrections (fix_text + split only)
@@ -1542,6 +1550,110 @@ _PASS2_PROMPT = """\
 
 {transcript_body}"""
 
+
+# zh-CN -> en variant of the Pass 2 prompt. Identical to ``_PASS2_PROMPT`` except
+# the glossary direction is reversed (source = Chinese term, value = English
+# translation) and the title rule no longer assumes an English original. The
+# task-card title (``display_title_zh``) stays Chinese — it is the product's UI
+# language, not the target language (plan v3 §4.4 UI-vs-target distinction).
+# lang_pair_marker: zh-CN->en
+_PASS2_PROMPT_ZH_EN = """\
+你正在执行视频转录审校的 Pass 2。Pass 1 已经完成 speaker 识别与 speaker 纠正。
+你的唯一目标是：
+1. 修正文本文字错误
+2. 对过长段落做语义拆分
+3. 提取术语表
+4. 生成一个适合任务卡片展示的中文视频名称
+
+你不是在做 speaker 重分配，不是在做音色描述，不是在做身份识别。
+
+输入信息：
+- 视频标题：{video_title}
+- 已校正 speaker 的转录文本（中文）：{transcript_body}
+- speakers 信息：{speakers_json}
+
+必须遵守的规则：
+1. 绝对不要修改任何 speaker_id
+2. 绝对不要输出 `correct_speaker`
+3. 不要输出 `merge`
+4. 只允许输出：
+   - `fix_text`
+   - `split`
+   - `glossary`
+   - `display_title_zh`
+5. `fix_text` 只修正明显 ASR 错误、重复、漏词、错词
+6. 不要改写语气，不要润色，不要重写内容
+7. 不要改变原文核心含义
+8. `split` 只用于过长段落（>60s），并且必须在自然语义断点切开
+9. 如果某段并不适合拆分，就不要强行拆分
+10. glossary 只收录稳定、值得后续翻译统一的专名、机构名、术语、人名；键为**中文源词**，值为其对应的**英文译名**（供后续翻译成英文时统一使用）
+11. display_title_zh 必须是中文，8-24 个汉字为佳，概括视频核心内容；不要照搬视频原标题、URL、文件名、引号、句号，也不要写成“油管视频/上传视频/未命名视频”
+12. 如果无法判断核心内容，display_title_zh 输出 null，不要硬编
+
+输出 JSON，且只能输出 JSON：
+
+{{
+  "display_title_zh": "马斯克谈火星与人工智能",
+  "corrections": [
+    {{
+      "action": "fix_text",
+      "index": 5,
+      "old": "原错误文本",
+      "new": "修正后文本",
+      "reason": "简短说明"
+    }},
+    {{
+      "action": "split",
+      "index": 18,
+      "at_text": "建议切分点附近的文本",
+      "reason": "该段过长，需要在自然断点拆分"
+    }}
+  ],
+  "glossary": {{
+    "伯克希尔·哈撒韦": "Berkshire Hathaway",
+    "格雷格·艾贝尔": "Greg Abel"
+  }}
+}}
+
+转录稿（{line_count} 行）：
+
+{transcript_body}"""
+
+
+#: Pass 2 prompt template per language pair. The default (en->zh-CN) is the exact
+#: legacy ``_PASS2_PROMPT`` (byte-identical); zh-CN->en reverses the glossary.
+_PASS2_TEMPLATE_BY_PAIR: dict[tuple[str, str], str] = {
+    ("en", "zh-CN"): _PASS2_PROMPT,
+    ("zh-CN", "en"): _PASS2_PROMPT_ZH_EN,
+}
+
+
+def _override_declares_language_pair(override: str, source_language: str, target_language: str) -> bool:
+    """§2.3 machine-checkable contract: a non-default-pair admin override must
+    explicitly declare the pair (contain the canonical ``"src->tgt"`` key) so it
+    cannot be silently reused with the wrong language direction."""
+    return f"{source_language}->{target_language}" in (override or "")
+
+
+def _select_pass2_template(source_language: str, target_language: str) -> str:
+    """Pick the Pass 2 prompt: admin override (default pair, or non-default only
+    when it declares the pair — else fail-closed), otherwise the per-pair
+    registry template. Default pair en->zh-CN is byte-identical to the legacy
+    ``_get_admin_prompt_override("pass2") or _PASS2_PROMPT``."""
+    is_default = source_language == "en" and target_language == "zh-CN"
+    override = _get_admin_prompt_override("pass2")
+    if override is not None:
+        if is_default or _override_declares_language_pair(override, source_language, target_language):
+            return override
+        logger.warning(
+            "[S2][Pass2] admin override is not language-aware for %s->%s; "
+            "falling back to the registry template (fail-closed).",
+            source_language,
+            target_language,
+        )
+    return _PASS2_TEMPLATE_BY_PAIR.get((source_language, target_language), _PASS2_PROMPT)
+
+
 _PASS2_ALLOWED_ACTIONS = frozenset({"fix_text", "split"})
 
 
@@ -1625,6 +1737,8 @@ def _review_pass2_text(
     review_model: str,
     debug_output_dir: str | Path | None = None,
     usage_meter: Any | None = None,
+    source_language: str = "en",
+    target_language: str = "zh-CN",
 ) -> dict:
     """Pass 2: text correction + split + glossary.  Pure text, no audio.
 
@@ -1635,7 +1749,7 @@ def _review_pass2_text(
     """
     transcript_body = _build_transcript_body(lines)
     speakers_json = json.dumps(speakers, ensure_ascii=False, indent=2)
-    prompt_template = _get_admin_prompt_override("pass2") or _PASS2_PROMPT
+    prompt_template = _select_pass2_template(source_language, target_language)
     prompt = prompt_template.format(
         video_title=video_title or "(unknown)",
         line_count=len(lines),
@@ -2244,11 +2358,20 @@ def legacy_review_transcript_single_pass(
     mode: str = "studio",
     usage_meter: Any | None = None,
 ) -> ReviewResult | None:
-    """Legacy single-pass review (fallback path).
+    """Legacy single-pass review — CONFIRMED DEAD CODE (multilingual ruling, v3 §1).
 
-    This is the original ``review_transcript()`` logic preserved as-is.
-    Called when the three-pass orchestrator encounters a failure in Pass 1
-    or Pass 2, ensuring the pipeline always has a working fallback.
+    ⚠️ No production caller. ``review_transcript()`` catches a three-pass failure
+    and returns ``None`` (it does NOT fall back here); MiMo is dispatched inside
+    the three passes. The only remaining references are unit tests that exercise
+    this function directly. The old "called on Pass 1/2 failure" contract above
+    is stale.
+
+    Multilingual ruling (PR-H): this path is **English-only and deliberately NOT
+    language-adapted** — it is unreachable for any non-default pair, so a
+    ``zh-CN->en`` job never executes it. Full removal (function + its tests +
+    REVIEW_PROMPT_TEMPLATE export + the English-hardcoded legacy prompt constants)
+    is recommended but deferred to a standalone cleanup PR; it is out of scope for
+    the multilingual change and not a runtime liability while inert.
 
     Parameters
     ----------
