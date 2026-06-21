@@ -56,7 +56,7 @@ def upgrade() -> None:
                 WHEN lower(coalesce(language, '')) LIKE 'en%'
                      OR lower(coalesce(language, '')) = 'english'
                      OR coalesce(language, '') = '英语'
-                     OR voice_id LIKE 'en\_%' ESCAPE '\'
+                     OR left(voice_id, 3) = 'en_'
                      OR voice_id LIKE 'English%'
                 THEN '["en"]'::jsonb
                 ELSE '["zh-CN"]'::jsonb
