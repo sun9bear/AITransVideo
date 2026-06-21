@@ -11435,6 +11435,11 @@ class ProcessPipeline:
                 # Phase 2a Task 8 (gate #8): free jobs carry a watermark text; the
                 # γ resume_publish_only call site leaves this None (Studio, clean).
                 watermark_text=watermark_text,
+                # PR-F: forward the dub target language so the cue pipeline routes
+                # per-script. Default (en->zh-CN) → "zh-CN" → byte-identical whisper path.
+                target_language=getattr(
+                    self._language_profile, "target_language", None
+                ),
             ),
         )
 
