@@ -37,17 +37,18 @@ import { formatDurationSeconds, formatMs } from "@/lib/format"
 
 // ---------- helpers ----------
 
-// PR-G: subtitle textarea auto-size, script-aware. CJK glyphs are ~2x wide so
-// ~40 fit a row; Latin ~80. Pick the divisor from the text's OWN script rather
-// than the source/target slot, so a non-default pair (e.g. zh source / en target)
-// sizes correctly. For the en->zh default (en source / zh target) this yields the
-// legacy 80 / 40 — byte-identical.
+// PR-G: subtitle textarea auto-size by display width, script-aware + slot-agnostic, so a
+// non-default pair (zh source / en target) sizes by the text's real script, not its slot.
 const _CJK_RE = /[㐀-鿿豈-﫿぀-ヿ가-힯]/g
 function rowsForText(text: string): number {
   const len = text.length || 1
   const cjk = (text.match(_CJK_RE) || []).length
-  const perRow = cjk * 2 >= len ? 40 : 80 // CJK-dominant → 40, else Latin-width 80
-  return Math.max(1, Math.ceil(len / perRow))
+  // Effective display width: CJK ~2 columns, others ~1; a row holds ~80 columns.
+  // Summing width before dividing sizes mixed CJK/Latin correctly (re-CodeX P2) and
+  // is byte-identical to the legacy per-slot divisors for pure-script text
+  // (pure Latin → ceil(len/80); pure CJK → ceil(2·len/80) = ceil(len/40)).
+  const effectiveWidth = cjk * 2 + (len - cjk)
+  return Math.max(1, Math.ceil(effectiveWidth / 80))
 }
 
 function isPreTtsLengthWarningStatus(status: SegmentStatus): boolean {
