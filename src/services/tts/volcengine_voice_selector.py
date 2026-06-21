@@ -82,10 +82,28 @@ def select_volcengine_voice_match(
     # derive the no-gender fallback from the target-language pool so an English dub
     # without reviewer gender isn't voiced in Chinese. zh keeps the legacy default.
     if _lang_code != "zh":
-        default_voice = next(
+        _target_default = next(
             (v["voice_id"] for v in pool if _volc_voice_matches_target(v, _lang_code)),
-            default_voice,
+            None,
         )
+        if _target_default is None:
+            # No target-language voice for this resource at all → fail closed BEFORE the
+            # no-gender / scoring paths (those would return the Chinese resource default
+            # with a non-fail_closed reason → wrong-language synthesis). The matchable
+            # migration normally keeps VolcEngine out of the en pool upstream.
+            logger.warning(
+                "[VolcEngine-matcher] no %s voice for resource=%s; failing closed instead "
+                "of a Chinese default",
+                _lang_code, resource_id,
+            )
+            return VoiceMatchResult(
+                voice_id=default_voice,
+                match_reason=f"fail_closed(no_{_lang_code}_voice,resource={resource_id})",
+                match_score=0.15,
+                match_confidence="low",
+                backup_voices=(),
+            )
+        default_voice = _target_default
 
     if not gender:
         logger.info("[VolcEngine-matcher] No gender, fallback=%s (resource=%s)", default_voice, resource_id)
