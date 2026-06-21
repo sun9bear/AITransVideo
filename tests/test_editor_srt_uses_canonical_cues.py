@@ -354,3 +354,42 @@ def test_compat_subtitles_srt_matches_zh_for_canonical_path(tmp_path: Path) -> N
 
     compat_path = Path(output.output_dir) / "output" / "subtitles.srt"
     assert compat_path.read_text(encoding="utf-8") == Path(zh_path).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# PR-F: script-neutral source/target SRT (additive; default byte-identical)
+# ---------------------------------------------------------------------------
+
+def test_prf_source_target_srt_written_for_canonical_path(tmp_path: Path) -> None:
+    """Canonical cue path also writes subtitles_target.srt (== zh, the dub/TARGET) and
+    subtitles_source.srt (== en, the SOURCE). Additive: the legacy zh/en files are
+    unchanged, so the GA default stays byte-identical."""
+    cue = _make_cue(text="目标语言字幕", en_text="Source language subtitle")
+    output = _make_output(tmp_path, cues=[cue])
+    writer = EditorPackageWriter()
+
+    zh_path, en_path, _ = writer._write_srt(output)
+
+    out_dir = Path(output.output_dir) / "output"
+    target_path = out_dir / "subtitles_target.srt"
+    source_path = out_dir / "subtitles_source.srt"
+    assert target_path.exists() and source_path.exists()
+    # target == zh file (cue.text), source == en file (cue.en_text)
+    assert target_path.read_text(encoding="utf-8") == Path(zh_path).read_text(encoding="utf-8")
+    assert source_path.read_text(encoding="utf-8") == Path(en_path).read_text(encoding="utf-8")
+
+
+def test_prf_source_target_srt_written_for_segment_path(tmp_path: Path) -> None:
+    """Segment fallback path (empty cues) also writes the script-neutral source/target
+    SRT mirroring zh/en."""
+    output = _make_output(tmp_path, cues=[])
+    writer = EditorPackageWriter()
+
+    zh_path, en_path, _ = writer._write_srt(output)
+
+    out_dir = Path(output.output_dir) / "output"
+    target_path = out_dir / "subtitles_target.srt"
+    source_path = out_dir / "subtitles_source.srt"
+    assert target_path.exists() and source_path.exists()
+    assert target_path.read_text(encoding="utf-8") == Path(zh_path).read_text(encoding="utf-8")
+    assert source_path.read_text(encoding="utf-8") == Path(en_path).read_text(encoding="utf-8")

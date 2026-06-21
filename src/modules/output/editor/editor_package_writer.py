@@ -370,6 +370,9 @@ class EditorPackageWriter:
         compat_path = output_root / "subtitles.srt"
         shutil.copy2(zh_path, compat_path)
 
+        # PR-F: script-neutral source/target SRT (see _write_source_target_srt_copies).
+        self._write_source_target_srt_copies(output_root, zh_path, en_path)
+
         return (zh_path, en_path, bilingual_path)
 
     def _write_srt_from_segments(self, output: ProjectOutput) -> tuple[str, str, str]:
@@ -404,7 +407,31 @@ class EditorPackageWriter:
         compat_path = output_root / "subtitles.srt"
         shutil.copy2(zh_path, compat_path)
 
+        # PR-F: script-neutral source/target SRT (see _write_source_target_srt_copies).
+        self._write_source_target_srt_copies(output_root, zh_path, en_path)
+
         return (zh_path, en_path, bilingual_path)
+
+    @staticmethod
+    def _write_source_target_srt_copies(
+        output_root: Path, zh_path: str, en_path: str
+    ) -> tuple[str, str]:
+        """PR-F: write script-neutral subtitles_source.srt / subtitles_target.srt.
+
+        Cue text is always the dub (TARGET) language and en_text always the SOURCE,
+        so the zh file always holds the target subtitle and the en file the source —
+        regardless of language pair. We mirror them under script-neutral names so
+        non-default pairs (e.g. zh->en, where the legacy "zh"/"en" filenames no longer
+        describe the content) expose the correct language to downstream consumers.
+        For the GA default (en->zh) these are byte-identical duplicates.
+
+        Returns (source_path, target_path).
+        """
+        target_path = output_root / "subtitles_target.srt"
+        source_path = output_root / "subtitles_source.srt"
+        shutil.copy2(zh_path, target_path)  # zh file == cue.text == TARGET
+        shutil.copy2(en_path, source_path)  # en file == cue.en_text == SOURCE
+        return (str(source_path), str(target_path))
 
     def _write_srt_file(
         self, slices: list[_SubtitleSlice], *, lang: str, output_path: Path
