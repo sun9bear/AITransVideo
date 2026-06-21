@@ -10917,6 +10917,10 @@ class ProcessPipeline:
             # Inherit per-speaker TTS provider from parent
             if getattr(segment, "tts_provider", None):
                 child.tts_provider = segment.tts_provider
+            # PR-E re-CodeX P2: split children are created AFTER the slice-6 stamp pass,
+            # so carry the parent's dub target language onto them — otherwise the split/
+            # repair re-synthesis bypasses the language hints + non-zh fallback guard.
+            child.target_language = getattr(segment, "target_language", None)
             child_segments.append(child)
         return child_segments
 
