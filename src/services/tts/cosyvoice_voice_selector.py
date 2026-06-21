@@ -488,10 +488,22 @@ def select_cosyvoice_voice_match(
     # CosyVoice; if one still reaches here the voice would be Chinese, so warn loudly
     # to make the misroute visible. The zh path is unchanged (byte-identical).
     if target_language and target_language not in ("zh-CN", "zh"):
+        # re-CodeX P2: CosyVoice is Chinese-only — a non-zh target can NEVER be served.
+        # Routing (get_fallback_provider) + the matchable migration keep en away from
+        # CosyVoice; this is the last-line defense. Fail closed with a flagged
+        # low-confidence result so downstream can detect the misroute, instead of
+        # silently scoring and returning a Chinese voice for an English dub.
         logger.warning(
             "[CosyVoice-matcher] non-zh target_language=%s reached CosyVoice (Chinese-only); "
-            "voice would be Chinese — check routing/matchable (PR-E)",
+            "failing closed (check routing/matchable, PR-E)",
             target_language,
+        )
+        return SharedVoiceMatchResult(
+            voice_id=FALLBACK_VOICE,
+            match_reason=f"fail_closed(cosyvoice_zh_only,target={target_language})",
+            match_score=0.15,
+            match_confidence="low",
+            backup_voices=(),
         )
 
     # --- Step 1: Load voice pool ---
