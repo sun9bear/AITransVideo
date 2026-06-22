@@ -1171,6 +1171,48 @@ def _resolve_preset_voice_id(auto_matched_voice) -> str:
     return ""
 
 
+def _fan_out_express_clone_to_unassigned_speakers(
+    speaker_voices: dict[str, str],
+    speaker_voice_routing: dict[str, dict[str, object]],
+    clone_outcome,
+) -> list[str]:
+    """Route unassigned Express clone-only speakers to the cloned worker voice.
+
+    Express auto-clone creates one temporary voice from the main speaker.  For
+    zh->en CosyVoice clone-only jobs, letting secondary ``auto`` speakers fall
+    through to the CosyVoice preset matcher hits the zh-only fail-closed guard.
+    Instead, use the cloned voice for any speaker that still has no concrete
+    voice for this run.
+    """
+    if getattr(clone_outcome, "cloned", False) is not True:
+        return []
+    cloned_voice_id = str(getattr(clone_outcome, "voice_id", "") or "").strip()
+    main_speaker_id = str(getattr(clone_outcome, "main_speaker_id", "") or "").strip()
+    if not cloned_voice_id or not main_speaker_id:
+        return []
+
+    main_routing = speaker_voice_routing.get(main_speaker_id) or {}
+    if main_routing.get("requires_worker") is not True:
+        return []
+    target_model = str(main_routing.get("worker_target_model", "") or "").strip()
+    if not target_model:
+        return []
+
+    filled: list[str] = []
+    for speaker_id, voice_id in list((speaker_voices or {}).items()):
+        if speaker_id == main_speaker_id:
+            continue
+        if str(voice_id or "").strip() not in {"", "auto"}:
+            continue
+        speaker_voices[speaker_id] = cloned_voice_id
+        speaker_voice_routing[speaker_id] = {
+            "requires_worker": True,
+            "worker_target_model": target_model,
+        }
+        filled.append(speaker_id)
+    return filled
+
+
 def _aggregate_smart_retry_stats(
     *,
     segments,
@@ -3975,6 +4017,20 @@ class ProcessPipeline:
                     # Mirror any injected clone voice into the a/b vars the
                     # translation/display path reads (matches the Studio
                     # approved-selection sync below).
+                    if express_clone_required and getattr(
+                        _express_clone_outcome, "cloned", False
+                    ) is True:
+                        _filled_speakers = _fan_out_express_clone_to_unassigned_speakers(
+                            _speaker_voices,
+                            _speaker_voice_routing,
+                            _express_clone_outcome,
+                        )
+                        if _filled_speakers:
+                            print(
+                                "[S2.5] Express clone-only reused main cloned voice "
+                                f"for unassigned speakers: {_filled_speakers}",
+                                flush=True,
+                            )
                     voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
                     voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
                 except Exception as _express_exc:  # never fatal — preset fallback
