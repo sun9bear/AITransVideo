@@ -248,6 +248,45 @@ def test_clone_failure_leaves_preset_path(monkeypatch):
     assert sv == {} and sr == {}, "失败必须保持预设路径（空 → 下游 preset 匹配）"
 
 
+def test_clone_only_fans_out_clone_voice_to_unassigned_speakers():
+    """zh->en CosyVoice clone-only must not let secondary speakers fall
+    back into the zh-only preset matcher.  Any still-unassigned speaker should
+    use the cloned worker voice for this Express run."""
+    from pipeline.process import _fan_out_express_clone_to_unassigned_speakers
+
+    class _Outcome:
+        cloned = True
+        voice_id = "cosyvoice-v3.5-flash-avtspeak-main"
+        main_speaker_id = "speaker_b"
+
+    speaker_voices = {
+        "speaker_a": "auto",
+        "speaker_b": "cosyvoice-v3.5-flash-avtspeak-main",
+        "speaker_c": "existing-concrete-voice",
+    }
+    speaker_routing = {
+        "speaker_b": {
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        }
+    }
+
+    filled = _fan_out_express_clone_to_unassigned_speakers(
+        speaker_voices,
+        speaker_routing,
+        _Outcome(),
+    )
+
+    assert filled == ["speaker_a"]
+    assert speaker_voices["speaker_a"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_routing["speaker_a"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+    assert speaker_voices["speaker_c"] == "existing-concrete-voice"
+    assert "speaker_c" not in speaker_routing
+
+
 # ===========================================================================
 # register-smart payload + upload multipart 适配器
 # ===========================================================================
