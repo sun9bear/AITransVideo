@@ -1176,13 +1176,14 @@ def _fan_out_express_clone_to_unassigned_speakers(
     speaker_voice_routing: dict[str, dict[str, object]],
     clone_outcome,
 ) -> list[str]:
-    """Route unassigned Express clone-only speakers to the cloned worker voice.
+    """Route Express clone-only speakers without worker routing to the clone.
 
     Express auto-clone creates one temporary voice from the main speaker.  For
-    zh->en CosyVoice clone-only jobs, letting secondary ``auto`` speakers fall
-    through to the CosyVoice preset matcher hits the zh-only fail-closed guard.
-    Instead, use the cloned voice for any speaker that still has no concrete
-    voice for this run.
+    zh->en CosyVoice clone-only jobs, letting secondary speakers fall through
+    to the CosyVoice preset matcher hits the zh-only fail-closed guard.  A
+    concrete preset without worker routing is still not usable for an English
+    target, so use the cloned voice for every speaker that does not already
+    have server-trusted worker routing.
     """
     if getattr(clone_outcome, "cloned", False) is not True:
         return []
@@ -1202,7 +1203,13 @@ def _fan_out_express_clone_to_unassigned_speakers(
     for speaker_id, voice_id in list((speaker_voices or {}).items()):
         if speaker_id == main_speaker_id:
             continue
-        if str(voice_id or "").strip() not in {"", "auto"}:
+        existing_routing = speaker_voice_routing.get(speaker_id) or {}
+        if (
+            existing_routing.get("requires_worker") is True
+            and str(existing_routing.get("worker_target_model", "") or "").strip()
+            and str(voice_id or "").strip()
+            and str(voice_id or "").strip() != "auto"
+        ):
             continue
         speaker_voices[speaker_id] = cloned_voice_id
         speaker_voice_routing[speaker_id] = {
