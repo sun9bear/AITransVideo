@@ -19,7 +19,7 @@ if _ENV_FILE.exists():
             _key, _, _val = _line.partition("=")
             if _key.strip() and _key.strip() not in os.environ:
                 os.environ[_key.strip()] = _val.strip()
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar
 
 from core.enums import OutputTarget, StageStatus
 from services.jobs.models import STAGE_ALIGNMENT, STAGE_LEGACY_PROCESS_OUTPUT
@@ -1175,6 +1175,8 @@ def _fan_out_express_clone_to_unassigned_speakers(
     speaker_voices: dict[str, str],
     speaker_voice_routing: dict[str, dict[str, object]],
     clone_outcome,
+    *,
+    speaker_ids: Iterable[str] | None = None,
 ) -> list[str]:
     """Route Express clone-only speakers without worker routing to the clone.
 
@@ -1183,7 +1185,9 @@ def _fan_out_express_clone_to_unassigned_speakers(
     to the CosyVoice preset matcher hits the zh-only fail-closed guard.  A
     concrete preset without worker routing is still not usable for an English
     target, so use the cloned voice for every speaker that does not already
-    have server-trusted worker routing.
+    have server-trusted worker routing.  ``speaker_ids`` covers auto-speaker
+    jobs where the voice map only contains the cloned main speaker while the
+    transcript contains additional speakers.
     """
     if getattr(clone_outcome, "cloned", False) is not True:
         return []
@@ -1199,8 +1203,18 @@ def _fan_out_express_clone_to_unassigned_speakers(
     if not target_model:
         return []
 
+    ordered_speaker_ids: list[str] = []
+    seen_speaker_ids: set[str] = set()
+    for raw_speaker_id in list((speaker_voices or {}).keys()) + list(speaker_ids or []):
+        speaker_id = str(raw_speaker_id or "").strip()
+        if not speaker_id or speaker_id in seen_speaker_ids:
+            continue
+        ordered_speaker_ids.append(speaker_id)
+        seen_speaker_ids.add(speaker_id)
+
     filled: list[str] = []
-    for speaker_id, voice_id in list((speaker_voices or {}).items()):
+    for speaker_id in ordered_speaker_ids:
+        voice_id = speaker_voices.get(speaker_id, "")
         if speaker_id == main_speaker_id:
             continue
         existing_routing = speaker_voice_routing.get(speaker_id) or {}
@@ -4031,6 +4045,10 @@ class ProcessPipeline:
                             _speaker_voices,
                             _speaker_voice_routing,
                             _express_clone_outcome,
+                            speaker_ids=(
+                                getattr(line, "speaker_id", "")
+                                for line in transcript_result.lines
+                            ),
                         )
                         if _filled_speakers:
                             print(
