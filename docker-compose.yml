@@ -277,12 +277,9 @@ services:
     environment:
       # The gateway imports the shared src/services tree (bind-mounted at
       # /opt/aivideotrans/app/src). The APF modules + the shared backend
-      # modules use `from src.services.X`, which needs the PARENT dir
-      # (/opt/aivideotrans/app) on sys.path — the per-module sys.path.insert
-      # only adds app/src (enabling `from services.X`). Without this the
-      # gateway crash-loops on `ModuleNotFoundError: No module named 'src'`
-      # (2026-06-11 US deploy incident).
-      PYTHONPATH: "/opt/aivideotrans/app"
+      # modules use both `from src.services.X` and `from services.X`, so keep
+      # the app root and app/src on sys.path for gateway-only entrypoints too.
+      PYTHONPATH: "/opt/aivideotrans/app:/opt/aivideotrans/app/src"
       AVT_JOB_API_UPSTREAM: "http://127.0.0.1:8877"
       # Phase 1.5 硬化（2026-04-22）：Gateway uvicorn 只监听 loopback。
       # 所有入站（Caddy / internal loopback / cloudflared 经 Caddy）都走
