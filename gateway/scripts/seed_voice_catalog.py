@@ -352,6 +352,7 @@ async def _execute_seed(plan: dict) -> None:
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from voice_catalog_models import VoiceCatalog, VoiceLabel
+    from voice_catalog_service import _infer_compatible_target_languages
 
     db_url = os.environ.get("DATABASE_URL") or os.environ.get("AVT_DATABASE_URL") or ""
     if not db_url:
@@ -385,6 +386,11 @@ async def _execute_seed(plan: dict) -> None:
                 matchable=v["matchable"],
                 verify_status=verified_status,
                 source="seed_migration",
+                # PR-E re-CodeX P2: stamp target-language compatibility at seed time so a
+                # clean-DB seed of en voices is matchable for en under the kill switch.
+                compatible_target_languages=_infer_compatible_target_languages(
+                    v["language"], v["voice_id"]
+                ),
                 created_at=now,
                 updated_at=now,
             ))

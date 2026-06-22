@@ -34,6 +34,10 @@ PUBLIC_RESULT_DOWNLOAD_KEYS = frozenset(
         "editor.subtitles",
         "editor.subtitles_en",
         "editor.subtitles_bilingual",
+        # PR-F: script-neutral subtitle keys (target=dub, source=original) so a
+        # non-default pair can download the correct-language subtitle by an honest name.
+        "editor.subtitles_target",
+        "editor.subtitles_source",
         "editor.dubbed_audio_complete",
         "editor.jianying_draft_zip",
         "publish.dubbed_video",

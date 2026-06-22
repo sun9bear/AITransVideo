@@ -26,8 +26,15 @@ from services.language_registry import (
     DEFAULT_LANGUAGE_PAIR_PROFILE,
     DEFAULT_SOURCE_LANGUAGE,
     DEFAULT_TARGET_LANGUAGE,
+    LanguageDescriptor,
     LanguagePairProfile,
+    RATIO_CALIBRATION_PENDING,
+    SCRIPT_CJK,
+    SCRIPT_LATIN,
+    SPOKEN_UNIT_CHAR,
+    SPOKEN_UNIT_WORD,
     SUPPORTED_LANGUAGE_PAIRS,
+    get_language_descriptor,
     is_supported_language_pair,
     make_pair_key,
     normalize_language,
@@ -182,3 +189,91 @@ def test_is_supported_language_pair() -> None:
     assert is_supported_language_pair("zh-CN", "en") is True
     assert is_supported_language_pair("en", "fr") is False
     assert is_supported_language_pair("en", "en") is False
+
+
+# ── Per-language descriptors (PR-W foundation) ─────────────────────────────
+
+
+def test_english_descriptor_is_latin_word() -> None:
+    desc = get_language_descriptor("en")
+    assert isinstance(desc, LanguageDescriptor)
+    assert desc.language == "en"
+    assert desc.script_family == SCRIPT_LATIN
+    assert desc.spoken_unit == SPOKEN_UNIT_WORD
+
+
+def test_chinese_descriptor_is_cjk_char() -> None:
+    desc = get_language_descriptor("zh-CN")
+    assert desc is not None
+    assert desc.language == "zh-CN"
+    assert desc.script_family == SCRIPT_CJK
+    assert desc.spoken_unit == SPOKEN_UNIT_CHAR
+
+
+def test_get_descriptor_resolves_aliases() -> None:
+    assert get_language_descriptor("English").script_family == SCRIPT_LATIN
+    assert get_language_descriptor("中文").script_family == SCRIPT_CJK
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", "fr", "klingon"])
+def test_get_descriptor_unknown_returns_none(raw) -> None:
+    assert get_language_descriptor(raw) is None
+
+
+def test_script_and_unit_constants() -> None:
+    assert SCRIPT_LATIN == "latin"
+    assert SCRIPT_CJK == "cjk"
+    assert SPOKEN_UNIT_WORD == "word"
+    assert SPOKEN_UNIT_CHAR == "char"
+
+
+def test_every_supported_pair_side_has_a_descriptor() -> None:
+    """No registered pair may reference a language without a descriptor —
+    the language-aware pipeline would otherwise have no script/unit to dispatch
+    on for that side."""
+    for profile in SUPPORTED_LANGUAGE_PAIRS.values():
+        assert get_language_descriptor(profile.source_language) is not None, profile.language_pair
+        assert get_language_descriptor(profile.target_language) is not None, profile.language_pair
+
+
+# ── natural_length_ratio ───────────────────────────────────────────────────
+
+
+def test_default_pair_ratio_is_exactly_1_8() -> None:
+    # Must be the exact float literal so the process.py voice-speed cps site
+    # (`wps * ratio`) stays byte-identical to the legacy `wps * 1.8`.
+    assert SUPPORTED_LANGUAGE_PAIRS["en->zh-CN"].natural_length_ratio == 1.8
+
+
+def test_zh_en_ratio_is_provisional_0_55() -> None:
+    assert SUPPORTED_LANGUAGE_PAIRS["zh-CN->en"].natural_length_ratio == 0.55
+
+
+def test_every_pair_has_a_positive_ratio() -> None:
+    for profile in SUPPORTED_LANGUAGE_PAIRS.values():
+        assert profile.natural_length_ratio > 0, profile.language_pair
+
+
+# ── Ratio-calibration GA guard (plan §3.4 / Phase 0) ───────────────────────
+
+
+def test_zh_en_ratio_is_marked_calibration_pending() -> None:
+    assert "zh-CN->en" in RATIO_CALIBRATION_PENDING
+
+
+def test_no_pipeline_ready_pair_has_an_uncalibrated_ratio() -> None:
+    """Hard invariant: a pair whose ratio is still provisional MUST NOT be GA.
+    Flipping ``zh-CN->en`` to ``pipeline_ready=True`` requires first removing it
+    from ``RATIO_CALIBRATION_PENDING`` (i.e. measuring 0.55 from fixtures) — this
+    test fails the moment someone flips it without calibrating."""
+    for profile in SUPPORTED_LANGUAGE_PAIRS.values():
+        if profile.pipeline_ready:
+            assert profile.language_pair not in RATIO_CALIBRATION_PENDING, (
+                f"{profile.language_pair} is pipeline_ready but its length ratio "
+                "is still calibration-pending — measure it before GA"
+            )
+
+
+def test_default_pair_is_not_calibration_pending() -> None:
+    assert "en->zh-CN" not in RATIO_CALIBRATION_PENDING
+    assert DEFAULT_LANGUAGE_PAIR_PROFILE.pipeline_ready is True

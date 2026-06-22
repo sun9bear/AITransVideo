@@ -68,6 +68,19 @@ from services.assemblyai.transcriber import (
     TranscriptionError,
     load_assemblyai_config,
 )
+from services.language_registry import (
+    DEFAULT_LANGUAGE_PAIR_PROFILE,
+    DEFAULT_SOURCE_LANGUAGE,
+    DEFAULT_TARGET_LANGUAGE,
+    LANG_EN,
+    LANG_ZH_CN,
+    SCRIPT_CJK,
+    SCRIPT_LATIN,
+    LanguagePairProfile,
+    get_language_descriptor,
+    normalize_language,
+    resolve_language_pair,
+)
 from services.gemini.rewriter import GeminiRewriter
 from services.gemini.translator import (
     DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
@@ -341,6 +354,15 @@ SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_MIN_TARGET_MS = 30_000
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.35
 FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;])\s*")
 FAILED_SEGMENT_SOURCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?;])\s+")
+# Script-aware split patterns for failed-segment repair. CJK text splits on
+# full-width sentence punctuation (no required trailing space); Latin text splits
+# on ASCII sentence punctuation followed by whitespace. The GA default pair
+# (target=CJK cn_text, source=Latin) maps to exactly the two legacy constants
+# above, so default-pair splitting is byte-identical.
+_FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT = {
+    SCRIPT_CJK: FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN,
+    SCRIPT_LATIN: FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
+}
 
 T = TypeVar("T")
 
@@ -2824,6 +2846,21 @@ def _is_english_language_code(language_code: str) -> bool:
     return normalized == "en" or normalized.startswith("en-")
 
 
+def _minimax_language_matches_target(voice_language: str, target_language: str) -> bool:
+    """Does a MiniMax voice's catalog ``language`` tag match the job's target?
+
+    Byte-identical to the legacy hard-coded Chinese filter for the GA default
+    target (``zh-CN`` → Mandarin/Cantonese). ``en`` → MiniMax's ``"英语"`` tag.
+    This provider-specific tag mapping is a PR-W de-Chinese seam; PR-E will
+    replace it with ``voice_catalog.compatible_target_languages``.
+    """
+    if target_language == LANG_ZH_CN:
+        return voice_language in ("中文-普通话", "中文-粤语")
+    if target_language == LANG_EN:
+        return voice_language == "英语"
+    return False
+
+
 class ProcessPipeline:
     """Legacy compatibility pipeline: YouTube URL -> editor-facing dubbing bundle."""
 
@@ -2916,6 +2953,29 @@ class ProcessPipeline:
             )
             job_voice_strategy = 'preset_mapping'
         self._current_service_mode = job_service_mode  # for recovery paths
+
+        # --- Multilingual language pair (PR-W) ------------------------
+        # Resolve the job's source/target language to a registry profile and stash
+        # it on the instance so the language-aware helpers (source gate,
+        # failed-segment split, voice pool builder, probe counting) can dispatch on
+        # it. Those helpers derive per-side script descriptors from this profile
+        # on demand (single source of truth) rather than from cached instance
+        # fields, so they stay correct even when called directly (bypassing run()).
+        # The create-path Gateway gate (PR-A) already rejected unsupported /
+        # not-yet-ready pairs with 4xx, so anything reaching here is the GA default
+        # (en->zh-CN) or a ``pipeline_ready`` pair. ``_resolve_job_language_profile``
+        # is fail-closed: absent fields → GA default (byte-identical), present but
+        # unsupported → ValueError (never silently run a foreign source as en->zh).
+        self._language_profile = self._resolve_job_language_profile(
+            _snap('source_language'), _snap('target_language')
+        )
+        if not self._language_profile.is_default:
+            print(
+                f"[PIPELINE] Language pair: {self._language_profile.language_pair} "
+                f"(source={self._language_profile.source_language}, "
+                f"target={self._language_profile.target_language})",
+                flush=True,
+            )
 
         # Smart MVP P2 (plan §6.0.6 / Codex 第八轮 F3) — derive the
         # effective pipeline mode that smart-aware branches should
@@ -3145,7 +3205,7 @@ class ProcessPipeline:
                 f"[S0] 音频实际时长：{round(actual_duration_ms / 1000, 2)}秒"
                 f"（yt-dlp报告：{round(download_result.duration_ms / 1000, 2)}秒）"
             )
-            self._enforce_english_source_language(download_result)
+            self._enforce_source_language(download_result)
 
             # --- 套餐时长限制 (snapshot-based, Gateway 主检查的安全网) ---
             _check_duration_limit(
@@ -3188,6 +3248,12 @@ class ProcessPipeline:
                 )
             translator = GeminiTranslator(**translator_kwargs)
             translator._service_mode = job_service_mode  # enables llm_registry model selection
+            # Seed the language pair at construction so it is set even when the
+            # translate()/translate_probe() calls are skipped (s3 cache hit / resume).
+            # Otherwise GeminiRewriter would read unset attrs and fall back to
+            # en->zh-CN for a cached non-default job (re-CodeX P2).
+            translator._translate_source_language = self._language_profile.source_language
+            translator._translate_target_language = self._language_profile.target_language
             _set_usage_meter_if_supported(translator, usage_meter)
 
             transcript_path = (final_project_dir / "transcript" / "transcript.json").resolve(strict=False)
@@ -3209,6 +3275,7 @@ class ProcessPipeline:
                     str(final_project_dir / "transcript"),
                     speaker_labels=normalized_speakers == "auto" or (isinstance(normalized_speakers, int) and normalized_speakers >= 2),
                     speakers_expected=normalized_speakers if isinstance(normalized_speakers, int) and normalized_speakers >= 2 else None,
+                    language=self._language_profile.source_language,
                 )
                 usage_meter.record_llm(
                     task="s1_gemini_transcribe",
@@ -3229,11 +3296,12 @@ class ProcessPipeline:
                     str(final_project_dir / "transcript"),
                     speaker_labels=normalized_speakers == "auto" or (isinstance(normalized_speakers, int) and normalized_speakers >= 2),
                     speakers_expected=normalized_speakers if isinstance(normalized_speakers, int) and normalized_speakers >= 2 else None,
+                    language=self._language_profile.source_language,
                 )
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
             if transcript_result.lines:
-                self._enforce_english_transcript_language(transcript_result)
+                self._enforce_transcript_language(transcript_result)
 
             if transcript_path.exists() and not transcript_result.lines:
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
@@ -3297,6 +3365,38 @@ class ProcessPipeline:
             voice_id_b = normalized_voice_b
             segments_path = (final_project_dir / "translation" / "segments.json").resolve(strict=False)
             s3_cache_hit = segments_path.exists()
+            _translation_pair_mismatch = False
+            # Pair-aware cache guard (re-CodeX P2, v3 §2.5/F): a project dir reused across
+            # language pairs must not serve stale wrong-language cache. Computed
+            # unconditionally so the S2-only path (no segments.json) can also use it.
+            # A missing marker == legacy default en->zh-CN (existing default jobs still
+            # hit → byte-identical).
+            _current_pair = (
+                f"{self._language_profile.source_language}->"
+                f"{self._language_profile.target_language}"
+            )
+
+            def _read_pair_marker(marker_path: Path) -> str:
+                try:
+                    return (
+                        marker_path.read_text(encoding="utf-8").strip()
+                        if marker_path.exists()
+                        else "en->zh-CN"
+                    )
+                except Exception:
+                    return "en->zh-CN"
+
+            if s3_cache_hit:
+                _cache_pair_marker = (
+                    final_project_dir / "translation" / ".language_pair"
+                ).resolve(strict=False)
+                if _read_pair_marker(_cache_pair_marker) != _current_pair:
+                    print(
+                        f"[S3] translation cache language-pair mismatch "
+                        f"(!= {_current_pair}); re-translating"
+                    )
+                    s3_cache_hit = False
+                    _translation_pair_mismatch = True
             speaker_name_a_is_placeholder = self._is_default_placeholder_speaker_name(
                 speaker_id="speaker_a",
                 speaker_name=speaker_name_a,
@@ -3315,7 +3415,20 @@ class ProcessPipeline:
             # S2 cache: if review already ran (e.g. pipeline resumed after
             # translation_config_review), restore results instead of re-running.
             s2_result_path = (final_project_dir / "transcript" / "s2_review_result.json").resolve(strict=False)
-            s2_cache_hit = s2_result_path.exists() and not s3_cache_hit
+            # The S2 review output is pair-specific (glossary/title direction, PR-H), so
+            # guard it with its OWN marker: an S2-only project dir (review ran, no
+            # segments.json) reused across pairs must not reuse stale review facts — the
+            # S3-mismatch flag never fires there. (re-CodeX P2)
+            _s2_pair_marker = (
+                final_project_dir / "transcript" / ".language_pair"
+            ).resolve(strict=False)
+            _s2_pair_ok = _read_pair_marker(_s2_pair_marker) == _current_pair
+            s2_cache_hit = (
+                s2_result_path.exists()
+                and not s3_cache_hit
+                and not _translation_pair_mismatch
+                and _s2_pair_ok
+            )
 
             if s3_cache_hit:
                 print("[S2] Translation cache hit, skipping review.")
@@ -3376,9 +3489,26 @@ class ProcessPipeline:
                         mode=job_service_mode,
                         skip_pass1=False,
                         usage_meter=usage_meter,
+                        source_language=self._language_profile.source_language,
+                        target_language=self._language_profile.target_language,
                     )
 
                     if review_result is not None:
+                        # Record the pair next to the S2 review output so an S2-only
+                        # project dir reused across pairs re-reviews instead of feeding
+                        # stale direction-specific facts forward. Default clears any
+                        # stale marker (missing == default). (re-CodeX P2)
+                        try:
+                            _s2_marker = (
+                                final_project_dir / "transcript" / ".language_pair"
+                            ).resolve(strict=False)
+                            if self._language_profile.is_default:
+                                _s2_marker.unlink(missing_ok=True)
+                            else:
+                                _s2_marker.parent.mkdir(parents=True, exist_ok=True)
+                                _s2_marker.write_text(_current_pair, encoding="utf-8")
+                        except Exception as _exc:
+                            print(f"[S2] language-pair marker update skipped (non-fatal): {_exc}")
                         if review_result.debug_artifacts:
                             print("[S2] Debug artifacts:")
                             raw_debug_path = review_result.debug_artifacts.get("raw_response_path")
@@ -3768,6 +3898,10 @@ class ProcessPipeline:
                 except Exception as exc:
                     print(f"[S4-probe] 探针翻译异常（非致命）：{exc}")
                     # logger removed — process.py uses print() for logging
+            # PR-E slice 6 (re-CodeX P2): stamp probe segments BEFORE probe TTS so a
+            # non-zh probe gets the right provider language hints + fail-closed fallback
+            # during calibration (the main-path stamp at translate() runs too late for probe).
+            self._stamp_segment_target_language(_probe_segments)
 
             # B': probe 段补说话人画像（gender/age_group/persona_style/energy_level +
             # voice_description + structure 角色）。translator.translate_probe 创建的、以及
@@ -5915,7 +6049,34 @@ class ProcessPipeline:
                     speaker_voices=_speaker_voices if effective_speakers > 2 else None,
                     chars_per_second=_probe_chars_per_second,
                     chars_per_second_by_speaker=_probe_chars_per_second_by_speaker or None,
+                    source_language=self._language_profile.source_language,
+                    target_language=self._language_profile.target_language,
                 )
+                # PR-E slice 6: stamp the dub target language onto fresh segments too.
+                self._stamp_segment_target_language(translation_result.segments)
+                # Pair-aware translation cache marker (re-CodeX P2, v3 §2.5/F): record
+                # the canonical pair next to segments.json so a later run that reuses
+                # this project dir with a different pair re-translates instead of serving
+                # stale wrong-language text. Default en->zh-CN writes nothing → a missing
+                # marker means the legacy default pair (byte-identical, no new artifact).
+                try:
+                    _pair_marker = (
+                        final_project_dir / "translation" / ".language_pair"
+                    ).resolve(strict=False)
+                    if self._language_profile.is_default:
+                        # Default writes no marker; clear any stale non-default marker
+                        # so later default resumes hit the cache (missing == default).
+                        # (re-CodeX P2)
+                        _pair_marker.unlink(missing_ok=True)
+                    else:
+                        _pair_marker.parent.mkdir(parents=True, exist_ok=True)
+                        _pair_marker.write_text(
+                            f"{self._language_profile.source_language}->"
+                            f"{self._language_profile.target_language}",
+                            encoding="utf-8",
+                        )
+                except Exception as _exc:
+                    print(f"[S3] language-pair cache marker update skipped (non-fatal): {_exc}")
                 # Phase 4.1 E.5 (Codex 2026-05-25 三签字版本 HC#5)：translate()
                 # 创建的 fresh DubbingSegment 没有 tts_provider / worker routing
                 # 字段。原 manual loop 只设了 tts_provider，**不覆盖** worker
@@ -8230,6 +8391,29 @@ class ProcessPipeline:
         speaker_structure_profiles: dict[str, dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Build pending payload for voice_selection_review stage."""
+        # Target-language-aware voice pool (PR-W de-Chinese). For the GA default
+        # (zh-CN target, CJK) every provider filter below stays byte-identical;
+        # a non-CJK target (e.g. en) gets target-language voices instead of being
+        # hard-restricted to Chinese (finding A: a foreign-target review page /
+        # Smart auto-match must not see only Chinese voices).
+        _profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        _target_language = _profile.target_language
+        # Derive descriptors from the PROFILE (single source of truth), not the
+        # per-run instance fields — so a direct helper call (e.g. a future Studio
+        # enter-edit refresh, or a unit test) that bypasses run() still gets the
+        # correct script for the default pair. Using the instance field's None
+        # fallback here would flip the default zh-CN target to "not CJK" and
+        # return empty Chinese pools (regression caught by both reviewers).
+        _target_desc = (
+            get_language_descriptor(_target_language)
+            or get_language_descriptor(DEFAULT_TARGET_LANGUAGE)
+        )
+        _target_is_cjk = _target_desc is not None and _target_desc.script_family == SCRIPT_CJK
+        _src_desc = (
+            get_language_descriptor(_profile.source_language)
+            or get_language_descriptor(DEFAULT_SOURCE_LANGUAGE)
+        )
+        _src_script = _src_desc.script_family if _src_desc is not None else SCRIPT_LATIN
         speaker_structure_profiles = (
             speaker_structure_profiles
             or self._build_speaker_structure_profiles(
@@ -8286,6 +8470,12 @@ class ProcessPipeline:
                 }
 
             if prov == "volcengine":
+                # VolcEngine non-Chinese-target voices need the
+                # compatible_target_languages + matchable migration (PR-E). Until
+                # then a non-CJK target gets no VolcEngine candidates rather than
+                # Chinese ones (de-Chinese: no contamination, no broken voice).
+                if not _target_is_cjk:
+                    return voices, display_map
                 from services.tts.volcengine_voice_catalog import get_voices_for_resource, RESOURCE_ID_1_0, RESOURCE_ID_2_0
                 rid = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
                 pool = get_voices_for_resource(rid)
@@ -8299,6 +8489,11 @@ class ProcessPipeline:
                     voices.append(_voice_dict(v, vid, lbl))
 
             elif prov == "cosyvoice":
+                # CosyVoice is a Chinese-only pool; it cannot read a non-CJK
+                # target. Offer no candidates for such targets (PR-E decides if
+                # any cross-lingual CosyVoice voice is ever eligible).
+                if not _target_is_cjk:
+                    return voices, display_map
                 from services.tts.cosyvoice_endpoint_config import get_runtime_endpoint_mode, is_voice_available
                 from services.tts.cosyvoice_voice_catalog import list_matchable_cosyvoice_voices
                 ep_mode = get_runtime_endpoint_mode()
@@ -8313,7 +8508,9 @@ class ProcessPipeline:
             elif prov == "minimax":
                 from services.tts.minimax_voice_selector import _load_minimax_pool
                 for v in _load_minimax_pool():
-                    if v.get("language") not in ("中文-普通话", "中文-粤语"):
+                    if not _minimax_language_matches_target(
+                        str(v.get("language", "")), _target_language
+                    ):
                         continue
                     vid = str(v.get("voice_id", ""))
                     lbl = str(v.get("display_name", v.get("name", vid)))
@@ -8361,6 +8558,13 @@ class ProcessPipeline:
             prov: str, gender: str, age_group: str, persona: str, energy: str,
             target_chars_per_second: float | None = None,
         ) -> dict[str, object] | None:
+            # Suppress auto-match when this provider contributes no voices for the
+            # job's target language (e.g. VolcEngine/CosyVoice for a non-CJK
+            # target). Otherwise the resolver could return a voice that is not in
+            # the (de-Chinese-filtered) available_voices, and the frontend would
+            # preselect a voice the user can't see / that mismatches the target.
+            if not all_providers.get(prov, {}).get("available_voices"):
+                return None
             try:
                 from services.tts.voice_match_resolver import resolve_voice_match
                 from services.tts.voice_match_types import VoiceMatchRequest
@@ -8378,6 +8582,7 @@ class ProcessPipeline:
                     persona_style=persona,
                     energy_level=energy,
                     target_chars_per_second=target_chars_per_second,
+                    target_language=_target_language,
                 ))
                 dmap = all_display_maps.get(prov, {})
                 matched_name = dmap.get(result.voice_id, result.voice_id)
@@ -8407,7 +8612,7 @@ class ProcessPipeline:
         _speaker_word_totals: dict[str, int] = {}
         _speaker_dur_ms_totals: dict[str, int] = {}
         for _line in transcript_result.lines:
-            _w = self._count_source_words(_line.source_text or "")
+            _w = self._count_source_words(_line.source_text or "", _src_script)
             _d = max(0, int(_line.end_ms - _line.start_ms))
             if _w > 0 and _d > 0:
                 _speaker_word_totals[_line.speaker_id] = (
@@ -8417,11 +8622,18 @@ class ProcessPipeline:
                     _speaker_dur_ms_totals.get(_line.speaker_id, 0) + _d
                 )
         speaker_target_cps: dict[str, float] = {}
-        for _sid, _words in _speaker_word_totals.items():
-            _dur_s = _speaker_dur_ms_totals.get(_sid, 0) / 1000.0
-            if _dur_s > 0:
-                _wps = _words / _dur_s
-                speaker_target_cps[_sid] = round(_wps * 1.8, 2)
+        # The voice-catalog cps is calibrated in Chinese hanzi/sec, so the speed
+        # dimension is only comparable when the TARGET is CJK. For a non-CJK
+        # target (e.g. en) leave cps empty → reranker speed dimension disabled
+        # (plan §Phase 4.1: zh->en relies on DSP/rewrite for duration matching,
+        # not speed scoring). Default pair (zh-CN target, ratio 1.8) is
+        # byte-identical to the legacy ``round(_wps * 1.8, 2)``.
+        if _target_is_cjk:
+            for _sid, _words in _speaker_word_totals.items():
+                _dur_s = _speaker_dur_ms_totals.get(_sid, 0) / 1000.0
+                if _dur_s > 0:
+                    _wps = _words / _dur_s
+                    speaker_target_cps[_sid] = round(_wps * _profile.natural_length_ratio, 2)
 
         # Get speaker profiles: prefer explicit speaker_styles, fallback to segment attributes
         speaker_profiles: dict[str, dict[str, str]] = {}
@@ -8590,35 +8802,124 @@ class ProcessPipeline:
             pass
         raise ValueError("说话人数量范围为 1-10 或 auto。")
 
-    def _enforce_english_source_language(self, download_result: DownloadResult) -> None:
+    @staticmethod
+    def _resolve_job_language_profile(
+        raw_source_language: object,
+        raw_target_language: object,
+    ) -> "LanguagePairProfile":
+        """Resolve a job's raw source/target language snapshot to a *runnable* profile.
+
+        * **Both fields absent** (None / empty / whitespace — legacy job or no
+          snapshot) → the GA default ``en->zh-CN`` profile, byte-identical to the
+          pre-multilingual pipeline.
+        * **At least one field present but the resulting pair is unsupported** →
+          fail-closed ``ValueError``. We never silently run a foreign source
+          through the English pipeline (e.g. a job stamped ``source_language='fr'``
+          must NOT default to ``en->zh-CN``).
+        * **Supported but ``pipeline_ready=False``** (e.g. ``zh-CN->en`` while
+          PR-CD/E/F are not yet landed) → fail-closed ``ValueError``. The Gateway
+          create-path returns 409 for such pairs, but a direct Job API /
+          JobService submission (or a ``copy_as_new`` of a pre-existing row)
+          could persist a supported-but-not-ready pair without that check. Since
+          replacing the English-only gate made the source/transcript gates accept
+          the not-ready source language, the pipeline MUST itself refuse here —
+          otherwise it would feed e.g. Chinese into the still English->Chinese
+          translator/TTS and burn paid APIs on a half-adapted path. ``pipeline_ready``
+          is a code constant (only a pipeline PR flips it), so this is the
+          last-line code gate that an ops mistake can never bypass.
+        """
+        has_source = bool(raw_source_language and str(raw_source_language).strip())
+        has_target = bool(raw_target_language and str(raw_target_language).strip())
+        if not has_source and not has_target:
+            return DEFAULT_LANGUAGE_PAIR_PROFILE
+        resolved = resolve_language_pair(
+            raw_source_language if has_source else DEFAULT_SOURCE_LANGUAGE,
+            raw_target_language if has_target else DEFAULT_TARGET_LANGUAGE,
+        )
+        if resolved is None:
+            raise ValueError(
+                "不支持的语言对："
+                f"source_language={raw_source_language!r}, "
+                f"target_language={raw_target_language!r}。"
+                "请确认任务的源/目标语言为受支持的组合。"
+            )
+        if not resolved.pipeline_ready:
+            raise ValueError(
+                f"语言对 {resolved.language_pair} 尚未就绪（pipeline_ready=False），"
+                "管线拒绝执行以避免半适配的错误产出。"
+            )
+        return resolved
+
+    def _enforce_source_language(self, download_result: DownloadResult) -> None:
+        """Validate the video's source-language metadata against the job's
+        expected source language.
+
+        Fail-open when metadata is absent (local uploads carry none) — preserved
+        from the legacy gate. For the GA default pair (``en->zh-CN``) this is
+        byte-identical to the legacy English-only gate, including the exact log
+        line and error message.
+        """
+        profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
         source_language = str(getattr(download_result, "language", "") or "").strip()
         if not source_language:
             return
-        if _is_english_language_code(source_language):
-            print(f"[S0] 视频源语言元数据：{source_language}")
+        if profile.is_default:
+            if _is_english_language_code(source_language):
+                print(f"[S0] 视频源语言元数据：{source_language}")
+                return
+            raise ValueError(
+                "当前只支持英文视频翻译。"
+                f"视频源语言元数据为 {source_language!r}，请确认输入的视频是英文内容。"
+            )
+        expected = profile.source_language
+        if normalize_language(source_language) == expected:
+            print(f"[S0] 视频源语言元数据：{source_language}（期望源语言 {expected}）")
             return
         raise ValueError(
-            "当前只支持英文视频翻译。"
-            f"视频源语言元数据为 {source_language!r}，请确认输入的视频是英文内容。"
+            f"任务源语言为 {expected}，但视频源语言元数据为 {source_language!r}，"
+            "请确认输入视频与所选源语言一致。"
         )
 
-    def _enforce_english_transcript_language(
+    def _enforce_transcript_language(
         self,
         transcript_result: TranscriptResult,
     ) -> None:
+        """Validate the transcript's language against the job's expected source
+        language. Byte-identical to the legacy English-only gate for the GA
+        default pair; script-aware for non-default pairs.
+        """
+        profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
         explicit_language = str(getattr(transcript_result, "language", "") or "").strip()
-        if explicit_language and not _is_english_language_code(explicit_language):
-            if explicit_language.lower() not in {"auto", "unknown", "und", "undefined"}:
-                raise ValueError(
-                    "当前只支持英文视频翻译。"
-                    f"转录服务检测到语言为 {explicit_language!r}，请确认输入的视频是英文内容。"
-                )
+        _provider_skip = {"auto", "unknown", "und", "undefined"}
 
+        if profile.is_default:
+            if explicit_language and not _is_english_language_code(explicit_language):
+                if explicit_language.lower() not in _provider_skip:
+                    raise ValueError(
+                        "当前只支持英文视频翻译。"
+                        f"转录服务检测到语言为 {explicit_language!r}，请确认输入的视频是英文内容。"
+                    )
+            detected_language = self._detect_transcript_language(transcript_result.lines)
+            if detected_language != "en":
+                raise ValueError(
+                    "当前只支持英文视频翻译。检测到转录稿语言为非英文"
+                    "（英文字符占比过低）。请确认输入的视频是英文内容。"
+                )
+            return
+
+        # --- source-aware path (non-default pair) ---
+        expected = profile.source_language
+        if explicit_language and explicit_language.lower() not in _provider_skip:
+            if normalize_language(explicit_language) != expected:
+                raise ValueError(
+                    f"任务源语言为 {expected}，但转录服务检测到语言为 {explicit_language!r}，"
+                    "请确认输入视频与所选源语言一致。"
+                )
         detected_language = self._detect_transcript_language(transcript_result.lines)
-        if detected_language != "en":
+        if detected_language != expected:
             raise ValueError(
-                "当前只支持英文视频翻译。检测到转录稿语言为非英文"
-                "（英文字符占比过低）。请确认输入的视频是英文内容。"
+                f"检测到转录稿语言与任务源语言 {expected} 不一致（脚本字符占比过低）。"
+                "请确认输入视频与所选源语言一致。"
             )
 
     def _detect_transcript_language(
@@ -8627,14 +8928,44 @@ class ProcessPipeline:
         sample_limit: int = 20,
         english_threshold: float = 0.6,
     ) -> str:
-        """Detect language from early transcript lines. Returns 'en' or 'unknown'."""
+        """Detect whether early transcript lines match the job's source script.
+
+        Returns the matched canonical source language (``"en"`` for the GA
+        default) or ``"unknown"``. For a Latin-script source (including the GA
+        default) this is byte-identical to the legacy English-ratio detection,
+        including the exact log line. For a CJK-script source it measures the
+        CJK character ratio instead.
+        """
+        profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        # Derive from the profile (SoT), robust to direct helper calls that bypass
+        # run(); for the default en source this resolves to the Latin descriptor.
+        descriptor = get_language_descriptor(profile.source_language)
         sample_lines = lines[:sample_limit]
         combined_text = " ".join(
             str(line.source_text).strip() for line in sample_lines if line.source_text
         )
         if not combined_text:
-            return "en"  # Empty transcript, let downstream handle it
+            # Empty transcript, let downstream handle it (no false rejection).
+            return "en" if profile.is_default else profile.source_language
 
+        if descriptor is not None and descriptor.script_family == SCRIPT_CJK:
+            cjk_chars = sum(1 for ch in combined_text if "一" <= ch <= "鿿")
+            # Denominator = letter-like chars only (CJK ideographs + Latin
+            # letters; both are ``isalpha``), excluding digits / punctuation /
+            # whitespace. A Chinese interview peppered with English names and
+            # numbers ("OpenAI GPT-5 2026 Q2 ARR …") must not be falsely judged
+            # non-Chinese because those tokens inflate the denominator. Mirrors
+            # the Latin branch's ascii_letters/total_letters ratio.
+            total_letters = sum(1 for ch in combined_text if ch.isalpha())
+            if total_letters == 0:
+                return profile.source_language  # no scorable chars, skip detection
+            cjk_ratio = cjk_chars / total_letters
+            print(
+                f"[S1] 语言检测：中文字符占比 {cjk_ratio:.0%}（阈值 {english_threshold:.0%}）"
+            )
+            return profile.source_language if cjk_ratio >= english_threshold else "unknown"
+
+        # Latin-script source (GA default) — byte-identical legacy logic.
         ascii_letters = sum(1 for ch in combined_text if ch.isascii() and ch.isalpha())
         total_letters = sum(1 for ch in combined_text if ch.isalpha())
         if total_letters == 0:
@@ -8721,11 +9052,27 @@ class ProcessPipeline:
             seg = DubbingSegment(**filtered)
             _backfill_legacy_tts_input_cn_text(seg)
             segments.append(seg)
+        self._stamp_segment_target_language(segments)
         return TranslationResult(
             segments=segments,
             total_segments=_coerce_int(payload.get("total_segments"), default=len(segments)),
             output_path=str(segments_path.resolve(strict=False)),
         )
+
+    def _stamp_segment_target_language(self, segments: list[DubbingSegment]) -> None:
+        """PR-E slice 6: record the dub target language on each segment so the
+        language-aware TTS hooks (fail-closed fallback / VolcEngine explicit_language /
+        MiniMax language_boost) read it via ``getattr(segment, 'target_language')``.
+
+        A missing profile or a zh-CN target leaves the legacy zh behavior unchanged
+        (those hooks treat None / "zh-CN" identically → byte-identical default).
+        """
+        profile = getattr(self, "_language_profile", None)
+        if profile is None:
+            return
+        target_language = getattr(profile, "target_language", None)
+        for seg in segments:
+            seg.target_language = target_language
 
     @staticmethod
     def _apply_transcript_dubbing_modes_to_segments(
@@ -10508,13 +10855,37 @@ class ProcessPipeline:
         if not cn_text:
             return None
 
-        cn_chunks = self._split_text_for_failed_segment(cn_text, FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN)
+        # Script-aware split: cn_text carries the TARGET language, source_text the
+        # SOURCE language. Pick each split pattern by its script family so an
+        # English target splits on ASCII '.' (not full-width 。) and a Chinese
+        # source splits on full-width punctuation. Default pair (target CJK /
+        # source Latin) resolves to the two legacy constants → byte-identical.
+        # Descriptors come from the profile (SoT), robust to direct helper calls.
+        _split_profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        _tgt_desc = get_language_descriptor(_split_profile.target_language)
+        _src_desc = get_language_descriptor(_split_profile.source_language)
+        _target_pattern = _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT.get(
+            _tgt_desc.script_family if _tgt_desc is not None else SCRIPT_CJK,
+            FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN,
+        )
+        _source_pattern = _FAILED_SEGMENT_SPLIT_PATTERN_BY_SCRIPT.get(
+            _src_desc.script_family if _src_desc is not None else SCRIPT_LATIN,
+            FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
+        )
+        # Re-join separator for the TARGET split: a Latin target needs a space
+        # between sentences ("First. Second."), a CJK target must NOT add one
+        # ("句一。句二。"). Default pair (CJK target) → "" → byte-identical. The
+        # source split keeps the legacy "" joiner so the default (English) source
+        # chunks are unchanged; a zh source is CJK and also wants "".
+        _target_joiner = " " if (_tgt_desc is not None and _tgt_desc.script_family == SCRIPT_LATIN) else ""
+
+        cn_chunks = self._split_text_for_failed_segment(cn_text, _target_pattern, _target_joiner)
         if cn_chunks is None:
             return None
 
         source_chunks = self._split_text_for_failed_segment(
             segment.source_text,
-            FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
+            _source_pattern,
         )
         if source_chunks is None or len(source_chunks) != len(cn_chunks):
             source_chunks = [segment.source_text for _ in cn_chunks]
@@ -10550,6 +10921,10 @@ class ProcessPipeline:
             # Inherit per-speaker TTS provider from parent
             if getattr(segment, "tts_provider", None):
                 child.tts_provider = segment.tts_provider
+            # PR-E re-CodeX P2: split children are created AFTER the slice-6 stamp pass,
+            # so carry the parent's dub target language onto them — otherwise the split/
+            # repair re-synthesis bypasses the language hints + non-zh fallback guard.
+            child.target_language = getattr(segment, "target_language", None)
             child_segments.append(child)
         return child_segments
 
@@ -11053,6 +11428,9 @@ class ProcessPipeline:
         build_result: WorkflowBuildResult,
         watermark_text: str | None = None,
     ) -> OutputBundleResult:
+        language_profile = getattr(
+            self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE
+        )
         return OutputDispatcher().dispatch(
             build_result.localized_project,
             build_result.artifact_index,
@@ -11064,6 +11442,11 @@ class ProcessPipeline:
                 # Phase 2a Task 8 (gate #8): free jobs carry a watermark text; the
                 # γ resume_publish_only call site leaves this None (Studio, clean).
                 watermark_text=watermark_text,
+                # PR-F: forward the dub target language so the cue pipeline routes
+                # per-script. Default (en->zh-CN) → "zh-CN" → byte-identical whisper path.
+                target_language=getattr(
+                    language_profile, "target_language", None
+                ),
             ),
         )
 
@@ -11485,7 +11868,9 @@ class ProcessPipeline:
             return "align_review_needed"
         return "align_done"
 
-    def _split_text_for_failed_segment(self, text: str, pattern: re.Pattern[str]) -> list[str] | None:
+    def _split_text_for_failed_segment(
+        self, text: str, pattern: re.Pattern[str], joiner: str = ""
+    ) -> list[str] | None:
         normalized_text = text.strip()
         if not normalized_text:
             return None
@@ -11518,8 +11903,8 @@ class ProcessPipeline:
         if best_index is None:
             return None
 
-        left_text = "".join(pieces[: best_index + 1]).strip()
-        right_text = "".join(pieces[best_index + 1 :]).strip()
+        left_text = joiner.join(pieces[: best_index + 1]).strip()
+        right_text = joiner.join(pieces[best_index + 1 :]).strip()
         if not left_text or not right_text:
             return None
         return [left_text, right_text]
@@ -12165,9 +12550,17 @@ class ProcessPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _count_source_words(text: str) -> int:
-        """Count spoken words in source text (same logic as translator.py)."""
+    def _count_source_words(text: str, source_script: str = SCRIPT_LATIN) -> int:
+        """Count spoken units in source text for probe sizing.
+
+        Latin (default) → word-like tokens, byte-identical to the legacy English
+        count (and translator.py). CJK → per-ideograph count, so a Chinese source
+        yields non-zero probe candidates instead of silently collapsing to an
+        empty probe set (the Latin regex matches ~0 tokens in Chinese text).
+        """
         import re as _re
+        if source_script == SCRIPT_CJK:
+            return sum(1 for ch in (text or "") if "一" <= ch <= "鿿")
         return len(_re.findall(r"[A-Za-z0-9']+", text or ""))
 
     @staticmethod
@@ -12243,6 +12636,7 @@ class ProcessPipeline:
     def _select_probe_segments(
         lines: list[TranscriptLine],
         *,
+        source_script: str = SCRIPT_LATIN,
         min_words: int = 20,
         max_words: int = 100,
         min_duration_ms: int = 3_000,
@@ -12266,7 +12660,8 @@ class ProcessPipeline:
         if len(lines) <= 2:
             return []
 
-        _count_words = ProcessPipeline._count_source_words
+        def _count_words(_t: str) -> int:
+            return ProcessPipeline._count_source_words(_t, source_script)
 
         # Build candidate pool: skip first/last, apply word + duration filters
         def _filter_candidates(
@@ -12327,11 +12722,21 @@ class ProcessPipeline:
                 # Proportional truncation (will be refined with word timestamps later)
                 import re as _re
                 target_wc = min(truncate_words, total_wc)
-                words_list = _re.findall(r"\S+", best.source_text or "")
-                # Try to break at sentence boundary near target_wc
-                truncated_text = _truncate_at_sentence(words_list, target_wc)
-                actual_wc = len(truncated_text.split())
-                ratio = actual_wc / max(len(words_list), 1)
+                if source_script == SCRIPT_CJK:
+                    # CJK has no whitespace word tokens — a long Chinese turn is a
+                    # single ``\S+`` token, so the legacy whitespace truncation
+                    # would not shrink it and the synthetic segment would still be
+                    # skipped by max_words_per_speaker. Truncate by character and
+                    # measure with the CJK-aware counter instead.
+                    truncated_text = (best.source_text or "")[:target_wc]
+                    actual_wc = _count_words(truncated_text)
+                    ratio = actual_wc / max(total_wc, 1)
+                else:
+                    words_list = _re.findall(r"\S+", best.source_text or "")
+                    # Try to break at sentence boundary near target_wc
+                    truncated_text = _truncate_at_sentence(words_list, target_wc)
+                    actual_wc = len(truncated_text.split())
+                    ratio = actual_wc / max(len(words_list), 1)
                 orig_dur = best.end_ms - best.start_ms
                 adj_dur = max(int(orig_dur * ratio), min_duration_ms)
                 adj_end_ms = best.start_ms + adj_dur
@@ -12382,6 +12787,8 @@ class ProcessPipeline:
         glossary: dict[str, str] | None,
         video_title: str,
         youtube_url: str,
+        source_language: str = "en",
+        target_language: str = "zh-CN",
     ) -> str:
         """Build a fingerprint for probe translation cache invalidation.
 
@@ -12398,6 +12805,11 @@ class ProcessPipeline:
             "video_title": video_title or "",
             "youtube_url": youtube_url or "",
         }
+        # Default en->zh-CN adds nothing → byte-identical legacy fingerprint (no paid
+        # re-probe of existing caches); a non-default pair keys the probe cache by pair
+        # so an en->zh probe is never reused for zh->en. (re-CodeX P2 + v3 §2.5/F)
+        if not (source_language == "en" and target_language == "zh-CN"):
+            payload["language_pair"] = f"{source_language}->{target_language}"
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return _hl.sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -12480,7 +12892,12 @@ class ProcessPipeline:
         Returns list of DubbingSegments with cn_text populated.
         Caches result with fingerprint for resume.
         """
-        probe_lines = self._select_probe_segments(transcript_lines)
+        _probe_profile = getattr(self, "_language_profile", DEFAULT_LANGUAGE_PAIR_PROFILE)
+        _probe_src_desc = get_language_descriptor(_probe_profile.source_language)
+        probe_lines = self._select_probe_segments(
+            transcript_lines,
+            source_script=_probe_src_desc.script_family if _probe_src_desc is not None else SCRIPT_LATIN,
+        )
         if not probe_lines:
             print("[S4-probe] 无满足条件的探针段落")
             return []
@@ -12527,6 +12944,8 @@ class ProcessPipeline:
             glossary=glossary,
             video_title=video_title,
             youtube_url=youtube_url,
+            source_language=_probe_profile.source_language,
+            target_language=_probe_profile.target_language,
         )
 
         # Try loading from cache (for resume after voice selection pause)
@@ -12551,6 +12970,8 @@ class ProcessPipeline:
                 display_name=display_name_a,
                 voice_id_b=voice_id_b,
                 display_name_b=display_name_b,
+                source_language=_probe_profile.source_language,
+                target_language=_probe_profile.target_language,
             )
         finally:
             setattr(translator, "_metering_usage_context", previous_phase)

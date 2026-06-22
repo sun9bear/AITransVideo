@@ -631,6 +631,55 @@ class TestBuildJianyingRequest:
         assert str(project_dir / "source.mp4") in req.source_video_path
         assert req.ambient_audio_path is not None
 
+    def test_build_request_prefers_target_subtitle_key(self, tmp_path):
+        """PR-F: when editor.subtitles_target is registered, the draft uses it (the
+        explicit dub/TARGET subtitle) over the legacy editor.subtitles alias."""
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        manifest = {
+            "artifact_index": {
+                "source.original_video": str(project_dir / "source.mp4"),
+                "editor.dubbed_audio_complete": str(project_dir / "dubbed.wav"),
+                "editor.subtitles": str(project_dir / "subtitles_zh.srt"),
+                "editor.subtitles_target": str(project_dir / "subtitles_target.srt"),
+            }
+        }
+        (project_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        store.save_job(_make_record(project_dir=str(project_dir), display_name="V"))
+
+        captured = {}
+        backend = mock.MagicMock()
+        backend.write.side_effect = lambda request: (captured.__setitem__("req", request), _make_ok_result())[1]
+        _make_runner(store, backend).trigger("job-test-001")
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert captured["req"].subtitle_path == str(project_dir / "subtitles_target.srt")
+
+    def test_build_request_falls_back_to_legacy_subtitle_key(self, tmp_path):
+        """PR-F: a pre-slice-4 manifest (no editor.subtitles_target) still resolves the
+        subtitle via the legacy editor.subtitles key — back-compatible, en->zh unchanged."""
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        manifest = {
+            "artifact_index": {
+                "source.original_video": str(project_dir / "source.mp4"),
+                "editor.dubbed_audio_complete": str(project_dir / "dubbed.wav"),
+                "editor.subtitles": str(project_dir / "subtitles_zh.srt"),
+            }
+        }
+        (project_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        store.save_job(_make_record(project_dir=str(project_dir), display_name="V"))
+
+        captured = {}
+        backend = mock.MagicMock()
+        backend.write.side_effect = lambda request: (captured.__setitem__("req", request), _make_ok_result())[1]
+        _make_runner(store, backend).trigger("job-test-001")
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert captured["req"].subtitle_path == str(project_dir / "subtitles_zh.srt")
+
     def test_build_request_uses_job_id_as_title_fallback(self, tmp_path):
         """When display_name is None, project_title defaults to job_id."""
         store = _make_store(tmp_path)

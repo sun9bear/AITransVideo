@@ -48,6 +48,9 @@ STUDIO_ALLOWED_ARTIFACT_KEYS: frozenset[str] = EXPRESS_ALLOWED_ARTIFACT_KEYS | f
     "editor.subtitles",
     "editor.subtitles_en",
     "editor.subtitles_bilingual",
+    # PR-F: script-neutral subtitle keys (target=dub, source=original).
+    "editor.subtitles_target",
+    "editor.subtitles_source",
     "editor.tts_segments_zip",
     "editor.jianying_draft_zip",
 })
@@ -56,6 +59,9 @@ STUDIO_ALLOWED_DOWNLOAD_KEYS: frozenset[str] = EXPRESS_ALLOWED_DOWNLOAD_KEYS | f
     "editor.subtitles",
     "editor.subtitles_en",
     "editor.subtitles_bilingual",
+    # PR-F: script-neutral subtitle keys (target=dub, source=original).
+    "editor.subtitles_target",
+    "editor.subtitles_source",
     "editor.jianying_draft_zip",
 })
 
@@ -77,6 +83,10 @@ EAGER_PUSH_TO_R2_KEYS_STUDIO: frozenset[str] = frozenset({
     "editor.subtitles",
     "editor.subtitles_en",
     "editor.subtitles_bilingual",
+    # PR-F: eager-push the script-neutral subtitle keys too so post-cleanup
+    # downloads of them still resolve via R2 302 (parity with legacy subtitle keys).
+    "editor.subtitles_target",
+    "editor.subtitles_source",
 })
 EAGER_PUSH_TO_R2_KEYS_EXPRESS: frozenset[str] = frozenset({
     "publish.dubbed_video",
@@ -239,6 +249,8 @@ _CONTENT_TYPE_BY_KEY: dict[str, str] = {
     "editor.subtitles": "text/plain; charset=utf-8",
     "editor.subtitles_en": "text/plain; charset=utf-8",
     "editor.subtitles_bilingual": "text/plain; charset=utf-8",
+    "editor.subtitles_target": "text/plain; charset=utf-8",
+    "editor.subtitles_source": "text/plain; charset=utf-8",
     "editor.jianying_draft_zip": "application/zip",
 }
 

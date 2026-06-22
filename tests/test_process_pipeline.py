@@ -1250,6 +1250,7 @@ def _install_single_speaker_pipeline_mocks(
             output_dir: str,
             speaker_labels: bool = False,
             speakers_expected: int | None = None,
+            language: str = "en",
         ) -> TranscriptResult:
             if capture is not None:
                 capture["transcribe_audio_path"] = audio_path
@@ -1314,6 +1315,8 @@ def _install_single_speaker_pipeline_mocks(
             speaker_voices: dict[str, str] | None = None,
             chars_per_second: float | None = None,
             chars_per_second_by_speaker: dict[str, float] | None = None,
+            source_language: str = "en",
+            target_language: str = "zh-CN",
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, glossary, speaker_voices
             if capture is not None:
@@ -1448,6 +1451,7 @@ def _install_dual_speaker_pipeline_mocks(
             output_dir: str,
             speaker_labels: bool = False,
             speakers_expected: int | None = None,
+            language: str = "en",
         ) -> TranscriptResult:
             del audio_path
             assert speaker_labels is expected_speaker_labels
@@ -1514,6 +1518,8 @@ def _install_dual_speaker_pipeline_mocks(
             speaker_voices: dict[str, str] | None = None,
             chars_per_second: float | None = None,
             chars_per_second_by_speaker: dict[str, float] | None = None,
+            source_language: str = "en",
+            target_language: str = "zh-CN",
         ) -> TranslationResult:
             del max_segment_duration_ms, video_title, youtube_url, glossary, speaker_voices
             capture["translate_input_speaker_ids"] = [line.speaker_id for line in lines]
@@ -2523,6 +2529,8 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
             speaker_voices: dict[str, str] | None = None,
             chars_per_second: float | None = None,
             chars_per_second_by_speaker: dict[str, float] | None = None,
+            source_language: str = "en",
+            target_language: str = "zh-CN",
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -2646,6 +2654,8 @@ def test_process_pipeline_passes_transcript_dir_to_review_debug_output(
             speaker_voices: dict[str, str] | None = None,
             chars_per_second: float | None = None,
             chars_per_second_by_speaker: dict[str, float] | None = None,
+            source_language: str = "en",
+            target_language: str = "zh-CN",
         ):
             del (
                 lines,
@@ -3058,6 +3068,8 @@ def test_process_pipeline_does_not_treat_translation_checkpoint_as_complete_cach
             speaker_voices: dict[str, str] | None = None,
             chars_per_second: float | None = None,
             chars_per_second_by_speaker: dict[str, float] | None = None,
+            source_language: str = "en",
+            target_language: str = "zh-CN",
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             observed["translate_called"] += 1
@@ -3856,6 +3868,8 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
             speaker_voices: dict[str, str] | None = None,
             chars_per_second: float | None = None,
             chars_per_second_by_speaker: dict[str, float] | None = None,
+            source_language: str = "en",
+            target_language: str = "zh-CN",
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             observed["translate_called"] += 1

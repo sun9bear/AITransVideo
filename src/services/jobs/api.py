@@ -284,6 +284,15 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                                 "artifact_count": len(filtered),
                             },
                         }
+                    # PR-G: surface the job's language pair so the download UI can label
+                    # subtitles by ACTUAL language (editor.subtitles=target, _en=source)
+                    # instead of the hard-coded 中文/英文. Absent → frontend falls back to
+                    # the en->zh default → byte-identical for the GA pair.
+                    artifacts_payload = {
+                        **artifacts_payload,
+                        "source_language": getattr(record, "source_language", None),
+                        "target_language": getattr(record, "target_language", None),
+                    }
                     self._write_json(HTTPStatus.OK, artifacts_payload)
                     return
                 # --- Studio post-edit: GET /jobs/{id}/editing/segments (T1-2) ---

@@ -177,6 +177,10 @@ def _filename_for(artifact_key: str, base: str, local_path: Path) -> str:
         return f"{name}_en.srt"
     if artifact_key == "editor.subtitles_bilingual":
         return f"{name}_bilingual.srt"
+    if artifact_key == "editor.subtitles_target":
+        return f"{name}_target.srt"
+    if artifact_key == "editor.subtitles_source":
+        return f"{name}_source.srt"
     if artifact_key == "editor.jianying_draft_zip":
         # 2026-05-11 production bug fix:
         # The jianying zip on disk is named "{title}_{YYYY-MM-DD}.zip"

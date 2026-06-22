@@ -767,6 +767,16 @@ class UserVoice(Base):
     created_from: Mapped[str | None] = mapped_column(String(32), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # --- Target-language compatibility (PR-E user_voices migration, alembic 043) ---
+    # Which DUB *target* languages this cloned voice supports. NULL/empty ⇒ legacy →
+    # treated as zh-CN-only by language-aware matching. Stamped at clone time by the
+    # three write paths (manual clone / Express auto-clone / Smart auto-clone).
+    # none_as_null=True: an omitted value persists as SQL NULL (not a JSONB ``null``),
+    # so add_user_voice's "None → NULL → zh-CN legacy" contract + any IS NULL predicate
+    # hold for clones created without a value (re-CodeX P2).
+    compatible_target_languages: Mapped[list | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     # Voice speed calibration (migration 013). Populated when the user
     # triggers POST /gateway/user-voices/{id}/calibrate-speed; NULL otherwise.
