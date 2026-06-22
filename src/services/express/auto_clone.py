@@ -341,6 +341,41 @@ def run_express_auto_clone(
         "worker_target_model": target_model,
     }
     audit["is_temporary"] = True
+    try:
+        from services.usage_meter import UsageMeter
+
+        UsageMeter(project_dir, job_id=str(job_id)).record_voice_clone(
+            provider="cosyvoice_voice_clone",
+            model=str(target_model or TARGET_MODEL),
+            voice_id=str(clone_res.voice_id or ""),
+            speaker_id=str(main_speaker_id or ""),
+            source_audio_seconds=float(getattr(sample, "duration_s", 0.0) or 0.0),
+            selected_segment_count=len(tuple(getattr(sample, "segment_ids", ()) or ())),
+            clone_count=1,
+            billable=True,
+            success=True,
+            extra={
+                "event_id": (
+                    "express_auto_clone:"
+                    f"{job_id}:{main_speaker_id}:{clone_res.voice_id}"
+                ),
+                "source": "express_auto_clone",
+                "tts_provider": "cosyvoice",
+                "worker_target_model": str(target_model or TARGET_MODEL),
+                "reservation_id": str(reservation_id or ""),
+                "reservation_status_final": reservation_status_final,
+                "worker_request_id": str(clone_res.worker_request_id or ""),
+                "provider_request_id": str(clone_res.provider_request_id or ""),
+                "is_temporary": True,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "express clone usage metering failed job=%s voice=%s: %s",
+            job_id,
+            clone_res.voice_id,
+            type(exc).__name__,
+        )
     decision = "cloned" if reservation_status_final == "consumed" else "cloned_consume_failed"
     reason_code = "cloned" if reservation_status_final == "consumed" else "cloned_consume_failed"
     return _finish(

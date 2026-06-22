@@ -1419,6 +1419,11 @@ class TTSGenerator:
             # fallback 到国际 DashScope endpoint，**不允许** 用 ``len(text)*2``
             # 覆盖 worker 的 authoritative billed_chars。
             requires_worker = bool(getattr(segment, "requires_worker", False))
+            worker_target_model = (
+                _normalize_optional_text(getattr(segment, "worker_target_model", None))
+                if requires_worker
+                else None
+            )
             try:
                 if requires_worker:
                     result = self._generate_one_cosyvoice_via_worker(
@@ -1435,7 +1440,16 @@ class TTSGenerator:
                     result,
                     bucket=usage_bucket,
                     provider="cosyvoice",
+                    model=worker_target_model,
                     text=tts_text,
+                    extra=(
+                        {
+                            "requires_worker": True,
+                            "worker_target_model": worker_target_model,
+                        }
+                        if worker_target_model
+                        else None
+                    ),
                 )
                 return result
             except TTSGenerationError:
@@ -1691,6 +1705,7 @@ class TTSGenerator:
         provider: str,
         model: str | None = None,
         text: str,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         meter = getattr(self, "_usage_meter", None)
         if meter is None:
@@ -1707,6 +1722,7 @@ class TTSGenerator:
                 selected_voice=result.selected_voice,
                 duration_ms=result.duration_ms,
                 fallback_used_provider=result.fallback_used_provider,
+                extra=extra,
             )
         except Exception as exc:
             print(f"[metering] TTS usage record skipped: {exc}", flush=True)
