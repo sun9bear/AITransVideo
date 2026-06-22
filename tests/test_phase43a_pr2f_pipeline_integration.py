@@ -323,6 +323,26 @@ def test_upload_sends_multipart_with_internal_key(monkeypatch, tmp_path):
     assert captured["url"].endswith("/api/internal/cosyvoice/express-sample-upload")
 
 
+def test_upload_uses_production_safe_timeout_by_default(monkeypatch, tmp_path):
+    sample = tmp_path / "speaker_a.wav"
+    sample.write_bytes(b"RIFFfake-wav-bytes")
+    captured: dict = {}
+
+    def _fake_post(url, headers=None, files=None, data=None, timeout=None):
+        captured["timeout"] = timeout
+        return _FakeResp(200, {"ok": True, "presigned_get_url": "https://oss/x", "sha256": "abc"})
+
+    monkeypatch.delenv("AVT_EXPRESS_SAMPLE_UPLOAD_TIMEOUT_S", raising=False)
+    monkeypatch.setattr(pc.requests, "post", _fake_post)
+
+    res = pc._http_upload_sample(
+        sample_path=str(sample), user_id="user-1", job_id="job-1", speaker_id="speaker_a"
+    )
+
+    assert res.ok
+    assert captured["timeout"] >= 90.0
+
+
 def test_upload_malformed_200_is_malformed(monkeypatch, tmp_path):
     sample = tmp_path / "s.wav"
     sample.write_bytes(b"x")
