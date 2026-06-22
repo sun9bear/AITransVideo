@@ -4915,6 +4915,47 @@ def test_process_pipeline_attempts_semantic_split_repair_for_failed_long_segment
     assert all(segment.alignment_method == "dsp" for segment in repaired_segments)
 
 
+def test_process_pipeline_semantic_split_children_preserve_worker_routing_metadata() -> None:
+    pipeline = ProcessPipeline()
+    profile = process_module.resolve_language_pair("zh-CN", "en")
+    assert profile is not None
+    pipeline._language_profile = profile
+    parent = DubbingSegment(
+        segment_id=30,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="cosyvoice-v3.5-flash-avtspeak-cloned",
+        start_ms=0,
+        end_ms=12_000,
+        target_duration_ms=12_000,
+        source_text="First source sentence. Second source sentence. Third source sentence.",
+        cn_text="No, not that. Yeah, hit it. It flew over. That was close.",
+        tts_provider="cosyvoice",
+        tts_model_key="cosyvoice-v3.5-flash",
+        target_language="en",
+        selected_voice="cosyvoice-v3.5-flash-avtspeak-cloned",
+        match_confidence="high",
+        requires_worker=True,
+        worker_target_model="cosyvoice-v3.5-flash",
+    )
+
+    children = pipeline._build_semantic_split_children(
+        segment=parent,
+        next_segment_id=100,
+    )
+
+    assert children is not None
+    assert [child.segment_id for child in children] == [100, 101]
+    assert {child.voice_id for child in children} == {parent.voice_id}
+    assert {child.tts_provider for child in children} == {"cosyvoice"}
+    assert {child.tts_model_key for child in children} == {"cosyvoice-v3.5-flash"}
+    assert {child.target_language for child in children} == {"en"}
+    assert {child.selected_voice for child in children} == {parent.selected_voice}
+    assert {child.match_confidence for child in children} == {"high"}
+    assert all(child.requires_worker is True for child in children)
+    assert {child.worker_target_model for child in children} == {"cosyvoice-v3.5-flash"}
+
+
 def test_process_pipeline_skips_semantic_split_repair_without_clear_sentence_boundary(
     tmp_path: Path,
 ) -> None:

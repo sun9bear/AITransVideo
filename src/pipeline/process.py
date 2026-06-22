@@ -11027,6 +11027,18 @@ class ProcessPipeline:
             # so carry the parent's dub target language onto them — otherwise the split/
             # repair re-synthesis bypasses the language hints + non-zh fallback guard.
             child.target_language = getattr(segment, "target_language", None)
+            # Split children re-synthesize audio, so they must keep the same
+            # provider and worker-routing identity as the selected parent.
+            for attr in (
+                "tts_model_key",
+                "selected_voice",
+                "match_confidence",
+                "target_chars_per_second",
+                "requires_worker",
+                "worker_target_model",
+                "voiceclone_reference_path",
+            ):
+                setattr(child, attr, getattr(segment, attr))
             child_segments.append(child)
         return child_segments
 
