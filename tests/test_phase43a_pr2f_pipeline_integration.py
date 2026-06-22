@@ -345,6 +345,45 @@ def test_clone_only_fans_out_clone_voice_over_non_worker_preset_speakers():
     }
 
 
+def test_clone_only_fans_out_clone_voice_to_missing_transcript_speakers():
+    """Clone-only must cover speakers absent from the current voice map.
+
+    In auto speaker mode the voice map may contain only the cloned main speaker,
+    while transcript/review data still contains speaker_a.  That missing speaker
+    would otherwise reach CosyVoice without worker routing.
+    """
+    from pipeline.process import _fan_out_express_clone_to_unassigned_speakers
+
+    class _Outcome:
+        cloned = True
+        voice_id = "cosyvoice-v3.5-flash-avtspeak-main"
+        main_speaker_id = "speaker_b"
+
+    speaker_voices = {
+        "speaker_b": "cosyvoice-v3.5-flash-avtspeak-main",
+    }
+    speaker_routing = {
+        "speaker_b": {
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        }
+    }
+
+    filled = _fan_out_express_clone_to_unassigned_speakers(
+        speaker_voices,
+        speaker_routing,
+        _Outcome(),
+        speaker_ids=["speaker_a", "speaker_b"],
+    )
+
+    assert filled == ["speaker_a"]
+    assert speaker_voices["speaker_a"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_routing["speaker_a"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+
+
 def test_register_payload_has_required_cosyvoice_fields(monkeypatch):
     captured: dict = {}
 
