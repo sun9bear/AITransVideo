@@ -43,7 +43,7 @@ TARGET_MODEL_DEFAULT = "cosyvoice-v3.5-flash"
 _TEMPORARY_TTL_DAYS = 7
 _UPLOAD_PATH = "/api/internal/cosyvoice/express-sample-upload"
 _REGISTER_PATH = "/api/internal/user-voices/register-smart"
-_UPLOAD_TIMEOUT_S = 30.0
+_UPLOAD_TIMEOUT_S = 120.0
 _REGISTER_TIMEOUT_S = 15.0
 
 # admin_settings keys（主 spec §7）
