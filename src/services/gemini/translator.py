@@ -1467,7 +1467,7 @@ class GeminiTranslator:
         prompt_key_map = {
             "s3_translate": "translate",
             "s5_rewrite": "rewrite",
-            "s5_rewrite_strict": "rewrite_strict",
+            "s5_rewrite_strict": "rewrite",
             "s5_short_content_compact": "rewrite",
             "s2_infer": "translate",  # speaker inference uses same model as translate
             "s2_review": "translate",  # legacy 2-speaker review fallback (process.py:_legacy_speaker_inference_and_review)
