@@ -292,6 +292,51 @@ def test_clone_only_fans_out_clone_voice_to_unassigned_speakers():
 # ===========================================================================
 
 
+def test_clone_only_fans_out_clone_voice_over_non_worker_preset_speakers():
+    """zh->en clone-only jobs must not preserve concrete CosyVoice presets.
+
+    A concrete preset without worker routing still reaches the zh-only
+    CosyVoice matcher for an English target and fails closed.  In clone-only
+    Express runs, every non-worker speaker should reuse the cloned worker voice.
+    """
+    from pipeline.process import _fan_out_express_clone_to_unassigned_speakers
+
+    class _Outcome:
+        cloned = True
+        voice_id = "cosyvoice-v3.5-flash-avtspeak-main"
+        main_speaker_id = "speaker_b"
+
+    speaker_voices = {
+        "speaker_a": "auto",
+        "speaker_b": "cosyvoice-v3.5-flash-avtspeak-main",
+        "speaker_c": "longshuo_v3",
+    }
+    speaker_routing = {
+        "speaker_b": {
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        }
+    }
+
+    filled = _fan_out_express_clone_to_unassigned_speakers(
+        speaker_voices,
+        speaker_routing,
+        _Outcome(),
+    )
+
+    assert filled == ["speaker_a", "speaker_c"]
+    assert speaker_voices["speaker_a"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_voices["speaker_c"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_routing["speaker_a"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+    assert speaker_routing["speaker_c"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+
+
 def test_register_payload_has_required_cosyvoice_fields(monkeypatch):
     captured: dict = {}
 
