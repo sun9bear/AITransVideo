@@ -180,6 +180,8 @@ class InMemoryUploader:
 
 DEFAULT_LOCAL_FS_DIR = Path("/tmp/aivideotrans/cosyvoice_samples")
 DEFAULT_OSS_CONTENT_TYPE = "audio/wav"
+DEFAULT_OSS_UPLOAD_MAX_ATTEMPTS = 3
+DEFAULT_OSS_UPLOAD_RETRY_BACKOFF_S = 0.25
 ALIYUN_OSS_REQUIRED_SETTINGS: tuple[tuple[str, str], ...] = (
     ("AVT_COSYVOICE_OSS_ENDPOINT", "cosyvoice_oss_endpoint"),
     ("AVT_COSYVOICE_OSS_BUCKET", "cosyvoice_oss_bucket"),
@@ -206,6 +208,8 @@ class AliyunOssUploader:
     connect_timeout_s: int = 10
     read_timeout_s: int = 30
     content_type: str = DEFAULT_OSS_CONTENT_TYPE
+    upload_max_attempts: int = DEFAULT_OSS_UPLOAD_MAX_ATTEMPTS
+    upload_retry_backoff_s: float = DEFAULT_OSS_UPLOAD_RETRY_BACKOFF_S
     _client: object | None = field(default=None, init=False, repr=False)
     _client_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _url_to_key: dict[str, str] = field(default_factory=dict, init=False, repr=False)
@@ -229,6 +233,11 @@ class AliyunOssUploader:
         self.bucket = str(self.bucket).strip()
         self.region = str(self.region or "cn-beijing").strip()
         self.key_prefix = _normalize_key_prefix(self.key_prefix)
+        self.upload_max_attempts = max(1, int(self.upload_max_attempts or 1))
+        self.upload_retry_backoff_s = max(
+            0.0,
+            float(self.upload_retry_backoff_s or 0.0),
+        )
 
     def upload_and_sign(
         self,
@@ -249,12 +258,12 @@ class AliyunOssUploader:
         content_type = _content_type_for_ext(ext)
 
         client = self._get_client()
-        client.put_object(
-            Bucket=self.bucket,
-            Key=key,
-            Body=data,
-            ContentType=content_type,
-            Metadata={"sha256": digest},
+        self._put_object_with_retries(
+            client=client,
+            key=key,
+            data=data,
+            content_type=content_type,
+            digest=digest,
         )
         # 2026-05-26: 不要在 presign 里加 ``ResponseContentType``——阿里云 OSS 对
         # 重写响应 Content-Type 返回 400 ``Can not override response header on
@@ -307,7 +316,10 @@ class AliyunOssUploader:
                 region_name=self.region,
                 connect_timeout=self.connect_timeout_s,
                 read_timeout=self.read_timeout_s,
-                retries={"max_attempts": 1, "mode": "standard"},
+                retries={
+                    "max_attempts": DEFAULT_OSS_UPLOAD_MAX_ATTEMPTS,
+                    "mode": "standard",
+                },
                 s3={"addressing_style": "virtual"},
             )
             self._client = boto3.client(
@@ -319,6 +331,42 @@ class AliyunOssUploader:
             )
             return self._client
 
+    def _put_object_with_retries(
+        self,
+        *,
+        client,
+        key: str,
+        data: bytes,
+        content_type: str,
+        digest: str,
+    ) -> None:
+        for attempt in range(1, self.upload_max_attempts + 1):
+            try:
+                client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=data,
+                    ContentType=content_type,
+                    Metadata={"sha256": digest},
+                )
+                return
+            except Exception as exc:
+                if (
+                    attempt >= self.upload_max_attempts
+                    or not _is_retryable_oss_upload_error(exc)
+                ):
+                    raise
+                logger.warning(
+                    "[sample_uploader] OSS put_object transient error; retrying "
+                    "attempt %s/%s (%s)",
+                    attempt + 1,
+                    self.upload_max_attempts,
+                    type(exc).__name__,
+                )
+                delay = self.upload_retry_backoff_s * attempt
+                if delay > 0:
+                    time.sleep(delay)
+
 
 def missing_aliyun_oss_settings(settings: object) -> list[str]:
     """Return missing ``AVT_COSYVOICE_OSS_*`` env names for early 503 gates."""
@@ -327,6 +375,42 @@ def missing_aliyun_oss_settings(settings: object) -> list[str]:
         for env_name, attr in ALIYUN_OSS_REQUIRED_SETTINGS
         if not str(getattr(settings, attr, "") or "").strip()
     ]
+
+
+_RETRYABLE_OSS_UPLOAD_EXCEPTION_NAMES = {
+    "ConnectionClosedError",
+    "ConnectionError",
+    "ConnectTimeoutError",
+    "EndpointConnectionError",
+    "ReadTimeoutError",
+    "SSLError",
+    "ProtocolError",
+}
+
+_RETRYABLE_OSS_UPLOAD_ERROR_CODES = {
+    "InternalError",
+    "RequestTimeout",
+    "ServiceUnavailable",
+    "SlowDown",
+    "Throttling",
+}
+
+
+def _is_retryable_oss_upload_error(exc: Exception) -> bool:
+    if type(exc).__name__ in _RETRYABLE_OSS_UPLOAD_EXCEPTION_NAMES:
+        return True
+
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        metadata = response.get("ResponseMetadata") or {}
+        status = metadata.get("HTTPStatusCode")
+        if isinstance(status, int) and status >= 500:
+            return True
+        error = response.get("Error") or {}
+        if str(error.get("Code") or "") in _RETRYABLE_OSS_UPLOAD_ERROR_CODES:
+            return True
+
+    return False
 
 
 # Codex 2026-05-25 C.2 二轮 review 部署前项 #A：``GatewaySettings.cosyvoice_sample_uploader``

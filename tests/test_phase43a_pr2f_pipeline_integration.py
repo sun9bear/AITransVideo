@@ -484,6 +484,31 @@ def test_upload_malformed_200_is_malformed(monkeypatch, tmp_path):
     assert not res.ok and res.error == "malformed_upload_response"
 
 
+def test_upload_non_200_preserves_gateway_error_code(monkeypatch, tmp_path):
+    sample = tmp_path / "s.wav"
+    sample.write_bytes(b"x")
+    monkeypatch.setattr(
+        pc.requests,
+        "post",
+        lambda *a, **k: _FakeResp(
+            503,
+            {
+                "error": {
+                    "code": "uploader_runtime_error",
+                    "detail": "ConnectionClosedError",
+                }
+            },
+        ),
+    )
+
+    res = pc._http_upload_sample(
+        sample_path=str(sample), user_id="u", job_id="j", speaker_id="speaker_a"
+    )
+
+    assert not res.ok
+    assert res.error == "http_503:uploader_runtime_error:ConnectionClosedError"
+
+
 # ===========================================================================
 # worker clone / delete 适配器映射
 # ===========================================================================
