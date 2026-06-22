@@ -158,7 +158,6 @@ _DEFAULTS: dict[str, str] = {
     "pass3": "gemini_pro",
     "translate": "deepseek",
     "rewrite": "deepseek",
-    "rewrite_strict": "gemini_pro",
     "probe_translate": "deepseek",
     "content_compliance": "gemini_31_flash_lite",
     # Customer support AI (plan 2026-05-08 §7.2). Default DeepSeek V4 Flash:
