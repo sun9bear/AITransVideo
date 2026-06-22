@@ -168,12 +168,11 @@ def test_resolve_profile_default_pair_is_runnable() -> None:
     assert ProcessPipeline._resolve_job_language_profile("en", "zh-CN").is_default is True
 
 
-def test_resolve_profile_supported_but_not_ready_fails_closed() -> None:
-    # zh-CN->en is a SUPPORTED pair but pipeline_ready=False (PR-CD/E/F pending).
-    # The pipeline must refuse it (defense-in-depth vs a direct Job API submission
-    # that bypasses the Gateway 409), not run a half-adapted English->Chinese path.
-    with pytest.raises(ValueError, match="尚未就绪"):
-        ProcessPipeline._resolve_job_language_profile("zh-CN", "en")
+def test_resolve_profile_zh_en_canary_is_runnable() -> None:
+    # zh-CN->en is now pipeline_ready for the allowlisted canary lane.
+    profile = ProcessPipeline._resolve_job_language_profile("zh-CN", "en")
+    assert profile.language_pair == "zh-CN->en"
+    assert profile.is_default is False
 
 
 @pytest.mark.parametrize(

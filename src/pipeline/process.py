@@ -8816,15 +8816,15 @@ class ProcessPipeline:
           fail-closed ``ValueError``. We never silently run a foreign source
           through the English pipeline (e.g. a job stamped ``source_language='fr'``
           must NOT default to ``en->zh-CN``).
-        * **Supported but ``pipeline_ready=False``** (e.g. ``zh-CN->en`` while
-          PR-CD/E/F are not yet landed) → fail-closed ``ValueError``. The Gateway
+        * **Supported but ``pipeline_ready=False``** (future registered pairs
+          before their pipeline adaptation lands) → fail-closed ``ValueError``. The Gateway
           create-path returns 409 for such pairs, but a direct Job API /
           JobService submission (or a ``copy_as_new`` of a pre-existing row)
           could persist a supported-but-not-ready pair without that check. Since
           replacing the English-only gate made the source/transcript gates accept
           the not-ready source language, the pipeline MUST itself refuse here —
-          otherwise it would feed e.g. Chinese into the still English->Chinese
-          translator/TTS and burn paid APIs on a half-adapted path. ``pipeline_ready``
+          otherwise it would feed a source into a half-adapted path and burn
+          paid APIs on bad output. ``pipeline_ready``
           is a code constant (only a pipeline PR flips it), so this is the
           last-line code gate that an ops mistake can never bypass.
         """

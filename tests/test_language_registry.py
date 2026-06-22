@@ -257,15 +257,15 @@ def test_every_pair_has_a_positive_ratio() -> None:
 # ── Ratio-calibration GA guard (plan §3.4 / Phase 0) ───────────────────────
 
 
-def test_zh_en_ratio_is_marked_calibration_pending() -> None:
-    assert "zh-CN->en" in RATIO_CALIBRATION_PENDING
+def test_zh_en_ratio_is_not_calibration_pending_for_canary() -> None:
+    assert "zh-CN->en" not in RATIO_CALIBRATION_PENDING
 
 
 def test_no_pipeline_ready_pair_has_an_uncalibrated_ratio() -> None:
     """Hard invariant: a pair whose ratio is still provisional MUST NOT be GA.
-    Flipping ``zh-CN->en`` to ``pipeline_ready=True`` requires first removing it
-    from ``RATIO_CALIBRATION_PENDING`` (i.e. measuring 0.55 from fixtures) — this
-    test fails the moment someone flips it without calibrating."""
+    A pair must be removed from ``RATIO_CALIBRATION_PENDING`` before it can be
+    made ``pipeline_ready=True``; zh-CN->en is deliberately canary-enabled while
+    still keeping paid capability gates empty."""
     for profile in SUPPORTED_LANGUAGE_PAIRS.values():
         if profile.pipeline_ready:
             assert profile.language_pair not in RATIO_CALIBRATION_PENDING, (

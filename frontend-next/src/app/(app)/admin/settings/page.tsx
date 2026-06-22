@@ -997,8 +997,8 @@ export default function AdminSettingsPage() {
 
       {/* 多语言互翻 language pairs（PR-A part 2 §1/§7） */}
       <SettingSection
-        title="多语言支持（内测 · 管线未就绪，勿在生产开启）"
-        description="控制非默认语言方向（首发：中文 → 英文）在前端入口的可见性。默认方向「英文 → 中文」永远可用，不受这些开关影响。⚠️ 端到端管线尚未适配非默认方向（翻译方向 / 音色池去中文 / 字幕 per-script 在后续 PR-W/CD/F）——开启主开关只会让该方向在创建页显示为「即将上线」（不可选），创建仍被后端 409 拦截（pipeline_ready 代码硬闸，翻开关绕不过）。真正放行须等管线 PR 上线并改 registry 常量。"
+        title="多语言支持（内测）"
+        description="控制非默认语言方向（首发：中文 → 英文）在前端入口的可见性。默认方向「英文 → 中文」永远可用，不受这些开关影响。中文 → 英文已进入 allowlist 内测：建议保持白名单开启，只给项目主/管理员试跑；post-edit / suggest-split 等付费增强能力仍由后端能力门禁用。"
       >
         <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
           <input

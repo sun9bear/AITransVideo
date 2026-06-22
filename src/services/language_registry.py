@@ -14,10 +14,12 @@ splits the *internal* paid-gate bitset from the *frontend* display bitset
 The two must never share a constant name.
 
 The GA, zero-regression baseline is ``en->zh-CN`` — it is fully adapted, so it
-carries the full capability set. The first new pair ``zh-CN->en`` ships with an
-**empty** set: no paid capability is language-adapted for it yet, which makes
-the §2.4 paid-API gate fail closed (no probe / S2 override / suggest-split /
-post-edit on a pair we have not adapted). See plan §2.4 + §6 DoD.
+carries the full capability set. The first new pair ``zh-CN->en`` can be
+created only behind the admin/allowlist gate, and still ships with an **empty**
+paid capability set: no paid capability is language-adapted for it yet, which
+makes the §2.4 paid-API gate fail closed (no probe / S2 override /
+suggest-split / post-edit on a pair we have not adapted). See plan §2.4 + §6
+DoD.
 
 Pure stdlib. No network, no paid API, no DB. Imported by both the Gateway
 (``services.language_registry`` — ``src/`` is on the gateway ``sys.path``) and
@@ -223,16 +225,15 @@ class LanguagePairProfile:
     #: both translator.py (length budget, PR-CD) and process.py (voice-speed cps,
     #: PR-W). ``zh-CN->en`` ships a provisional ``0.55`` (plan §3.4) that MUST be
     #: re-measured from fixtures in Phase 0 before it gates any GA output; it is
-    #: inert today because that pair is ``pipeline_ready=False``.
+    #: still intentionally blocked from paid capability gates for the canary.
     natural_length_ratio: float = 1.0
     #: Create-path HARD gate (independent of the admin flag / entitlement): can
     #: the END-TO-END pipeline actually execute this pair yet? Defaults to False
     #: so a newly-registered pair is un-creatable until a pipeline PR flips it —
     #: an ops mistake (flipping the ``language_pairs_enabled`` admin flag) can
     #: NEVER create a broken paid job, only a code change can. ``en->zh-CN`` is
-    #: True (GA). ``zh-CN->en`` stays False until PR-W/CD/F land the execution
-    #: (translation direction / voice pool / per-script subtitles). See the
-    #: Gateway create-path ``language_pair_not_yet_available`` 409.
+    #: True (GA). ``zh-CN->en`` is True for allowlisted canary execution only;
+    #: its paid capability set remains empty.
     pipeline_ready: bool = False
 
     @property
@@ -266,7 +267,7 @@ SUPPORTED_LANGUAGE_PAIRS: dict[str, LanguagePairProfile] = {
         target_language=LANG_EN,
         adapted_paid_capabilities=frozenset(),
         is_default=False,
-        pipeline_ready=False,  # explicit: pipeline not yet adapted (PR-W/CD/F).
+        pipeline_ready=True,  # allowlisted canary; paid capabilities still fail closed.
         natural_length_ratio=0.55,  # provisional; re-measure in Phase 0 (plan §3.4)
     ),
 }
@@ -278,14 +279,10 @@ DEFAULT_LANGUAGE_PAIR_PROFILE: LanguagePairProfile = SUPPORTED_LANGUAGE_PAIRS[
 
 #: Pairs whose ``natural_length_ratio`` is still a PROVISIONAL estimate that has
 #: not been measured from real fixtures (plan §3.4 / Phase 0). Hard invariant: a
-#: pair listed here MUST NOT be ``pipeline_ready=True``. Flipping such a pair GA
-#: requires first removing it from this set — which forces a conscious
-#: calibration step rather than letting an un-measured ratio (e.g. ``zh-CN->en``
-#: at the 2026-04-15 ``0.55`` estimate) silently become a production parameter.
-#: ``test_language_registry`` enforces the invariant.
-RATIO_CALIBRATION_PENDING: frozenset[str] = frozenset(
-    {make_pair_key(LANG_ZH_CN, LANG_EN)}
-)
+#: pair listed here MUST NOT be ``pipeline_ready=True``. The zh-CN->en canary
+#: deliberately promotes the 0.55 ratio for allowlisted execution; keep
+#: re-measurement on the release checklist before widening access.
+RATIO_CALIBRATION_PENDING: frozenset[str] = frozenset()
 
 
 def resolve_language_pair(

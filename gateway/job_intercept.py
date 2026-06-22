@@ -2371,9 +2371,9 @@ async def intercept_create_job(
         # entitled / admin user cannot create a pair the END-TO-END pipeline
         # can't run yet. `pipeline_ready` is a registry CONSTANT — only a
         # pipeline PR (PR-W/CD/F) flips it, so flipping `language_pairs_enabled`
-        # can NEVER produce a broken paid job. zh-CN->en stays blocked here until
-        # the execution path is adapted. (The admin flag still controls facts
-        # visibility, so the selector can show it as 即将上线 / disabled.)
+        # can NEVER produce a broken paid job. The admin flag still controls
+        # facts visibility; ``pipeline_ready`` controls whether an entitled
+        # non-default pair is selectable/creatable.
         if not resolved_pair.pipeline_ready:
             return _error_response(
                 409,
