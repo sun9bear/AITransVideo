@@ -141,7 +141,7 @@ def _install_fake_httpx_head(
     status_code: int = 200,
     raise_exc: Exception | None = None,
 ) -> None:
-    """让 httpx.Client.head 返回伪造响应（不打真实 HEAD 请求）。"""
+    """让 httpx.Client.get 返回伪造响应（不打真实 Range GET 请求）。"""
     import httpx
 
     class _FakeResp:
@@ -159,7 +159,8 @@ def _install_fake_httpx_head(
         def __exit__(self, *args):
             return False
 
-        def head(self, url):
+        def get(self, url, headers=None):
+            del headers
             if raise_exc:
                 raise raise_exc
             return _FakeResp(status_code, content_length)
@@ -281,7 +282,7 @@ def test_clone_rejects_head_network_error(monkeypatch) -> None:
     p = _provider()
     with pytest.raises(ProviderError) as exc:
         p.clone(_make_clone_req())
-    assert exc.value.code == "sample_head_failed"
+    assert exc.value.code == "sample_get_failed"
 
 
 def test_clone_rejects_head_4xx(monkeypatch) -> None:

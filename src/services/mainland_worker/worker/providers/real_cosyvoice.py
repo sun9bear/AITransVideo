@@ -235,7 +235,7 @@ class RealCosyvoiceProvider(CosyvoiceProvider):
             raise ProviderError(
                 f"synthesize returned unexpected: {type(audio).__name__}",
                 code="synthesize_empty",
-                retryable=False,
+                retryable=True,
             )
 
         audio_bytes = bytes(audio)
