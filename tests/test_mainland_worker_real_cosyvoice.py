@@ -402,6 +402,23 @@ def test_synthesize_returns_non_bytes(monkeypatch) -> None:
     assert exc.value.code == "synthesize_empty"
 
 
+def test_synthesize_empty_provider_response_is_retryable(monkeypatch) -> None:
+    """DashScope may transiently return no audio instead of raising.
+
+    The worker must expose this as retryable so the mainland client can use
+    the single-segment retry budget instead of failing the whole job on one
+    provider blip.
+    """
+    _install_fake_dashscope(monkeypatch, synthesize_result="")
+    p = _provider()
+
+    with pytest.raises(ProviderError) as exc:
+        p.synthesize_segment(_make_segment("a"), target_model="cosyvoice-v3.5-flash")
+
+    assert exc.value.code == "synthesize_empty"
+    assert exc.value.retryable is True
+
+
 def test_synthesize_returns_zero_duration(monkeypatch) -> None:
     # 注入一个最小合法 WAV header 但 0 frames
     _install_fake_dashscope(monkeypatch, synthesize_result=generate_silent_wav(0))
