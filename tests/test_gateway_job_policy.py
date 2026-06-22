@@ -42,14 +42,14 @@ def _make_user(*, role="user", plan_code="free", email="u@test.com"):
 
 class TestComputeJobPolicy:
     def test_express_default_cosyvoice(self):
-        """Default express provider from admin settings is cosyvoice."""
+        """Default express provider from admin settings is CosyVoice clone-only."""
         p = compute_job_policy(_make_user(plan_code="free"), "express")
         assert p["service_mode"] == "express"
         assert p["tts_provider"] == "cosyvoice"
-        assert p["tts_model"] == "cosyvoice-v3-flash"
+        assert p["tts_model"] == "cosyvoice-v3.5-flash"
         assert p["requires_review"] is False
-        assert p["voice_clone_enabled"] is False
-        assert p["voice_strategy"] == "preset_mapping"
+        assert p["voice_clone_enabled"] is True
+        assert p["voice_strategy"] == "express_auto_clone"
         assert p["plan_code_snapshot"] == "free"
         assert p["role_snapshot"] == "user"
 
@@ -201,11 +201,30 @@ class TestComputeJobPolicy:
         assert p["tts_model"] == "speech-2.8-turbo"
         assert p["voice_clone_enabled"] is True
 
-    def test_non_volcengine_express_unchanged(self):
+    def test_non_volcengine_express_is_clone_only(self):
         """express + cosyvoice (default) → tts_model unchanged."""
         p = compute_job_policy(_make_user(plan_code="free"), "express")
-        assert p["tts_model"] == "cosyvoice-v3-flash"
-        assert p["voice_clone_enabled"] is False
+        assert p["tts_model"] == "cosyvoice-v3.5-flash"
+        assert p["voice_clone_enabled"] is True
+        assert p["voice_strategy"] == "express_auto_clone"
+
+    def test_express_cosyvoice_uses_admin_clone_target_model(self, monkeypatch):
+        """CosyVoice Express snapshots follow the domestic clone target model setting."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.express_tts_provider = "cosyvoice"
+            s.express_cosyvoice_auto_clone_target_model = "cosyvoice-v3.5-plus"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="free"), "express")
+        assert p["tts_provider"] == "cosyvoice"
+        assert p["tts_model"] == "cosyvoice-v3.5-plus"
+        assert p["voice_clone_enabled"] is True
+        assert p["voice_strategy"] == "express_auto_clone"
 
 
 # ===================================================================

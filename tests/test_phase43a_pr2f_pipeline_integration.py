@@ -426,6 +426,13 @@ def test_process_wires_express_auto_clone_in_express_branch():
     assert 'express_consent=_snap("express_consent", None)' in src
 
 
+def test_process_express_clone_only_failure_is_fatal():
+    """CosyVoice Express clone-only jobs must fail closed instead of falling back to presets."""
+    src = (_SRC / "pipeline" / "process.py").read_text(encoding="utf-8")
+    assert "express_clone_required" in src
+    assert "Express auto-clone required but not completed" in src
+
+
 def test_process_express_clone_failure_is_non_fatal():
     """process.py 调用点包 try/except（失败不炸 pipeline，回预设）。"""
     src = (_SRC / "pipeline" / "process.py").read_text(encoding="utf-8")
