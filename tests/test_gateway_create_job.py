@@ -62,6 +62,14 @@ def _make_user(*, role="user", plan_code="free"):
 def _make_request(body: dict) -> MagicMock:
     """Create a mock FastAPI Request with given JSON body."""
     req = MagicMock()
+    if body.get("service_mode", "express") == "express" and "express_consent" not in body:
+        body = {
+            **body,
+            "express_consent": {
+                "auto_voice_clone": True,
+                "client_confirmed_at": "2026-06-22T00:00:00Z",
+            },
+        }
     encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req.body = AsyncMock(return_value=encoded)
     req.headers = {"content-type": "application/json"}

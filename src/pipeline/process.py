@@ -2926,6 +2926,11 @@ class ProcessPipeline:
         job_tts_provider = _snap('tts_provider', 'cosyvoice')
         job_requires_review = _snap('requires_review', False)
         job_voice_strategy = _snap('voice_strategy', 'preset_mapping')
+        express_clone_required = (
+            job_service_mode == "express"
+            and job_tts_provider == "cosyvoice"
+            and job_voice_strategy == "express_auto_clone"
+        )
         job_plan_code = _snap('plan_code_snapshot', 'free')
         job_role = _snap('role_snapshot', 'user')
         # APF P0 T5（AD-7/G3）：匿名预览标记，严格 is True gate；
@@ -3941,18 +3946,20 @@ class ProcessPipeline:
             # maybe_run_express_auto_clone — orchestrator logic stays in
             # services.express.*, this call site is intentionally tiny. With the
             # admin switch off (production default) it is a no-op, so Express
-            # behaves exactly as before PR2. On success it injects the clone
+            # behaves exactly as before PR2 unless the job snapshot explicitly
+            # asks for clone-only CosyVoice Express. On success it injects the clone
             # voice_id + worker routing into _speaker_voices /
-            # _speaker_voice_routing in place; any failure leaves them untouched
-            # so downstream falls back to a CosyVoice preset (never MiniMax).
+            # _speaker_voice_routing in place; clone-only jobs fail closed below
+            # when that injection did not happen.
             # PR3 wires the frontend consent UI; until then most jobs skip here.
+            _express_clone_outcome = None
             if job_service_mode == "express" and approved_voice_selection is None:
                 try:
                     from services.express.pipeline_clients import (
                         maybe_run_express_auto_clone as _maybe_express_auto_clone,
                     )
 
-                    _maybe_express_auto_clone(
+                    _express_clone_outcome = _maybe_express_auto_clone(
                         user_id=_snap("user_id", "") or "",
                         job_id=config.job_id or "",
                         project_dir=final_project_dir,
@@ -3976,6 +3983,20 @@ class ProcessPipeline:
                         f"{type(_express_exc).__name__}: {_express_exc}",
                         flush=True,
                     )
+
+            if express_clone_required and (
+                _express_clone_outcome is None
+                or getattr(_express_clone_outcome, "cloned", False) is not True
+            ):
+                _reason = (
+                    getattr(_express_clone_outcome, "reason_code", None)
+                    if _express_clone_outcome is not None
+                    else "not_run"
+                )
+                raise RuntimeError(
+                    "Express auto-clone required but not completed "
+                    f"(reason={_reason})"
+                )
 
             if approved_voice_selection is not None:
                 sel_speakers = approved_voice_selection.get("speakers")

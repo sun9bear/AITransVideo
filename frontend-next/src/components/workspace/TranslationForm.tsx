@@ -140,6 +140,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // HARD-fails (403 consent_required) otherwise.
   const validationError =
     sourceValidationError ??
+    (serviceMode === "express" && expressAutoCloneAvailable && !expressAutoVoiceClone
+      ? "快捷版 CosyVoice 需要先确认自动克隆主说话人音色。"
+      : null) ??
     (serviceMode === "free" && !freeVoiceRightsConfirmed
       ? "请先阅读并勾选免费版声音授权声明。"
       : null)
@@ -293,7 +296,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   useEffect(() => {
     if (serviceMode !== "express" || !expressAutoCloneAvailable) {
       setExpressAutoVoiceClone(false)
+      return
     }
+    setExpressAutoVoiceClone(true)
   }, [serviceMode, expressAutoCloneAvailable])
 
   // Phase 2a LAUNCH GATE: leaving free mode clears the attestation so a stale
