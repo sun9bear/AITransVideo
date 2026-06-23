@@ -13,8 +13,9 @@
  * the checkout card keeps BillingStatusBanner polling in the background, so a
  * buyer who scans, closes, then pays still sees the page settle.
  *
- * Native QR codes can NOT be long-press-recognized inside WeChat, so the copy
- * tells mobile users to screenshot and pick the screenshot inside WeChat.
+ * Native QR codes can NOT be long-press-recognized inside WeChat. WeChat also
+ * blocks paying from album-scanned screenshots, so mobile users need a second
+ * scanning screen.
  */
 
 import { useEffect, useRef, useState } from "react"
@@ -150,7 +151,7 @@ export function WechatQrDialog({
               />
             </div>
             <p className="px-2 text-center text-sm font-medium leading-relaxed text-foreground sm:hidden">
-              手机端请截图后在微信中选择截图扫码。
+              手机端请将截图发送到电脑端扫码支付，或用另一个手机扫码支付。
             </p>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {pollExhausted ? (
@@ -164,7 +165,7 @@ export function WechatQrDialog({
             </div>
             <p className="px-2 text-center text-xs leading-relaxed text-muted-foreground">
               请打开手机微信,用「扫一扫」扫描上方二维码完成支付。
-              二维码不支持长按识别;如你正在手机上浏览,可截图保存后在微信中选择截图扫码。
+              二维码不支持长按识别。
             </p>
           </div>
         )}
