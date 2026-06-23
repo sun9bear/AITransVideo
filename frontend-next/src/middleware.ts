@@ -53,6 +53,23 @@ function isLocalHost(host: string): boolean {
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1"
 }
 
+function cloudflareVisitorProtocol(value: string | null): string | null {
+  if (!value) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(value) as { scheme?: unknown }
+    if (parsed.scheme === "http" || parsed.scheme === "https") {
+      return `${parsed.scheme}:`
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
 function canonicalRedirect(request: NextRequest): NextResponse | null {
   if (!canonicalSiteOrigin) {
     return null
@@ -71,10 +88,11 @@ function canonicalRedirect(request: NextRequest): NextResponse | null {
     return null
   }
 
+  const cloudflareProtocol = cloudflareVisitorProtocol(request.headers.get("cf-visitor"))
   const forwardedProto = firstHeaderValue(request.headers.get("x-forwarded-proto"))
-  const currentProtocol = forwardedProto
+  const currentProtocol = cloudflareProtocol ?? (forwardedProto
     ? `${forwardedProto.toLowerCase()}:`
-    : request.nextUrl.protocol.toLowerCase()
+    : request.nextUrl.protocol.toLowerCase())
 
   if (
     currentHost.toLowerCase() === canonical.host.toLowerCase() &&
