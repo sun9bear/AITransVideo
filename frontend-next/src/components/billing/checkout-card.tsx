@@ -144,8 +144,8 @@ export function CheckoutCard({
 
   // Provider AVAILABILITY is gateway-owned (checkout-config). When 2+ rails
   // are operational the user picks one (P3 three-rail selection); the initial
-  // pick follows the gateway's surface-aware recommendation (desktop →
-  // wechatpay QR, mobile → paddle).
+  // pick follows the gateway's recommendation, currently wechatpay first on
+  // both desktop and mobile.
   const operationalProviders =
     checkoutConfig?.providers.filter((p) => p.operational) ?? []
   const gatewayPick =
