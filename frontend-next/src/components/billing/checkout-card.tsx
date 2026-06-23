@@ -48,6 +48,11 @@ const PERIOD_LABELS: Record<BillingPeriod, string> = {
   annual: "年付",
 }
 
+const ACTIVE_CHOICE_CLASS =
+  "border-primary bg-background text-primary shadow-[inset_0_0_0_1px_var(--primary)]"
+const INACTIVE_CHOICE_CLASS =
+  "border-border bg-background text-foreground hover:border-primary/40"
+
 function formatYuan(fen: number): string {
   const yuan = fen / 100
   return yuan % 1 === 0 ? `¥${yuan.toFixed(0)}` : `¥${yuan.toFixed(2)}`
@@ -247,9 +252,7 @@ export function CheckoutCard({
                 onClick={() => setSelectedPlanCode(plan.code)}
                 className={cn(
                   "rounded-md border px-4 py-3 text-left transition-colors",
-                  active
-                    ? "border-primary/60 bg-primary/5 text-foreground"
-                    : "border-border bg-background text-foreground hover:border-primary/40",
+                  active ? ACTIVE_CHOICE_CLASS : INACTIVE_CHOICE_CLASS,
                   disabled && "cursor-not-allowed opacity-50",
                 )}
               >
@@ -281,9 +284,9 @@ export function CheckoutCard({
                 type="button"
                 onClick={() => setSelectedPeriod(p)}
                 className={cn(
-                  "rounded-md border px-3 py-1.5 text-sm transition-colors",
+                  "rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
                   effectivePeriod === p
-                    ? "border-primary/60 bg-primary/5 text-foreground"
+                    ? ACTIVE_CHOICE_CLASS
                     : "border-border bg-background text-muted-foreground hover:text-foreground",
                 )}
               >
@@ -317,9 +320,7 @@ export function CheckoutCard({
                   onClick={() => setPickedProvider(p.code)}
                   className={cn(
                     "rounded-md border px-4 py-3 text-left transition-colors",
-                    active
-                      ? "border-primary/60 bg-primary/5 text-foreground"
-                      : "border-border bg-background text-foreground hover:border-primary/40",
+                    active ? ACTIVE_CHOICE_CLASS : INACTIVE_CHOICE_CLASS,
                   )}
                 >
                   <div className="text-sm font-medium">{p.display_name}</div>

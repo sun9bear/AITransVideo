@@ -104,7 +104,15 @@ export function WechatQrDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-[420px] overflow-y-auto sm:max-w-[420px]">
+      <DialogContent
+        className="h-fit w-[calc(100vw-2rem)] max-w-[420px] overflow-y-auto p-5 sm:p-4"
+        style={{
+          inset: "1rem",
+          margin: "auto",
+          maxHeight: "calc(100dvh - 2rem)",
+          translate: "0 0",
+        }}
+      >
         <DialogHeader>
           <DialogTitle>微信扫码支付</DialogTitle>
           <DialogDescription>
@@ -130,8 +138,8 @@ export function WechatQrDialog({
         ) : (
           <div className="flex flex-col items-center gap-4 py-2">
             <div
-              className="mx-auto flex aspect-square items-center justify-center rounded-lg bg-white p-3 shadow-sm"
-              style={{ width: "min(72vw, 280px)" }}
+              className="mx-auto flex aspect-square max-w-full items-center justify-center rounded-lg bg-white p-3 shadow-sm"
+              style={{ width: "min(70vw, 280px)" }}
             >
               <QRCode
                 value={qrCodeUrl}
