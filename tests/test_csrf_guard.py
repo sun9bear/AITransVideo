@@ -158,6 +158,48 @@ def test_rejects_missing_origin_and_referer_for_state_change():
     assert exc.value.detail == "csrf_origin_rejected"
 
 
+def test_allows_missing_origin_when_fetch_metadata_says_same_origin():
+    req = _Request(
+        headers={
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-mode": "cors",
+        }
+    )
+
+    require_same_origin_state_change(req)
+
+
+def test_rejects_missing_origin_when_fetch_metadata_says_cross_site():
+    req = _Request(
+        headers={
+            "sec-fetch-site": "cross-site",
+            "sec-fetch-mode": "cors",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        require_same_origin_state_change(req)
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "csrf_origin_rejected"
+
+
+def test_null_origin_does_not_fall_back_to_fetch_metadata():
+    req = _Request(
+        headers={
+            "origin": "null",
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-mode": "cors",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        require_same_origin_state_change(req)
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "csrf_origin_rejected"
+
+
 def test_safe_method_does_not_require_origin_or_referer():
     req = _Request(method="GET")
 

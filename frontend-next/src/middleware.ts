@@ -34,7 +34,67 @@ const publicExactPaths = [
   "/healthz.txt",
 ]
 
+const canonicalSiteOrigin = process.env.NEXT_PUBLIC_SITE_URL?.trim()
+
+function firstHeaderValue(value: string | null): string | null {
+  const first = value?.split(",", 1)[0]?.trim()
+  return first || null
+}
+
+function hostWithoutPort(host: string): string {
+  if (host.startsWith("[") && host.includes("]")) {
+    return host.slice(1, host.indexOf("]")).toLowerCase()
+  }
+  return host.split(":", 1)[0].toLowerCase()
+}
+
+function isLocalHost(host: string): boolean {
+  const normalized = hostWithoutPort(host)
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1"
+}
+
+function canonicalRedirect(request: NextRequest): NextResponse | null {
+  if (!canonicalSiteOrigin) {
+    return null
+  }
+
+  let canonical: URL
+  try {
+    canonical = new URL(canonicalSiteOrigin)
+  } catch {
+    return null
+  }
+
+  const forwardedHost = firstHeaderValue(request.headers.get("x-forwarded-host"))
+  const currentHost = forwardedHost ?? request.headers.get("host") ?? request.nextUrl.host
+  if (!currentHost || isLocalHost(currentHost)) {
+    return null
+  }
+
+  const forwardedProto = firstHeaderValue(request.headers.get("x-forwarded-proto"))
+  const currentProtocol = forwardedProto
+    ? `${forwardedProto.toLowerCase()}:`
+    : request.nextUrl.protocol.toLowerCase()
+
+  if (
+    currentHost.toLowerCase() === canonical.host.toLowerCase() &&
+    currentProtocol === canonical.protocol.toLowerCase()
+  ) {
+    return null
+  }
+
+  const canonicalUrl = request.nextUrl.clone()
+  canonicalUrl.protocol = canonical.protocol
+  canonicalUrl.host = canonical.host
+  return NextResponse.redirect(canonicalUrl, 308)
+}
+
 export function middleware(request: NextRequest) {
+  const redirect = canonicalRedirect(request)
+  if (redirect) {
+    return redirect
+  }
+
   const { pathname } = request.nextUrl
 
   // Skip auth check for public paths, API routes, and static assets in /public.
