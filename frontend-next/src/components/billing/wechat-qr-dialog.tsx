@@ -13,9 +13,8 @@
  * the checkout card keeps BillingStatusBanner polling in the background, so a
  * buyer who scans, closes, then pays still sees the page settle.
  *
- * Native QR codes can NOT be long-press-recognized inside WeChat — the copy
- * says so explicitly, and mobile users are steered to Paddle upstream by the
- * gateway's surface-aware recommended_provider.
+ * Native QR codes can NOT be long-press-recognized inside WeChat, so the copy
+ * tells mobile users to screenshot and pick the screenshot inside WeChat.
  */
 
 import { useEffect, useRef, useState } from "react"
@@ -105,7 +104,7 @@ export function WechatQrDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-sm">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-[420px] overflow-y-auto sm:max-w-[420px]">
         <DialogHeader>
           <DialogTitle>微信扫码支付</DialogTitle>
           <DialogDescription>
@@ -130,9 +129,21 @@ export function WechatQrDialog({
           </div>
         ) : (
           <div className="flex flex-col items-center gap-4 py-2">
-            <div className="rounded-lg bg-white p-3">
-              <QRCode value={qrCodeUrl} size={192} aria-label="微信支付二维码" />
+            <div
+              className="mx-auto flex aspect-square items-center justify-center rounded-lg bg-white p-3 shadow-sm"
+              style={{ width: "min(72vw, 280px)" }}
+            >
+              <QRCode
+                value={qrCodeUrl}
+                size={256}
+                style={{ height: "100%", width: "100%" }}
+                viewBox="0 0 256 256"
+                aria-label="微信支付二维码"
+              />
             </div>
+            <p className="px-2 text-center text-sm font-medium leading-relaxed text-foreground sm:hidden">
+              手机端请截图后在微信中选择截图扫码。
+            </p>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {pollExhausted ? (
                 <span>确认超时。若你已完成支付,可关闭本窗口,到账后账单页会自动更新。</span>
@@ -145,8 +156,7 @@ export function WechatQrDialog({
             </div>
             <p className="px-2 text-center text-xs leading-relaxed text-muted-foreground">
               请打开手机微信,用「扫一扫」扫描上方二维码完成支付。
-              二维码不支持长按识别;如你正在手机上浏览,建议返回选择
-              Paddle(银行卡)支付。
+              二维码不支持长按识别;如你正在手机上浏览,可截图保存后在微信中选择截图扫码。
             </p>
           </div>
         )}
