@@ -103,7 +103,8 @@ function canonicalRedirect(request: NextRequest): NextResponse | null {
 
   const canonicalUrl = request.nextUrl.clone()
   canonicalUrl.protocol = canonical.protocol
-  canonicalUrl.host = canonical.host
+  canonicalUrl.hostname = canonical.hostname
+  canonicalUrl.port = canonical.port
   return NextResponse.redirect(canonicalUrl, 308)
 }
 
