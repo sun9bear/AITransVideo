@@ -28,7 +28,7 @@ export default function LoginPage() {
           登录 AITrans.Video
         </h1>
         <p className="mt-3 zh-body text-sm text-muted-foreground">
-          {mode === "password" ? "使用账号和密码登录" : "使用手机号验证码登录"}
+          {mode === "password" ? "使用手机号或邮箱和密码登录" : "使用手机号验证码登录"}
         </p>
       </div>
 
