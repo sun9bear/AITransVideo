@@ -147,6 +147,11 @@ class AdminSettings(BaseModel):
     # never opens a paid API. MiMo voiceclone itself is the free promotional path
     # (inline reference, no MiniMax/CosyVoice paid clone).
     free_tier_voiceclone_enabled: bool = True
+    # Runtime rollout switches for visible task-plan cards. Smart reuses
+    # smart_mode_enabled below because it already is the global kill switch.
+    service_mode_express_enabled: StrictBool = True
+    service_mode_free_enabled: StrictBool = False
+    service_mode_studio_enabled: StrictBool = True
     enable_pre_tts_rewrite: bool = True            # Pre-TTS rewrite to match target duration
     express_tts_provider: str = "cosyvoice"        # Default TTS provider for express mode
     studio_tts_provider: str = "minimax"           # Default TTS provider for studio mode

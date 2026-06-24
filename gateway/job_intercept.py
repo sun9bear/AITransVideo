@@ -1927,6 +1927,25 @@ async def intercept_create_job(
     # "降级预设、不阻断"语义。由 Gate A 在确认 "smart" not in effective_modes 后置 True。
     _smart_preview_via_exemption = False
 
+    if service_mode in ("express", "studio", "free"):
+        from entitlements import get_runtime_enabled_service_modes
+        _runtime_modes = get_runtime_enabled_service_modes()
+        if service_mode not in _runtime_modes:
+            _mode_label = {
+                "express": "快捷版",
+                "studio": "工作台版",
+                "free": "免费版",
+            }.get(service_mode, service_mode)
+            return _error_response(
+                403,
+                "service_mode_offline",
+                f"{_mode_label}当前未上线，请选择其它任务方案。",
+                {
+                    "requested_mode": service_mode,
+                    "enabled_modes": list(_runtime_modes),
+                },
+            )
+
     if service_mode == "smart" and user is not None:
         from entitlements import get_effective_allowed_service_modes
         effective_modes = get_effective_allowed_service_modes(user)
