@@ -1492,6 +1492,7 @@ async def intercept_list_jobs(
                                     else None
                                 ),
                             ),
+                            settle_smart_clone=False,
                         )
                 except Exception:
                     mirror_failed = True
@@ -3269,6 +3270,7 @@ async def intercept_get_job(
                     db,
                     db_job,
                     _job_json_record_from_payload(job_id, payload),
+                    settle_smart_clone=False,
                 )
             # Commit notification rows plus any mirror/settlement changes here
             # because the surrounding handler returns through several paths.

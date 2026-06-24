@@ -373,6 +373,7 @@ def test_get_job_routes_terminal_payload_through_mirror_before_merge():
     upstream_record = mirror.await_args.args[2]
     assert upstream_record.job_id == "job_detail"
     assert upstream_record.status == "succeeded"
+    assert mirror.await_args.kwargs["settle_smart_clone"] is False
     db.commit.assert_awaited_once()
 
 
