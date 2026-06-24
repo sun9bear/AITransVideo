@@ -57,7 +57,9 @@ class OutputDispatcher:
             # EditorPackageWriter._write_srt routes to the canonical cue path (T8).
             cue_result = None
             if os.environ.get("AVT_DISABLE_SUBTITLE_CUES_V2", "").strip() not in ("1", "true", "yes"):
-                cue_result = self._generate_subtitle_cues(localized_project)
+                cue_result = self._generate_subtitle_cues(
+                    localized_project, target_language=request.target_language
+                )
                 if cue_result is not None:
                     project_output.subtitle_cues = cue_result.cues
 
@@ -269,16 +271,30 @@ class OutputDispatcher:
         artifact_index.register("editor.subtitles", result.subtitles_path)
         artifact_index.register("editor.subtitles_en", result.subtitles_en_path)
         artifact_index.register("editor.subtitles_bilingual", result.subtitles_bilingual_path)
+        # PR-F: explicit script-neutral keys. editor.subtitles_target == cue.text (the dub
+        # TARGET), editor.subtitles_source == cue.en_text (the SOURCE). For en->zh these
+        # point at byte-identical copies of subtitles(zh)/subtitles_en; for non-default
+        # pairs they carry the correct language under an honest name. Additive — the legacy
+        # editor.subtitles / editor.subtitles_en keys are unchanged.
+        if result.subtitles_target_path:
+            artifact_index.register("editor.subtitles_target", result.subtitles_target_path)
+        if result.subtitles_source_path:
+            artifact_index.register("editor.subtitles_source", result.subtitles_source_path)
         artifact_index.register("editor.alignment_report", result.alignment_report_path)
         artifact_index.register("editor.segments_dir", result.segments_dir)
 
     @staticmethod
-    def _generate_subtitle_cues(localized_project: LocalizedProject):  # type: ignore[return]
+    def _generate_subtitle_cues(
+        localized_project: LocalizedProject, *, target_language: str | None = None
+    ):  # type: ignore[return]
         """Generate canonical subtitle cues for the localized project.
 
         Returns a SubtitleCuePipelineResult, or None if no semantic_blocks are present.
         Uses localized_project.semantic_blocks as the source of truth for cue generation
         (these are the final blocks with actual TTS text and alignment durations).
+
+        ``target_language`` (PR-F) routes the cue pipeline per script: a non-zh dub
+        bypasses the zh-only whisper char-DTW. Default (None / "zh-CN") → byte-identical.
         """
         # Lazy import to keep the import graph clean and avoid loading subtitle modules
         # in callers that don't need them.
@@ -290,6 +306,7 @@ class OutputDispatcher:
         return build_subtitle_cues_for_blocks(
             localized_project.semantic_blocks,
             localized_project.captions,
+            target_language=target_language,
         )
 
     @staticmethod

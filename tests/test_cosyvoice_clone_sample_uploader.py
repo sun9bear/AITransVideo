@@ -41,6 +41,22 @@ class _FakeOssClient:
         self.delete_calls.append(kwargs)
 
 
+class ConnectionClosedError(Exception):
+    pass
+
+
+class _FlakyOssClient(_FakeOssClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failures_remaining = 1
+
+    def put_object(self, **kwargs):
+        self.put_calls.append(kwargs)
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise ConnectionClosedError("simulated closed connection")
+
+
 def _make_uploader() -> tuple[AliyunOssUploader, _FakeOssClient]:
     fake = _FakeOssClient()
     uploader = AliyunOssUploader(
@@ -91,6 +107,30 @@ def test_upload_and_sign_puts_object_then_returns_presigned_get_url() -> None:
     assert presign["HttpMethod"] == "GET"
 
 
+def test_upload_and_sign_retries_transient_connection_closed() -> None:
+    fake = _FlakyOssClient()
+    uploader = AliyunOssUploader(
+        endpoint="https://s3.oss-cn-beijing.aliyuncs.com",
+        bucket="avt-cosyvoice-test",
+        access_key_id="ak-test",
+        access_key_secret="secret-test",
+        region="cn-beijing",
+        key_prefix="cosyvoice/clone-samples",
+        upload_retry_backoff_s=0,
+    )
+    uploader._client = fake
+
+    url = uploader.upload_and_sign(
+        b"RIFF....WAVE",
+        filename_hint="voice.wav",
+        ttl_seconds=1800,
+    )
+
+    assert url.startswith("https://avt-cosyvoice-test.s3.oss-cn-beijing.aliyuncs.com/")
+    assert len(fake.put_calls) == 2
+    assert len(fake.presign_calls) == 1
+
+
 def test_delete_uploaded_url_deletes_the_same_object_key() -> None:
     uploader, fake = _make_uploader()
     url = uploader.upload_and_sign(b"abc", filename_hint="voice.wav", ttl_seconds=60)
@@ -136,7 +176,7 @@ def test_aliyun_oss_client_uses_oss_compatible_s3_config() -> None:
 
     assert 'signature_version="s3"' in source
     assert '"addressing_style": "virtual"' in source
-    assert '"max_attempts": 1' in source
+    assert '"max_attempts": DEFAULT_OSS_UPLOAD_MAX_ATTEMPTS' in source
 
 
 def test_object_key_from_signed_url_extracts_path_without_query() -> None:

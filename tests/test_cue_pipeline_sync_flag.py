@@ -1310,6 +1310,102 @@ def test_d1_admin_setting_change_takes_effect_without_restart(monkeypatch, tmp_p
     assert len(whisper_calls) == 1  # whisper IS called now
 
 
+def _both_gates_open(monkeypatch, tmp_path):
+    """Open BOTH whisper gates (env + admin policy, trigger=publish) so the
+    only thing that can keep whisper from running is the PR-F language gate."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_prf_non_zh_target_bypasses_whisper_char_dtw(monkeypatch, tmp_path):
+    """PR-F: a non-zh dub (target_language='en') MUST bypass the zh-only whisper
+    char-DTW path even when BOTH whisper gates are open and aligned audio exists.
+    Whisper forces language='zh' + DTW aligns per Han char → garbage for English
+    audio/text; we fall through to the proportional cue builder instead."""
+    _both_gates_open(monkeypatch, tmp_path)
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "hello"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block(
+        "b1", "Hello world",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000, target_duration_ms=1000,
+    )
+    result = build_subtitle_cues_for_blocks(
+        [block], _make_subtitle_lines("Hello world"), target_language="en",
+    )
+    assert whisper_calls == [], (
+        "non-zh target must NOT invoke the zh whisper char-DTW path; "
+        f"got {len(whisper_calls)} call(s)."
+    )
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+    assert len(result.cues) >= 1  # proportional fallback still produces cues
+
+
+def test_prf_zh_cn_target_still_uses_whisper(monkeypatch, tmp_path):
+    """PR-F byte-identical guard: target_language='zh-CN' (the GA default pair's
+    target) keeps the whisper-aligned path — identical to the legacy default."""
+    _both_gates_open(monkeypatch, tmp_path)
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        lambda *a, **kw: [{"start_ms": 0, "end_ms": 800, "text": "你好"}],
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000, target_duration_ms=1000,
+    )
+    result = build_subtitle_cues_for_blocks(
+        [block], _make_subtitle_lines("你好"), target_language="zh-CN",
+    )
+    assert any("whisper" in c.source.lower() for c in result.cues)
+
+
+def test_prf_default_none_target_uses_whisper(monkeypatch, tmp_path):
+    """PR-F byte-identical guard: target_language=None (legacy callers that never
+    pass it) behaves exactly as before — whisper-aligned path."""
+    _both_gates_open(monkeypatch, tmp_path)
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        lambda *a, **kw: [{"start_ms": 0, "end_ms": 800, "text": "你好"}],
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000, target_duration_ms=1000,
+    )
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert any("whisper" in c.source.lower() for c in result.cues)
+
+
 def test_c3_drift_check_uses_normalize_consistent_with_phase_b(monkeypatch, tmp_path):
     """The drift gate must use cue_models.normalize() — same as the
     Phase B validator — so drift decisions in C3 match what

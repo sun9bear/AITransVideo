@@ -441,6 +441,7 @@ def select_cosyvoice_voice_match(
     energy_level: str | None = None,
     is_childlike: bool = False,
     target_chars_per_second: float | None = None,
+    target_language: str | None = None,
 ) -> SharedVoiceMatchResult:
     """Select the best CosyVoice voice using shared combined_rerank.
 
@@ -466,6 +467,25 @@ def select_cosyvoice_voice_match(
         score_to_confidence,
     )
 
+    # PR-E re-CodeX P2: CosyVoice is Chinese-only — fail closed for ANY non-zh target
+    # BEFORE the no-gender / pool paths (those would otherwise return the Chinese
+    # FALLBACK_VOICE with a non-fail_closed reason, which the TTS caller would synthesize
+    # as wrong-language audio). Routing (get_fallback_provider) + the matchable migration
+    # keep en away from CosyVoice; this is the last-line defense. zh unchanged.
+    if target_language and target_language not in ("zh-CN", "zh"):
+        logger.warning(
+            "[CosyVoice-matcher] non-zh target_language=%s reached CosyVoice (Chinese-only); "
+            "failing closed (check routing/matchable, PR-E)",
+            target_language,
+        )
+        return SharedVoiceMatchResult(
+            voice_id=FALLBACK_VOICE,
+            match_reason=f"fail_closed(cosyvoice_zh_only,target={target_language})",
+            match_score=0.15,
+            match_confidence="low",
+            backup_voices=(),
+        )
+
     effective_gender = "child" if is_childlike else gender
     if not effective_gender:
         logger.info("[CosyVoice-matcher] No gender, fallback=%s", FALLBACK_VOICE)
@@ -484,7 +504,7 @@ def select_cosyvoice_voice_match(
 
     # --- Step 1: Load voice pool ---
     endpoint_mode = get_runtime_endpoint_mode()
-    pool = list_matchable_cosyvoice_voices()
+    pool = list_matchable_cosyvoice_voices(target_language=target_language)
 
     # --- Step 1b: Detect static fallback ---
     # Static catalog entries lack Gateway-provided demographic tags

@@ -71,6 +71,37 @@ class TestCountSourceWords:
 
 
 # ---------------------------------------------------------------------------
+# _build_probe_fingerprint language-pair awareness (re-CodeX P2, v3 §2.5/F)
+# ---------------------------------------------------------------------------
+class TestProbeFingerprintLanguagePair:
+    @staticmethod
+    def _lines():
+        return [
+            _make_line(1, 0, 3000, source_text="hello"),
+            _make_line(2, 3000, 6000, source_text="world"),
+        ]
+
+    def _fp(self, source_language="en", target_language="zh-CN"):
+        from pipeline.process import ProcessPipeline
+        return ProcessPipeline._build_probe_fingerprint(
+            self._lines(), model_name="m", glossary=None, video_title="", youtube_url="",
+            source_language=source_language, target_language=target_language,
+        )
+
+    def test_default_pair_byte_identical_to_legacy(self):
+        # Default en->zh-CN must equal the fingerprint built WITHOUT the new args →
+        # existing en->zh probe caches stay valid (no paid re-probe).
+        from pipeline.process import ProcessPipeline
+        legacy = ProcessPipeline._build_probe_fingerprint(
+            self._lines(), model_name="m", glossary=None, video_title="", youtube_url="",
+        )
+        assert self._fp("en", "zh-CN") == legacy
+
+    def test_non_default_pair_differs(self):
+        assert self._fp("zh-CN", "en") != self._fp("en", "zh-CN")
+
+
+# ---------------------------------------------------------------------------
 # _select_probe_segments (hybrid word count + duration)
 # ---------------------------------------------------------------------------
 class TestSelectProbeSegments:

@@ -14,10 +14,12 @@ splits the *internal* paid-gate bitset from the *frontend* display bitset
 The two must never share a constant name.
 
 The GA, zero-regression baseline is ``en->zh-CN`` — it is fully adapted, so it
-carries the full capability set. The first new pair ``zh-CN->en`` ships with an
-**empty** set: no paid capability is language-adapted for it yet, which makes
-the §2.4 paid-API gate fail closed (no probe / S2 override / suggest-split /
-post-edit on a pair we have not adapted). See plan §2.4 + §6 DoD.
+carries the full capability set. The first new pair ``zh-CN->en`` can be
+created only behind the admin/allowlist gate, and still ships with an **empty**
+paid capability set: no paid capability is language-adapted for it yet, which
+makes the §2.4 paid-API gate fail closed (no probe / S2 override /
+suggest-split / post-edit on a pair we have not adapted). See plan §2.4 + §6
+DoD.
 
 Pure stdlib. No network, no paid API, no DB. Imported by both the Gateway
 (``services.language_registry`` — ``src/`` is on the gateway ``sys.path``) and
@@ -140,6 +142,65 @@ def normalize_language(value: Optional[str]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Per-language script + spoken-unit descriptors (PR-W foundation)
+# ---------------------------------------------------------------------------
+#
+# PR-A shipped only the pair-gating layer. The language-aware pipeline (PR-W and
+# downstream PR-B/CD/F) needs a *shared* vocabulary for two questions that recur
+# at every coupling point — "what script does this language use?" (drives the
+# source-language gate, the failed-segment split regex, subtitle segmentation)
+# and "is the spoken unit a word or a character?" (drives length budgeting and
+# probe word counting). plan v3 §4.1 makes the registry the single source of
+# truth for both, so the primitives live here, not duplicated inside process.py.
+
+#: Script families the platform reasons about. ``latin`` = space-delimited,
+#: ASCII sentence punctuation; ``cjk`` = no inter-word spaces, full-width
+#: sentence punctuation. Used to dispatch char-vs-word logic.
+SCRIPT_LATIN = "latin"
+SCRIPT_CJK = "cjk"
+
+#: Spoken-unit kinds. ``word`` = whitespace/alpha tokens (en); ``char`` =
+#: per-character (zh). Drives length estimation + probe counting.
+SPOKEN_UNIT_WORD = "word"
+SPOKEN_UNIT_CHAR = "char"
+
+
+@dataclass(frozen=True)
+class LanguageDescriptor:
+    """Immutable per-language traits the language-aware pipeline dispatches on."""
+
+    language: str
+    script_family: str  # SCRIPT_LATIN | SCRIPT_CJK
+    spoken_unit: str  # SPOKEN_UNIT_WORD | SPOKEN_UNIT_CHAR
+    #: Default spoken units (per :attr:`spoken_unit`) per second, for mapping a
+    #: target duration to a target length when no per-voice calibration applies.
+    #: zh-CN = 4.5 chars/s (byte-identical with the legacy rewriter default). en =
+    #: 2.6 words/s (~156 wpm) — PROVISIONAL, re-measure at GA (the probe currently
+    #: calibrates char-rate only, so Latin targets use this constant, not the
+    #: char-based per-voice cps). Keep this unit consistent with ``spoken_unit``.
+    spoken_units_per_second: float = 4.5
+
+
+_LANGUAGE_DESCRIPTORS: dict[str, LanguageDescriptor] = {
+    LANG_EN: LanguageDescriptor(LANG_EN, SCRIPT_LATIN, SPOKEN_UNIT_WORD, 2.6),
+    LANG_ZH_CN: LanguageDescriptor(LANG_ZH_CN, SCRIPT_CJK, SPOKEN_UNIT_CHAR, 4.5),
+}
+
+
+def get_language_descriptor(language: Optional[str]) -> Optional[LanguageDescriptor]:
+    """Resolve a free-form language to its :class:`LanguageDescriptor`.
+
+    Normalizes first; returns ``None`` for unknown languages (fail-closed —
+    callers must decide the default behavior explicitly rather than silently
+    assuming a script family).
+    """
+    canonical = normalize_language(language)
+    if canonical is None:
+        return None
+    return _LANGUAGE_DESCRIPTORS.get(canonical)
+
+
+# ---------------------------------------------------------------------------
 # Language-pair profile + registry
 # ---------------------------------------------------------------------------
 
@@ -158,14 +219,21 @@ class LanguagePairProfile:
     target_language: str
     adapted_paid_capabilities: frozenset[str] = field(default_factory=frozenset)
     is_default: bool = False
+    #: Natural translation length ratio = target spoken units per source spoken
+    #: unit (e.g. en->zh-CN ``1.8`` = ~1.8 Chinese chars per English word). The
+    #: ONE source of truth for the ratio that today is hard-coded as ``1.8`` in
+    #: both translator.py (length budget, PR-CD) and process.py (voice-speed cps,
+    #: PR-W). ``zh-CN->en`` ships a provisional ``0.55`` (plan §3.4) that MUST be
+    #: re-measured from fixtures in Phase 0 before it gates any GA output; it is
+    #: still intentionally blocked from paid capability gates for the canary.
+    natural_length_ratio: float = 1.0
     #: Create-path HARD gate (independent of the admin flag / entitlement): can
     #: the END-TO-END pipeline actually execute this pair yet? Defaults to False
     #: so a newly-registered pair is un-creatable until a pipeline PR flips it —
     #: an ops mistake (flipping the ``language_pairs_enabled`` admin flag) can
     #: NEVER create a broken paid job, only a code change can. ``en->zh-CN`` is
-    #: True (GA). ``zh-CN->en`` stays False until PR-W/CD/F land the execution
-    #: (translation direction / voice pool / per-script subtitles). See the
-    #: Gateway create-path ``language_pair_not_yet_available`` 409.
+    #: True (GA). ``zh-CN->en`` is True for allowlisted canary execution only;
+    #: its paid capability set remains empty.
     pipeline_ready: bool = False
 
     @property
@@ -192,13 +260,15 @@ SUPPORTED_LANGUAGE_PAIRS: dict[str, LanguagePairProfile] = {
         adapted_paid_capabilities=ALL_PAID_CAPABILITIES,
         is_default=True,
         pipeline_ready=True,  # GA — the pipeline runs this end-to-end today.
+        natural_length_ratio=1.8,  # byte-identical with the legacy hard-coded 1.8
     ),
     make_pair_key(LANG_ZH_CN, LANG_EN): LanguagePairProfile(
         source_language=LANG_ZH_CN,
         target_language=LANG_EN,
         adapted_paid_capabilities=frozenset(),
         is_default=False,
-        pipeline_ready=False,  # explicit: pipeline not yet adapted (PR-W/CD/F).
+        pipeline_ready=True,  # allowlisted canary; paid capabilities still fail closed.
+        natural_length_ratio=0.55,  # provisional; re-measure in Phase 0 (plan §3.4)
     ),
 }
 
@@ -206,6 +276,13 @@ SUPPORTED_LANGUAGE_PAIRS: dict[str, LanguagePairProfile] = {
 DEFAULT_LANGUAGE_PAIR_PROFILE: LanguagePairProfile = SUPPORTED_LANGUAGE_PAIRS[
     DEFAULT_LANGUAGE_PAIR
 ]
+
+#: Pairs whose ``natural_length_ratio`` is still a PROVISIONAL estimate that has
+#: not been measured from real fixtures (plan §3.4 / Phase 0). Hard invariant: a
+#: pair listed here MUST NOT be ``pipeline_ready=True``. The zh-CN->en canary
+#: deliberately promotes the 0.55 ratio for allowlisted execution; keep
+#: re-measurement on the release checklist before widening access.
+RATIO_CALIBRATION_PENDING: frozenset[str] = frozenset()
 
 
 def resolve_language_pair(

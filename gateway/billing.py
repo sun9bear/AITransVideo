@@ -419,7 +419,7 @@ async def get_checkout_config(
     Availability rule used here:
     - every known provider is listed with its `operational` flag
     - `default_provider` is the first operational provider in preference order
-      [alipay, wechatpay, stripe, fake]
+      [alipay, wechatpay, paddle, stripe, fake]
     - fake is operational in dev/test; production must explicitly opt in with
       AVT_ENABLE_FAKE_PAYMENT=true
     - if nothing is operational, `fake` is returned as a compatibility fallback
@@ -464,12 +464,9 @@ async def get_checkout_config(
         "fake",
     )
 
-    # Surface-aware recommendation (plan 2026-06-08 §4 three-rail routing):
-    # - desktop + domestic: own WeChat Native QR (~0.6% fee) when operational
-    # - mobile web: Paddle — WeChat Native QR needs a SECOND device on mobile
-    #   (the weixin:// QR cannot be long-press-recognized inside WeChat), and
-    #   WeChat-via-Paddle is desktop-only, so Paddle (card / future Alipay)
-    #   is the usable mobile rail.
+    # Checkout recommendation: prefer own WeChat Native QR on both desktop and
+    # mobile when operational. Mobile users can pay by scanning from a second
+    # phone or by sending the screenshot to a desktop.
     # default_provider keeps its historical "first operational" semantics for
     # backward compatibility; the frontend should prefer recommended_provider.
     operational_codes = {p["code"] for p in providers_payload if p["operational"]}
@@ -477,10 +474,7 @@ async def get_checkout_config(
         None,
         request.headers.get("user-agent") if request is not None else None,
     )
-    if surface == "mobile_web":
-        surface_preference = ["paddle", "wechatpay"]
-    else:
-        surface_preference = ["wechatpay", "paddle"]
+    surface_preference = ["wechatpay", "paddle"]
     recommended_provider = next(
         (code for code in surface_preference if code in operational_codes),
         default_provider,

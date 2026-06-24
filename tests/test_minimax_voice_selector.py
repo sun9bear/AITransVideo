@@ -7,7 +7,7 @@ def test_minimax_no_gender_fallback_includes_backup_voices(monkeypatch) -> None:
     monkeypatch.setattr(
         minimax_voice_selector,
         "_load_minimax_pool",
-        lambda: [
+        lambda *a, **k: [
             {"voice_id": "Wise_Woman", "language": "中文-普通话", "gender": "female"},
             {"voice_id": "voice_1", "language": "中文-普通话", "gender": "female"},
             {"voice_id": "voice_2", "language": "中文-普通话", "gender": "male"},
@@ -28,7 +28,7 @@ def test_minimax_no_candidates_fallback_includes_backup_voices(monkeypatch) -> N
     monkeypatch.setattr(
         minimax_voice_selector,
         "_load_minimax_pool",
-        lambda: [
+        lambda *a, **k: [
             {"voice_id": "Wise_Woman", "language": "中文-普通话", "gender": "female"},
             {"voice_id": "voice_1", "language": "中文-普通话", "gender": "female"},
             {"voice_id": "voice_2", "language": "中文-普通话", "gender": "female"},
@@ -45,7 +45,7 @@ def test_minimax_unknown_gender_fallback_includes_backup_voices(monkeypatch) -> 
     monkeypatch.setattr(
         minimax_voice_selector,
         "_load_minimax_pool",
-        lambda: [
+        lambda *a, **k: [
             {"voice_id": "Wise_Woman", "language": "中文-普通话", "gender": "female"},
             {"voice_id": "voice_1", "language": "中文-普通话", "gender": "female"},
             {"voice_id": "voice_2", "language": "中文-普通话", "gender": "male"},

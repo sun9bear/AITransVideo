@@ -17,6 +17,9 @@ class OutputRequest:
     # Phase 2a Task 8 (gate #8): free service-mode watermark text (None = clean).
     # Carried through to the PublishRequest the dispatcher builds.
     watermark_text: str | None = None
+    # PR-F: dub target language (None / "zh-CN" = GA default). Drives the subtitle cue
+    # pipeline's per-script handling (non-zh bypasses the zh-only whisper char-DTW).
+    target_language: str | None = None
 
     def __post_init__(self) -> None:
         if not self.targets:

@@ -293,6 +293,76 @@ def test_regenerates_cues_and_srts_when_gates_open_and_proportional(
         assert (project_dir / "output" / n).is_file()
 
 
+def test_prf_regenerate_writes_script_neutral_source_target_srt(tmp_path, monkeypatch):
+    """PR-F: the deliverable regenerate path also writes subtitles_target.srt (== the
+    zh/cue.text TARGET subtitle) and subtitles_source.srt (== the en/cue.en_text SOURCE),
+    mirroring EditorPackageWriter. Default (no target_language stamp) is byte-identical."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
+    project_dir = _build_minimal_project(tmp_path, n_segments=2)
+
+    from services.subtitles.ensure_whisper_alignment import ensure_whisper_aligned_subtitles
+
+    with patch(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        return_value=[{"start_ms": 100, "end_ms": 800, "text": "文本"}],
+    ):
+        ensure_whisper_aligned_subtitles(project_dir)
+
+    out = project_dir / "output"
+    assert (out / "subtitles_target.srt").is_file()
+    assert (out / "subtitles_source.srt").is_file()
+    assert (out / "subtitles_target.srt").read_text(encoding="utf-8") == (
+        out / "subtitles_zh.srt"
+    ).read_text(encoding="utf-8")
+    assert (out / "subtitles_source.srt").read_text(encoding="utf-8") == (
+        out / "subtitles_en.srt"
+    ).read_text(encoding="utf-8")
+
+
+def test_prf_non_zh_segments_bypass_whisper_in_deliverable(tmp_path, monkeypatch):
+    """PR-F: when segments are stamped target_language='en' (a zh->en dub), the
+    deliverable regenerate path must bypass the zh-only whisper char-DTW, exactly like
+    the publish path. Whisper must NOT be invoked even with both gates open."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
+    project_dir = _build_minimal_project(tmp_path, n_segments=2)
+
+    # Stamp target_language='en' on every segment (PR-E slice 6 convention).
+    seg_path = project_dir / "editor" / "segments.json"
+    segs = json.loads(seg_path.read_text(encoding="utf-8"))
+    for s in segs:
+        s["target_language"] = "en"
+        s["cn_text"] = f"English dub line {s['segment_id']}"
+    seg_path.write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+
+    from services.subtitles.ensure_whisper_alignment import ensure_whisper_aligned_subtitles
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "x"}]
+
+    with patch("modules.subtitles.cue_pipeline._run_whisper_cached", _stub):
+        ensure_whisper_aligned_subtitles(project_dir)
+
+    assert whisper_calls == [], (
+        "non-zh deliverable must bypass the zh whisper char-DTW; "
+        f"got {len(whisper_calls)} call(s)."
+    )
+    payload = json.loads(
+        (project_dir / "output" / "subtitle_cues.json").read_text(encoding="utf-8")
+    )
+    assert all("whisper" not in c["source"].lower() for c in payload["cues"])
+
+
 # ---------------------------------------------------------------------------
 # fingerprint mismatch: aligned WAV bytes changed since last whisper run
 # ---------------------------------------------------------------------------

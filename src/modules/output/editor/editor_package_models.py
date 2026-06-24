@@ -60,3 +60,9 @@ class ProjectOutputResult:
     background_sounds_path: str
     alignment_report_path: str
     needs_review_count: int
+    # PR-F: script-neutral source/target SRT paths (cue.en_text=SOURCE, cue.text=TARGET).
+    # Defaulted so existing positional constructors / tests stay back-compatible; the
+    # writer populates them by keyword. For en->zh these are byte-identical to the
+    # subtitles_en/subtitles(zh) files.
+    subtitles_source_path: str = ""
+    subtitles_target_path: str = ""

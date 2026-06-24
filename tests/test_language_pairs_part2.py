@@ -311,28 +311,19 @@ class TestCreatePathLanguageGate:
         ), "partial language input must take the default branch (OR, not AND)"
 
     def test_registry_pipeline_ready_flags(self):
-        # Code-level hard gate: the default pair is runnable today, zh-CN->en is
-        # NOT yet (pipeline support lands in PR-W/CD/F).
+        # Code-level hard gate: the default pair is GA, zh-CN->en is now
+        # canary-runnable when the admin/allowlist gate grants access.
         assert SUPPORTED_LANGUAGE_PAIRS[EN_ZH].pipeline_ready is True
-        assert SUPPORTED_LANGUAGE_PAIRS[ZH_EN].pipeline_ready is False
+        assert SUPPORTED_LANGUAGE_PAIRS[ZH_EN].pipeline_ready is True
 
-    def test_zh_en_pipeline_not_ready_returns_409_even_for_admin(self):
-        # Even an entitled admin (flag ON) cannot create zh-CN->en while the
-        # pipeline is not ready — the code-level hard block returns 409 BEFORE any
-        # forward, independent of the admin flag (flipping it can't bypass this).
-        req = _make_request({
-            "service_mode": "studio",
-            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
-            "estimated_duration_seconds": 60,
-            "source_language": "zh-CN",
-            "target_language": "en",
-        })
-        with patch("admin_settings.load_settings", return_value=_real_admin(enabled=True)), \
-                patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
-            resp = _run(intercept_create_job(req, _make_db(), _user(role="admin")))
-        assert resp.status_code == 409
-        assert json.loads(resp.body)["error"] == "language_pair_not_yet_available"
-        proxy.assert_not_called()
+    def test_zh_en_canary_still_has_code_level_pipeline_guard(self):
+        # The guard remains in place for future registered pairs; zh-CN->en is
+        # opened by changing the registry constant, not by bypassing the check.
+        src = (
+            Path(__file__).resolve().parent.parent / "gateway" / "job_intercept.py"
+        ).read_text(encoding="utf-8")
+        assert "if not resolved_pair.pipeline_ready:" in src
+        assert "language_pair_not_yet_available" in src
 
 
 # ===================================================================
@@ -363,8 +354,8 @@ class TestLanguageFactsEndpoint:
         zh_en = next(p for p in data if p["pair_key"] == ZH_EN)
         assert zh_en["label"] == "中文 → 英文"
         assert zh_en["is_default"] is False
-        # Hard-gate signal so the frontend can render 即将上线 / disable the option.
-        assert zh_en["pipeline_ready"] is False
+        # Hard-gate signal so the frontend can render 内测 / enable the option.
+        assert zh_en["pipeline_ready"] is True
         assert next(p for p in data if p["pair_key"] == EN_ZH)["pipeline_ready"] is True
 
     def test_logged_in_non_allowlisted_user_sees_only_default(self):

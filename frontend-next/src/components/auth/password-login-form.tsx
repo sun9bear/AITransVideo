@@ -10,6 +10,11 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { goToPostAuthRedirect, resolvePostAuthRedirect } from "@/lib/auth/post-auth-redirect"
 
+const LOGIN_ERROR_MESSAGES: Record<string, string> = {
+  csrf_origin_rejected:
+    "请求来源校验失败，请确认正在使用 https://aitrans.video 访问，刷新页面后重试。",
+}
+
 /**
  * Account + password login form (A1 unified login).
  *
@@ -38,7 +43,8 @@ export function PasswordLoginForm() {
       })
       const data = await res.json()
       if (!res.ok) {
-        toast.error(data.detail || "登录失败")
+        const detail = typeof data.detail === "string" ? data.detail : ""
+        toast.error(LOGIN_ERROR_MESSAGES[detail] || detail || "登录失败")
         return
       }
       toast.success("登录成功")
@@ -66,7 +72,7 @@ export function PasswordLoginForm() {
             type="text"
             inputMode="text"
             autoComplete="username"
-            placeholder="请输入手机号"
+            placeholder="请输入手机号或邮箱"
             value={account}
             onChange={(e) => setAccount(e.target.value)}
             className="h-11 pl-10"

@@ -180,6 +180,15 @@ class AdminSettings(BaseModel):
     # synced content (subtitles, lip-sync) when LLM translation length
     # control is unreliable.
     force_dsp_alignment: bool = False
+    # --- PR-E matchable migration — language-aware voice catalog query (kill switch) ---
+    # When True, the internal voice-catalog query additionally filters by
+    # compatible_target_languages @> [target_language], so a zh dub never returns en
+    # voices (and vice versa). Default OFF → legacy matchable-only query
+    # (byte-identical). Turn ON only after migration 042 backfilled
+    # compatible_target_languages AND the "zh target returns 0 en" assertion passes;
+    # turning OFF instantly reverts to the legacy query (the kill switch). See
+    # plan 2026-06-13 ...-v3.md Phase 5 (B).
+    voice_catalog_target_language_filter_enabled: bool = False
     # --- Phase D — Whisper subtitle alignment (2026-05-05) ---
     # Master switch + sub-policy fields. The runtime additionally requires
     # ``AVT_WHISPER_ALIGN_ENABLED=1`` env var to be set (ops capability

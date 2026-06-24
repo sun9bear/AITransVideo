@@ -164,6 +164,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     sourceValidationError ??
     (!hasAnyServiceMode ? "当前没有可用的任务方案，请联系管理员。" : null) ??
     serviceModeUnavailableError ??
+    (serviceMode === "express" && expressAutoCloneAvailable && !expressAutoVoiceClone
+      ? "快捷版 CosyVoice 需要先确认自动克隆主说话人音色。"
+      : null) ??
     (serviceMode === "free" && !freeVoiceRightsConfirmed
       ? "请先阅读并勾选免费版声音授权声明。"
       : null)
@@ -331,7 +334,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   useEffect(() => {
     if (serviceMode !== "express" || !expressAutoCloneAvailable) {
       setExpressAutoVoiceClone(false)
+      return
     }
+    setExpressAutoVoiceClone(true)
   }, [serviceMode, expressAutoCloneAvailable])
 
   // Phase 2a LAUNCH GATE: leaving free mode clears the attestation so a stale

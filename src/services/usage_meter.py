@@ -128,9 +128,10 @@ class UsageMeter:
         selected_voice: str = "",
         duration_ms: int | None = None,
         fallback_used_provider: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         bucket_key = _safe_key(bucket)
-        self.record_event({
+        payload: dict[str, Any] = {
             "kind": "tts",
             "bucket": bucket_key,
             "provider": str(provider or ""),
@@ -142,7 +143,13 @@ class UsageMeter:
             "billed_chars": max(0, _coerce_int(billed_chars)),
             "duration_ms": max(0, _coerce_int(duration_ms)),
             "fallback_used_provider": str(fallback_used_provider or ""),
-        })
+        }
+        if extra:
+            for key, value in extra.items():
+                if key in payload:
+                    continue
+                payload[key] = value
+        self.record_event(payload)
 
     def record_llm(
         self,

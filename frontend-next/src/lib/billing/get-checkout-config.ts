@@ -8,7 +8,7 @@
  * Rule summary (mirrors gateway behavior):
  * - `providers` lists every known provider with its `operational` flag.
  * - `default_provider` is the first operational provider in the gateway's
- *   preference order (currently: alipay → wechatpay → stripe → fake).
+ *   preference order (currently: alipay → wechatpay → paddle → stripe → fake).
  * - `fake` is the default safe path when no real provider is operational.
  * - Pricing facts are NEVER returned here; `/api/plans` stays the price truth.
  */
@@ -21,8 +21,8 @@ export type CheckoutProvider = {
 
 export type CheckoutConfigResponse = {
   default_provider: string
-  // Surface-aware pick (desktop → wechatpay QR, mobile → paddle). Prefer this
-  // over default_provider as the initially-selected option when present.
+  // Gateway recommendation for the initially-selected option. Current policy
+  // prefers wechatpay on both desktop and mobile when operational.
   recommended_provider?: string
   checkout_surface?: string
   providers: CheckoutProvider[]

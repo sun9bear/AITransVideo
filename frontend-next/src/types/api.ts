@@ -150,6 +150,10 @@ export interface ApiJobArtifactsResponse {
   fallback_summary: Record<string, unknown> | null
   project_dir: string | null
   manifest_path: string | null
+  // PR-G: the job's language pair, used to label subtitle downloads by actual
+  // language. Absent → en->zh default (byte-identical for the GA pair).
+  source_language?: string | null
+  target_language?: string | null
 }
 
 export interface ApiWebUiReviewStageSnapshot {

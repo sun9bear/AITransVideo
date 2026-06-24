@@ -59,6 +59,52 @@ TRANSCRIPTION_PROMPT = """你是专业的视频转录专家。请观看这个视
 }"""
 
 
+# Chinese-source transcription prompt (mirrors the English one but transcribes in
+# Chinese). Selected when the job's source language is zh-CN. The UI/instruction
+# language stays Chinese in both; only the transcription target + filler examples
+# + declared language differ.
+TRANSCRIPTION_PROMPT_ZH = """你是专业的视频转录专家。请观看这个视频，输出完整的中文转录稿，包含说话人标注和时间戳。
+
+要求：
+1. 识别视频中所有说话人，为每人分配 speaker_1, speaker_2 等编号
+2. 如果能从上下文（如字幕、介绍）识别出说话人的真实姓名，请在 speakers 中填写
+3. 按发言顺序输出每段话，每段包含精确的开始和结束时间（毫秒）
+4. 转录必须是中文原文，不要翻译
+5. 包含口语填充词（嗯、呃、那个、就是 等）
+6. 每段不要太长，按自然停顿分段，通常每段 5-30 秒
+
+请严格按以下 JSON 格式输出（只输出 JSON，不要 markdown 代码块或其他文字）：
+{
+  "speakers": [
+    {"id": "speaker_1", "name": "说话人姓名或 Unknown"}
+  ],
+  "segments": [
+    {
+      "speaker_id": "speaker_1",
+      "start_ms": 0,
+      "end_ms": 5200,
+      "text": "实际说出的中文内容..."
+    }
+  ],
+  "total_duration_ms": 187000,
+  "language": "zh-CN"
+}"""
+
+
+_TRANSCRIPTION_PROMPT_BY_LANGUAGE: dict[str, str] = {
+    "en": TRANSCRIPTION_PROMPT,
+    "zh-CN": TRANSCRIPTION_PROMPT_ZH,
+}
+
+
+def _transcription_prompt_for_language(language: str | None) -> str:
+    """Select the transcription prompt for a canonical source language.
+    Unknown / empty → the English prompt (byte-identical default)."""
+    return _TRANSCRIPTION_PROMPT_BY_LANGUAGE.get(
+        str(language or "").strip() or "en", TRANSCRIPTION_PROMPT
+    )
+
+
 class GeminiTranscriptionError(Exception):
     pass
 
@@ -94,6 +140,7 @@ class GeminiTranscriber:
         output_dir: str,
         speaker_labels: bool = True,
         speakers_expected: int | None = None,
+        language: str = "en",
     ) -> TranscriptResult:
         """Transcribe a YouTube video using Gemini multimodal API.
 
@@ -116,7 +163,7 @@ class GeminiTranscriber:
         print(f"[S1] Gemini 多模态转录：{normalized_url}")
         print(f"[S1] 使用模型：{self.model_name}")
 
-        prompt = self._build_prompt(speaker_labels, speakers_expected)
+        prompt = self._build_prompt(speaker_labels, speakers_expected, language=language)
         video_part = self._build_video_part(normalized_url)
 
         raw_response = self._call_gemini(video_part, prompt)
@@ -137,12 +184,15 @@ class GeminiTranscriber:
         if not total_duration_ms and lines:
             total_duration_ms = max(line.end_ms for line in lines)
 
-        language = parsed.get("language", "en")
+        # Fail-closed on a missing/empty Gemini language: default to the job's
+        # EXPECTED source language, never a blind "en" (which would mislabel a
+        # zh-CN transcript as English). For an en job this is byte-identical.
+        result_language = parsed.get("language") or language
 
         result = TranscriptResult(
             lines=lines,
             total_duration_ms=int(total_duration_ms),
-            language=language,
+            language=result_language,
             raw_response_path=str(raw_response_path),
             structured_transcript_path=str(output_root / "transcript.json"),
         )
@@ -164,8 +214,9 @@ class GeminiTranscriber:
         self,
         speaker_labels: bool,
         speakers_expected: int | None,
+        language: str = "en",
     ) -> str:
-        prompt = TRANSCRIPTION_PROMPT
+        prompt = _transcription_prompt_for_language(language)
         if speakers_expected:
             prompt += f"\n\n提示：这个视频中预计有 {speakers_expected} 位说话人。"
         if not speaker_labels:

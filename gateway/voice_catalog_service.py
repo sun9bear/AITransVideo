@@ -218,6 +218,31 @@ async def _volc_synthesize_check(
 # CRUD helpers
 # ---------------------------------------------------------------------------
 
+def _infer_compatible_target_languages(
+    language: str | None, voice_id: str | None
+) -> list[str]:
+    """Infer dub *target*-language compatibility from a voice's own language / id,
+    mirroring the migration 042 en-detection. English-speaking voices dub English;
+    everything else (Chinese, dialects, unknown) → zh-CN.
+
+    PR-E re-CodeX: stamped on every catalog write so a newly added English voice is
+    matchable for ``target_language=en`` once the kill switch is on, and the NULL-as-zh
+    query fallback only ever catches truly-legacy pre-migration rows.
+    """
+    lang = (language or "").strip().lower()
+    vid = voice_id or ""
+    if (
+        lang.startswith("en")
+        or lang == "english"
+        or (language or "").strip() == "英语"
+        or vid[:3] == "en_"
+        or vid.startswith("ICL_en_")
+        or vid.startswith("English")
+    ):
+        return ["en"]
+    return ["zh-CN"]
+
+
 async def create_voice(db: AsyncSession, data: dict[str, Any]) -> VoiceCatalog:
     """Insert a new voice into voice_catalog."""
     voice = VoiceCatalog(
@@ -232,6 +257,15 @@ async def create_voice(db: AsyncSession, data: dict[str, Any]) -> VoiceCatalog:
         verify_status=data.get("verify_status", {}),
         source=data.get("source", "manual"),
         notes=data.get("notes"),
+        # PR-E re-CodeX P2: stamp target-language compatibility on insert (explicit value
+        # wins; else infer from language/voice_id) so new en voices are usable under the
+        # kill switch instead of landing NULL → excluded from the en query.
+        compatible_target_languages=(
+            data.get("compatible_target_languages")
+            or _infer_compatible_target_languages(
+                data.get("language", "zh"), data["voice_id"]
+            )
+        ),
     )
     db.add(voice)
     await db.flush()
@@ -246,11 +280,17 @@ async def update_voice(
     """Partial update of voice metadata.  Only touches provided fields."""
     allowed = {
         "display_name", "gender", "language", "scene", "matchable",
-        "provider_config", "notes",
+        "provider_config", "notes", "compatible_target_languages",
     }
     for key in allowed:
         if key in data:
             setattr(voice, key, data[key])
+    # PR-E re-CodeX P2: if language was re-tagged without an explicit compatibility,
+    # re-infer so target-language compatibility stays consistent with the voice.
+    if "language" in data and "compatible_target_languages" not in data:
+        voice.compatible_target_languages = _infer_compatible_target_languages(
+            data.get("language"), voice.voice_id
+        )
     voice.updated_at = datetime.now(timezone.utc)
     await db.flush()
     return voice
