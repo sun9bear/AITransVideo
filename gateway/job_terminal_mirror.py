@@ -62,6 +62,8 @@ async def mirror_job_terminal_state(
     db: "AsyncSession",
     db_job: "Job",
     upstream: "JobJsonRecord",
+    *,
+    settle_smart_clone: bool = True,
 ) -> bool:
     """Sync a Gateway PG ``Job`` row from the corresponding JSON record.
 
@@ -150,10 +152,11 @@ async def mirror_job_terminal_state(
         # smart 预览会复用"匿名标记跳过分钟结算"的早返回路径——克隆 600 点结算
         # 不能随分钟结算一起被跳过。marker-gated + 独立 session（见 helper
         # docstring）。幂等；无 reservation → no-op。
-        await _settle_smart_clone_reservations_post_terminal(
-            db_job,
-            smart_state=effective_smart_state,
-        )
+        if settle_smart_clone:
+            await _settle_smart_clone_reservations_post_terminal(
+                db_job,
+                smart_state=effective_smart_state,
+            )
         if getattr(db_job, "is_anonymous_preview", False) is True:
             # APF P0 T8（AD-7/G2）：匿名预览 job 零结算不变量——跳过
             # settle_job_quota / settle_job_credit_ledger / cost backfill，

@@ -1,7 +1,7 @@
 export interface EntitlementsLimits {
   max_duration_minutes: number | null
   max_concurrent_jobs: number | null
-  allowed_service_modes: ('express' | 'studio' | 'smart')[]
+  allowed_service_modes: ('express' | 'studio' | 'smart' | 'free')[]
   free_jobs_quota_total: number | null
   free_jobs_quota_used: number | null
   free_jobs_quota_remaining: number | null
@@ -10,6 +10,7 @@ export interface EntitlementsLimits {
 export interface EntitlementsUI {
   show_admin_badge: boolean
   allow_upgrade: boolean
+  in_trial: boolean
 }
 
 export interface UserEntitlements {

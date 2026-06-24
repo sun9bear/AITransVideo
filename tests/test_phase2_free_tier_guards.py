@@ -138,6 +138,16 @@ def _min_db():
     return db
 
 
+def _free_service_online_admin_settings():
+    return types.SimpleNamespace(
+        free_tier_voiceclone_enabled=True,
+        service_mode_express_enabled=True,
+        service_mode_free_enabled=True,
+        service_mode_studio_enabled=True,
+        smart_mode_enabled=False,
+    )
+
+
 def _run_create(req, db, user):
     from job_intercept import intercept_create_job
     loop = asyncio.new_event_loop()
@@ -223,6 +233,7 @@ def test_free_in_allowed_modes_when_flag_on():
     returning 403 service_mode_not_allowed, and excludes it (flag off)."""
     _stub_database_module()
     from entitlements import get_effective_allowed_service_modes
+    import admin_settings
     user = types.SimpleNamespace(
         role="user", plan_code="free",
         free_jobs_quota_total=5, free_jobs_quota_used=0,
@@ -230,8 +241,25 @@ def test_free_in_allowed_modes_when_flag_on():
     )
     on = types.SimpleNamespace(enable_smart_mode=False, enable_free_tier=True)
     off = types.SimpleNamespace(enable_smart_mode=False, enable_free_tier=False)
-    assert "free" in get_effective_allowed_service_modes(user, settings=on)
-    assert "free" not in get_effective_allowed_service_modes(user, settings=off)
+    admin_on = types.SimpleNamespace(
+        service_mode_express_enabled=True,
+        service_mode_free_enabled=True,
+        service_mode_studio_enabled=True,
+        smart_mode_enabled=False,
+    )
+    admin_off = types.SimpleNamespace(
+        service_mode_express_enabled=True,
+        service_mode_free_enabled=False,
+        service_mode_studio_enabled=True,
+        smart_mode_enabled=False,
+    )
+
+    with patch.object(admin_settings, "load_settings", lambda: admin_on):
+        assert "free" in get_effective_allowed_service_modes(user, settings=on)
+        assert "free" not in get_effective_allowed_service_modes(user, settings=off)
+
+    with patch.object(admin_settings, "load_settings", lambda: admin_off):
+        assert "free" not in get_effective_allowed_service_modes(user, settings=on)
 
 
 # ── Task 3: dual-layer free=0 debit truth (CodeX) ────────────────────────
@@ -289,6 +317,7 @@ def test_handler_admits_free_and_forwards_snapshot_when_flag_on():
     # test_free_service_quota). Without stubbing, the MagicMock db makes reserve
     # return user_not_found -> 403 before the forward.
     with patch.object(ji.settings, "enable_free_tier", True), \
+         patch("admin_settings.load_settings", return_value=_free_service_online_admin_settings()), \
          patch.object(fq, "reserve_free_daily", AsyncMock(return_value=fq.FreeDailyOutcome(status="reserved", row_id="r"))), \
          patch.object(fq, "consume_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "consumed"))), \
          patch.object(fq, "release_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "released"))), \
@@ -328,6 +357,7 @@ def test_free_job_over_daily_cap_returns_403():
     proxy_spy = AsyncMock(return_value=MagicMock(status_code=200, body=b"{}"))
     denied = fq.FreeDailyOutcome(status="denied", deny_reason="daily_cap_exceeded")
     with patch.object(ji.settings, "enable_free_tier", True), \
+         patch("admin_settings.load_settings", return_value=_free_service_online_admin_settings()), \
          patch.object(fq, "reserve_free_daily", AsyncMock(return_value=denied)), \
          patch.object(ji, "proxy_request", proxy_spy):
         resp = _run_create(_free_job_request("free"), _min_db(), user)
@@ -353,6 +383,7 @@ def test_free_job_skips_legacy_reserve_quota():
     # job_id in the upstream body so the flow reaches the reserve_quota line.
     proxy_resp = MagicMock(status_code=200, body=b'{"job_id": "job_free_1", "status": "queued"}')
     with patch.object(ji.settings, "enable_free_tier", True), \
+         patch("admin_settings.load_settings", return_value=_free_service_online_admin_settings()), \
          patch.object(fq, "reserve_free_daily", reserve_spy), \
          patch.object(fq, "consume_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "consumed"))), \
          patch.object(fq, "release_free_daily", AsyncMock(return_value=fq.FreeTransitionOutcome(True, "released"))), \
@@ -375,6 +406,7 @@ def test_free_job_without_consent_returns_403():
     )
     proxy_spy = AsyncMock(return_value=MagicMock(status_code=200, body=b"{}"))
     with patch.object(ji.settings, "enable_free_tier", True), \
+         patch("admin_settings.load_settings", return_value=_free_service_online_admin_settings()), \
          patch.object(ji, "proxy_request", proxy_spy):
         resp = _run_create(_free_job_request("free", with_consent=False), _min_db(), user)
     assert resp.status_code == 403

@@ -1279,6 +1279,7 @@ class TestQualityTierTruthChain:
         upstream_record = mirror.await_args.args[2]
         assert upstream_record.job_id == "job-settle-qt"
         assert upstream_record.status == "succeeded"
+        assert mirror.await_args.kwargs["settle_smart_clone"] is True
 
 
 # ===================================================================
