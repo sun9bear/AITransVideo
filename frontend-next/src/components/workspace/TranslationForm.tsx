@@ -146,6 +146,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const freeAllowed = isServiceModeSelectable("free")
   const studioAllowed = isServiceModeSelectable("studio")
   const smartAllowed = isServiceModeSelectable("smart")
+  const isAdminUser = entitlements?.role === "admin"
+  const hasPaidPlan = entitlements?.plan_code === "plus" || entitlements?.plan_code === "pro"
+  const hasStudioPlanEntitlement = isAdminUser || hasPaidPlan || entitlements?.ui.in_trial === true
+  const hasSmartPlanEntitlement = isAdminUser || hasPaidPlan
+  const studioRolloutOffline = Boolean(entitlements) && hasStudioPlanEntitlement && !studioAllowed
+  const smartRolloutOffline = Boolean(entitlements) && hasSmartPlanEntitlement && !smartAllowed
   const hasAnyServiceMode = expressAllowed || freeAllowed || studioAllowed || smartAllowed
   const serviceModeUnavailableError =
     entitlements && !isServiceModeSelectable(serviceMode)
@@ -763,7 +769,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
 
               {/* Studio mode — locked unless plan allows it */}
               {(() => {
-                const studioAllowed = entitlements?.limits.allowed_service_modes.includes("studio") ?? false
                 return studioAllowed ? (
                   <button
                     type="button"
@@ -808,7 +813,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
-                    {entitlements?.ui.allow_upgrade ? (
+                    {studioRolloutOffline ? (
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        已下线
+                      </div>
+                    ) : entitlements?.ui.allow_upgrade ? (
                       <Link
                         href="/settings/billing"
                         className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"
@@ -828,7 +837,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                 * 100 credits/min fixed price, AI auto-decisions for translation
                 * review + voice cloning. plan_catalog gates plus + pro. */}
               {(() => {
-                const smartAllowed = entitlements?.limits.allowed_service_modes.includes("smart") ?? false
                 return smartAllowed ? (
                   <button
                     type="button"
@@ -857,7 +865,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </div>
                     )}
                   </button>
-                ) : smartPreviewEntryEnabled && !reuseAnonPreviewId ? (
+                ) : !smartRolloutOffline && smartPreviewEntryEnabled && !reuseAnonPreviewId ? (
                   // P3e-4c：免费 / 未获 smart 的登录用户的预览入口。点击校验源 →
                   // 打开预扣确认弹窗（付费克隆的用户显式触发面）。
                   // 转完整模式隐藏（用户已预览过，不再二次预览；源也不是 fresh upload）。
@@ -903,7 +911,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">100 点/分钟固定价，AI 自动审核翻译并自动克隆音色，无需人工操作。</p>
-                    {entitlements?.ui.allow_upgrade ? (
+                    {smartRolloutOffline ? (
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        已下线
+                      </div>
+                    ) : entitlements?.ui.allow_upgrade ? (
                       <Link
                         href="/settings/billing"
                         className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"

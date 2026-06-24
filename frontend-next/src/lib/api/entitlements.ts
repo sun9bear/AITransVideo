@@ -10,6 +10,7 @@ export interface EntitlementsLimits {
 export interface EntitlementsUI {
   show_admin_badge: boolean
   allow_upgrade: boolean
+  in_trial: boolean
 }
 
 export interface UserEntitlements {
