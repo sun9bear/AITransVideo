@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { Link } from "@/i18n/navigation"
 import { UploadCloud, CheckCircle2, AlertCircle, Loader2, Film, Minus, X } from "lucide-react"
 import {
   Dialog,
@@ -597,9 +598,9 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           <p className="text-sm font-medium text-foreground">免注册试用暂未开放</p>
           <p className="text-xs text-muted-foreground">
             可以先
-            <a href="/auth" className="mx-1 text-primary hover:underline font-medium">
+            <Link href="/auth" className="mx-1 text-primary hover:underline font-medium">
               注册账号
-            </a>
+            </Link>
             体验完整的视频翻译配音
           </p>
         </div>

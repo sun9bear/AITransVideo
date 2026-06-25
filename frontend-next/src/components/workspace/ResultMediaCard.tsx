@@ -21,7 +21,7 @@ import { JianyingDraftPathDialog } from "@/components/workspace/JianyingDraftPat
 import { useBackgroundTask } from "@/lib/react/useBackgroundTask"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2, RefreshCw, Clapperboard } from "lucide-react"
-import Link from "next/link"
+import { Link } from "@/i18n/navigation"
 import { toast } from "sonner"
 
 const RESULT_VIDEO_PLAY_EVENT = "aivt:result-video-play"

@@ -1,4 +1,5 @@
 import { FaqJsonLd } from "@/components/seo/faq-json-ld"
+import { Link } from "@/i18n/navigation"
 
 /**
  * FAQ section. DESIGN.md §3.5 — pricing / FAQ surfaces should stay on neutral,
@@ -107,13 +108,13 @@ export function Faq({ variant = "home" }: { variant?: "home" | "pricing" }) {
           {useMarquee && (
             <p className="mt-3 text-xs text-muted-foreground">
               鼠标悬停可暂停自动滚动 · 完整问答见
-              <a
+              <Link
                 href="/pricing#faq"
                 className="ml-1 underline-offset-2 hover:underline"
                 style={{ color: "var(--cinnabar)" }}
               >
                 定价页
-              </a>
+              </Link>
             </p>
           )}
         </div>

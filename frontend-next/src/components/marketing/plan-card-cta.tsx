@@ -1,6 +1,6 @@
 "use client"
 
-import Link from "next/link"
+import { Link } from "@/i18n/navigation"
 import { buttonVariants } from "@/components/ui/button"
 import { useSession } from "@/components/providers/session-provider"
 import { cn } from "@/lib/utils"

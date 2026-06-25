@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from 'react'
+import { Link } from "@/i18n/navigation"
 import { toast } from 'sonner'
 
 interface AdminSettings {
@@ -692,12 +693,12 @@ export default function AdminSettingsPage() {
         description="审校模型和翻译模型现已移至「提示词管理」页面，支持工作台版/快捷版独立配置"
       >
         <div className="rounded-xl border border-border bg-muted/30 p-4">
-          <a
+          <Link
             href="/admin/prompts"
             className="text-sm text-primary hover:underline"
           >
             前往「提示词 & 模型管理」→
-          </a>
+          </Link>
         </div>
       </SettingSection>
 

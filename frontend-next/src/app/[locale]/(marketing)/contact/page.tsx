@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { Link } from "@/i18n/navigation"
 import { COMPANY_ADDRESS, COMPANY_NAME, PAYMENT_CHANNEL_NOTE, SUPPORT_EMAIL } from "@/components/marketing/company-info"
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page"
 import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
@@ -85,9 +86,9 @@ export default function ContactPage() {
         <p>
           请发送邮件至 <Mail address={SUPPORT_EMAIL} />
           ，并在邮件标题中注明“账单 / 退款申请”。具体退款规则请参考{" "}
-          <a href="/refund" className="text-foreground underline-offset-4 hover:underline">
+          <Link href="/refund" className="text-foreground underline-offset-4 hover:underline">
             《退款政策》
-          </a>
+          </Link>
           。
         </p>
       </LegalSection>
@@ -103,9 +104,9 @@ export default function ContactPage() {
         <p>
           请发送邮件至 <Mail address={SUPPORT_EMAIL} />
           ，并在邮件标题中注明“隐私请求”。具体隐私规则请参考{" "}
-          <a href="/privacy" className="text-foreground underline-offset-4 hover:underline">
+          <Link href="/privacy" className="text-foreground underline-offset-4 hover:underline">
             《隐私政策》
-          </a>
+          </Link>
           。
         </p>
       </LegalSection>

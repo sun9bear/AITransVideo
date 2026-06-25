@@ -14,7 +14,8 @@
  */
 
 import { useEffect, useState } from "react"
-import { useParams, useRouter } from "next/navigation"
+import { useParams } from "next/navigation"
+import { useRouter } from "@/i18n/navigation"
 import {
   ArrowLeft,
   Calculator,

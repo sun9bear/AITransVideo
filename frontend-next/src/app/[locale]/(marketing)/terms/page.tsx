@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { Link } from "@/i18n/navigation"
 import {
   LegalPage,
   LegalSection,
@@ -212,12 +213,12 @@ export default function TermsPage() {
         <p>
           8.2
           退款条件、退款时限、退款流程及不予退款的具体情形，以
-          <a
+          <Link
             href="/refund"
             className="text-foreground underline-offset-4 hover:underline"
           >
             《退款政策》
-          </a>
+          </Link>
           页面约定为准。
         </p>
         <p>
@@ -370,12 +371,12 @@ export default function TermsPage() {
       <LegalSection number="17" title="联系我们">
         <p>
           如您对本条款有任何疑问、意见或投诉，请通过页面底部的运营主体信息或
-          <a
+          <Link
             href="/contact"
             className="text-foreground underline-offset-4 hover:underline"
           >
             《联系我们》
-          </a>
+          </Link>
           页面联系我们。
         </p>
       </LegalSection>

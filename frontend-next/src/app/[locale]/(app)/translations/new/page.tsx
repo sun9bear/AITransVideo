@@ -1,6 +1,6 @@
 "use client"
 
-import { useRouter } from "next/navigation"
+import { useRouter } from "@/i18n/navigation"
 import { TranslationForm } from "@/components/workspace/TranslationForm"
 
 export default function NewTranslationPage() {

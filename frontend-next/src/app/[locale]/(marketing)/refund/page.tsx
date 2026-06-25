@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { Link } from "@/i18n/navigation"
 import {
   LegalPage,
   LegalSection,
@@ -342,12 +343,12 @@ export default function RefundPage() {
               {SUPPORT_EMAIL}
             </a>
             、页面底部的运营主体信息或{" "}
-            <a
+            <Link
               href="/contact"
               className="text-foreground underline-offset-4 hover:underline"
             >
               《联系我们》
-            </a>{" "}
+            </Link>{" "}
             页面联系我们。
           </p>
           <p className="mt-2 text-muted-foreground">

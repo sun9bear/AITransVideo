@@ -23,9 +23,14 @@ import { absoluteUrl, blockedRoutes } from "@/lib/seo/site"
  * return 200 instead of redirecting to `/auth/login`.
  */
 export default function robots(): MetadataRoute.Robots {
+  // UI-02：locale-aware disallow。route group 迁入 `[locale]` 后，app/admin 路由
+  // 在 `/en` 前缀下同样可达（如 `/en/workspace`、`/en/admin`）。若只 disallow 裸路径，
+  // en locale 下的受保护路由会对爬虫暴露。单点 map 生成 `/en` 变体（不手抄）；
+  // 对不存在的 `/en/api` 等后端代理路径 disallow 是无害 no-op。
+  const localizedBlocked = blockedRoutes.map((route) => `/en${route}`)
   const sharedRules = {
     allow: ["/"],
-    disallow: [...blockedRoutes],
+    disallow: [...blockedRoutes, ...localizedBlocked],
   }
 
   return {

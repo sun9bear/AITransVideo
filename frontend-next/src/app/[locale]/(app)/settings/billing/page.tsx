@@ -26,7 +26,7 @@
  */
 
 import { Suspense, useEffect, useState } from "react"
-import Link from "next/link"
+import { Link } from "@/i18n/navigation"
 import { Loader2 } from "lucide-react"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"

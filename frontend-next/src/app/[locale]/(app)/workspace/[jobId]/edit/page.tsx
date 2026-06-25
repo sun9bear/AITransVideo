@@ -1,8 +1,9 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import Link from "next/link"
-import { useParams, useRouter } from "next/navigation"
+import { Link } from "@/i18n/navigation"
+import { useParams } from "next/navigation"
+import { useRouter } from "@/i18n/navigation"
 import { toast } from "sonner"
 import {
   ArrowLeft,

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { useParams } from "next/navigation"
-import Link from "next/link"
+import { Link } from "@/i18n/navigation"
 import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
 import { ResultDownloadList } from "@/components/result-download-list"

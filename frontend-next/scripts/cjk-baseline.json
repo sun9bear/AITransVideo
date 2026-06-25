@@ -1,12 +1,12 @@
 {
-  "src/app/(app)/error.tsx": {
+  "src/app/[locale]/(app)/error.tsx": {
     "当前页面加载失败": 1,
     "工作区异常": 1,
     "请重试一次；如果仍然失败，可以先回到项目列表。": 1,
     "项目列表": 1,
     "重试": 1
   },
-  "src/app/(app)/help/page.tsx": {
+  "src/app/[locale]/(app)/help/page.tsx": {
     "。": 1,
     "帮助中心": 1,
     "常见失败原因、重试策略、是否扣除额度。": 1,
@@ -26,7 +26,7 @@
     "支持的视频来源（本地 / YouTube / 其他链接）以及授权要求。": 1,
     "Express 与 Studio 模式": 1
   },
-  "src/app/(app)/notifications/page.tsx": {
+  "src/app/[locale]/(app)/notifications/page.tsx": {
     "标记失败": 2,
     "标已读": 1,
     "查看": 1,
@@ -48,7 +48,7 @@
     "账单": 1,
     "账户": 1
   },
-  "src/app/(app)/projects/[jobId]/page.tsx": {
+  "src/app/[locale]/(app)/projects/[jobId]/page.tsx": {
     "当前没有可下载的结果文件。": 1,
     "返回项目列表": 3,
     "更多下载": 1,
@@ -62,7 +62,7 @@
     "新建翻译": 1,
     "正在加载项目详情...": 1
   },
-  "src/app/(app)/projects/page.tsx": {
+  "src/app/[locale]/(app)/projects/page.tsx": {
     "，过期后自动删除。请及时下载结果文件。": 1,
     "，后台定期清理不会自动删除。": 1,
     "· 派生自": 1,
@@ -138,7 +138,7 @@
     "重新创建": 1,
     "最多约 12 个中文字符。与已有任务重名时会自动追加随机后缀。": 1
   },
-  "src/app/(app)/settings/billing/page.tsx": {
+  "src/app/[locale]/(app)/settings/billing/page.tsx": {
     "。": 1,
     "查看": 1,
     "查看你的当前套餐、付费记录,并在需要时升级到付费方案。": 1,
@@ -150,7 +150,7 @@
     "完整套餐对比": 1,
     "重试": 1
   },
-  "src/app/(app)/settings/page.tsx": {
+  "src/app/[locale]/(app)/settings/page.tsx": {
     "绑定": 1,
     "绑定失败": 2,
     "绑定邮箱": 1,
@@ -189,7 +189,7 @@
     "账户信息": 1,
     "注册时间": 1
   },
-  "src/app/(app)/tasks/current/page.tsx": {
+  "src/app/[locale]/(app)/tasks/current/page.tsx": {
     "当前还没有任务，先创建一个翻译任务。": 1,
     "当前没有任务": 1,
     "加载中": 1,
@@ -197,14 +197,14 @@
     "新建翻译": 2,
     "正在查找当前任务…": 1
   },
-  "src/app/(app)/translations/new/page.tsx": {
+  "src/app/[locale]/(app)/translations/new/page.tsx": {
     "新建翻译": 1
   },
-  "src/app/(app)/usage/page.tsx": {
+  "src/app/[locale]/(app)/usage/page.tsx": {
     "此功能正在开发中，敬请期待。": 1,
     "用量统计": 1
   },
-  "src/app/(app)/voices/page.tsx": {
+  "src/app/[locale]/(app)/voices/page.tsx": {
     "· 未标定": 1,
     "）": 1,
     "」吗？删除后不可恢复。": 1,
@@ -271,7 +271,7 @@
     "字/秒（": 1,
     "YouTube 视频": 1
   },
-  "src/app/(app)/workspace/[jobId]/page.tsx": {
+  "src/app/[locale]/(app)/workspace/[jobId]/page.tsx": {
     "（已完成": 1,
     "查看和播放结果。": 1,
     "处理失败，点击查看详情": 1,
@@ -320,7 +320,7 @@
     "重新创建任务": 1,
     "最近关键进展。": 1
   },
-  "src/app/(auth)/auth/forgot-password/page.tsx": {
+  "src/app/[locale]/(auth)/auth/forgot-password/page.tsx": {
     "短信验证码已发送": 1,
     "发送验证码": 1,
     "发送中...": 1,
@@ -352,7 +352,7 @@
     "重置失败": 1,
     "重置中...": 1
   },
-  "src/app/(auth)/auth/login/page.tsx": {
+  "src/app/[locale]/(auth)/auth/login/page.tsx": {
     "登录 AITrans.Video": 1,
     "还没有账号？": 1,
     "欢迎回来": 1,
@@ -362,7 +362,7 @@
     "使用手机号验证码登录": 1,
     "验证码登录": 1
   },
-  "src/app/(auth)/auth/page.tsx": {
+  "src/app/[locale]/(auth)/auth/page.tsx": {
     "登录": 1,
     "返回登录": 1,
     "开始本地化": 1,
@@ -371,7 +371,7 @@
     "注册 AITrans.Video": 1,
     "AITrans.Video 首页": 1
   },
-  "src/app/(auth)/auth/register/page.tsx": {
+  "src/app/[locale]/(auth)/auth/register/page.tsx": {
     "登录": 1,
     "返回登录": 1,
     "开始本地化": 1,
@@ -380,7 +380,7 @@
     "注册 AITrans.Video": 1,
     "AITrans.Video 首页": 1
   },
-  "src/app/(marketing)/contact/page.tsx": {
+  "src/app/[locale]/(marketing)/contact/page.tsx": {
     "，并在邮件标题中注明“侵权投诉”。": 1,
     "，并在邮件标题中注明“商务合作”。": 1,
     "，并在邮件标题中注明“隐私请求”。具体隐私规则请参考": 1,
@@ -442,14 +442,14 @@
     "主体名称：": 1,
     "API 接入": 1
   },
-  "src/app/(marketing)/error.tsx": {
+  "src/app/[locale]/(marketing)/error.tsx": {
     "返回首页": 1,
     "请重试一次；如果仍然失败，可以返回首页重新进入。": 1,
     "页面异常": 1,
     "页面暂时无法加载": 1,
     "重试": 1
   },
-  "src/app/(marketing)/pricing/page.tsx": {
+  "src/app/[locale]/(marketing)/pricing/page.tsx": {
     "从个人试用到团队高频生产，按你真正需要的处理能力选择套餐。试用无需绑卡，任务失败不计费，修改片段不必重跑全片。": 1,
     "定价": 3,
     "定价 · 爱译视频": 1,
@@ -457,7 +457,7 @@
     "长视频也用得起的 AI 翻译配音": 1,
     "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。": 1
   },
-  "src/app/(marketing)/privacy/page.tsx": {
+  "src/app/[locale]/(marketing)/privacy/page.tsx": {
     "。为保障安全，我们可能会要求您完成身份验证后再处理相关请求。": 1,
     "（以下简称“我们”）非常重视您的个人信息与数据安全。本《隐私政策》旨在说明，当您访问": 1,
     "《百度网盘隐私政策》": 1,
@@ -577,7 +577,7 @@
     "AITrans.Video 隐私政策：说明我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。": 1,
     "IP 地址": 1
   },
-  "src/app/(marketing)/refund/page.tsx": {
+  "src/app/[locale]/(marketing)/refund/page.tsx": {
     "、页面底部的运营主体信息或": 1,
     "：周期到期后不会自动扣款，因此不存在意外续费扣费的情形；如需继续使用，由您主动再次购买。": 1,
     "。": 1,
@@ -654,7 +654,7 @@
     "重新处理任务； / re-process the job;": 1,
     "AITrans.Video 退款政策：详细说明订阅、点数购买、处理失败、异常扣费等情形下的退款规则与申请方式。Refund Policy for AITrans.Video paid plans (中 / EN).": 1
   },
-  "src/app/(marketing)/terms/page.tsx": {
+  "src/app/[locale]/(marketing)/terms/page.tsx": {
     "。": 1,
     "（以下简称“我们”）运营，并通过": 1,
     "《百度网盘服务协议》": 1,
@@ -760,7 +760,7 @@
     "AI 输出结果说明": 1,
     "AITrans.Video 服务条款：详细说明本服务的使用规则、用户权利与义务、知识产权、费用、免责及争议解决条款。": 1
   },
-  "src/app/(marketing)/trial/page.tsx": {
+  "src/app/[locale]/(marketing)/trial/page.tsx": {
     "。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，账户信息和已购点数也会保留下来。": 1,
     "· 试用结束不会自动扣费": 1,
     "· 无需绑定支付方式": 1,
@@ -781,14 +781,14 @@
     "注册即享": 1,
     "注册即享免费试用。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，账户信息和已购点数也会保留下来。": 1
   },
-  "src/app/error.tsx": {
+  "src/app/[locale]/error.tsx": {
     "返回工作区": 1,
     "请重试一次；如果仍然失败，可以先返回工作区。": 1,
     "页面异常": 1,
     "页面暂时无法打开": 1,
     "重试": 1
   },
-  "src/app/layout.tsx": {
+  "src/app/[locale]/layout.tsx": {
     "视频本地化": 1,
     "跳到主内容": 1,
     "英文视频翻译": 1,
@@ -800,7 +800,7 @@
     "SRT 字幕导出": 1,
     "YouTube 视频翻译": 1
   },
-  "src/app/not-found.tsx": {
+  "src/app/[locale]/not-found.tsx": {
     "返回首页": 1,
     "你访问的页面不存在或已移动，试试回到首页。": 1,
     "找不到页面": 1

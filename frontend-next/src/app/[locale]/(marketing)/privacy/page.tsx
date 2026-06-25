@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { Link } from "@/i18n/navigation"
 import {
   LegalPage,
   LegalSection,
@@ -333,12 +334,12 @@ export default function PrivacyPage() {
       <LegalSection number="12" title="联系我们">
         <p>
           如果您对本隐私政策、您的个人信息、数据删除申请或其他隐私相关问题有任何疑问，请通过页面底部的运营主体信息或
-          <a
+          <Link
             href="/contact"
             className="text-foreground underline-offset-4 hover:underline"
           >
             《联系我们》
-          </a>
+          </Link>
           页面联系我们。
         </p>
       </LegalSection>

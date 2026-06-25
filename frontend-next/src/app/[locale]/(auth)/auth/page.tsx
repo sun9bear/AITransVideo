@@ -1,7 +1,7 @@
 "use client"
 
 import { Suspense } from "react"
-import Link from "next/link"
+import { Link } from "@/i18n/navigation"
 import { BrandMark } from "@/components/marketing/brand-mark"
 import { RegisterMethodForm } from "@/components/auth/register-method-form"
 

@@ -1,11 +1,12 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { Link } from "@/i18n/navigation"
+import { usePathname } from "@/i18n/navigation"
 import { useSession } from "@/components/providers/session-provider"
 import { BrandLockup } from "./brand-mark"
 import { buttonVariants } from "@/components/ui/button-variants"
+import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher"
 import { cn } from "@/lib/utils"
 
 const NAV_ITEMS: Array<{ href: string; label: string }> = [
@@ -89,6 +90,7 @@ export function SiteHeader() {
         </nav>
 
         <div className="flex items-center gap-2">
+          <LocaleSwitcher />
           {user ? (
             <Link
               href="/translations/new"

@@ -1,6 +1,6 @@
 "use client"
 
-import { usePathname } from "next/navigation"
+import { usePathname } from "@/i18n/navigation"
 import { useCallback, useEffect, useState } from "react"
 
 import { useSession } from "@/components/providers/session-provider"
