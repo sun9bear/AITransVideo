@@ -41,8 +41,8 @@ for _candidate in [
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from admin_auth import _require_admin
 from auth import get_current_user
-from admin_settings import _require_admin
 from config import GatewaySettings
 from models import User
 

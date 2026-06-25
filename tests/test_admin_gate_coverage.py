@@ -33,15 +33,16 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Files that register one or more APIRouters under ``/api/admin/...``.
-# Each file must have its own ``_require_admin`` (currently 9 distinct
-# copies — P2-19 will抽 to a shared helper later, but for now this
-# guard is content with the per-file pattern).
+# As of TU-05 (DRY-01) every file imports the single shared
+# ``_require_admin`` from ``gateway/admin_auth.py``; this guard keys on
+# the ``_require_admin(`` call marker in each route body, so it is
+# agnostic to where the helper is defined/imported.
 #
 # IMPORTANT: only include files that are TRACKED in the git index. A
-# WIP-only file (e.g. user's untracked AI customer support work at the
-# 2026-05-08 audit checkpoint) would make this test pass locally but
-# fail on a clean CI checkout at ``assert path.is_file()``. When the
-# WIP lands in committed form, add the file here and bump the baseline.
+# WIP-only file would make this test pass locally but fail on a clean
+# CI checkout at ``assert path.is_file()``. ``admin_support_api.py`` was
+# WIP-excluded at the 2026-05-08 audit; TU-05 confirmed it is committed
+# and all its routes are gated, so it is now tracked here.
 _ADMIN_FILES = (
     "gateway/admin_settings.py",
     "gateway/admin_disk_api.py",
@@ -54,6 +55,7 @@ _ADMIN_FILES = (
     "gateway/s2_monitor_api.py",
     "gateway/traffic_analytics.py",
     "gateway/voice_catalog_api.py",
+    "gateway/admin_support_api.py",  # TU-05: now tracked (was WIP-excluded)
 )
 
 # Recognised gate-call markers. Any of these in the function source
@@ -148,22 +150,20 @@ def test_every_admin_route_has_gate_call():
 
 
 def test_admin_route_count_baseline():
-    """Sanity: the 2026-05-08 audit baseline counted 51 admin routes
-    across the original 8 tracked admin files (the user's WIP
-    ``admin_support_api.py`` adds 6 more but is intentionally
-    excluded — see _ADMIN_FILES note). If the count drops sharply,
-    the _ADMIN_FILES list may be missing a new admin file. If it
-    grows, that's fine — new admin endpoints landed.
-
-    This test is intentionally a soft floor (≥ baseline) rather than
-    an exact match — additions are normal, but a sudden drop would
-    indicate the scan stopped finding routes (e.g. router rename).
+    """Sanity: as of TU-05 the AST scan finds 88 admin routes across
+    the 12 tracked admin files (admin_support_api.py is now included).
+    The assertion is a soft floor (≥ baseline) with headroom rather
+    than an exact match — new admin endpoints landing is normal, but a
+    sudden drop would indicate the scan stopped finding routes (e.g. a
+    router rename) or a whole admin file was removed without updating
+    _ADMIN_FILES. Bump the floor only when routes are intentionally
+    removed.
     """
     total = 0
     for rel in _ADMIN_FILES:
         src = (_REPO_ROOT / rel).read_text(encoding="utf-8")
         total += len(_collect_routes(src, rel))
-    baseline = 51
+    baseline = 80
     assert total >= baseline, (
         f"Audit §10 regression: admin route count dropped to {total}, "
         f"below the 2026-05-08 baseline of {baseline}. Either a "

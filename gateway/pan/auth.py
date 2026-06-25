@@ -79,7 +79,10 @@ BAIDU_SCOPE = "basic netdisk"
 DASHBOARD_REDIRECT_URL = "/admin/pan/dashboard"
 
 
-# --- admin gate (local copy to avoid cross-router private import) ---
+# --- admin gate (local copy: pan/ is an independent auth context) ---
+# TU-05 (DRY-01) explicit exception: NOT migrated to gateway/admin_auth.py.
+# Semantic equivalence with the shared helper is not yet fully verified;
+# migrate in a separate PR once confirmed. See admin_auth.py BACKGROUND note.
 
 
 def _is_admin(user: User) -> bool:

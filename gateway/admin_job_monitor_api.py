@@ -11,6 +11,7 @@ import re
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
+from admin_auth import _require_admin
 from auth import get_current_user
 from config import settings
 from csrf import require_same_origin_state_change
@@ -28,17 +29,6 @@ router = APIRouter(
 # Job API upstream URL comes from gateway/config.py (env var AVT_JOB_API_UPSTREAM).
 # No module-level constant for the URL — always read settings.job_api_upstream
 # at call time so tests can monkeypatch without a module reload.
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-def _require_admin(user: User | None) -> None:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if getattr(user, "role", None) != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
 
 
 # ---------------------------------------------------------------------------

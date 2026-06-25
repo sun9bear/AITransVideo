@@ -13,6 +13,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 
+from admin_auth import _require_admin
 from auth import get_current_user
 from config import settings
 from database import async_session
@@ -55,13 +56,6 @@ def _derive_project_dir_from_manifest(manifest_path: str | None) -> str | None:
     if len(parts) >= 2:
         return str(PROJECTS_DATA_DIR / parts[0] / parts[1])
     return None
-
-
-def _require_admin(user: User | None) -> None:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if getattr(user, "role", None) != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
 
 
 def _safe_read_json(path: Path) -> dict | None:

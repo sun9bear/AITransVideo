@@ -24,9 +24,8 @@ _fake_database.engine = MagicMock()
 _fake_database.async_session = MagicMock()
 sys.modules.setdefault("database", _fake_database)
 
+from admin_auth import _is_admin, _require_admin  # noqa: E402
 from admin_settings import (  # noqa: E402
-    _is_admin,
-    _require_admin,
     list_users,
     update_user_entitlements,
     get_user_audit_log,
