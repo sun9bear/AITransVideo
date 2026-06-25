@@ -1,8 +1,8 @@
 "use client"
 
 import { useState, useRef, useEffect } from 'react'
-import Link from 'next/link'
-import { useParams, useRouter } from 'next/navigation'
+import { Link, useRouter } from "@/i18n/navigation"
+import { useParams } from "next/navigation"
 import { toast } from 'sonner'
 import { RefreshCw } from 'lucide-react'
 

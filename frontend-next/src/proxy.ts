@@ -183,14 +183,29 @@ export function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
+  // Routes that live OUTSIDE the [locale] tree (their own root layout, e.g.
+  // /paddle-checkout — Step 7) must SKIP the next-intl locale stage. With
+  // localePrefix:'as-needed' + default zh, next-intl would rewrite
+  // `/paddle-checkout` → `/zh/paddle-checkout`, which has no route (the page is at
+  // app/paddle-checkout, NOT app/[locale]/paddle-checkout) → 404 (breaks the Paddle
+  // payment handoff). They STILL pass through the auth gate below — parity with the
+  // pre-UI-02 middleware, where /paddle-checkout required a session. Any future
+  // non-[locale] root route MUST be added here.
+  const isNonLocalizedRoute =
+    pathname === "/paddle-checkout" || pathname.startsWith("/paddle-checkout/")
+
   // ── Stage 2: locale resolution / normalization (next-intl) ──────────────────
   // intlResponse is EITHER a redirect (locale normalization, e.g. /zh/x → /x) OR
   // a next() carrying the internal locale rewrite headers. We must return THIS
   // response on the allow-paths below — returning a fresh NextResponse.next()
-  // would drop the locale rewrite and break [locale] segment resolution.
-  const intlResponse = intlMiddleware(request)
-  if (intlResponse.headers.has("location")) {
-    return intlResponse
+  // would drop the locale rewrite and break [locale] segment resolution. For
+  // non-localized routes it stays null and the allow-paths fall back to next().
+  let intlResponse: NextResponse | null = null
+  if (!isNonLocalizedRoute) {
+    intlResponse = intlMiddleware(request)
+    if (intlResponse.headers.has("location")) {
+      return intlResponse
+    }
   }
 
   // ── Stage 3: session auth gate (locale-aware) ───────────────────────────────
@@ -202,7 +217,7 @@ export function proxy(request: NextRequest) {
     publicPaths.some((p) => normalizedPath.startsWith(p)) ||
     normalizedPath.startsWith("/auth/")
   ) {
-    return intlResponse
+    return intlResponse ?? NextResponse.next()
   }
 
   // Check for session cookie
@@ -218,7 +233,7 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(loginUrl)
   }
 
-  return intlResponse
+  return intlResponse ?? NextResponse.next()
 }
 
 export const config = {
