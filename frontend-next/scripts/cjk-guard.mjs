@@ -64,16 +64,26 @@ function collect(fp) {
   return out
 }
 
+// 计数（不去重）：{ text: count }，按 text 稳定排序。@codex bot 指出：只记 (file,text) 成员
+// 会漏掉"同文件已有该串、再加一处"的新增；故记 count，check 时 cur>baseline 即判新增。
+function toCounts(arr) {
+  const m = {}
+  for (const t of arr) m[t] = (m[t] || 0) + 1
+  return Object.fromEntries(Object.entries(m).sort(([a], [b]) => a.localeCompare(b)))
+}
+
 function scan() {
   const map = {}
   for (const fp of walk(srcDir)) {
     const rp = rel(fp)
     if (EXCLUDE_RE.test(rp)) continue
     const found = collect(fp)
-    if (found.length) map[rp] = [...new Set(found)].sort()
+    if (found.length) map[rp] = toCounts(found)
   }
   return map
 }
+
+const sumCounts = (o) => Object.values(o).reduce((s, c) => s + c, 0)
 
 const current = scan()
 const update = process.argv.includes("--update") || process.env.UILOC_CJK_UPDATE === "1"
@@ -81,7 +91,7 @@ const update = process.argv.includes("--update") || process.env.UILOC_CJK_UPDATE
 if (update) {
   const sorted = Object.fromEntries(Object.entries(current).sort(([a], [b]) => a.localeCompare(b)))
   writeFileSync(baselinePath, JSON.stringify(sorted, null, 2) + "\n")
-  const n = Object.values(current).reduce((s, a) => s + a.length, 0)
+  const n = Object.values(current).reduce((s, o) => s + sumCounts(o), 0)
   console.log(`[cjk-guard] baseline 写入：${Object.keys(current).length} 文件 / ${n} occurrences`)
   process.exit(0)
 }
@@ -98,9 +108,15 @@ if (!existsSync(baselinePath)) {
 
 const baseline = JSON.parse(readFileSync(baselinePath, "utf8"))
 const violations = []
-for (const [rp, texts] of Object.entries(current)) {
-  const base = new Set(baseline[rp] || [])
-  for (const t of texts) if (!base.has(t)) violations.push(`${rp}: ${JSON.stringify(t.slice(0, 60))}`)
+for (const [rp, counts] of Object.entries(current)) {
+  const base = baseline[rp] || {}
+  for (const [t, cur] of Object.entries(counts)) {
+    const allowed = base[t] || 0
+    if (cur > allowed) {
+      const excess = cur - allowed
+      violations.push(`${rp}: ${JSON.stringify(t.slice(0, 60))} (新增 ${excess} 处${allowed ? `，baseline ${allowed}` : ""})`)
+    }
+  }
 }
 
 if (violations.length) {

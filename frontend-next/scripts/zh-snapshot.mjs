@@ -15,7 +15,11 @@ assert.equal(zhCommon.appName, "爱译视频", "messages/zh/common.json appName 
 assert.equal(enCommon.appName, "AITrans.Video", "messages/en/common.json appName 漂移")
 
 // 2) site.ts inert：默认 zh / 单参 absoluteUrl 行为与旧实现等价（红线 1），hreflang 只 zh
-const SITE_URL = "https://aitrans.video" // NEXT_PUBLIC_SITE_URL 未设时 fallback
+// site.ts 在 import 时即按 NEXT_PUBLIC_SITE_URL 求值 siteUrl；本守卫测的是 absoluteUrl/hreflang
+// 的【逻辑】（相对 siteUrl 的前缀拼接），与具体 origin 无关。故先清掉环境变量，让 siteUrl
+// 确定性回退到 fallback，避免 CI/Compose 注入 NEXT_PUBLIC_SITE_URL 时误红（@codex bot 指出）。
+delete process.env.NEXT_PUBLIC_SITE_URL
+const SITE_URL = "https://aitrans.video" // 清掉 env 后 siteUrl 的确定性 fallback
 const site = await import(pathToFileURL(path.join(root, "src/lib/seo/site.ts")).href)
 
 assert.equal(site.siteUrl, SITE_URL, "siteUrl fallback 漂移")
