@@ -176,6 +176,29 @@
   ```
   （`npm run build` 在最后一步跑一次完整 standalone 构建，确保整链无 RSC/hydration/import 错误。PowerShell：`Select-String -Path src/components/auth/* -Pattern '\|\|\s*"[^"]*\p{IsCJKUnifiedIdeographs}'`。）
 
+### Step 5.6 · 登录 / 登出后的 locale 连续性（PR #48 @codex 评审吸纳，2026-06-25）
+
+- **来源**：UI-02（PR #48）@codex bot 报了 2×P2，经评估属**认证流的 locale 连续性**——UI-02 Step 3 显式把 `window.location.href` / 登出 / 后端 `/auth/logout` 留原生，post-auth 回跳默认目标也非本单元射程，故**转入本单元**（P1.5「防漏斗断」正是为此）。
+- **动作**：让登录成功、登出两条回跳路径保留访客当前 locale，使 `/en` 漏斗在登录前后不掉回中文。
+- **涉及文件**：
+  - `frontend-next/src/lib/auth/post-auth-redirect.ts`（登录成功默认目标硬编码 `/translations/new`——无 `from` 的直接登录会丢 locale；受保护页跳登录已由 UI-02 proxy 注入带 locale 前缀的 `from`，那条路径已 OK，只缺**默认目标**这一支）。
+  - `frontend-next/src/components/app-shell.tsx`（登出 `window.location.href = "/auth/login"` 硬跳——`/en/workspace` 登出应到 `/en/auth/login`）。
+  - 相关 auth 表单调用 `post-auth-redirect` 的入口（确认默认目标改造后仍按 `from` 优先、默认随 locale）。
+- **具体改法**：
+  - 默认 post-auth 目标改为 locale-aware：用 next-intl navigation 的 `useRouter`（client）按当前 locale 产出 `/translations/new`（zh 裸 / en 带 `/en`），或在 `post-auth-redirect` 取数处传入当前 locale 由其拼前缀。**`from` 仍最高优先**（它已含 locale 前缀，verbatim 用）。
+  - 登出回跳：把 `window.location.href = "/auth/login"` 改为带当前 locale 前缀（`/en/auth/login` / `/auth/login`）。若必须保留硬导航（清 session 需整页刷新），则用 `useLocale()` 读当前 locale 拼前缀，**不**走 i18n router（保持整页跳的语义），只补 locale 前缀字符串。
+  - **红线**：不改 `fetch`/登出 endpoint/method（红线 2）；locale 只**读** `useLocale()`，不另立 lang 真源（红线 5）。
+- **该步验收**：
+  ```bash
+  cd frontend-next
+  # 登出硬跳不再裸 /auth/login（应带 locale 前缀逻辑）：
+  grep -n "window.location.href" src/components/app-shell.tsx
+  # 默认 post-auth 目标不再硬编码裸 /translations/new（应 locale 驱动）：
+  grep -n "translations/new" src/lib/auth/post-auth-redirect.ts
+  npm run lint && npx tsc --noEmit
+  ```
+  **运行态手测**：en 营销页直接点「登录」→ 登录成功落 `/en/translations/new`（非 `/translations/new`）；`/en/workspace` 登出 → `/en/auth/login`。
+
 ### Step 6 · 收口验收 + 缺口声明
 
 - **动作**：跑全套验收命令 + 在 PR 描述与本单元 DoD 显式声明「server detail 仍中文」缺口、知会项目主（主方案 Task 1.5.4 末句要求）。
