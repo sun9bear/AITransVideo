@@ -6,10 +6,20 @@ from unittest.mock import patch
 
 import pytest
 
-# Mock HTTP calls to prevent real Gateway requests during tests
+# Mock HTTP calls to prevent real Gateway requests during tests.
+#
+# NOTE: ``volcengine_voice_selector`` does ``from services.tts.voice_reranker
+# import load_profiles`` at import time, so it holds its OWN binding. Patching
+# only ``voice_reranker.load_profiles`` leaves the selector's call (selector.py
+# lines 75 + 108) un-mocked — each invocation then makes a real ~2s request to a
+# dead Gateway, which is what made TestCrossResourceSafety's 80-combination
+# sweeps take ~124s apiece. Patch the selector's own binding too. Behaviour is
+# unchanged: the un-mocked call already failed network → returned {}, so the
+# reranker always saw empty profiles; this just makes that instant.
 @pytest.fixture(autouse=True)
 def _mock_gateway_calls():
     with patch("services.tts.voice_reranker.load_profiles", return_value={}), \
+         patch("services.tts.volcengine_voice_selector.load_profiles", return_value={}), \
          patch("services.tts.volcengine_voice_catalog._fetch_from_gateway", side_effect=ConnectionError("test")):
         yield
 

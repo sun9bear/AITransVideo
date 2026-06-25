@@ -193,10 +193,21 @@ class TestPolicySourceGuards:
         # 既有 create-intercept / post-edit 等业务逻辑（§C 范围外、含 i18n
         # PR-A 等分支累积的 service_mode 业务比较）；§C 两个 R2 redirect gate
         # 已改走 helper。任何升高 = 有人绕过 helper 新增**策略**判断。
-        # 13 = 12 既有业务比较 + P3e-2b 的 ``service_mode == "smart"`` reserve-gate
-        # （智能版预览克隆 600 预扣触发判断）——**业务/计费判断，非策略判断**
-        # （不决定下载/stream/水印/R2），与既有同类、不绕 effective_policy_mode。
-        "gateway/job_intercept.py": 13,
+        # 14 = 12 既有业务比较
+        #    + P3e-2b 的 ``service_mode == "smart"`` reserve-gate（智能版预览克隆
+        #      600 预扣触发判断）
+        #    + P3e-4a 的 ``service_mode == "smart"`` 预览 lane **准入** gate
+        #      （smart_preview_lane_exempt 一次性判定：免费/未获 smart entitlement 的
+        #      登录用户能否进入受限智能版预览 lane）。
+        # 后两者均为 **业务/准入/计费判断，非策略判断**：不决定下载 key / stream
+        # kinds / 水印 / R2 redirect——这 8 个策略点仍单点经 effective_policy_mode
+        # （准入放行后，受限预览的水印/stream-only/跳分钟全由下游 smart_preview_mode
+        # → effective_policy_mode(..., smart_preview=...) 服务端强制）。准入 gate 问的是
+        # "请求模式是否为 smart"，effective_policy_mode 解析的是"模式→策略档字符串"，
+        # 二者语义不同；强行套 helper 在此为恒等空操作（smart_preview=False 时透传），
+        # 只会把准入判断伪装成策略判断、并在 flag 变动时埋坑，故按既有 P3e-2b 同类
+        # 处理：保留直接比较、计入基线、不绕 helper。
+        "gateway/job_intercept.py": 14,
         "src/utils/free_watermark.py": 0,
     }
 
