@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server"
 import { Link } from "@/i18n/navigation"
 import { BrandLockup } from "./brand-mark"
 import { SUPPORT_EMAIL, SUPPORT_EMAIL_HREF } from "./company-info"
@@ -6,8 +7,15 @@ import { SUPPORT_EMAIL, SUPPORT_EMAIL_HREF } from "./company-info"
  * Marketing footer with public trust information.
  * The operator identity and support mailbox are shared with the legal pages so
  * payment-partner review sees one consistent public identity.
+ *
+ * i18n (UI-03a): chrome (tagline / column titles / link labels / aria / copyright)
+ * lives in messages/{zh,en}/marketing.json under `marketing.footer`. The support
+ * email + operator identity stay as content constants (company-info.ts), not
+ * translated. Server component → getTranslations.
  */
-export function SiteFooter() {
+export async function SiteFooter() {
+  const t = await getTranslations("marketing.footer")
+
   return (
     <footer className="border-t border-border/70 bg-background">
       <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:px-8">
@@ -15,69 +23,69 @@ export function SiteFooter() {
           <div className="space-y-3">
             <BrandLockup />
             <p className="max-w-sm text-sm text-muted-foreground">
-              爱译视频，让世界视频开口说中文。专注长视频的 AI 翻译配音工作台，支持中文字幕、中文配音、多格式导出和逐句修改。
+              {t("tagline")}
             </p>
           </div>
 
-          <nav aria-label="产品导航" className="space-y-3">
+          <nav aria-label={t("ariaProductNav")} className="space-y-3">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              产品
+              {t("colProduct")}
             </h3>
             <ul className="space-y-2 text-sm text-muted-foreground">
               <li>
                 <Link href="/" className="transition-colors hover:text-foreground">
-                  首页
+                  {t("linkHome")}
                 </Link>
               </li>
               <li>
                 <Link href="/pricing" className="transition-colors hover:text-foreground">
-                  定价
+                  {t("linkPricing")}
                 </Link>
               </li>
               <li>
                 <Link href="/trial" className="transition-colors hover:text-foreground">
-                  免费试用
+                  {t("linkTrial")}
                 </Link>
               </li>
               <li>
                 <Link href="/auth/login" className="transition-colors hover:text-foreground">
-                  登录
+                  {t("linkLogin")}
                 </Link>
               </li>
             </ul>
           </nav>
 
-          <nav aria-label="法律与合规" className="space-y-3">
+          <nav aria-label={t("ariaLegalNav")} className="space-y-3">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              法律与合规
+              {t("colLegal")}
             </h3>
             <ul className="space-y-2 text-sm text-muted-foreground">
               <li>
                 <Link href="/terms" className="transition-colors hover:text-foreground">
-                  服务条款
+                  {t("linkTerms")}
                 </Link>
               </li>
               <li>
                 <Link href="/privacy" className="transition-colors hover:text-foreground">
-                  隐私政策
+                  {t("linkPrivacy")}
                 </Link>
               </li>
               <li>
                 <Link href="/refund" className="transition-colors hover:text-foreground">
-                  退款政策
+                  {t("linkRefund")}
                 </Link>
               </li>
             </ul>
           </nav>
 
-          <nav aria-label="支持" className="space-y-3">
+          <nav aria-label={t("ariaSupportNav")} className="space-y-3">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              支持
+              {t("colSupport")}
             </h3>
             <ul className="space-y-2 text-sm text-muted-foreground">
               <li>
                 <Link href="/contact" className="transition-colors hover:text-foreground">
-                  联系我们
+                  {t("linkContact")}
                 </Link>
               </li>
               <li>
@@ -95,7 +103,7 @@ export function SiteFooter() {
             duplicated in the footer cluttered the rice-paper aesthetic without
             adding compliance value. */}
         <div className="mt-10 border-t border-border/60 pt-6 text-xs text-muted-foreground">
-          © {new Date().getFullYear()} 爱译视频 AITrans.Video · 长视频翻译配音工作台
+          {t("copyright", { year: new Date().getFullYear() })}
         </div>
       </div>
     </footer>

@@ -1,12 +1,16 @@
+import { getLocale } from "next-intl/server"
 import { COMPANY_NAME, SUPPORT_EMAIL } from "@/components/marketing/company-info"
 import {
   absoluteUrl,
   brandNames,
-  defaultDescription,
-  siteName,
+  localeSeo,
   siteUrl,
+  type Locale,
 } from "@/lib/seo/site"
 import { JsonLd } from "./json-ld"
+
+/** schema.org BCP-47 language tags per UI page locale. */
+const IN_LANGUAGE: Record<Locale, string> = { zh: "zh-CN", en: "en-US" }
 
 /**
  * Site-level Organization + WebSite + SoftwareApplication structured data.
@@ -30,14 +34,25 @@ import { JsonLd } from "./json-ld"
  *   - `FAQPage` — visible FAQ text suffices; schema only adds value when
  *     a specific search term wins rich-result placement (TBD).
  */
-export function SiteJsonLd() {
-  const alternateName = brandNames.filter((n) => n !== siteName)
+export async function SiteJsonLd() {
+  // Locale-driven structural schema (UI-03a). `getLocale()` resolves the active
+  // UI page locale from the [locale] segment. zh output stays byte-identical to
+  // the pre-migration hardcoded values (红线 1); en pages emit en-US + bilingual
+  // availableLanguage now that English support is real.
+  const locale = (await getLocale()) as Locale
+  const inLanguage = IN_LANGUAGE[locale] ?? IN_LANGUAGE.zh
+  const seo = localeSeo[locale] ?? localeSeo.zh
+  // contactPoint availableLanguage reflects actual support: zh always; en added
+  // only on the en surface so the default zh JSON-LD stays byte-identical.
+  const availableLanguage = locale === "en" ? ["zh-CN", "en-US"] : ["zh-CN"]
+
+  const alternateName = brandNames.filter((n) => n !== seo.siteName)
 
   const organization = {
     "@context": "https://schema.org",
     "@type": "Organization",
     "@id": `${siteUrl}#organization`,
-    name: siteName,
+    name: seo.siteName,
     alternateName,
     legalName: COMPANY_NAME,
     url: siteUrl,
@@ -48,7 +63,7 @@ export function SiteJsonLd() {
         "@type": "ContactPoint",
         contactType: "customer support",
         email: SUPPORT_EMAIL,
-        availableLanguage: ["zh-CN"],
+        availableLanguage,
       },
     ],
   }
@@ -57,10 +72,10 @@ export function SiteJsonLd() {
     "@context": "https://schema.org",
     "@type": "WebSite",
     "@id": `${siteUrl}#website`,
-    name: siteName,
+    name: seo.siteName,
     alternateName,
     url: siteUrl,
-    inLanguage: "zh-CN",
+    inLanguage,
     publisher: { "@id": `${siteUrl}#organization` },
   }
 
@@ -68,13 +83,13 @@ export function SiteJsonLd() {
     "@context": "https://schema.org",
     "@type": "WebApplication",
     "@id": `${siteUrl}#webapp`,
-    name: siteName,
+    name: seo.siteName,
     alternateName,
     url: siteUrl,
     applicationCategory: "MultimediaApplication",
     operatingSystem: "Web",
-    inLanguage: "zh-CN",
-    description: defaultDescription,
+    inLanguage,
+    description: seo.defaultDescription,
     publisher: { "@id": `${siteUrl}#organization` },
   }
 

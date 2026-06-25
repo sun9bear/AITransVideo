@@ -99,8 +99,13 @@ export const localeSeo: Record<
   { siteName: string; defaultTitle: string; defaultDescription: string }
 > = {
   zh: { siteName, defaultTitle, defaultDescription },
-  // TODO(UI-03)：填充真实英文文案；当前为占位（未被消费，INERT）。
-  en: { siteName: "AITrans.Video", defaultTitle, defaultDescription },
+  // UI-03a：真实英文文案，与 messages/en/seo.json 的 site.* 同源同值。
+  en: {
+    siteName: "AITrans.Video",
+    defaultTitle: "AITrans.Video · Make the world's videos speak Chinese",
+    defaultDescription:
+      "Turn long English videos into publish-ready Chinese-dubbed versions. AI video translation, Chinese voiceover, AI subtitles, YouTube video translation, SRT subtitle export, and a long-form localization workbench. Supports videos up to 3 hours, with sentence-by-sentence editing and single-sentence regeneration.",
+  },
 }
 
 /**
