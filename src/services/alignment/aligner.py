@@ -104,7 +104,7 @@ def _snapshot_first_pass_text(segment: DubbingSegment) -> None:
     current = (segment.cn_text or "").strip()
     if not current:
         return
-    if not getattr(segment, "first_pass_cn_text", ""):
+    if not segment.first_pass_cn_text:
         segment.first_pass_cn_text = current
     segment.tts_input_cn_text = current
 
@@ -335,7 +335,7 @@ class SegmentAligner:
         results: list[AlignedSegment] = []
         total_segments = len(segments)
         for index, segment in enumerate(segments, start=1):
-            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+            if is_keep_original_dubbing_mode(segment.dubbing_mode):
                 results.append(self._keep_original_result(segment))
                 if total_segments > 0 and (index % 15 == 0 or index == total_segments):
                     print(f"[S5] 对齐进度: {index}/{total_segments} 段")
@@ -363,7 +363,7 @@ class SegmentAligner:
                     actual_duration_ms=duration_ms,
                     alignment_method="checkpoint",
                     needs_review=False,
-                    dubbing_mode=normalize_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)),
+                    dubbing_mode=normalize_dubbing_mode(segment.dubbing_mode),
                 ))
                 if total_segments > 0 and (index % 15 == 0 or index == total_segments):
                     print(f"[S5] 对齐进度: {index}/{total_segments} 段")
@@ -416,7 +416,7 @@ class SegmentAligner:
         needs_align: list[tuple[int, DubbingSegment, Path]] = []
         non_keep_original_paths: list[tuple[int, str]] = []
         for idx, segment in enumerate(segments):
-            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+            if is_keep_original_dubbing_mode(segment.dubbing_mode):
                 # keep_original uses segment.tts_audio_path / aligned_audio_path,
                 # NOT segment_{id}_aligned.wav, so its paths are disjoint by
                 # design and don't participate in this guard.
@@ -544,9 +544,7 @@ class SegmentAligner:
             actual_duration_ms=duration_ms,
             alignment_method="checkpoint",
             needs_review=False,
-            dubbing_mode=normalize_dubbing_mode(
-                getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
-            ),
+            dubbing_mode=normalize_dubbing_mode(segment.dubbing_mode),
         )
 
     @staticmethod
@@ -557,7 +555,7 @@ class SegmentAligner:
         alignment.  If that input is newer than the aligned wav, the path-based
         checkpoint is stale even though the aligned file is non-empty.
         """
-        raw_path_value = (getattr(segment, "tts_audio_path", None) or "").strip()
+        raw_path_value = (segment.tts_audio_path or "").strip()
         if not raw_path_value:
             return True
         raw_path = Path(raw_path_value).resolve(strict=False)
@@ -633,7 +631,7 @@ class SegmentAligner:
         segment.first_pass_error_pct = (
             (current_actual_duration_ms - target_duration_ms) / target_duration_ms
         )
-        pre_tts_direction = (getattr(segment, "pre_tts_rewrite_direction", "") or "").lower()
+        pre_tts_direction = (segment.pre_tts_rewrite_direction or "").lower()
         if pre_tts_direction:
             segment.pre_tts_post_tts_first_pass_ms = current_actual_duration_ms
             error_pct = segment.first_pass_error_pct
@@ -761,7 +759,7 @@ class SegmentAligner:
         segment.alignment_method = alignment_method
         segment.needs_review = needs_review
         segment.pre_tts_harmful_contradiction = (
-            bool(getattr(segment, "pre_tts_contradiction", False))
+            bool(segment.pre_tts_contradiction)
             and self._is_pre_tts_contradiction_harmful(
                 alignment_method=alignment_method,
                 needs_review=needs_review,
@@ -780,7 +778,7 @@ class SegmentAligner:
             actual_duration_ms=aligned_duration_ms,
             alignment_method=alignment_method,
             needs_review=needs_review,
-            dubbing_mode=normalize_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)),
+            dubbing_mode=normalize_dubbing_mode(segment.dubbing_mode),
         )
 
     def _attempt_rewrite_loop(
