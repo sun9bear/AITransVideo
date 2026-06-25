@@ -44,7 +44,8 @@ if (Have "mypy") {
 
 Write-Host "==> [4/4] 新增 .py 阻断 + 改动既有 .py report-only (决定退出码；与 CI python-lint 对齐)"
 if (Have "ruff") {
-  git fetch -q origin ($Base -replace '^origin/', '') --depth=1 2>$null
+  # 不主动 fetch：shallow 仓库里 `git fetch --depth=1` 会把当前分支 tip graft 进
+  # .git/shallow 污染共享仓库（曾致 push 不完整）。直接用本地已有 origin/main ref。
   # 本地普通分支 checkout：三点 diff（merge-base）取 PR 净改动。只对【新增】文件阻断
   # （无历史债）；【改动既有】文件仅报告，不拿历史债卡退出码。
   $added = @(git diff --name-only --diff-filter=A "$Base...HEAD" -- '*.py' 2>$null | Where-Object { $_ })

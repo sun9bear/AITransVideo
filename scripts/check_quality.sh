@@ -46,7 +46,9 @@ fi
 
 echo "==> [4/4] 新增 .py 阻断 + 改动既有 .py report-only (决定退出码；与 CI python-lint 对齐)"
 if have ruff; then
-  git fetch -q origin "${BASE#origin/}" --depth=1 2>/dev/null || true
+  # 不主动 fetch：在 shallow 仓库里 `git fetch --depth=1` 会重算 shallow 边界、把当前
+  # 分支 tip 也 graft 进 .git/shallow，污染共享仓库（曾导致 push 不完整）。直接用本地
+  # 已有的 origin/main ref；需要最新 base 时由开发者自行 fetch。
   # 本地是普通分支 checkout（非 PR merge ref），用三点 diff（merge-base）取 PR 净改动。
   # 只对【新增】文件阻断（无历史债）；【改动既有】文件仅报告，不拿历史债卡退出码。
   ADDED="$(git diff --name-only --diff-filter=A "${BASE}...HEAD" -- '*.py' 2>/dev/null | tr '\n' ' ')"
