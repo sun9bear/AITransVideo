@@ -625,7 +625,7 @@ class TTSGenerator:
                 # PR-E re-CodeX P2: drive language-aware selection in the main path.
                 target_language=segment.target_language,
                 target_chars_per_second=(
-                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                    float(segment.target_chars_per_second) or None
                 ),
             ))
             # PR-E re-CodeX P2: a fail_closed match must actually abort — returning the
@@ -664,7 +664,7 @@ class TTSGenerator:
             from services.tts.speed_decision import decide_tts_speed
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
@@ -813,7 +813,7 @@ class TTSGenerator:
             from services.tts.speed_decision import decide_tts_speed
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # 与 legacy 一致：speed_decision 异常不阻塞 TTS
@@ -856,7 +856,7 @@ class TTSGenerator:
             voice_id=voice_id,
             text=tts_text,
             speech_rate=effective_speed,
-            target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0) or None,
+            target_duration_ms=int(segment.target_duration_ms or 0) or None,
             text_hash=compute_text_hash(tts_text),
         )
         batch_req = WorkerSynthesizeBatchRequest(
@@ -1058,7 +1058,7 @@ class TTSGenerator:
                 # PR-E re-CodeX P2: drive language-aware selection in the main path.
                 target_language=segment.target_language,
                 target_chars_per_second=(
-                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                    float(segment.target_chars_per_second) or None
                 ),
             ))
             # PR-E re-CodeX P2: a fail_closed match must abort, not synthesize the
@@ -1101,7 +1101,7 @@ class TTSGenerator:
             )
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
@@ -1543,7 +1543,7 @@ class TTSGenerator:
                 voice_description=segment.voice_description,
                 target_language=segment.target_language,
                 target_chars_per_second=(
-                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                    float(segment.target_chars_per_second) or None
                 ),
             ))
             mm_voice = match_result.voice_id
@@ -1582,7 +1582,7 @@ class TTSGenerator:
             from services.tts.speed_decision import decide_tts_speed
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
