@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server"
 import { SealStamp } from "./seal-stamp"
 import { HeroSamplePlayer } from "./hero-sample-player"
 import { AnonymousTrialLauncher } from "./anonymous-trial-launcher"
@@ -29,7 +30,8 @@ import { loadFeaturedDemos } from "./featured-demos-data"
  *     page meaning. The text card guarantees legibility over either half of the
  *     painting.
  */
-export function Hero() {
+export async function Hero() {
+  const t = await getTranslations("marketing.hero")
   const demos = loadFeaturedDemos()
   const hasDemos = demos.length > 0
 
@@ -62,16 +64,16 @@ export function Hero() {
               visually below the player on mobile and to the left on desktop. */}
           <div className="order-2 lg:order-1 lg:col-span-5 rounded-md bg-[rgba(245,240,230,0.95)] p-6 sm:p-7 md:bg-[rgba(245,240,230,0.92)] md:p-8 backdrop-blur-[2px] shadow-[0_8px_40px_-20px_rgba(26,26,26,0.18)]">
             <p className="ink-heading text-xs sm:text-sm uppercase tracking-[0.25em] text-[color:var(--cinnabar)]">
-              爱译视频 · AITrans.Video
+              {t("eyebrow")}
             </p>
 
             <h1
               className="ink-display mt-4 text-4xl leading-tight text-foreground sm:text-5xl lg:text-5xl xl:text-6xl"
               style={{ letterSpacing: "-0.01em" }}
             >
-              让世界视频，
-              <br className="hidden sm:block" />
-              开口说中文
+              {t.rich("title", {
+                br: () => <br className="hidden sm:block" />,
+              })}
             </h1>
 
             <div
@@ -81,7 +83,7 @@ export function Hero() {
             />
 
             <p className="zh-body-lg mt-6 max-w-xl text-foreground/80">
-              把英文长视频变成可发布的中文配音版。免注册先预览效果——前 3 分钟中文配音，满意再注册下载、生成完整视频。
+              {t("lead")}
             </p>
 
             <div className="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
@@ -90,13 +92,13 @@ export function Hero() {
                 href="#pricing"
                 className="inline-flex items-center gap-1 text-sm font-medium text-foreground/80 transition-colors hover:text-foreground"
               >
-                查看套餐价格
+                {t("ctaPricing")}
                 <span aria-hidden="true">→</span>
               </a>
             </div>
 
             <p className="mt-5 text-xs text-foreground/55">
-              免注册试用 · 英文转中文 · 失败不计费 · 支持长视频
+              {t("trustLine")}
             </p>
           </div>
 
@@ -106,9 +108,11 @@ export function Hero() {
             <div className="order-1 lg:order-2 lg:col-span-7">
               <HeroSamplePlayer demos={demos} />
               <p className="mt-3 hidden text-xs text-foreground/70 lg:block">
-                鼠标移到画面上自动播放，点左上角{" "}
-                <span className="font-medium text-foreground/85">开启声音</span> 试听；右上角切换{" "}
-                <span className="font-medium text-foreground/85">英文原片 / 中文配音</span> 对比。
+                {t.rich("playerHint", {
+                  strong: (chunks) => (
+                    <span className="font-medium text-foreground/85">{chunks}</span>
+                  ),
+                })}
               </p>
             </div>
           ) : null}

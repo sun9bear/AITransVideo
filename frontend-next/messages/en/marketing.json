@@ -60,6 +60,85 @@
       }
     ]
   },
+  "hero": {
+    "eyebrow": "AITrans.Video",
+    "title": "Make the world's videos<br></br>speak Chinese",
+    "lead": "Turn long English videos into publish-ready Chinese dubbed versions. Preview the result before signing up — the first 3 minutes Chinese-dubbed, then register to download and generate the full video once you're happy.",
+    "ctaPricing": "See plans & pricing",
+    "trustLine": "No sign-up to try · English to Chinese · No charge on failure · Long videos supported",
+    "playerHint": "Hover over the frame to autoplay, click the top-left <strong>Sound on</strong> to listen; switch <strong>English original / Chinese dub</strong> at the top right to compare."
+  },
+  "pricing": {
+    "eyebrow": "Pricing",
+    "heading": "AI translation & dubbing that's affordable for long videos",
+    "lead": "From a solo trial to high-volume team production, pick the plan with the processing capacity you actually need. No card required to try, no charge on failed jobs, and editing a segment never means re-running the whole video."
+  },
+  "pricingGrid": {
+    "unitMonthly": "/ mo",
+    "unitQuarterly": "/ qtr",
+    "unitAnnual": "/ yr",
+    "free": "Free",
+    "popular": "Most popular",
+    "emptyState": "Plan information is temporarily unavailable. Please try again later.",
+    "subtitleFree": "For solo creators testing the waters and small projects",
+    "subtitlePlus": "For independent creators with steady output",
+    "subtitlePro": "For high-volume teams and studios",
+    "benefitMaxDuration": "Up to {minutes} minutes per video",
+    "benefitConcurrency": "Up to {jobs} jobs processed in parallel",
+    "benefitGrantWithMinutes": "{credits} processing credits per month (about {expMin} min Express / {studioMin} min Studio standard)",
+    "benefitGrantOnly": "{credits} processing credits per month",
+    "benefitGrantQualitative": "Includes a monthly processing allowance, billed by actual video duration",
+    "benefitExpress": "Express fast mode",
+    "benefitStudio": "Studio fine-tuning mode (with human review)",
+    "benefitFreeQuota": "{quota} free job allowance"
+  },
+  "pricingAssurance": {
+    "eyebrow": "What you buy & how it activates",
+    "heading": "You're buying in-account video processing capacity and digital deliverables",
+    "lead": "AITrans.Video is an online digital service. After payment, you can create translation jobs in your account, review past projects, download deliverables, and continue human review. Different plans unlock processing duration, concurrency, workbench mode, and download access.",
+    "paymentChannelNote": "Payment methods follow what's shown on the in-app checkout page. Once payment succeeds, the corresponding plan benefits or processing allowance are issued to your current account automatically.",
+    "deliverables": [
+      "Dubbed video",
+      "Dubbed audio",
+      "Subtitles / materials pack",
+      "Jianying draft project",
+      "Human review workbench",
+      "Incremental regeneration"
+    ],
+    "settlementTitle": "Settlement rules",
+    "afterTitle": "What you get after activation",
+    "rules": [
+      "Benefits are issued to your logged-in account automatically — no manual activation needed.",
+      "No automatic charge when the trial ends; upgrading is always your decision.",
+      "Payment methods follow the checkout page; activation is confirmed only after payment succeeds."
+    ],
+    "previewTitle": "Review before you buy",
+    "linkTrial": "Free trial details",
+    "linkRefund": "Refund Policy",
+    "linkContact": "Contact support"
+  },
+  "trialBanner": {
+    "eyebrow": "Free trial",
+    "heading": "No card required — try it first, then decide",
+    "descriptionWithNumbers": "Sign up to get a {days}-day trial with {minutes} minutes of source-video allowance{studio}. No automatic charge when the trial ends, and your account info and purchased credits are kept indefinitely.",
+    "descriptionFallback": "Sign up for a free trial and verify the alignment quality and dubbing naturalness yourself. No automatic charge when the trial ends, and your account info and purchased credits are kept indefinitely.",
+    "studioSuffix": " plus Studio fine-tuning mode",
+    "cta": "See trial details"
+  },
+  "trial": {
+    "badge": "No card required",
+    "heading": "Try it free first, then decide whether to upgrade",
+    "leadWithNumbers": "Sign up to get a {days}-day trial with {minutes} minutes of source-video allowance{studio}. Verify the alignment quality and dubbing naturalness yourself. No automatic charge when the trial ends, and your account info and purchased credits are kept too.",
+    "leadFallback": "Sign up for a free trial. Verify the alignment quality and dubbing naturalness yourself. No automatic charge when the trial ends, and your account info and purchased credits are kept too.",
+    "studioSuffix": " plus Studio fine-tuning mode",
+    "asideLabel": "Start the trial",
+    "asideTitle": "Get started",
+    "asideDescription": "Create an account to view and claim your trial allowance — the whole thing takes under a minute.",
+    "asidePricingLink": "Check pricing first",
+    "asideNote1": "· No payment method required",
+    "asideNote2": "· No automatic charge when the trial ends",
+    "asideNote3": "· Account info and purchased credits always kept"
+  },
   "faq": {
     "eyebrow": "FAQ",
     "heading": "You might be wondering",

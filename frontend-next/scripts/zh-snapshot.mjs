@@ -131,6 +131,64 @@ assert.equal(
   "marketing.faq.general[0].q 漂移（全角问号）",
 )
 
+// 4b) UI-03b 内联重文案（hero / pricing / trial）默认 zh 字节一致（红线 R1）：
+//     这些是转化关键文案，标点/全半角/破折号/空格最易被"修正"。任一漂移即 red =
+//     默认 zh 渲染回归。下面钉死代表性串：
+//   - hero.title 用 next-intl rich-text <br></br> 标签（不得退回字面 <br> 或换行）
+//   - hero.lead 用全角破折号 ——（U+2014 ×2，不得改连字符）+ 间隔号无关
+//   - hero.trustLine / playerHint 用间隔号 ·（U+00B7）与全角斜杠分隔
+//   - pricingGrid 单位用全角斜杠+空格"/ 月"；额度模板用全角括号（约 …）
+//   - trialBanner / trial 的 {studio} 占位紧贴"额度"与"。"之间（无多余空格），
+//     与改造前 `${... ? "与 Studio 精校模式" : ""}。` 拼接逐字节一致
+assert.equal(zhMkt.hero.eyebrow, "爱译视频 · AITrans.Video", "marketing.hero.eyebrow 间隔号漂移")
+assert.equal(zhMkt.hero.title, "让世界视频，<br></br>开口说中文", "marketing.hero.title rich-text <br> 标签漂移")
+assert.equal(
+  zhMkt.hero.lead,
+  "把英文长视频变成可发布的中文配音版。免注册先预览效果——前 3 分钟中文配音，满意再注册下载、生成完整视频。",
+  "marketing.hero.lead 全角破折号/标点漂移",
+)
+assert.equal(
+  zhMkt.hero.trustLine,
+  "免注册试用 · 英文转中文 · 失败不计费 · 支持长视频",
+  "marketing.hero.trustLine 间隔号漂移",
+)
+assert.equal(
+  zhMkt.hero.playerHint,
+  "鼠标移到画面上自动播放，点左上角 <strong>开启声音</strong> 试听；右上角切换 <strong>英文原片 / 中文配音</strong> 对比。",
+  "marketing.hero.playerHint rich-text/空白漂移",
+)
+assert.equal(zhMkt.pricingGrid.unitMonthly, "/ 月", "marketing.pricingGrid.unitMonthly 全角斜杠/空格漂移")
+assert.equal(
+  zhMkt.pricingGrid.benefitGrantWithMinutes,
+  "每月 {credits} 点处理额度（约 {expMin} 分钟 Express / {studioMin} 分钟 Studio 标准）",
+  "marketing.pricingGrid.benefitGrantWithMinutes 全角括号/占位符漂移",
+)
+assert.equal(zhMkt.pricingGrid.benefitStudio, "Studio 精校模式（支持人工复核）", "marketing.pricingGrid.benefitStudio 全角括号漂移")
+assert.equal(
+  zhMkt.trialBanner.descriptionWithNumbers,
+  "注册即享 {days} 天试用，含 {minutes} 分钟源视频额度{studio}。试用结束不会自动扣费，你的账户信息和已购点数会一直保留。",
+  "marketing.trialBanner.descriptionWithNumbers {studio} 占位/标点漂移",
+)
+assert.equal(zhMkt.trialBanner.studioSuffix, "与 Studio 精校模式", "marketing.trialBanner.studioSuffix 漂移")
+assert.equal(
+  zhMkt.trial.leadWithNumbers,
+  "注册即享 {days} 天试用，含 {minutes} 分钟源视频额度{studio}。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，账户信息和已购点数也会保留下来。",
+  "marketing.trial.leadWithNumbers {studio} 占位/标点漂移",
+)
+assert.equal(zhMkt.trial.asideNote1, "· 无需绑定支付方式", "marketing.trial.asideNote1 间隔号漂移")
+// pricingAssurance：lead 的两段中文之间是【单空格】（JSX 折叠换行+缩进的等价渲染），
+// 不得回退成换行/多空格；paymentChannelNote 是 company-info 移交到 03b 消费点的字典化值
+assert.equal(
+  zhMkt.pricingAssurance.lead,
+  "AITrans.Video 为在线数字化服务。用户完成支付后，可在账户内创建翻译任务、查看历史项目、下载交付结果并继续人工复核。 不同套餐解锁的是处理时长、并发能力、工作台模式和下载权限。",
+  "marketing.pricingAssurance.lead 折叠空格/标点漂移",
+)
+assert.equal(
+  zhMkt.pricingAssurance.paymentChannelNote,
+  "付款方式以站内结算页展示为准，支付成功后，相应套餐权益或处理额度会自动发放至当前账户。",
+  "marketing.pricingAssurance.paymentChannelNote 漂移（company-info 移交值）",
+)
+
 // 5) seo 默认 zh 字节一致：site 级标题/描述与 site.ts 顶层常量同源同值（红线 1）
 const zhSeo = JSON.parse(readFileSync(path.join(root, "messages/zh/seo.json"), "utf8"))
 assert.equal(zhSeo.site.name, "爱译视频", "seo.site.name 漂移")

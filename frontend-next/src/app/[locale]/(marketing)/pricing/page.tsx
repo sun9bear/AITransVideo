@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import { getTranslations } from "next-intl/server"
 import { PricingGrid } from "@/components/marketing/pricing-grid"
 import { PricingAssurance } from "@/components/marketing/pricing-assurance"
 import { TrialBanner } from "@/components/marketing/trial-banner"
@@ -37,7 +38,8 @@ export const metadata: Metadata = {
  * All numeric facts come from the gateway truth source. There are no hardcoded
  * prices, minutes, concurrency limits, or quotas in this file.
  */
-export default function PricingPage() {
+export default async function PricingPage() {
+  const t = await getTranslations("marketing.pricing")
   return (
     <>
       <BreadcrumbJsonLd
@@ -49,13 +51,13 @@ export default function PricingPage() {
       <section className="marketing-reading-surface pt-16 pb-10 sm:pt-20 sm:pb-12">
         <div className="mx-auto max-w-3xl px-4 text-center sm:px-6 lg:px-8">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-            定价
+            {t("eyebrow")}
           </p>
           <h1 className="ink-display mt-3 text-4xl tracking-tight text-foreground sm:text-5xl">
-            长视频也用得起的 AI 翻译配音
+            {t("heading")}
           </h1>
           <p className="mt-5 zh-body-lg text-muted-foreground">
-            从个人试用到团队高频生产，按你真正需要的处理能力选择套餐。试用无需绑卡，任务失败不计费，修改片段不必重跑全片。
+            {t("lead")}
           </p>
         </div>
       </section>
