@@ -129,14 +129,7 @@ def _is_volcengine_voice_resource_mismatch(exc: Exception) -> bool:
 
 
 class JobRecordLike(Protocol):
-    """tts_generator 访问的 job_record 字段子集（结构型子类型 / TS-07）。
-
-    job_record 在流水线里有两种形态：``dict``（JSON 快照反序列化）或
-    runtime 的 JobRecord ORM 对象。tts_generator 位于 ``src/services/tts/``，
-    不能 import gateway 的 ORM 类（跨层 + 循环依赖），故用 Protocol 表达
-    "具备这些字段" 的契约，而非继承。仅列常读字段，不强求穷尽——
-    ``_read_job_field`` 通过动态 getattr 读取任意 key。
-    """
+    """job_record 结构型子类型（TS-07）：dict（JSON 快照）或 JobRecord ORM；不 import gateway ORM 避跨层循环依赖，仅列常读字段，_read_job_field 动态读任意 key。"""
 
     job_id: str
     tts_model: str | None
