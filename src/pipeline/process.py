@@ -2925,10 +2925,6 @@ class ProcessPipeline:
         self.project_builder = project_builder or ProjectBuilder()
 
     def run(self, config: ProcessConfig) -> ProcessResult:
-        # TU-08: emit structured audit logs at runtime — pipeline runs via
-        # ``main.py process`` (subprocess, no logging config → root=WARNING drops INFO).
-        if not logging.getLogger().handlers:
-            logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
         # Commit copy_as_new / overwrite routes here with
         # resume_from='alignment' to skip S0-S3 (D28). All context the
         # alignment+publish block needs is rebuilt from the project_dir
