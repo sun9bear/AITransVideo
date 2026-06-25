@@ -92,12 +92,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # 24：与 uiloc 守卫脚本（zh-snapshot 运行时 import site.ts 依赖原生 type-stripping）
+          # 一致，避免浮动 "22" 在 <22.18 上无 strip-types 而 ERR（多 lens 复审）。
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend-next/package-lock.json
       - run: npm ci
       - run: npm run lint
       - run: npx tsc --noEmit
+      # UI-locale (uiloc) 守卫（append，与 TU-03 脚手架并存）：key 对齐 / 默认 zh
+      # 字节一致 / 禁新增内联 CJK。cjk-guard 读已提交的 scripts/cjk-baseline.json（只阻断
+      # 新增、不需 git 浅 fetch），故无 shallow-repo footgun。见 uiloc 方案 §5 / UI-01。
+      - name: UI-locale guards (key-parity / zh-snapshot / cjk-guard)
+        run: |
+          npm run uiloc:key-parity
+          npm run uiloc:zh-snapshot
+          npm run uiloc:cjk-guard
 
   # ---------------------------------------------------------------------------
   # TU-03 质量护栏脚手架（2026-06-25）。首周一律不把历史 lint/type 债或全量

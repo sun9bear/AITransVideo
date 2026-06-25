@@ -31,3 +31,13 @@ repos:
         # 历史 type 债不在本单元清理（交 TU-07），首周报告即可。
         files: ^src/core/|^src/utils/|^gateway/storage/|^src/services/llm
         additional_dependencies: ["pydantic>=2.11", "pydantic-settings>=2.9"]
+  # UI-locale (uiloc) CJK 守卫（append；opt-in，同 TU-03 约定不强制 install）。
+  # 禁止 frontend-next/src 新增内联 CJK 字面量（读已提交 baseline，只阻断新增）。
+  - repo: local
+    hooks:
+      - id: uiloc-cjk-guard
+        name: uiloc CJK guard (禁新增内联 CJK)
+        entry: bash -c 'cd frontend-next && npm run uiloc:cjk-guard'
+        language: system
+        files: ^frontend-next/src/.*\.(tsx?|jsx?|mjs)$
+        pass_filenames: false

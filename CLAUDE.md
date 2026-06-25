@@ -368,7 +368,7 @@ commit 管线（alignment / publish 阶段代码）**永不**调用 `tts_generat
 
 ## Key Conventions
 
-- 所有 UI 文本和沟通用中文
+- 所有 UI 文本经本地化层（next-intl message catalog）产出；**zh-CN 是默认/源 locale**；新 UI 串必须是 message key，**不得**新写内联 CJK 字面量（由回归守卫 `frontend-next` 的 `uiloc:cjk-guard` 强制，见 [`docs/plans/2026-06-25-ui-page-locale-switch-plan.md`](docs/plans/2026-06-25-ui-page-locale-switch-plan.md) §5）。沟通/文档默认仍用中文。（界面语言切换=UI page locale，与产品 `target_language` 配音轴正交，勿混。）
 - Next.js 16 + React 19 + TypeScript strict + Tailwind v4 + shadcn/ui
 - API client is a thin `fetch` wrapper — no axios, no react-query
 - 响应式设计：桌面 + 手机 web 通用

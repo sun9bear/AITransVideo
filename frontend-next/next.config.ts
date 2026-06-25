@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import createNextIntlPlugin from "next-intl/plugin";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -49,4 +50,9 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+// next-intl plugin：注入 src/i18n/request.ts 作为 getRequestConfig 来源。
+// 只包裹导出，不触碰 output:'standalone' / rewrites()（no-blanket-rewrite guard 由
+// tests/test_phase42_e1_next_config_no_blanket_rewrite.py 守护）。
+const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
+
+export default withNextIntl(nextConfig);
