@@ -123,7 +123,9 @@ jobs:
           FILES=""
           if [ -n "$BASE" ]; then
             git fetch origin "$BASE" || true
-            FILES=$(git diff --name-only "origin/$BASE...HEAD" -- '*.py' | tr '\n' ' ')
+            # --diff-filter=ACMR：只取 Added/Copied/Modified/Renamed（去掉 Deleted），
+            # 否则被删 .py 的路径会进 $FILES，ruff 对不存在的文件 E902 退出 → 误阻断纯删除 PR。
+            FILES=$(git diff --name-only --diff-filter=ACMR "origin/$BASE...HEAD" -- '*.py' | tr '\n' ' ')
           fi
           if [ -n "${FILES// /}" ]; then
             echo "Changed .py files: $FILES"
@@ -170,9 +172,21 @@ jobs:
       - uses: actions/checkout@v4
       - name: File-size ratchet (新文件 ≤800；白名单文件不许超过基线行数)
         run: |
-          python - <<'PY'
-          import json, pathlib, sys
-          BASELINE = json.load(open("tools/file_size_baseline.json", encoding="utf-8"))
+          # 防同一 PR 同时撑大文件并抬高其基线 cap（自我授权绕过）：优先用 base ref 的基线
+          # 衡量当前行数。base ref 没有该文件（如本 PR 首次引入基线）或非 PR 事件 → 回退到
+          # 当前 checkout 的基线（fail-open 到本地基线，避免基础设施抖动误阻断）。
+          BASE="${{ github.base_ref }}"
+          BASELINE_FILE=tools/file_size_baseline.json
+          if [ -n "$BASE" ]; then
+            git fetch origin "$BASE" --depth=1 || true
+            if git show "origin/$BASE:tools/file_size_baseline.json" > /tmp/base_baseline.json 2>/dev/null; then
+              BASELINE_FILE=/tmp/base_baseline.json
+            fi
+          fi
+          echo "Using baseline: $BASELINE_FILE"
+          BASELINE_FILE="$BASELINE_FILE" python - <<'PY'
+          import json, os, pathlib, sys
+          BASELINE = json.load(open(os.environ["BASELINE_FILE"], encoding="utf-8"))
           targets = list(pathlib.Path("src").rglob("*.py")) + list(pathlib.Path("gateway").rglob("*.py")) + [pathlib.Path("main.py")]
           viol = []
           for p in targets:
@@ -182,7 +196,7 @@ jobs:
               if n > cap:
                   viol.append((rel, n, cap))
           if viol:
-              print("File exceeds size budget (new file >800, or whitelisted file grew past baseline):")
+              print("File exceeds size budget (new file >800, or whitelisted file grew past base-branch baseline):")
               for f, n, cap in viol:
                   print(f"  {f}: {n} > {cap}")
               sys.exit(1)

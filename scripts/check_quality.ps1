@@ -45,7 +45,8 @@ if (Have "mypy") {
 Write-Host "==> [4/4] changed-files ruff (阻断口径，决定退出码)"
 if (Have "ruff") {
   git fetch -q origin ($Base -replace '^origin/', '') --depth=1 2>$null
-  $files = @(git diff --name-only "$Base...HEAD" -- '*.py' 2>$null | Where-Object { $_ })
+  # --diff-filter=ACMR 去掉 Deleted，避免 ruff 对被删文件 E902（与 CI python-lint 对齐）。
+  $files = @(git diff --name-only --diff-filter=ACMR "$Base...HEAD" -- '*.py' 2>$null | Where-Object { $_ })
   if ($files.Count -gt 0) {
     Write-Host ("  改动 .py 文件: " + ($files -join " "))
     ruff check @files --output-format=concise; if ($LASTEXITCODE -ne 0) { $fail = 1 }

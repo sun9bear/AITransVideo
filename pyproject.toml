@@ -71,7 +71,10 @@ exclude = ["gateway/alembic/", "\\.codex_worktrees/", "\\.claude/", "\\.codex_tm
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "-p no:cacheprovider"
+# 默认排除 slow / real_provider / benchmark（§10.4 + DoD）：这些 mark 的语义本就是
+# 「默认不跑」。当前三类 mark 标注 0 个测试，故 collection 不变（实测 8687）；
+# 需要时显式 -m 覆盖（如 full-suite job 的 inline -m 追加 postgres）。
+addopts = "-p no:cacheprovider -m 'not slow and not real_provider and not benchmark'"
 markers = [
     "unit: 纯函数/小模块",
     "contract: API/schema/status/path parity 契约",

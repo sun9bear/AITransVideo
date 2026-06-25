@@ -47,7 +47,8 @@ fi
 echo "==> [4/4] changed-files ruff (阻断口径，决定退出码)"
 if have ruff; then
   git fetch -q origin "${BASE#origin/}" --depth=1 2>/dev/null || true
-  FILES="$(git diff --name-only "${BASE}...HEAD" -- '*.py' 2>/dev/null | tr '\n' ' ')"
+  # --diff-filter=ACMR 去掉 Deleted，避免 ruff 对被删文件 E902（与 CI python-lint 对齐）。
+  FILES="$(git diff --name-only --diff-filter=ACMR "${BASE}...HEAD" -- '*.py' 2>/dev/null | tr '\n' ' ')"
   if [ -n "${FILES// /}" ]; then
     echo "  改动 .py 文件: $FILES"
     ruff check $FILES --output-format=concise || fail=1
