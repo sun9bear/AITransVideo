@@ -4,9 +4,9 @@
 
 当前图谱基线：
 
-- GitNexus 索引提交：`ecadcb9f`
-- 索引时间：`2026-06-16T11:36:00+08:00`
-- 统计概览：`1737` 文件，`32,849` 节点，`76,841` 关系，`1353` 聚类，`300` 条流程
+- GitNexus 索引提交：`7ed503b`
+- 索引时间：`2026-06-24T15:12:21+08:00`
+- 统计概览：`1750` 文件，`32,892` 节点，`77,420` 关系，`1369` 聚类，`300` 条流程
 
 ## 本轮更新重点
 
@@ -18,6 +18,10 @@
 - 编辑面新增 bulk replace：post-edit 可做批量文本替换，仍要通过编辑态同步、commit 与交付物失效边界。
 - Admin/Ops 新增 APF、chunked upload、Smart preview clone、payment reconciliation、rotating logs/watchdog 等运维面。
 - 旧 Free tier、Express auto-clone、R2/Pan、Smart analytics 图谱保留，并补上与匿名预览和 Smart preview 的新边界。
+- Service mode rollout 从单一 Smart kill switch 扩展为 Express / Studio / Free / Smart 的运行时可见入口控制，`entitlements.py` 与 create-job gate 共用同一套 Gateway 真源。
+- Job list/get 读路径补上 metadata snapshot + rollback 保护，并显式用 `settle_smart_clone=False` 避免读接口触发 Smart Preview clone settlement。
+- YouTube ingestion 针对 403/Forbidden 默认流失败新增 HLS fallback，归入工作流输入可靠性而不是下游 TTS/对齐问题。
+- Payment order reconciliation 进入带 `last_reconciled_at` 的可重扫模型，便于多 provider 状态漂移补偿。
 
 ## 使用顺序
 
@@ -32,17 +36,17 @@
 9. 想看 review gate、speaker edits、candidate-first voice selection、Smart handoff、Smart 决策摘要，读 [GITNEXUS_REVIEW_GRAPH.md](./GITNEXUS_REVIEW_GRAPH.md)
 10. 想看 Smart/Studio 修改入口、editing speakers、split-many、智能切点、bulk replace、segment regenerate、batch re-TTS、overwrite / copy-as-new，读 [GITNEXUS_EDITING_POST_EDIT_GRAPH.md](./GITNEXUS_EDITING_POST_EDIT_GRAPH.md)
 11. 想看 `publish.dubbed_video`、`materials_pack`、`editor.jianying_draft_zip`、R2 registry、lazy fallback、sweeper、parity cleanup、anonymous preview stream-only，读 [GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md](./GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md)
-12. 想看 pricing / trial / phone auth / email auth / Smart / Smart Preview / Express / Free entitlement truth / Paddle / WeChat / payment reconciliation / CSRF，读 [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)
+12. 想看 pricing / trial / phone auth / email auth / Smart / Smart Preview / Express / Free entitlement truth / service-mode rollout / Paddle / WeChat / payment reconciliation / CSRF，读 [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)
 13. 想看免费档入口、voice-rights consent、日配额、MiMo voiceclone、时长限制、水印和下载限制，读 [GITNEXUS_FREE_TIER_GRAPH.md](./GITNEXUS_FREE_TIER_GRAPH.md)
 14. 想看帮助中心、客服浮窗、通知中心、系统公告、新注册用户 live 分发与支持面 CSRF/polling，读 [GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md](./GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md)
-15. 想看 admin settings、APF、chunked upload、Smart preview clone caps、Smart voice policy、Smart analytics、report analysis、mainland worker health、Express reservation/cleanup、payment reconciliation、CSRF、polling governance、voice calibration、cost management、admin disk resize、cleanup、R2 sweeper 与 parity 运维面，读 [GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md](./GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md)
+15. 想看 admin settings、service-mode rollout、APF、chunked upload、Smart preview clone caps、Smart voice policy、Smart analytics、report analysis、mainland worker health、Express reservation/cleanup、payment reconciliation、Job list/get rollback、YouTube HLS fallback、CSRF、polling governance、voice calibration、cost management、admin disk resize、cleanup、R2 sweeper 与 parity 运维面，读 [GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md](./GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md)
 16. 想看 `UsageMeter`、voice clone/reuse/rejection audit、Smart preview 600 点 offset、RMB-direct pricing、MiMo v2.5/voiceclone usage/cost、Smart analytics、Phase 1a/1b reports、Smart sidecar、worker billed chars、`smart_shadow_eval / sim`、quality / cost / margin，读 [GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md](./GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md)
 17. 想看百度网盘备份、归档/恢复、BackupRecord 状态机、Pan schedulers、pan.* observability，读 [GITNEXUS_PAN_BACKUP_GRAPH.md](./GITNEXUS_PAN_BACKUP_GRAPH.md)
 
 ## 文件说明
 
 - [GITNEXUS_PROJECT_GRAPH.md](./GITNEXUS_PROJECT_GRAPH.md)：项目总图。适合第一次进入仓库时快速建立“前门 / Gateway / Job API / Workflow / Smart / Review / Editing / Delivery / Ops”整体结构。
-- [GITNEXUS_WORKFLOW_CORE_GRAPH.md](./GITNEXUS_WORKFLOW_CORE_GRAPH.md)：工作流内核图。聚焦 `SemanticBlock`、DSP-first 对齐、Smart inline branch、candidate-first voice policy、voice_id 传播、paid fallback、cue pipeline、deliverable-time whisper sidecar 与 Phase 1a/1b report sidecars。
+- [GITNEXUS_WORKFLOW_CORE_GRAPH.md](./GITNEXUS_WORKFLOW_CORE_GRAPH.md)：工作流内核图。聚焦 `SemanticBlock`、DSP-first 对齐、Smart inline branch、candidate-first voice policy、voice_id 传播、YouTube HLS fallback、paid fallback、cue pipeline、deliverable-time whisper sidecar 与 Phase 1a/1b report sidecars。
 - [GITNEXUS_COSYVOICE_MAINLAND_WORKER_GRAPH.md](./GITNEXUS_COSYVOICE_MAINLAND_WORKER_GRAPH.md)：CosyVoice / Mainland Worker 图。聚焦用户显式 clone、clone-gate、source_segments 样本拼接、OSS/R2 uploader、HMAC worker、worker routing、`requires_worker` TTS dispatch 与付费 API fail-closed 边界。
 - [GITNEXUS_EXPRESS_COSYVOICE_AUTO_CLONE_GRAPH.md](./GITNEXUS_EXPRESS_COSYVOICE_AUTO_CLONE_GRAPH.md)：Express CosyVoice Auto-Clone 图。聚焦快捷版 availability、consent、atomic reservation、pipeline 自动克隆、临时音色入库、TTL reservation 回收、到期临时音色 cleanup 和手动 CLI。
 - [GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md](./GITNEXUS_SMART_AUTO_REVIEW_GRAPH.md)：Smart 自动审核图。聚焦 deterministic eligibility、consent、translation review、candidate-first voice reuse/clone/preset orchestration、P5 possible-match auto-reuse、quota/balance exhaustion、handoff、quality report、cost summary。
@@ -52,10 +56,10 @@
 - [GITNEXUS_REVIEW_GRAPH.md](./GITNEXUS_REVIEW_GRAPH.md)：审核流图。聚焦 `WorkspacePage`、review gate、translation/voice panels、candidate-first voice selection、Smart handoff 后重新进入 Studio，以及 Smart 决策摘要面板。
 - [GITNEXUS_EDITING_POST_EDIT_GRAPH.md](./GITNEXUS_EDITING_POST_EDIT_GRAPH.md)：编辑 / 后处理图。聚焦 Smart/Studio 修改入口、editing speakers registry、SegmentRow / ops panel、multi-cut split、智能切点、bulk replace、single/batch re-TTS、克隆/复用音色、`editing_audio_sync_required`、overwrite/copy-as-new、交付物失效。
 - [GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md](./GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md)：存储与交付图。聚焦 `materials_pack`、`editor.jianying_draft_zip`、`r2_artifacts`、anonymous preview stream-only、`r2_artifact_sweeper`、`job_terminal_mirror`、R2 parity cleanup。
-- [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)：商业化图。聚焦 Gateway plan truth、套餐事实、trial、Paddle/WeChat 支付、billing reconciliation、fake payment production gate、CSRF、phone/email auth 前门、Smart fixed price 与 entitlements。
+- [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)：商业化图。聚焦 Gateway plan truth、套餐事实、trial、Paddle/WeChat 支付、billing reconciliation、fake payment production gate、CSRF、phone/email auth 前门、Smart fixed price、service-mode rollout 与 entitlements。
 - [GITNEXUS_FREE_TIER_GRAPH.md](./GITNEXUS_FREE_TIER_GRAPH.md)：Free Tier 图。聚焦 `service_mode=free`、feature flag、voice-rights consent、daily quota ledger、MiMo voiceclone、paid API guard、10 分钟上限、水印与下载限制。
 - [GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md](./GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md)：支持 / 通知图。聚焦帮助中心、客服会话、通知中心、popup feed、系统公告、人工接管、支持面 CSRF 与 visibility-aware polling。
-- [GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md](./GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md)：Admin / Ops / Calibration 图。聚焦 alignment / whisper settings、APF/chunked upload settings、Smart LLM model config、Smart voice policy、Smart analytics、report analysis、Phase 1b flags、payment reconciliation、logs/watchdog、CSRF、polling governance、voice calibration、traffic / cost / cleanup、admin disk cleanup/resize、R2 sweeper / parity / observability。
+- [GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md](./GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md)：Admin / Ops / Calibration 图。聚焦 alignment / whisper settings、service-mode rollout、APF/chunked upload settings、Smart LLM model config、Smart voice policy、Smart analytics、report analysis、Phase 1b flags、payment reconciliation、Job list/get rollback、YouTube HLS fallback、logs/watchdog、CSRF、polling governance、voice calibration、traffic / cost / cleanup、admin disk cleanup/resize、R2 sweeper / parity / observability。
 - [GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md](./GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md)：质量与成本图。聚焦 `UsageMeter`、attempt 级事件、Smart sidecar、Smart analytics、Phase 1a/1b reports、voice reuse/clone/rejection metering、APF usage、payment reconciliation、RMB-direct LLM pricing、edit audit、shadow eval/sim、quality / cost 报告。
 - [GITNEXUS_PAN_BACKUP_GRAPH.md](./GITNEXUS_PAN_BACKUP_GRAPH.md)：网盘备份图。聚焦 admin pan API、Baidu OAuth、BackgroundTask、BackupRecord、backup/restore 状态机、rollback archive attempt、scheduler、residue cleanup、stale reaper、pan.* observability 与通知。
 

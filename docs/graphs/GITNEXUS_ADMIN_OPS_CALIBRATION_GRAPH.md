@@ -9,12 +9,15 @@
 - alignment / whisper / paid fallback settings
 - Smart prompt model settings
 - Smart voice candidate / clone / weak-match policy settings
+- Service mode rollout switches for Express / Studio / Free / Smart
 - CosyVoice clone 灰度、GA、max voices、sample uploader 与 mainland worker health
 - Express CosyVoice 自动克隆 admin 主开关、allowlist、reservation TTL、临时音色 cleanup 与手动 CLI
 - Free tier feature flag、free voiceclone kill switch、daily quota ledger 与 launch-gate 诊断
 - Anonymous Preview APF caps、claim switch、direct/chunked upload knobs 与匿名 TTL 诊断
 - Smart Preview clone 主开关、600 点 reservation caps、strict reservation gate 与 sweeper
 - Paddle / WeChat payment provider reconciliation、refund closure 与 fake payment guard
+- Job list/get metadata snapshot、rollback 与 read-path no-settlement guard
+- YouTube downloader 403/Forbidden HLS fallback 诊断
 - rotating logs、process runner watchdog 与任务 terminal mirror 诊断
 - MiMo v2.5 / MiMo TTS promotional pricing / provider usage capture 的成本诊断
 - Smart analytics、report analysis 与 Phase 1b rollout flags
@@ -51,6 +54,7 @@ graph TD
     Settings --> AlignPolicy["force_dsp_alignment + paid_fallback"]
     Settings --> WhisperPolicy["whisper policy fields"]
     Settings --> PromptModels["prompt_models studio/express/smart"]
+    Settings --> ServiceModePolicy["service-mode rollout switches"]
     Settings --> SmartVoicePolicy["smart_auto_clone / reuse / auto_reuse_possible / pause_on_possible"]
     Settings --> CosyVoicePolicy["cosyvoice clone allowlist / GA / worker / max voices"]
     Settings --> ExpressPolicy["express auto-clone enabled / allowlist / caps / TTL"]
@@ -60,6 +64,9 @@ graph TD
     Settings --> SmartPreviewPolicy["smart preview clone caps / reservation strict gate"]
     Settings --> Phase1BFlags["phase1b report flags"]
     PromptModels --> LLMRegistry["llm_registry mode defaults + admin override"]
+    ServiceModePolicy --> Entitlements["get_runtime_enabled_service_modes"]
+    Entitlements --> CreateGate["job_intercept service_mode_offline"]
+    ServiceModePolicy --> AdminSettingsUI["admin settings service-mode cards"]
     SmartVoicePolicy --> SmartRuntime["process.py read_admin_setting"]
     CosyVoicePolicy --> CloneGate["/api/voice/cosyvoice/clone-gate"]
     ExpressPolicy --> ExpressAvailability["/api/me/express-auto-clone-availability"]
@@ -107,6 +114,9 @@ graph TD
     Mirror --> SmartState["smart_state mirror"]
     Mirror --> Settle["credit/quota settle"]
     Mirror --> SmartCloneSettle["smart preview clone settle"]
+    JobReadApi["job list/get read path"] --> ReadMirrorGuard["metadata snapshot + rollback"]
+    ReadMirrorGuard --> ReadNoSmartCloneSettle["settle_smart_clone=false"]
+    ReadNoSmartCloneSettle --> Mirror
     SmartCloneSettle --> SmartCloneReservation
     Settle --> Backfill["cost_summary_backfill.py"]
     Backfill --> CostFile["audit/smart_cost_summary.json"]
@@ -149,6 +159,8 @@ graph TD
     Security --> FakePaymentGate["fake payment dev/test default"]
     PollingGov["usePollingTask + visibility-aware admin heartbeat"] --> AdminUI
     Logs["rotating_log + process runner watchdog"] --> AdminUI
+    IngestionOps["ingestion reliability"] --> YouTubeHLS["YouTube 403/Forbidden HLS fallback"]
+    YouTubeHLS --> Logs
     PanAdmin --> PanStatus["status / quota / credentials"]
     PanAdmin --> PanBackups["backup list / manifest / restore / delete"]
     PanAdmin --> PanBatch["single + batch backup enqueue"]
@@ -166,6 +178,7 @@ graph TD
     Categories --> AdminUI
     CostRows --> AdminUI
     AdminDecision --> AdminUI
+    AdminSettingsUI --> AdminUI
 ```
 
 ## 3. 当前最重要的控制面变化
@@ -390,6 +403,32 @@ graph TD
 
 结论：真实支付 provider 增多后，admin 排障应同时看 provider callback、reconciliation、ledger 和 fake-payment production guard。
 
+### 3.25 Service mode rollout 是运营入口闸，不是前端展示开关
+
+- `gateway/admin_settings.py` 的 `service_mode_express_enabled / service_mode_free_enabled / service_mode_studio_enabled` 控制 Express、Free、Studio 是否在线；Smart 继续由 `AVT_ENABLE_SMART_MODE` 和 `smart_mode_enabled` 双层控制。
+- `gateway/entitlements.py::get_runtime_enabled_service_modes(...)` 是 runtime online modes 真源，`get_effective_allowed_service_modes(...)` 再叠加用户套餐。
+- `gateway/job_intercept.py` 的 create path 会对 offline 的 `express / studio / free` 返回 `service_mode_offline`，避免只靠前端隐藏卡片。
+- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露 rollout 卡片，便于 ops 做可见入口灰度或临时下线。
+
+结论：排查“为什么某服务模式不可选或创建 403”时，先看 env + admin rollout，再看 plan entitlement。
+
+### 3.26 Job list/get 读路径必须保持 side-effect-light
+
+- `gateway/job_intercept.py` 在 list/get 路径对 job metadata 做 snapshot，mirror hook 失败后 rollback，并用 snapshot 防止 ORM instance 过期导致响应缺字段。
+- list/get 调用 `mirror_job_terminal_state(..., settle_smart_clone=False)`，避免刷新列表或详情时触发 Smart Preview clone capture/release。
+- `gateway/job_terminal_mirror.py` 的 terminal settlement 默认仍保留，读路径只是显式关闭 Smart clone settlement 副作用。
+- `tests/test_gateway_list_jobs_metadata.py` 覆盖 rollback、metadata fallback、get/list mirror 和 `settle_smart_clone=False`。
+
+结论：读接口可以修正展示态，但不能把结算副作用偷偷带进用户刷新页面的路径。
+
+### 3.27 YouTube 403/Forbidden HLS fallback 属于输入可靠性诊断
+
+- `src/modules/ingestion/youtube/downloader.py` 默认下载流遇到 403 或 Forbidden 时，会用 HLS 格式表达式再试一次。
+- fallback label 为 `:hls_fallback`，日志与测试可以区分默认格式失败和 HLS 兜底。
+- `tests/test_youtube_downloader.py` 覆盖该行为，排查 YouTube 任务失败时应先看 downloader 层错误和 fallback 是否触发。
+
+结论：YouTube 源下载失败的首要排查面是 ingestion/downloader，不是转写、翻译、TTS 或对齐。
+
 ## 4. 关键证据
 
 - `gateway/admin_disk_api.py`
@@ -469,6 +508,7 @@ graph TD
 - `gateway/credits_service.py`
   - Smart credits policy dispatcher
 - `gateway/admin_settings.py`
+  - service-mode rollout switches
   - prompt model settings
   - Smart voice policy settings
   - CosyVoice clone rollout settings
@@ -492,6 +532,24 @@ graph TD
   - Smart clone reservation expiry sweeper
 - `gateway/billing_reconciliation.py`
   - provider/payment state reconciliation
+  - last_reconciled_at retry ordering
+- `gateway/models.py`
+  - payment order last_reconciled_at index
+- `gateway/alembic/versions/041_payment_order_last_reconciled_at.py`
+  - payment order reconciliation schema alignment
+- `gateway/entitlements.py`
+  - runtime service-mode rollout
+  - effective allowed service modes
+- `gateway/job_intercept.py`
+  - create service_mode offline gate
+  - list/get metadata snapshot and rollback
+  - read-path `settle_smart_clone=False`
+- `tests/test_gateway_list_jobs_metadata.py`
+  - read-path rollback and no-settlement coverage
+- `src/modules/ingestion/youtube/downloader.py`
+  - YouTube 403/Forbidden HLS fallback
+- `tests/test_youtube_downloader.py`
+  - HLS fallback regression coverage
 - `gateway/payment_provider_paddle.py`
   - Paddle provider integration
 - `gateway/payment_provider_wechat.py`
@@ -539,6 +597,7 @@ graph TD
 - 想排查 Smart 成本摘要、settlement backfill、admin cost page
 - 想改 voice calibration 行为或入口
 - 想排查 Smart prompt model 为什么选了某个模型
+- 想排查 Express / Studio / Free / Smart 为什么入口不可见或创建时返回 `service_mode_offline`
 - 想排查 Smart voice policy 为什么允许/禁止复用、克隆或弱匹配暂停
 - 想排查 P5 possible-match 为什么自动复用或没有暂停
 - 想排查 Smart clone quota / match / register-smart / UserVoice mirror
@@ -548,6 +607,8 @@ graph TD
 - 想排查 Anonymous Preview APF 限流、claim 开关、chunked upload TTL、磁盘水位或匿名上传失败
 - 想排查 Smart Preview clone cap、600 点 reservation、carryover、sweeper 或 terminal settle
 - 想排查 Paddle / WeChat 支付状态、refund closure、billing reconciliation 或 fake payment 生产门禁
+- 想排查 job list/get 刷新后 metadata 丢失、terminal mirror rollback 或读接口是否错误触发 Smart clone settlement
+- 想排查 YouTube 403/Forbidden 下载失败是否已经尝试 HLS fallback
 - 想排查 MiMo v2.5、MiMo TTS promotional rate、真实 provider usage 与 admin cost 明细
 - 想看 Smart analytics、report analysis、Phase 1b flags 为什么显示某个统计或开关状态
 - 想排查 CSRF 403、生产启动 safety guard、fake payment 被禁用

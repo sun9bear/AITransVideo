@@ -15,6 +15,7 @@
 - preview-only clone charge 与 full-job minute offset
 - preview-to-full convert 不重复扣 600 点
 - sweeper / terminal mirror / cost summary
+- Job list/get read path must not settle clone reservation
 
 ## 2. 主图
 
@@ -48,6 +49,8 @@ graph TD
     TerminalMirror --> Settle["settle smart clone reservation"]
     Settle --> Capture
     Settle --> Release["release on terminal failure / no clone"]
+    JobReadPath["job list/get read path"] --> ReadNoSettle["settle_smart_clone=false"]
+    ReadNoSettle --> TerminalMirror
     Sweeper["smart_clone_reservation_sweeper"] --> ReservationRow
     AdminSettings["admin_settings caps"] --> AdminGate
     AdminSettings --> Sweeper
@@ -91,6 +94,14 @@ graph TD
 
 结论：Smart preview 是购买前决策面，不应被当作完整任务的低价替代。
 
+### 3.5 list/get 读路径不能触发 clone settlement
+
+- `gateway/job_intercept.py` 的 list/get 路径调用 `mirror_job_terminal_state(..., settle_smart_clone=False)`。
+- terminal mirror 与 sweeper 仍负责 Smart clone reservation 的 capture/release/expire；读路径只做展示态同步和 metadata 保护。
+- `tests/test_gateway_list_jobs_metadata.py` 覆盖 list/get 不触发 smart clone settlement，防止用户刷新页面时产生财务副作用。
+
+结论：Smart Preview clone 结算只应来自终态推进或补偿任务，不能来自列表/详情刷新。
+
 ## 4. 关键证据
 
 - `frontend-next/src/components/workspace/SmartPreviewConfirmDialog.tsx`
@@ -118,6 +129,11 @@ graph TD
   - preview minute release
 - `gateway/job_terminal_mirror.py`
   - terminal smart_state mirror and reservation settle
+- `gateway/job_intercept.py`
+  - list/get read-path `settle_smart_clone=False`
+  - metadata snapshot and rollback
+- `tests/test_gateway_list_jobs_metadata.py`
+  - read-path no-settlement coverage
 - `gateway/alembic/versions/037_smart_clone_reservations.py`
   - reservation table and billing event schema
 - `gateway/alembic/versions/038_smart_clone_created_at_index.py`
@@ -133,3 +149,4 @@ graph TD
 - 想改 preview-to-full，避免重复扣克隆点数
 - 想确认 Smart preview 为什么没有完整下载、剪映草稿或后编辑入口
 - 想排查 smart clone reservation sweeper、terminal settlement 或 cost summary
+- 想确认列表/详情刷新不会触发 Smart clone capture/release

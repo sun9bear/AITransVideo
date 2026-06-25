@@ -17,6 +17,7 @@
 - MiMo voiceclone usage/cost visibility for free tier
 - free=0 debit truth 与免费档 artifact/watermark observability
 - Smart Preview 600 点 clone reservation、preview minute release 与 full-job carryover offset
+- Job list/get read path explicitly disables Smart Preview clone settlement
 - Paddle / WeChat provider status、refund closure 与 billing reconciliation 观测
 - Smart sidecar trio
 - Smart handoff quality report synthesis
@@ -89,6 +90,8 @@ graph TD
     ReportAnalysis --> PhaseFlags["phase1b flags"]
 
     SmartState --> Settlement["credits_service smart credits_policy"]
+    JobReadPath["job list/get read path"] --> ReadNoSettle["settle_smart_clone=false"]
+    ReadNoSettle --> SettlementGuard["no capture/release from reads"]
     PaymentProviders["Paddle / WeChat providers"] --> BillingRecon["billing_reconciliation"]
     BillingRecon --> Settlement
     Settlement --> Backfill["cost_summary_backfill.py"]
@@ -315,9 +318,18 @@ graph TD
 
 - Paddle / WeChat provider status 可能异步到达，checkout 返回、callback、ledger 和订单状态可能短暂不一致。
 - `billing_reconciliation.py` 是补偿式状态收敛入口，适合分析支付漂移、refund closure 和重复通知。
+- `last_reconciled_at` 让订单可以按最久未检查优先重扫，失败或无结果的尝试也会 bump，避免同一批坏单长期占住队列。
 - fake payment 的 dev/test guard 不应进入真实支付成功率或退款率统计。
 
 结论：真实支付分析要把 provider events、reconciliation 结果和 Gateway ledger 连接起来看。
+
+### 3.22 Job read paths 不产生 Smart clone settlement
+
+- `gateway/job_intercept.py` 的 list/get 路径调用 `mirror_job_terminal_state(..., settle_smart_clone=False)`。
+- `gateway/job_terminal_mirror.py` 的 terminal settlement 默认仍能 capture/release Smart clone reservation；关闭 settlement 只作用于读接口。
+- `tests/test_gateway_list_jobs_metadata.py` 验证 list/get mirror rollback 后仍保留 metadata，并确认 read path 不触发 Smart clone settlement。
+
+结论：成本/结算分析不能把用户刷新列表或详情当成财务动作；Smart Preview clone capture/release 应来自 terminal path 或 sweeper。
 
 ## 4. 关键证据
 
@@ -331,6 +343,14 @@ graph TD
   - cost summary emit
   - retry summary aggregation
   - budget exhausted decision events
+- `gateway/job_intercept.py`
+  - list/get read-path `settle_smart_clone=False`
+  - metadata snapshot before rollback
+- `gateway/job_terminal_mirror.py`
+  - terminal settlement default path
+  - optional Smart clone reservation settlement
+- `tests/test_gateway_list_jobs_metadata.py`
+  - read-path no-settlement regression coverage
 - `src/services/usage_meter.py`
   - attempt-level usage
   - voice clone / voice reuse / voice candidate rejected metrics
@@ -431,6 +451,7 @@ graph TD
 - 想排查 MiMo v2.5 provider usage、MiMo TTS promotional rate 或 `mimo_omni` 迁移后的成本归因
 - 想排查 free=0 价格、MiMo voiceclone 内部消耗、水印重编码或 free artifact 限制
 - 想排查 Smart Preview 600 点 reservation、preview minute release、full-job carryover offset 或重复扣点
+- 想确认 job list/get 是否错误触发 Smart clone settlement
 - 想排查 Paddle / WeChat 支付漂移、refund closure 或 billing reconciliation
 - 想看 Smart analytics summary / CSV 的指标来源
 - 想排查 CosyVoice worker billed chars、worker_request_id 或 clone/TTS 成本归因

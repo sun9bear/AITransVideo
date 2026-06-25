@@ -15,6 +15,7 @@
 - Express 快捷版新增可选 CosyVoice 自动克隆分支，必须满足 availability、server-confirmed consent、admin gate、reservation cap 后才会调用 worker
 - Free tier 新增时长 fail-closed、MiMo voiceclone reference stamp、free watermark 与 restricted deliverables
 - Anonymous Preview 新增未登录 teaser lane：APF intake/admission 先行，pipeline 标记 `anonymous_preview` 后只产出 stream-only teaser
+- YouTube ingestion 在默认流 403 / Forbidden 时可回退 HLS format，再进入后续媒体理解链路
 - Phase 1a/1b reports 是 shadow-first 质量观测，不改变 `SemanticBlock` 和 DSP-first 主线
 - language registry / job language fields 是 workflow 的输入事实，前端不应自建第二套语言规则
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
@@ -34,7 +35,10 @@ graph TD
     Effective --> StudioMode["effective mode = studio"]
 
     Entry --> Ingestion["Input ingest"]
+    Ingestion --> YouTubeDownloader["YouTube downloader"]
+    YouTubeDownloader --> HLSFallback["403 / Forbidden HLS fallback"]
     Ingestion --> Media["Media understanding"]
+    HLSFallback --> Media
     Media --> Compliance["Content compliance"]
     Compliance --> Transcript["Transcript / speaker prep"]
     PreviewKind --> AnonymousPreviewLane["anonymous preview teaser lane"]
@@ -254,6 +258,14 @@ graph TD
 
 结论：Free tier 不是改变 block/TTS/alignment 基本模型，而是在 workflow 上加时长、reference、MiMo voiceclone 和水印的受控分支。
 
+### 3.13 YouTube HLS fallback 只属于输入可靠性
+
+- `src/modules/ingestion/youtube/downloader.py` 在默认格式遇到 403 / Forbidden 时，会用 HLS fallback format 再试一次。
+- fallback 只影响视频源下载选择，不改变 media understanding、transcript、`SemanticBlock`、TTS、alignment 或 cue pipeline。
+- `tests/test_youtube_downloader.py` 覆盖默认流 forbidden 后走 HLS fallback，防止后续误删兜底。
+
+结论：排查 YouTube 源失败时先看 ingestion/downloader；HLS 兜底成功后，后续仍回到同一条 workflow 主线。
+
 ## 4. 关键证据
 
 - `src/pipeline/process.py`
@@ -271,6 +283,11 @@ graph TD
   - `_register_smart_clone_in_user_voices`
   - `_emit_smart_quality_report`
   - `_emit_smart_cost_summary`
+- `src/modules/ingestion/youtube/downloader.py`
+  - default stream 403/Forbidden detection
+  - HLS fallback format and retry label
+- `tests/test_youtube_downloader.py`
+  - HLS fallback regression coverage
 - `src/services/admin_settings.py`
   - app-safe admin policy reads
 - `gateway/user_voice_api.py`
@@ -347,6 +364,7 @@ graph TD
 ## 5. 什么时候优先读这张图
 
 - 想改 `process.py` 主流水线
+- 想排查 YouTube 403/Forbidden 下载失败或 HLS fallback
 - 想改 anonymous preview teaser lane、Pass3 skip 或 preset-only 限制
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
 - 想改 anonymous preview 或 Smart preview 如何进入 teaser / convert-to-full

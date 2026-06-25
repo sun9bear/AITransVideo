@@ -1,6 +1,6 @@
 # GitNexus 项目图谱
 
-新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-06-16`
+新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-06-24`
 
 生成方式：基于 GitNexus 最新索引、Git 历史 diff 与源代码交叉整理。
 
@@ -8,12 +8,12 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1737 |
-| 节点数 | 32,849 |
-| 关系数 | 76,841 |
-| 聚类数 | 1353 |
+| 文件数 | 1750 |
+| 节点数 | 32,892 |
+| 关系数 | 77,420 |
+| 聚类数 | 1369 |
 | 流程数 | 300 |
-| 索引提交 | `ecadcb9f` |
+| 索引提交 | `7ed503b` |
 | 索引状态 | `up-to-date` |
 
 本轮最需要反映的结构变化：
@@ -25,18 +25,22 @@
 - 语言字段与 registry 进入 job/API/model：source/target language facts 由服务端暴露，前端消费 Gateway/API truth。
 - Post-edit 新增 bulk replace 能力，仍遵守编辑态同步、commit 与交付物失效边界。
 - Admin/Ops 同步 APF、chunked upload、Smart preview clone caps、payment reconciliation、rotating logs/watchdog 等运维入口。
+- Service mode rollout 从 Smart kill switch 扩展为 Express / Studio / Free / Smart 的运行时入口控制，Gateway entitlements 与 create-job gate 共享同一套事实。
+- Job list/get 读路径新增 metadata snapshot、失败 rollback 与 `settle_smart_clone=False`，避免读接口触发 Smart Preview clone settlement 或污染 ORM metadata。
+- YouTube downloader 针对 403 / Forbidden 默认流失败新增 HLS fallback，属于输入可靠性边界，不改变后续 `SemanticBlock`、TTS 和 DSP-first 对齐主线。
+- Payment order reconciliation 增加 `last_reconciled_at` 可重扫字段，让 Paddle / WeChat 多 provider 状态补偿更可观测。
 
 ## 2. 关键基座
 
 | 基座 | 当前主轴 | 代表文件 |
 | --- | --- | --- |
-| Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs`，Smart inline branch、Smart Preview lane、Express auto-clone gate、Anonymous Preview teaser 与 Free duration/voiceclone/watermark gate 都挂在受控流程中 | `src/pipeline/process.py`, `src/services/alignment/aligner.py`, `src/services/express/pipeline_clients.py`, `src/utils/free_duration_gate.py` |
+| Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs`，Smart inline branch、Smart Preview lane、Express auto-clone gate、Anonymous Preview teaser、Free duration/voiceclone/watermark gate 与 YouTube HLS fallback 都挂在受控流程中 | `src/pipeline/process.py`, `src/modules/ingestion/youtube/downloader.py`, `src/services/alignment/aligner.py`, `src/services/express/pipeline_clients.py`, `src/utils/free_duration_gate.py` |
 | Smart | deterministic auto-review, consent gate, admin policy, candidate-first reuse/clone/preset, sidecar audit, Studio handoff | `src/services/smart/*`, `src/services/smart_wiring.py`, `gateway/smart_consent.py`, `src/pipeline/process.py` |
 | Smart Reports | user quality report、admin cost summary、Smart analytics、Phase 1a/1b report analysis 分离 | `src/services/smart/sidecar_emitter.py`, `src/services/smart/quality_report_synthesizer.py`, `gateway/admin_cost_api.py`, `gateway/admin_smart_analytics_api.py` |
 | Review | `waiting_for_review -> WorkspacePage panels -> resume`，Smart handoff 复用 Studio gate，voice selection 支持 candidate-first clone/reuse | `src/services/review_state.py`, `src/services/jobs/review_actions.py`, `gateway/voice_selection_api.py` |
 | Editing | Smart/Studio `enter-edit -> editing speakers -> split-many / suggest-split -> bulk replace -> regenerate -> batch -> commit` | `src/services/jobs/editing_segments.py`, `src/services/jobs/editing_split_suggest.py`, `src/services/jobs/editing_bulk_replace.py`, `src/services/jobs/editing_batch.py`, `src/services/jobs/editing_commit.py` |
 | Delivery | `materials_pack / generate_video / editor.jianying_draft_zip / R2 registry / parity`，free 只暴露水印视频与 poster，anonymous preview 只暴露 stream-only teaser | `gateway/storage/backend_router.py`, `gateway/r2_artifact_sweeper.py`, `src/services/r2_publisher_lib/r2_parity.py`, `src/services/r2_publisher_lib/downloadable_keys.py` |
-| Commercialization | Gateway owns plan, trial, pricing, entitlement, Smart/Express/Free availability, consent, fixed price/free=0, Paddle/WeChat provider policy, reconciliation and production safety | `gateway/plan_catalog.py`, `gateway/entitlements.py`, `gateway/credits_service.py`, `gateway/job_intercept.py`, `gateway/payment_provider_paddle.py`, `gateway/payment_provider_wechat.py`, `gateway/billing_reconciliation.py`, `gateway/payment_providers.py`, `gateway/express_consent.py`, `gateway/free_consent.py` |
+| Commercialization | Gateway owns plan, trial, pricing, entitlement, Smart/Express/Studio/Free service-mode rollout, consent, fixed price/free=0, Paddle/WeChat provider policy, reconciliation and production safety | `gateway/plan_catalog.py`, `gateway/entitlements.py`, `gateway/admin_settings.py`, `gateway/credits_service.py`, `gateway/job_intercept.py`, `gateway/payment_provider_paddle.py`, `gateway/payment_provider_wechat.py`, `gateway/billing_reconciliation.py`, `gateway/payment_providers.py`, `gateway/express_consent.py`, `gateway/free_consent.py` |
 | Auth | phone + email registration, reset, session | `gateway/auth_phone.py`, `gateway/auth_email.py`, `frontend-next/src/components/auth/*` |
 | Security | CSRF same-origin guard, production env validation, fake payment production gate | `gateway/csrf.py`, `gateway/main.py`, `gateway/startup_checks.py`, `gateway/payment_providers.py` |
 | Calibration | manual / clone-after / review-preflight / Smart clone mirror / candidate matching / source metadata | `gateway/user_voice_api.py`, `gateway/user_voice_service.py`, `gateway/voice_calibration_hook.py`, `gateway/voice_calibration_review_preflight.py` |
@@ -48,8 +52,8 @@
 | Upload & Intake | direct upload, chunked upload, anonymous TTL, daily GB, disk floor, ready TTL, intake bridge into preview/create flows | `gateway/chunked_upload_api.py`, `gateway/chunked_upload_service.py`, `gateway/anonymous_preview_chunked_api.py`, `gateway/admin_settings.py`, `frontend-next/src/lib/upload/chunkedUpload.ts` |
 | Billing Providers | plan truth, Paddle MoR, WeChat Native, refund closure, reconciliation, fake payment production guard | `gateway/plan_catalog.py`, `gateway/payment_provider_paddle.py`, `gateway/payment_provider_wechat.py`, `gateway/billing_reconciliation.py`, `gateway/payment_providers.py`, `gateway/credits_service.py` |
 | Language Facts | source/target language registry, job language fields, language facts API, frontend consumer truth | `src/services/language_registry.py`, `gateway/alembic/versions/036_job_language_fields.py`, `src/services/jobs/api.py`, `frontend-next/src/lib/api/languages.ts` |
-| Admin/Ops | settings, APF/chunked upload/Smart preview clone caps, Smart LLM defaults, Smart voice policy, Smart analytics, report analysis, Phase 1b flags, traffic, support, cost, payment reconciliation, logs/watchdog, disk cleanup/resize, R2 sweeper, Express CosyVoice control/cleanup, free voiceclone kill switch | `gateway/admin_settings.py`, `src/services/llm_registry.py`, `gateway/admin_smart_analytics_api.py`, `gateway/admin_cosyvoice_control_api.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/billing_reconciliation.py`, `gateway/main.py` |
-| Metering & Settlement | `UsageMeter`, voice reuse/clone/rejection meter, Smart preview 600 credit offset, MiMo v2.5/voiceclone provider usage, RMB-direct/promotional/free pricing, Smart credits policy, terminal settle, cost backfill | `src/services/usage_meter.py`, `gateway/cost_management.py`, `gateway/credits_service.py`, `gateway/job_terminal_mirror.py`, `gateway/cost_summary_backfill.py`, `src/services/gemini/translator.py`, `src/services/transcript_reviewer.py`, `src/services/tts/mimo_tts_provider.py` |
+| Admin/Ops | settings, service-mode rollout, APF/chunked upload/Smart preview clone caps, Smart LLM defaults, Smart voice policy, Smart analytics, report analysis, Phase 1b flags, traffic, support, cost, payment reconciliation, Job list/get rollback diagnostics, YouTube HLS fallback, logs/watchdog, disk cleanup/resize, R2 sweeper, Express CosyVoice control/cleanup, free voiceclone kill switch | `gateway/admin_settings.py`, `gateway/entitlements.py`, `gateway/job_intercept.py`, `src/modules/ingestion/youtube/downloader.py`, `src/services/llm_registry.py`, `gateway/admin_smart_analytics_api.py`, `gateway/admin_cosyvoice_control_api.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/billing_reconciliation.py`, `gateway/main.py` |
+| Metering & Settlement | `UsageMeter`, voice reuse/clone/rejection meter, Smart preview 600 credit offset, MiMo v2.5/voiceclone provider usage, RMB-direct/promotional/free pricing, Smart credits policy, terminal settle, read-path no-settlement guard, cost backfill | `src/services/usage_meter.py`, `gateway/cost_management.py`, `gateway/credits_service.py`, `gateway/job_terminal_mirror.py`, `gateway/job_intercept.py`, `gateway/cost_summary_backfill.py`, `src/services/gemini/translator.py`, `src/services/transcript_reviewer.py`, `src/services/tts/mimo_tts_provider.py` |
 | Pan Backup | admin-only Baidu Pan archive/restore, BackupRecord state machine, schedulers, residue cleanup, observability | `gateway/pan/*`, `gateway/background_task_reconciler.py`, `frontend-next/src/lib/api/pan.ts`, `scripts/r2_observability.py` |
 | Offline Evaluation | `smart_shadow_eval / sim`, Phase 1a baseline, Phase 1b report summaries, quality/cost reports | `scripts/smart_shadow_eval_collector.py`, `scripts/smart_shadow_sim_aggregator.py`, `src/services/phase1b_report_summary.py` |
 
@@ -108,11 +112,16 @@ graph TD
     AuthFront --> Gateway
     FrontApi --> Gateway
     FrontApi --> JobApi["Job API / artifacts / tasks"]
+    JobApi --> ReadPathMirror["list/get mirror rollback guard"]
+    ReadPathMirror --> MetadataSnapshot["metadata snapshot before rollback"]
+    ReadPathMirror --> ReadNoSettle["settle_smart_clone=false on reads"]
 
     Gateway --> Billing["plan / trial / credits / payment"]
     Billing --> PaymentProviders["Paddle / WeChat / fake providers"]
     PaymentProviders --> BillingRecon["billing_reconciliation"]
     Gateway --> Entitlements["entitlements / allowed service modes"]
+    Entitlements --> ServiceModeRollout["runtime service-mode rollout"]
+    ServiceModeRollout --> TranslationForm
     Gateway --> AnonymousPreviewPlane["anonymous preview / claim / intake"]
     Gateway --> ChunkedUploadPlane["chunked upload control plane"]
     Gateway --> SmartPreviewClonePlane["smart clone reservation plane"]
@@ -145,9 +154,13 @@ graph TD
     JobApi --> Workflow["process.py / ProjectWorkflow"]
     AnonymousPreviewJob --> JobApi
     SmartPreviewClonePlane --> JobApi
+    ReadNoSettle --> SmartPreviewClonePlane
     SmartPreviewSurface --> SmartPreviewUI
     SmartPreviewUI --> SmartPreviewConvert["convert preview to full"]
     SmartPreviewConvert --> JobApi
+    Workflow --> YouTubeDownloader["YouTube downloader"]
+    YouTubeDownloader --> HLSFallback["403 / Forbidden HLS fallback"]
+    HLSFallback --> EffectiveMode["derive_effective_pipeline_mode"]
     Workflow --> EffectiveMode["derive_effective_pipeline_mode"]
     EffectiveMode --> SmartPlane["Smart auto review"]
     EffectiveMode --> StudioFlow["Studio review flow"]
@@ -508,6 +521,39 @@ graph TD
 - `src/services/jobs/editing_bulk_replace.py` 把批量替换纳入 post-edit 操作模型，仍要尊重编辑态同步、commit、audio sync 和交付物失效。
 
 结论：多语言和批量编辑都已经进入正式模型，后续任务要优先读语言 registry 与 editing 图，而不是只改前端文案。
+
+### 5.19 Service mode rollout 是 Gateway 运行时入口闸
+
+- `gateway/admin_settings.py` 新增 `service_mode_express_enabled / service_mode_free_enabled / service_mode_studio_enabled`，Smart 仍同时受 `AVT_ENABLE_SMART_MODE` 与 admin `smart_mode_enabled` 控制。
+- `gateway/entitlements.py::get_runtime_enabled_service_modes(...)` 先合并 env 与 admin rollout，再由 `get_effective_allowed_service_modes(...)` 按用户套餐过滤。
+- `gateway/job_intercept.py` 在 create path 对 `express / studio / free` 使用 runtime modes 返回 `service_mode_offline`，对 Smart 继续通过 effective allowed modes 返回 Smart-specific 禁用语义。
+- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露这些开关，文案说明关闭后既不展示入口，直接调用创建接口也会被拒绝。
+
+结论：服务模式是否可见、可创建，不再只看套餐 allowed modes；还要看 Gateway runtime rollout。
+
+### 5.20 Job list/get 是读路径，不应触发 Smart clone settlement
+
+- `gateway/job_intercept.py` 在 list/get merge terminal payload 前先 snapshot metadata，mirror 失败后 rollback，再用 snapshot 避免 ORM instance 过期导致响应 metadata 丢失。
+- `gateway/job_intercept.py` 的 list/get 调用 `mirror_job_terminal_state(..., settle_smart_clone=False)`，把读接口从 Smart Preview clone settlement 中隔离出来。
+- `gateway/job_terminal_mirror.py` 默认仍允许 terminal path settle Smart clone reservation；只有读路径显式关闭 settlement。
+- `tests/test_gateway_list_jobs_metadata.py` 覆盖 list/get mirror rollback、metadata fallback、以及 read path 不 settle smart clone 的行为。
+
+结论：读列表/详情可以补镜像和返回终态信息，但不能因为用户刷新页面就触发克隆扣点或释放。
+
+### 5.21 YouTube ingestion 增加 HLS fallback
+
+- `src/modules/ingestion/youtube/downloader.py` 在默认格式遇到 403 / Forbidden 时，会用 `best[protocol*=m3u8][ext=mp4]/best[protocol*=m3u8]/best` 再试一次。
+- fallback 使用 `:hls_fallback` retry label，便于日志和测试区分默认流失败与 HLS 兜底成功。
+- `tests/test_youtube_downloader.py` 覆盖默认流 forbidden 后走 HLS fallback。
+
+结论：YouTube 输入失败先看 downloader fallback 与网络/协议问题，不要直接归因到后续转写、TTS 或对齐链路。
+
+### 5.22 Payment reconciliation 进入可重扫订单模型
+
+- payment order schema 增加 `last_reconciled_at`，让 reconciliation 可以区分从未扫过、最近扫过和需要补偿重扫的订单。
+- 该字段属于 Gateway billing / reconciliation 事实，不应由前端或 provider callback 单独推导用户权益。
+
+结论：多 provider 支付上线后，订单状态修复是后台补偿模型，不是前端页面刷新时的即时推断。
 
 ## 6. 按任务选图
 

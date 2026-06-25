@@ -20,7 +20,7 @@
 - Free tier 的 feature flag、voice-rights consent、free=0 pricing、daily quota 与交付限制
 - 匿名预览试用、claim、convert-to-full 与正式付费任务边界
 - Paddle MoR、WeChat Native、refund closure、billing reconciliation
-- entitlements 与 allowed service modes
+- entitlements、runtime service-mode rollout 与 allowed service modes
 - trial 发放边界
 - fake payment production gate
 - CSRF same-origin guard for auth / billing / account state changes
@@ -68,8 +68,11 @@ graph TD
     Workspace["TranslationForm"] --> Entitlements["GET entitlements"]
     Workspace --> SmartPreview["Smart preview confirm/result"]
     Entitlements --> AllowedModes["allowed_service_modes"]
+    Entitlements --> RuntimeRollout["runtime service-mode rollout"]
+    AdminServiceModeRollout["admin service-mode rollout"] --> RuntimeRollout
+    RuntimeRollout --> AllowedModes
     Entitlements --> SmartKill["Smart kill switch env + admin"]
-    SmartKill --> AllowedModes
+    SmartKill --> RuntimeRollout
     AllowedModes --> Express["express"]
     AllowedModes --> Studio["studio"]
     AllowedModes --> Smart["smart"]
@@ -304,6 +307,15 @@ graph TD
 
 结论：多 provider 是接入层扩展，套餐、权益、支付状态和 ledger 仍由 Gateway 统一裁决。
 
+### 3.19 Service mode rollout 过滤套餐可见入口
+
+- `gateway/entitlements.py::get_runtime_enabled_service_modes(...)` 先计算全局在线服务模式，再由 `get_effective_allowed_service_modes(...)` 叠加用户套餐与 trial 事实。
+- Express、Studio、Free 由 `service_mode_express_enabled / service_mode_studio_enabled / service_mode_free_enabled` 控制；Smart 同时需要 `AVT_ENABLE_SMART_MODE` 与 admin `smart_mode_enabled`。
+- `gateway/job_intercept.py` create path 不只相信前端卡片隐藏：runtime offline 的 `express / studio / free` 会返回 `service_mode_offline`，Smart 继续用 Smart kill-switch 语义。
+- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露开关，文案明确关闭后入口不可见且直接调用创建接口也会被拒绝。
+
+结论：商业化入口的可售性 = 套餐 entitlement + runtime rollout；前端只能消费 Gateway 结果，不能把套餐表当最终可见入口。
+
 ## 4. 关键证据
 
 - `gateway/plan_catalog.py`
@@ -312,6 +324,7 @@ graph TD
 - `gateway/entitlements.py`
   - entitlement response
   - Smart kill switch allowed modes
+  - runtime service-mode rollout
   - Express auto-clone availability
   - Free allowed service mode
 - `gateway/credits_service.py`
@@ -321,6 +334,7 @@ graph TD
   - Smart create-job quota safety water mark
   - consent + admin clone gate for quota preflight
   - candidate rejection audit
+  - service_mode_offline create gate
 - `gateway/smart_consent.py`
   - Smart consent schema and allowed budget policy
   - `fail_and_refund` deferred blocker
@@ -345,6 +359,8 @@ graph TD
 - `gateway/billing_reconciliation.py`
   - payment status reconciliation
 - `gateway/admin_settings.py`
+  - service-mode rollout switches
+  - smart_mode_enabled runtime kill switch
   - Smart voice policy settings
   - Express CosyVoice auto-clone policy settings
   - Free voiceclone kill switch
@@ -399,7 +415,7 @@ graph TD
 ## 5. 什么时候优先读这张图
 
 - 想改 pricing / trial / billing truth
-- 想改 Smart 可售入口、Smart Preview、固定价、allowed service modes
+- 想改 Smart 可售入口、Smart Preview、固定价、service-mode rollout、allowed service modes
 - 想改匿名预览、claim、convert-to-full、anonymous preview 限流或 stream-only 边界
 - 想改 Express auto-clone availability、consent、allowlist、reservation cap 或临时音色 cleanup
 - 想改 Free tier 入口、free=0 pricing、voice-rights consent、daily quota 或免费交付限制
