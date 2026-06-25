@@ -41,6 +41,7 @@ WHAT IS CHECKED
 002.  To bootstrap the first admin:
     UPDATE users SET role='admin' WHERE email='your-admin@example.com';
 """
+
 from __future__ import annotations
 
 from fastapi import HTTPException

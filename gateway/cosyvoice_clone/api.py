@@ -100,7 +100,6 @@ from cosyvoice_clone.sample_assembler import (  # type: ignore[import-not-found]
     assemble_sample_from_job_segments,
 )
 from cosyvoice_clone.sample_validator import (
-    SampleValidationResult,
     validate_sample_bytes,
 )
 from database import get_db

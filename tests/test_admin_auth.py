@@ -1,14 +1,15 @@
 """Unit tests for gateway/admin_auth.py — the shared admin gate helper."""
+
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "gateway"))
 
-import pytest
 from unittest.mock import MagicMock
-from fastapi import HTTPException
 
-from admin_auth import is_admin, require_admin, _require_admin, _is_admin
+import pytest
+from admin_auth import _is_admin, _require_admin, is_admin, require_admin
+from fastapi import HTTPException
 
 
 def _make_user(role):
