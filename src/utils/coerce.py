@@ -5,6 +5,7 @@ All functions are pure (no I/O, no external calls). They consolidate the
 ``_coerce_optional_int`` micro-helpers that were duplicated across many
 modules (DRY audit finding; see docs/plans/code-quality-tasks/TU-06-...).
 """
+
 from __future__ import annotations
 
 __all__ = [
