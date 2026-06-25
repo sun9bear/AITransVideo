@@ -525,9 +525,13 @@ def test_cancel_writes_cancel_requested_flag(tmp_path: Path) -> None:
         time.sleep(0.3)
         output_path.write_bytes(b"W")
     task_id = start_regen_all_async(project_dir=project, tts_caller=_slow)
-    # Wait for status file to exist with stage=running OR starting.
+    # Wait until the worker is actually *inside* a segment (current_segment_id
+    # set → it is in the 0.3s _slow sleep), so the cancel write + read below do
+    # not race the worker's startup snapshots. The old `is not None` wait could
+    # fire on the early "starting"/initial snapshot and then be clobbered by the
+    # worker's running write — flaky ~40% on main independent of this change.
     _wait_until(
-        lambda: read_regen_all_status(project, task_id) is not None,
+        lambda: (read_regen_all_status(project, task_id) or {}).get("current_segment_id") is not None,
         timeout_s=1.0,
     )
     request_regen_all_cancel(project, task_id)

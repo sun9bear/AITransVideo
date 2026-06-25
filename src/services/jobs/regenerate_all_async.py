@@ -180,6 +180,28 @@ def _write_status(project_dir: Path, payload: dict[str, Any]) -> None:
     logger.warning("Failed to write regen status after retries: %s", last_exc)
 
 
+def _write_running_status(
+    project_dir: Path, task_id: str, payload: dict[str, Any],
+) -> None:
+    """Write a *running*-phase status snapshot while preserving a
+    concurrently-set ``cancel_requested=True``.
+
+    The per-segment "current" snapshot used to hardcode
+    ``cancel_requested=False``; a cancel arriving between the worker's
+    last cancel check and this write would be clobbered back to False and
+    silently lost (H3 / ASYNC-06). All running writes now go through here
+    so an in-flight cancel survives. Terminal writes (cancelled/completed)
+    set the flag explicitly and bypass this helper.
+
+    Still a read-modify-write, so a tiny TOCTOU window remains vs.
+    :func:`request_regen_all_cancel`; this shrinks it from a whole TTS call
+    (2-5s) to two adjacent JSON writes (~microseconds).
+    """
+    existing = _read_status_raw(project_dir, task_id) or {}
+    payload = {**payload, "cancel_requested": existing.get("cancel_requested") is True}
+    _write_status(project_dir, payload)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -369,8 +391,9 @@ def _run_batch(
         failures: list[dict[str, str]] = []
 
         # Initial running snapshot with known total.
-        _write_status(
+        _write_running_status(
             project_dir,
+            task_id,
             {
                 **_initial_status(task_id),
                 "stage": "running",
@@ -391,9 +414,12 @@ def _run_batch(
                 cancelled = True
                 break
 
-            # "Current" snapshot so the UI can show "正在重合成 seg_042"
-            _write_status(
+            # "Current" snapshot so the UI can show "正在重合成 seg_042".
+            # Routed through _write_running_status so a cancel that lands
+            # between the check above and this write isn't clobbered (H3).
+            _write_running_status(
                 project_dir,
+                task_id,
                 {
                     "task_id": task_id,
                     "stage": "running",
@@ -406,7 +432,6 @@ def _run_batch(
                     "current_segment_id": segment_id,
                     "result": None,
                     "error": None,
-                    "cancel_requested": False,
                     "updated_at": _utc_now_iso(),
                 },
             )
