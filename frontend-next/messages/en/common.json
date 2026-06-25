@@ -3,5 +3,12 @@
   "actions": {
     "confirm": "Confirm",
     "cancel": "Cancel"
+  },
+  "localeSwitcher": {
+    "groupLabel": "Switch interface language",
+    "ariaZh": "Switch to Chinese",
+    "ariaEn": "Switch to English",
+    "labelZh": "中",
+    "labelEn": "EN"
   }
 }

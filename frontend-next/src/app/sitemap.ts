@@ -25,5 +25,13 @@ import { absoluteUrl, publicRoutes } from "@/lib/seo/site"
 export default function sitemap(): MetadataRoute.Sitemap {
   return publicRoutes.map((path) => ({
     url: absoluteUrl(path),
+    // UI-02：locale-aware alternates 结构（INERT，仅 zh 自指，0 个 en URL）。
+    // `en` alternates 留给 UI-03 翻旗（Phase 1 Task 1.3）；此处只铺管线骨架，
+    // 让默认 zh sitemap 结构与未来 en 扩展兼容，对当前抓取零行为变化。
+    alternates: {
+      languages: {
+        "zh-Hans": absoluteUrl(path, "zh"),
+      },
+    },
   }))
 }

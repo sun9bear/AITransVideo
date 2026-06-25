@@ -1,7 +1,7 @@
 "use client"
 
-import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { Link } from "@/i18n/navigation"
+import { usePathname } from "@/i18n/navigation"
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
 import { SupportWidget } from "@/components/support/SupportWidget"
 import { AdminPresenceSwitcher } from "@/components/support/AdminPresenceSwitcher"
+import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher"
 import {
   NotificationBell,
   useNotificationUnreadCount,
@@ -423,6 +424,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-3">
+            <LocaleSwitcher />
             {/* Notification bell — visible to all logged-in users. Polls
                 unread count every 30s, flashes tab title when new
                 notification arrives in background tab. */}

@@ -1,4 +1,4 @@
-import Link from "next/link"
+import { Link } from "@/i18n/navigation"
 import { BrandLockup } from "./brand-mark"
 import { SUPPORT_EMAIL, SUPPORT_EMAIL_HREF } from "./company-info"
 
