@@ -1,6 +1,7 @@
 "use client"
 
 import { Suspense, useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { BrandMark } from "@/components/marketing/brand-mark"
 import { PasswordLoginForm } from "@/components/auth/password-login-form"
@@ -13,6 +14,7 @@ import { cn } from "@/lib/utils"
 type LoginMode = "password" | "phone"
 
 export default function LoginPage() {
+  const t = useTranslations("auth")
   const [mode, setMode] = useState<LoginMode>("password")
 
   return (
@@ -22,13 +24,13 @@ export default function LoginPage() {
           <BrandMark size={52} />
         </div>
         <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-          欢迎回来
+          {t("login.eyebrow")}
         </p>
         <h1 className="ink-display mt-2 text-3xl tracking-tight text-foreground sm:text-4xl">
-          登录 AITrans.Video
+          {t("login.title")}
         </h1>
         <p className="mt-3 zh-body text-sm text-muted-foreground">
-          {mode === "password" ? "使用手机号或邮箱和密码登录" : "使用手机号验证码登录"}
+          {mode === "password" ? t("login.subtitlePassword") : t("login.subtitlePhone")}
         </p>
       </div>
 
@@ -45,7 +47,7 @@ export default function LoginPage() {
                 : "text-muted-foreground hover:text-foreground",
             )}
           >
-            密码登录
+            {t("login.tabPassword")}
           </button>
           <button
             type="button"
@@ -57,7 +59,7 @@ export default function LoginPage() {
                 : "text-muted-foreground hover:text-foreground",
             )}
           >
-            验证码登录
+            {t("login.tabPhone")}
           </button>
         </div>
 
@@ -66,9 +68,9 @@ export default function LoginPage() {
         </Suspense>
 
         <div className="mt-6 border-t border-border pt-5 text-center text-sm text-muted-foreground">
-          还没有账号？
+          {t("login.noAccount")}
           <Link href="/auth" className="ml-1 text-primary hover:underline">
-            免费注册
+            {t("login.freeRegister")}
           </Link>
         </div>
       </div>

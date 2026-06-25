@@ -1,9 +1,4 @@
-"use client"
-
-import { Suspense } from "react"
-import { Link } from "@/i18n/navigation"
-import { BrandMark } from "@/components/marketing/brand-mark"
-import { RegisterMethodForm } from "@/components/auth/register-method-form"
+import { RegisterPageContent } from "@/components/auth/register-page-content"
 
 /**
  * Registration page at /auth — primary entry for "免费开始试用".
@@ -11,44 +6,5 @@ import { RegisterMethodForm } from "@/components/auth/register-method-form"
  * Existing users who verify phone are auto-logged in.
  */
 export default function RegisterPage() {
-  return (
-    <div className="w-full">
-      <div className="mb-6 flex items-center justify-between">
-        <Link href="/" className="inline-flex items-center" aria-label="AITrans.Video 首页">
-          <BrandMark size={44} />
-        </Link>
-        <Link
-          href="/auth/login"
-          className="inline-flex h-9 items-center justify-center rounded-lg border border-border bg-card px-3 text-sm font-medium text-foreground shadow-sm transition-colors hover:border-primary/50 hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-        >
-          登录
-        </Link>
-      </div>
-
-      <div className="mb-6 text-center sm:mb-8">
-        <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-          开始本地化
-        </p>
-        <h1 className="ink-display mt-2 text-3xl tracking-tight text-foreground sm:text-4xl">
-          注册 AITrans.Video
-        </h1>
-        <p className="mt-3 zh-body text-sm text-muted-foreground">
-          默认使用手机号注册，也可以切换邮箱注册
-        </p>
-      </div>
-
-      <div className="rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-8">
-        <Suspense fallback={null}>
-          <RegisterMethodForm />
-        </Suspense>
-
-        <div className="mt-6 border-t border-border pt-5 text-center text-sm text-muted-foreground">
-          已有账号？
-          <Link href="/auth/login" className="ml-1 text-primary hover:underline">
-            返回登录
-          </Link>
-        </div>
-      </div>
-    </div>
-  )
+  return <RegisterPageContent />
 }

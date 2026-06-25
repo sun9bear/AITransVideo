@@ -1,8 +1,19 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useLocale, useTranslations } from "next-intl"
 import { ShieldCheck, Check } from "lucide-react"
 import { cn } from "@/lib/utils"
+
+// GeeTest v4 / Cloudflare Turnstile language codes, driven by the active UI
+// locale (UI-04 Step 5.6) so an English form never embeds a Chinese widget.
+// locale is *read* from useLocale() — never a second <html lang> source (R5).
+function geetestLanguage(locale: string): string {
+  return locale === "en" ? "eng" : "zho"
+}
+function turnstileLanguage(locale: string): string {
+  return locale === "en" ? "en" : "zh-cn"
+}
 
 /**
  * Captcha gate component — supports GeeTest, Cloudflare Turnstile, and fake modes.
@@ -74,6 +85,7 @@ function getGeetestCaptchaId(scenario: CaptchaGateProps["scenario"]) {
 // ---------------------------------------------------------------------------
 
 function FakeCaptchaGate({ onVerify, verified, disabled, onReady }: CaptchaGateProps) {
+  const t = useTranslations("auth.captcha")
   const [loading, setLoading] = useState(false)
 
   const complete = useCallback(async () => {
@@ -121,10 +133,10 @@ function FakeCaptchaGate({ onVerify, verified, disabled, onReady }: CaptchaGateP
       <span className="flex items-center gap-1.5">
         <ShieldCheck className="h-4 w-4" aria-hidden="true" />
         {loading
-          ? "正在验证…"
+          ? t("loadingVerify")
           : verified
-            ? "已完成人机验证"
-            : "点击完成人机验证"}
+            ? t("verified")
+            : t("clickToComplete")}
       </span>
     </button>
   )
@@ -141,6 +153,17 @@ function GeeTestCaptchaGate({
   onReady,
   scenario = "register",
 }: CaptchaGateProps) {
+  const t = useTranslations("auth.captcha")
+  const locale = useLocale()
+  // Callbacks below live in stable useCallback closures; read the latest
+  // translator through a ref so a locale switch is reflected without
+  // re-creating the GeeTest widget (mirrors the existing onVerifyRef pattern).
+  const tRef = useRef(t)
+  // Read locale through a ref so the widget-init effect's dependency-driven
+  // lifecycle is unchanged (R5: locale is read, never a new lang source; the
+  // captcha render/destroy control flow stays byte-for-byte). A locale switch
+  // remounts the form (full-page URL nav), re-reading this at mount.
+  const localeRef = useRef(locale)
   const captchaRef = useRef<GeeTestCaptcha | null>(null)
   const onVerifyRef = useRef(onVerify)
   const pendingRef = useRef<{
@@ -152,12 +175,22 @@ function GeeTestCaptchaGate({
   const [ready, setReady] = useState(false)
   const [executing, setExecuting] = useState(false)
   const [error, setError] = useState<string | null>(
-    !captchaId ? "验证码配置缺失（NEXT_PUBLIC_GEETEST_*_CAPTCHA_ID 未设置）" : null,
+    !captchaId
+      ? t("configMissing", { var: "NEXT_PUBLIC_GEETEST_*_CAPTCHA_ID" })
+      : null,
   )
 
   useEffect(() => {
     onVerifyRef.current = onVerify
   }, [onVerify])
+
+  useEffect(() => {
+    tRef.current = t
+  }, [t])
+
+  useEffect(() => {
+    localeRef.current = locale
+  }, [locale])
 
   const clearPending = useCallback(() => {
     if (pendingRef.current) {
@@ -178,7 +211,7 @@ function GeeTestCaptchaGate({
 
   const resolveToken = useCallback((result: GeeTestValidateResult) => {
     if (!result || !result.lot_number || !result.captcha_output || !result.pass_token || !result.gen_time) {
-      rejectToken("人机验证结果不完整,请重试")
+      rejectToken(tRef.current("resultIncomplete"))
       return
     }
 
@@ -210,7 +243,7 @@ function GeeTestCaptchaGate({
         {
           captchaId,
           product: "bind",
-          language: "zho",
+          language: geetestLanguage(localeRef.current),
           timeout: 30000,
         },
         (captcha) => {
@@ -223,18 +256,18 @@ function GeeTestCaptchaGate({
             .onSuccess(() => {
               const result = captcha.getValidate()
               if (!result) {
-                rejectToken("人机验证未通过,请重试")
+                rejectToken(tRef.current("notPassed"))
                 return
               }
               resolveToken(result)
             })
             .onError((captchaError) => {
-              const message = captchaError?.msg || "人机验证加载失败,请重试"
+              const message = captchaError?.msg || tRef.current("loadFailed")
               rejectToken(message)
             })
             .onClose(() => {
               if (pendingRef.current) {
-                rejectToken("请先完成人机验证")
+                rejectToken(tRef.current("completeFirst"))
               }
             })
         },
@@ -250,7 +283,7 @@ function GeeTestCaptchaGate({
     script.src = "https://static.geetest.com/v4/gt4.js"
     script.async = true
     script.onload = init
-    script.onerror = () => setError("人机验证组件加载失败,请刷新重试")
+    script.onerror = () => setError(tRef.current("componentLoadFailed"))
     document.head.appendChild(script)
 
     return () => {
@@ -275,7 +308,7 @@ function GeeTestCaptchaGate({
 
   const executeChallenge = useCallback(() => {
     if (!captchaRef.current || !ready) {
-      return Promise.reject(new Error("人机验证仍在加载"))
+      return Promise.reject(new Error(tRef.current("stillLoading")))
     }
     setExecuting(true)
     setError(null)
@@ -285,13 +318,13 @@ function GeeTestCaptchaGate({
         resolve,
         reject,
         timeoutId: window.setTimeout(() => {
-          rejectToken("人机验证超时,请重试")
+          rejectToken(tRef.current("timeout"))
         }, 60000),
       }
       try {
         captchaRef.current?.showCaptcha()
       } catch {
-        rejectToken("人机验证启动失败,请重试")
+        rejectToken(tRef.current("startFailed"))
       }
     })
   }, [clearPending, ready, rejectToken])
@@ -325,7 +358,7 @@ function GeeTestCaptchaGate({
         >
           {verified ? <Check className="h-3.5 w-3.5" /> : <ShieldCheck className="h-3.5 w-3.5" />}
         </span>
-        <span>{verified ? "已完成人机验证" : ready ? "安全验证已就绪" : "正在加载人机验证"}</span>
+        <span>{verified ? t("verified") : ready ? t("ready") : t("loading")}</span>
       </div>
       {!verified && (
         <button
@@ -336,7 +369,7 @@ function GeeTestCaptchaGate({
           disabled={!ready || disabled || executing}
           className="mt-3 inline-flex h-9 w-full items-center justify-center rounded-md border border-primary/30 bg-primary/5 px-3 text-sm font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:border-border disabled:bg-muted/40 disabled:text-muted-foreground"
         >
-          {executing ? "验证中..." : ready ? "点击验证" : "加载中..."}
+          {executing ? t("verifying") : ready ? t("clickToVerify") : t("loadingShort")}
         </button>
       )}
       {error && !verified && (
@@ -347,7 +380,7 @@ function GeeTestCaptchaGate({
             onClick={resetChallenge}
             className="shrink-0 font-medium text-primary transition-colors hover:text-primary/80"
           >
-            重试
+            {t("retry")}
           </button>
         </div>
       )}
@@ -360,6 +393,12 @@ function GeeTestCaptchaGate({
 // ---------------------------------------------------------------------------
 
 function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: CaptchaGateProps) {
+  const t = useTranslations("auth.captcha")
+  const locale = useLocale()
+  const tRef = useRef(t)
+  // See GeeTest note: locale is read via a ref so the render effect's
+  // dependency-driven lifecycle stays unchanged (R5).
+  const localeRef = useRef(locale)
   const containerRef = useRef<HTMLDivElement>(null)
   const widgetIdRef = useRef<string | null>(null)
   const onVerifyRef = useRef(onVerify)
@@ -370,7 +409,7 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
   } | null>(null)
   const [error, setError] = useState<string | null>(
     !TURNSTILE_SITE_KEY
-      ? "验证码配置缺失（NEXT_PUBLIC_TURNSTILE_SITE_KEY 未设置）"
+      ? t("configMissing", { var: "NEXT_PUBLIC_TURNSTILE_SITE_KEY" })
       : null,
   )
   const [ready, setReady] = useState(false)
@@ -379,6 +418,14 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
   useEffect(() => {
     onVerifyRef.current = onVerify
   }, [onVerify])
+
+  useEffect(() => {
+    tRef.current = t
+  }, [t])
+
+  useEffect(() => {
+    localeRef.current = locale
+  }, [locale])
 
   const clearPending = useCallback(() => {
     if (pendingRef.current) {
@@ -418,7 +465,7 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
         widgetIdRef.current = window.turnstile.render(containerRef.current, {
           sitekey: TURNSTILE_SITE_KEY,
           theme: "light",
-          language: "zh-cn",
+          language: turnstileLanguage(localeRef.current),
           size: window.matchMedia("(max-width: 340px)").matches ? "compact" : "flexible",
           appearance: "always",
           execution: "execute",
@@ -428,22 +475,22 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
           "refresh-timeout": "auto",
           callback: (token: string) => resolveToken(token),
           "error-callback": () => {
-            rejectToken("人机验证未完成,请点击下方控件重试")
+            rejectToken(tRef.current("turnstileError"))
           },
           "expired-callback": () => {
-            rejectToken("人机验证已过期,请重新验证")
+            rejectToken(tRef.current("turnstileExpired"))
           },
           "timeout-callback": () => {
-            rejectToken("人机验证超时,请重试")
+            rejectToken(tRef.current("timeout"))
           },
           "unsupported-callback": () => {
-            rejectToken("当前浏览器不支持人机验证,请换用系统浏览器")
+            rejectToken(tRef.current("turnstileUnsupported"))
           },
         })
         setReady(true)
       } catch (e) {
         console.error("Turnstile render error:", e)
-        setError("验证码初始化失败,请刷新重试")
+        setError(tRef.current("turnstileInitFailed"))
       }
     }
 
@@ -457,7 +504,7 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
     script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
     script.async = true
     script.onload = () => renderWidget()
-    script.onerror = () => setError("验证码加载失败,请刷新重试")
+    script.onerror = () => setError(tRef.current("turnstileLoadFailed"))
     document.head.appendChild(script)
 
     return () => {
@@ -487,7 +534,7 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
 
   const executeChallenge = useCallback(() => {
     if (!widgetIdRef.current) {
-      return Promise.reject(new Error("人机验证仍在加载"))
+      return Promise.reject(new Error(tRef.current("stillLoading")))
     }
     setExecuting(true)
     setError(null)
@@ -497,14 +544,14 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
         resolve,
         reject,
         timeoutId: window.setTimeout(() => {
-          rejectToken("人机验证超时,请重试")
+          rejectToken(tRef.current("timeout"))
         }, 30000),
       }
       try {
         // @ts-expect-error — Turnstile global
         window.turnstile?.execute(widgetIdRef.current)
       } catch {
-        rejectToken("人机验证启动失败,请重试")
+        rejectToken(tRef.current("startFailed"))
       }
     })
   }, [clearPending, rejectToken])
@@ -538,7 +585,7 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
         >
           {verified ? <Check className="h-3.5 w-3.5" /> : <ShieldCheck className="h-3.5 w-3.5" />}
         </span>
-        <span>{verified ? "已完成人机验证" : ready ? "安全验证已就绪" : "正在加载人机验证"}</span>
+        <span>{verified ? t("verified") : ready ? t("ready") : t("loading")}</span>
       </div>
       <div
         data-turnstile-container="true"
@@ -558,7 +605,7 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
           disabled={!ready || disabled || executing}
           className="mt-3 inline-flex h-9 w-full items-center justify-center rounded-md border border-primary/30 bg-primary/5 px-3 text-sm font-medium text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:border-border disabled:bg-muted/40 disabled:text-muted-foreground"
         >
-          {executing ? "验证中..." : ready ? "点击验证" : "加载中..."}
+          {executing ? t("verifying") : ready ? t("clickToVerify") : t("loadingShort")}
         </button>
       )}
       {error && !verified && (
@@ -569,7 +616,7 @@ function TurnstileCaptchaGate({ onVerify, verified, disabled, onReady }: Captcha
             onClick={resetChallenge}
             className="shrink-0 font-medium text-primary transition-colors hover:text-primary/80"
           >
-            重试
+            {t("retry")}
           </button>
         </div>
       )}

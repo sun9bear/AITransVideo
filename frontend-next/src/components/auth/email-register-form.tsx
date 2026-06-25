@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useSearchParams } from "next/navigation"
+import { useLocale, useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { KeyRound, Lock, Mail, User } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -12,9 +13,13 @@ import { goToPostAuthRedirect, resolvePostAuthRedirect } from "@/lib/auth/post-a
 
 type Step = "email" | "code" | "password"
 
+const MIN_PASSWORD_LENGTH = 12
+
 export function EmailRegisterForm() {
+  const t = useTranslations("auth.emailForm")
+  const locale = useLocale()
   const searchParams = useSearchParams()
-  const redirectTo = resolvePostAuthRedirect(searchParams)
+  const redirectTo = resolvePostAuthRedirect(searchParams, locale)
   const [step, setStep] = useState<Step>("email")
   const [email, setEmail] = useState("")
   const [code, setCode] = useState("")
@@ -33,7 +38,7 @@ export function EmailRegisterForm() {
   const resolveCaptchaToken = async () => {
     if (captchaToken) return captchaToken
     if (!captchaChallenge) {
-      toast.error("人机验证仍在加载，请稍后再试")
+      toast.error(t("toastCaptchaLoading"))
       return null
     }
     setCaptchaExecuting(true)
@@ -42,7 +47,7 @@ export function EmailRegisterForm() {
       setCaptchaToken(token)
       return token
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "人机验证失败，请重试")
+      toast.error(error instanceof Error ? error.message : t("toastCaptchaFailed"))
       captchaChallenge.reset()
       return null
     } finally {
@@ -53,7 +58,7 @@ export function EmailRegisterForm() {
   const handleSendCode = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!emailLooksValid) {
-      toast.error("请输入正确的邮箱地址")
+      toast.error(t("toastInvalidEmail"))
       return
     }
     const token = await resolveCaptchaToken()
@@ -74,13 +79,13 @@ export function EmailRegisterForm() {
       if (!res.ok) {
         setCaptchaToken(null)
         captchaChallenge?.reset()
-        toast.error(data?.detail || "验证码发送失败")
+        toast.error(data?.detail || t("toastSendCodeFailed"))
         return
       }
-      toast.success("验证码已发送到邮箱")
+      toast.success(t("toastCodeSent"))
       setStep("code")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "网络错误，请重试")
+      toast.error(error instanceof Error ? error.message : t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -90,7 +95,7 @@ export function EmailRegisterForm() {
     e.preventDefault()
     const cleanCode = code.trim()
     if (!cleanCode) {
-      toast.error("请输入邮箱验证码")
+      toast.error(t("toastEnterCode"))
       return
     }
 
@@ -107,14 +112,14 @@ export function EmailRegisterForm() {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        toast.error(data?.detail || "邮箱验证失败")
+        toast.error(data?.detail || t("toastVerifyFailed"))
         return
       }
       setRegistrationToken(data.registration_token || "")
-      toast.success("邮箱验证通过，请设置登录密码")
+      toast.success(t("toastEmailVerified"))
       setStep("password")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "网络错误，请重试")
+      toast.error(error instanceof Error ? error.message : t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -122,16 +127,16 @@ export function EmailRegisterForm() {
 
   const handleCompleteRegistration = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!password || password.length < 12) {
-      toast.error("密码至少 12 位")
+    if (!password || password.length < MIN_PASSWORD_LENGTH) {
+      toast.error(t("toastPasswordMinLength", { min: MIN_PASSWORD_LENGTH }))
       return
     }
     if (password !== confirmPassword) {
-      toast.error("两次密码输入不一致")
+      toast.error(t("toastPasswordMismatch"))
       return
     }
     if (!registrationToken) {
-      toast.error("邮箱验证已失效，请重新验证")
+      toast.error(t("toastRegTokenExpired"))
       setStep("email")
       return
     }
@@ -151,13 +156,13 @@ export function EmailRegisterForm() {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        toast.error(data?.detail || "注册失败")
+        toast.error(data?.detail || t("toastRegisterFailed"))
         return
       }
-      toast.success("邮箱注册成功，欢迎使用")
+      toast.success(t("toastRegisterSuccess"))
       await goToPostAuthRedirect(redirectTo)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "网络错误，请重试")
+      toast.error(error instanceof Error ? error.message : t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -167,12 +172,17 @@ export function EmailRegisterForm() {
     return (
       <form onSubmit={handleVerifyCode} className="space-y-5">
         <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-          验证码已发送至 <span className="font-medium text-foreground">{normalizedEmail}</span>
+          {t.rich("codeSentTo", {
+            normalizedEmail,
+            highlight: (chunks) => (
+              <span className="font-medium text-foreground">{chunks}</span>
+            ),
+          })}
         </div>
 
         <div className="space-y-2">
           <Label htmlFor="register-email-code" className="text-sm font-medium text-foreground">
-            邮箱验证码
+            {t("codeLabel")}
           </Label>
           <div className="relative">
             <KeyRound
@@ -184,7 +194,7 @@ export function EmailRegisterForm() {
               type="text"
               inputMode="numeric"
               autoComplete="one-time-code"
-              placeholder="请输入邮箱验证码"
+              placeholder={t("codePlaceholder")}
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\s/g, "").slice(0, 16))}
               className="h-11 pl-10 tracking-widest"
@@ -194,7 +204,7 @@ export function EmailRegisterForm() {
         </div>
 
         <Button type="submit" className="h-11 w-full" disabled={submitting || !code.trim()}>
-          {submitting ? "验证中..." : "验证邮箱"}
+          {submitting ? t("verifying") : t("verifyEmail")}
         </Button>
 
         <Button
@@ -210,7 +220,7 @@ export function EmailRegisterForm() {
             captchaChallenge?.reset()
           }}
         >
-          修改邮箱或重新发送
+          {t("editEmailOrResend")}
         </Button>
       </form>
     )
@@ -220,12 +230,17 @@ export function EmailRegisterForm() {
     return (
       <form onSubmit={handleCompleteRegistration} className="space-y-5">
         <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-          邮箱已验证：<span className="font-medium text-foreground">{normalizedEmail}</span>
+          {t.rich("emailVerified", {
+            normalizedEmail,
+            highlight: (chunks) => (
+              <span className="font-medium text-foreground">{chunks}</span>
+            ),
+          })}
         </div>
 
         <div className="space-y-2">
           <Label htmlFor="register-name" className="text-sm font-medium text-foreground">
-            昵称
+            {t("nicknameLabel")}
           </Label>
           <div className="relative">
             <User
@@ -236,7 +251,7 @@ export function EmailRegisterForm() {
               id="register-name"
               type="text"
               autoComplete="nickname"
-              placeholder="可选"
+              placeholder={t("nicknamePlaceholder")}
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               className="h-11 pl-10"
@@ -246,7 +261,7 @@ export function EmailRegisterForm() {
 
         <div className="space-y-2">
           <Label htmlFor="register-password" className="text-sm font-medium text-foreground">
-            登录密码
+            {t("passwordLabel")}
           </Label>
           <div className="relative">
             <Lock
@@ -257,7 +272,7 @@ export function EmailRegisterForm() {
               id="register-password"
               type="password"
               autoComplete="new-password"
-              placeholder="至少 12 位"
+              placeholder={t("passwordPlaceholder", { min: MIN_PASSWORD_LENGTH })}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="h-11 pl-10"
@@ -268,7 +283,7 @@ export function EmailRegisterForm() {
 
         <div className="space-y-2">
           <Label htmlFor="register-confirm-password" className="text-sm font-medium text-foreground">
-            确认密码
+            {t("confirmPasswordLabel")}
           </Label>
           <div className="relative">
             <Lock
@@ -279,7 +294,7 @@ export function EmailRegisterForm() {
               id="register-confirm-password"
               type="password"
               autoComplete="new-password"
-              placeholder="再次输入密码"
+              placeholder={t("confirmPasswordPlaceholder")}
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               className="h-11 pl-10"
@@ -289,7 +304,7 @@ export function EmailRegisterForm() {
         </div>
 
         <p className="text-xs leading-relaxed text-muted-foreground">
-          邮箱注册会创建普通免费账号；免费试用仍以手机号注册和验证为准。
+          {t("registerNote")}
         </p>
 
         <Button
@@ -297,7 +312,7 @@ export function EmailRegisterForm() {
           className="h-11 w-full"
           disabled={submitting || !password || !confirmPassword}
         >
-          {submitting ? "注册中..." : "完成注册"}
+          {submitting ? t("registering") : t("completeRegister")}
         </Button>
       </form>
     )
@@ -307,7 +322,7 @@ export function EmailRegisterForm() {
     <form onSubmit={handleSendCode} className="space-y-5">
       <div className="space-y-2">
         <Label htmlFor="register-email" className="text-sm font-medium text-foreground">
-          邮箱
+          {t("emailLabel")}
         </Label>
         <div className="relative">
           <Mail
@@ -319,7 +334,7 @@ export function EmailRegisterForm() {
             type="email"
             inputMode="email"
             autoComplete="email"
-            placeholder="请输入邮箱地址"
+            placeholder={t("emailPlaceholder")}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             className="h-11 pl-10"
@@ -337,7 +352,7 @@ export function EmailRegisterForm() {
       />
 
       <p className="text-xs leading-relaxed text-muted-foreground">
-        邮箱注册需要先验证邮箱，验证通过后再设置登录密码。
+        {t("sendCodeHint")}
       </p>
 
       <Button
@@ -350,7 +365,7 @@ export function EmailRegisterForm() {
           (!captchaToken && !captchaChallenge)
         }
       >
-        {captchaExecuting ? "验证中..." : submitting ? "发送中..." : "发送邮箱验证码"}
+        {captchaExecuting ? t("verifying") : submitting ? t("sending") : t("sendCode")}
       </Button>
     </form>
   )
