@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { useSearchParams } from "next/navigation"
+import { useLocale, useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { Phone, KeyRound, Lock } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -24,13 +25,17 @@ import { goToPostAuthRedirect, resolvePostAuthRedirect } from "@/lib/auth/post-a
  */
 type Step = "phone" | "code" | "set-password"
 
+const MIN_PASSWORD_LENGTH = 12
+
 type PhoneLoginFormProps = {
   captchaScenario?: "register" | "login"
 }
 
 export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormProps) {
+  const t = useTranslations("auth.phoneForm")
+  const locale = useLocale()
   const searchParams = useSearchParams()
-  const redirectTo = resolvePostAuthRedirect(searchParams)
+  const redirectTo = resolvePostAuthRedirect(searchParams, locale)
 
   const [step, setStep] = useState<Step>("phone")
   const [phone, setPhone] = useState("")
@@ -57,7 +62,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
   const resolveCaptchaToken = async () => {
     if (captchaToken) return captchaToken
     if (!captchaChallenge) {
-      toast.error("人机验证仍在加载,请稍后再试")
+      toast.error(t("toastCaptchaLoading"))
       return null
     }
     setCaptchaExecuting(true)
@@ -66,7 +71,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       setCaptchaToken(token)
       return token
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "人机验证失败,请重试")
+      toast.error(error instanceof Error ? error.message : t("toastCaptchaFailed"))
       captchaChallenge.reset()
       return null
     } finally {
@@ -77,7 +82,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
   const handleSendCode = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!phoneLooksValid) {
-      toast.error("请输入正确的手机号")
+      toast.error(t("toastInvalidPhone"))
       return
     }
     const token = await resolveCaptchaToken()
@@ -99,14 +104,14 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       if (!res.ok) {
         setCaptchaToken(null)
         captchaChallenge?.reset()
-        toast.error(data?.detail || "验证码发送失败")
+        toast.error(data?.detail || t("toastSendCodeFailed"))
         return
       }
-      toast.success("验证码已发送")
+      toast.success(t("toastCodeSent"))
       setStep("code")
       setResendCountdown(60)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "网络错误,请重试")
+      toast.error(error instanceof Error ? error.message : t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -115,7 +120,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
   const handleVerifyCode = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!code.trim()) {
-      toast.error("请输入验证码")
+      toast.error(t("toastEnterCode"))
       return
     }
     setSubmitting(true)
@@ -131,7 +136,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        toast.error(data?.detail || "验证失败")
+        toast.error(data?.detail || t("toastVerifyFailed"))
         return
       }
 
@@ -143,10 +148,10 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       }
 
       // EXISTING user — already logged in.
-      toast.success("登录成功")
+      toast.success(t("toastLoginSuccess"))
       await goToPostAuthRedirect(redirectTo)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "网络错误,请重试")
+      toast.error(error instanceof Error ? error.message : t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -154,16 +159,16 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
 
   const handleSetPassword = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!password || password.length < 12) {
-      toast.error("密码至少 12 位")
+    if (!password || password.length < MIN_PASSWORD_LENGTH) {
+      toast.error(t("toastPasswordMinLength", { min: MIN_PASSWORD_LENGTH }))
       return
     }
     if (password !== confirmPassword) {
-      toast.error("两次密码输入不一致")
+      toast.error(t("toastPasswordMismatch"))
       return
     }
     if (!registrationToken) {
-      toast.error("注册令牌无效,请重新开始")
+      toast.error(t("toastInvalidRegToken"))
       setStep("phone")
       return
     }
@@ -180,13 +185,13 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        toast.error(data?.detail || "注册失败")
+        toast.error(data?.detail || t("toastRegisterFailed"))
         return
       }
-      toast.success("注册成功,欢迎使用")
+      toast.success(t("toastRegisterSuccess"))
       await goToPostAuthRedirect(redirectTo)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "网络错误,请重试")
+      toast.error(error instanceof Error ? error.message : t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -198,7 +203,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       <form onSubmit={handleSendCode} className="space-y-5">
         <div className="space-y-2">
           <Label htmlFor="phone" className="text-sm font-medium text-foreground">
-            手机号
+            {t("phoneLabel")}
           </Label>
           <div className="relative">
             <Phone
@@ -210,7 +215,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
               type="tel"
               inputMode="numeric"
               autoComplete="tel"
-              placeholder="请输入中国大陆手机号"
+              placeholder={t("phonePlaceholder")}
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               className="h-11 pl-10"
@@ -237,7 +242,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
             (!captchaToken && !captchaChallenge)
           }
         >
-          {captchaExecuting ? "验证中…" : submitting ? "发送中…" : "发送验证码"}
+          {captchaExecuting ? t("verifying") : submitting ? t("sending") : t("sendCode")}
         </Button>
       </form>
     )
@@ -249,7 +254,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       <form onSubmit={handleVerifyCode} className="space-y-5">
         <div className="space-y-2">
           <Label htmlFor="code" className="text-sm font-medium text-foreground">
-            验证码
+            {t("codeLabel")}
           </Label>
           <div className="relative">
             <KeyRound
@@ -261,7 +266,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
               type="text"
               inputMode="numeric"
               autoComplete="one-time-code"
-              placeholder="请输入短信验证码"
+              placeholder={t("codePlaceholder")}
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 8))}
               className="h-11 pl-10 tracking-widest"
@@ -269,12 +274,17 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            已向 <span className="font-medium text-foreground">{phone}</span> 发送验证码
+            {t.rich("codeSentTo", {
+              phone,
+              highlight: (chunks) => (
+                <span className="font-medium text-foreground">{chunks}</span>
+              ),
+            })}
           </p>
         </div>
 
         <Button type="submit" className="h-11 w-full" disabled={submitting}>
-          {submitting ? "验证中…" : "验证并继续"}
+          {submitting ? t("verifying") : t("verifyAndContinue")}
         </Button>
 
         <div className="flex items-center justify-between text-xs">
@@ -284,7 +294,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
             className="text-muted-foreground hover:text-foreground transition-colors"
             disabled={submitting}
           >
-            使用其他手机号
+            {t("useAnotherPhone")}
           </button>
           <button
             type="button"
@@ -302,7 +312,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
                   credentials: "include",
                 })
                 if (res.ok) {
-                  toast.success("已重新发送")
+                  toast.success(t("toastResent"))
                   setResendCountdown(60)
                 }
               } finally {
@@ -312,7 +322,9 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
             className="text-primary hover:text-primary/80 transition-colors disabled:text-muted-foreground"
             disabled={resendCountdown > 0 || submitting}
           >
-            {resendCountdown > 0 ? `${resendCountdown}s 后可重发` : "重发验证码"}
+            {resendCountdown > 0
+              ? t("resendCountdown", { remaining: resendCountdown })
+              : t("resend")}
           </button>
         </div>
       </form>
@@ -323,15 +335,15 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
   return (
     <form onSubmit={handleSetPassword} className="space-y-5">
       <div className="rounded-md border border-primary/20 bg-primary/5 p-3 text-sm text-foreground">
-        <p className="font-medium">设置登录密码</p>
+        <p className="font-medium">{t("setPasswordTitle")}</p>
         <p className="mt-1 text-xs text-muted-foreground">
-          设置密码后即完成注册,并自动领取免费试用权益。
+          {t("setPasswordHint")}
         </p>
       </div>
 
       <div className="space-y-2">
         <Label htmlFor="new-password" className="text-sm font-medium text-foreground">
-          密码
+          {t("passwordLabel")}
         </Label>
         <div className="relative">
           <Lock
@@ -342,7 +354,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
             id="new-password"
             type="password"
             autoComplete="new-password"
-            placeholder="至少 12 位"
+            placeholder={t("passwordPlaceholder", { min: MIN_PASSWORD_LENGTH })}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="h-11 pl-10"
@@ -352,7 +364,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       </div>
       <div className="space-y-2">
         <Label htmlFor="confirm-password" className="text-sm font-medium text-foreground">
-          确认密码
+          {t("confirmPasswordLabel")}
         </Label>
         <div className="relative">
           <Lock
@@ -363,7 +375,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
             id="confirm-password"
             type="password"
             autoComplete="new-password"
-            placeholder="再次输入密码"
+            placeholder={t("confirmPasswordPlaceholder")}
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             className="h-11 pl-10"
@@ -373,7 +385,7 @@ export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormP
       </div>
 
       <Button type="submit" className="h-11 w-full" disabled={submitting}>
-        {submitting ? "注册中…" : "完成注册"}
+        {submitting ? t("registering") : t("completeRegister")}
       </Button>
     </form>
   )

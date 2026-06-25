@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useLocale, useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { toast } from "sonner"
 import { KeyRound, Lock, Mail, Phone } from "lucide-react"
@@ -14,7 +15,11 @@ import { cn } from "@/lib/utils"
 type Method = "phone" | "email"
 type Step = "identity" | "reset"
 
+const MIN_PASSWORD_LENGTH = 12
+
 export default function ForgotPasswordPage() {
+  const t = useTranslations("auth.forgot")
+  const locale = useLocale()
   const [method, setMethod] = useState<Method>("phone")
   const [step, setStep] = useState<Step>("identity")
   const [phone, setPhone] = useState("")
@@ -58,13 +63,13 @@ export default function ForgotPasswordPage() {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        toast.error(data?.detail || "验证码发送失败")
+        toast.error(data?.detail || t("toastSendCodeFailed"))
         return
       }
-      toast.success(method === "phone" ? "短信验证码已发送" : "邮箱验证码已发送")
+      toast.success(method === "phone" ? t("toastSmsCodeSent") : t("toastEmailCodeSent"))
       setStep("reset")
     } catch {
-      toast.error("网络错误")
+      toast.error(t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -74,15 +79,15 @@ export default function ForgotPasswordPage() {
     e.preventDefault()
     const cleanCode = code.trim()
     if (!cleanCode) {
-      toast.error("请输入验证码")
+      toast.error(t("toastEnterCode"))
       return
     }
-    if (newPassword.length < 12) {
-      toast.error("密码至少 12 位")
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      toast.error(t("toastPasswordMinLength", { min: MIN_PASSWORD_LENGTH }))
       return
     }
     if (newPassword !== confirmPassword) {
-      toast.error("两次密码不一致")
+      toast.error(t("toastPasswordMismatch"))
       return
     }
     setSubmitting(true)
@@ -108,14 +113,18 @@ export default function ForgotPasswordPage() {
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
-        toast.error(data?.detail || "重置失败")
+        toast.error(data?.detail || t("toastResetFailed"))
         return
       }
-      toast.success("密码重置成功，已自动登录")
+      toast.success(t("toastResetSuccess"))
       await new Promise((r) => setTimeout(r, 300))
-      window.location.replace("/translations/new")
+      // Locale-aware default target (UI-04 Step 5.6): keep the /en funnel on /en
+      // after a hard reload. zh stays bare per localePrefix:"as-needed".
+      window.location.replace(
+        locale && locale !== "zh" ? `/${locale}/translations/new` : "/translations/new",
+      )
     } catch {
-      toast.error("网络错误")
+      toast.error(t("toastNetworkError"))
     } finally {
       setSubmitting(false)
     }
@@ -128,10 +137,10 @@ export default function ForgotPasswordPage() {
           <BrandMark size={44} />
         </div>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          找回密码
+          {t("title")}
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          通过手机号或邮箱验证码重置登录密码
+          {t("subtitle")}
         </p>
       </div>
 
@@ -150,7 +159,7 @@ export default function ForgotPasswordPage() {
                 )}
               >
                 <Phone className="h-4 w-4" aria-hidden="true" />
-                手机号
+                {t("phoneLabel")}
               </button>
               <button
                 type="button"
@@ -163,14 +172,14 @@ export default function ForgotPasswordPage() {
                 )}
               >
                 <Mail className="h-4 w-4" aria-hidden="true" />
-                邮箱
+                {t("emailLabel")}
               </button>
             </div>
 
             {method === "phone" ? (
               <div className="space-y-2">
                 <Label htmlFor="reset-phone" className="text-sm font-medium text-foreground">
-                  手机号
+                  {t("phoneLabel")}
                 </Label>
                 <div className="relative">
                   <Phone
@@ -181,7 +190,7 @@ export default function ForgotPasswordPage() {
                     id="reset-phone"
                     type="tel"
                     inputMode="numeric"
-                    placeholder="请输入注册时使用的手机号"
+                    placeholder={t("phonePlaceholder")}
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     className="h-11 pl-10"
@@ -192,7 +201,7 @@ export default function ForgotPasswordPage() {
             ) : (
               <div className="space-y-2">
                 <Label htmlFor="reset-email" className="text-sm font-medium text-foreground">
-                  邮箱
+                  {t("emailLabel")}
                 </Label>
                 <div className="relative">
                   <Mail
@@ -204,7 +213,7 @@ export default function ForgotPasswordPage() {
                     type="email"
                     inputMode="email"
                     autoComplete="email"
-                    placeholder="请输入注册时使用的邮箱"
+                    placeholder={t("emailPlaceholder")}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     className="h-11 pl-10"
@@ -227,7 +236,7 @@ export default function ForgotPasswordPage() {
               disabled={submitting || !identityLooksValid || !captchaToken}
               onClick={handleSendCode}
             >
-              {submitting ? "发送中..." : "发送验证码"}
+              {submitting ? t("sending") : t("sendCode")}
             </Button>
           </div>
         )}
@@ -235,14 +244,16 @@ export default function ForgotPasswordPage() {
         {step === "reset" && (
           <form onSubmit={handleReset} className="space-y-5">
             <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-              验证码已发送至{" "}
-              <span className="font-medium text-foreground">
-                {method === "phone" ? normalizedPhone : normalizedEmail}
-              </span>
+              {t.rich("codeSentTo", {
+                identity: method === "phone" ? normalizedPhone : normalizedEmail,
+                highlight: (chunks) => (
+                  <span className="font-medium text-foreground">{chunks}</span>
+                ),
+              })}
             </div>
             <div className="space-y-2">
               <Label htmlFor="reset-code" className="text-sm font-medium text-foreground">
-                验证码
+                {t("codeLabel")}
               </Label>
               <div className="relative">
                 <KeyRound
@@ -254,7 +265,7 @@ export default function ForgotPasswordPage() {
                   type="text"
                   inputMode="numeric"
                   autoComplete="one-time-code"
-                  placeholder={method === "phone" ? "请输入短信验证码" : "请输入邮箱验证码"}
+                  placeholder={method === "phone" ? t("codePlaceholderPhone") : t("codePlaceholderEmail")}
                   value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\s/g, "").slice(0, 16))}
                   className="h-11 pl-10 tracking-widest"
@@ -264,7 +275,7 @@ export default function ForgotPasswordPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="new-pw" className="text-sm font-medium text-foreground">
-                新密码
+                {t("newPasswordLabel")}
               </Label>
               <div className="relative">
                 <Lock
@@ -275,7 +286,7 @@ export default function ForgotPasswordPage() {
                   id="new-pw"
                   type="password"
                   autoComplete="new-password"
-                  placeholder="至少 12 位"
+                  placeholder={t("newPasswordPlaceholder", { min: MIN_PASSWORD_LENGTH })}
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   className="h-11 pl-10"
@@ -285,7 +296,7 @@ export default function ForgotPasswordPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirm-pw" className="text-sm font-medium text-foreground">
-                确认新密码
+                {t("confirmPasswordLabel")}
               </Label>
               <div className="relative">
                 <Lock
@@ -296,7 +307,7 @@ export default function ForgotPasswordPage() {
                   id="confirm-pw"
                   type="password"
                   autoComplete="new-password"
-                  placeholder="再次输入新密码"
+                  placeholder={t("confirmPasswordPlaceholder")}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   className="h-11 pl-10"
@@ -305,7 +316,7 @@ export default function ForgotPasswordPage() {
               </div>
             </div>
             <Button type="submit" className="h-11 w-full" disabled={submitting}>
-              {submitting ? "重置中..." : "重置密码"}
+              {submitting ? t("resetting") : t("resetPassword")}
             </Button>
             <Button
               type="button"
@@ -318,13 +329,13 @@ export default function ForgotPasswordPage() {
                 setCode("")
               }}
             >
-              重新发送验证码
+              {t("resendCode")}
             </Button>
           </form>
         )}
 
         <div className="mt-6 border-t border-border pt-5 text-center text-xs text-muted-foreground">
-          手机号和已验证邮箱均可用于找回密码。
+          {t("footnote")}
         </div>
       </div>
 
@@ -333,7 +344,7 @@ export default function ForgotPasswordPage() {
           href="/auth"
           className="text-primary transition-colors hover:text-primary/80"
         >
-          返回登录
+          {t("backToLogin")}
         </Link>
       </div>
     </div>

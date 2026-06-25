@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useTranslations } from "next-intl"
 import { Mail, Phone } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { PhoneLoginForm } from "@/components/auth/phone-login-form"
@@ -9,6 +10,7 @@ import { EmailRegisterForm } from "@/components/auth/email-register-form"
 type RegisterMode = "phone" | "email"
 
 export function RegisterMethodForm() {
+  const t = useTranslations("auth")
   const [mode, setMode] = useState<RegisterMode>("phone")
 
   return (
@@ -25,7 +27,7 @@ export function RegisterMethodForm() {
           )}
         >
           <Phone className="h-4 w-4" aria-hidden="true" />
-          手机号
+          {t("methodTab.phone")}
         </button>
         <button
           type="button"
@@ -38,7 +40,7 @@ export function RegisterMethodForm() {
           )}
         >
           <Mail className="h-4 w-4" aria-hidden="true" />
-          邮箱
+          {t("methodTab.email")}
         </button>
       </div>
 
