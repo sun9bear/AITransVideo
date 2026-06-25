@@ -13,23 +13,41 @@ type SearchParamsLike = {
 
 const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
 
-export function resolvePostAuthRedirect(searchParams: SearchParamsLike): string {
-  return normalizeInternalRedirect(searchParams.get("from"))
+/**
+ * Default post-auth target, prefixed for the active UI locale (UI-04 Step 5.6).
+ * `localePrefix: "as-needed"` → zh stays bare (`/translations/new`), en is
+ * prefixed (`/en/translations/new`) so the English funnel doesn't drop back to
+ * Chinese after login. A valid `from` already carries its own locale prefix
+ * (injected by the UI-02 proxy) and is used verbatim — this only covers the
+ * no-`from` default branch.
+ */
+function localizedDefaultTarget(locale?: string): string {
+  return locale && locale !== "zh"
+    ? `/${locale}${DEFAULT_POST_AUTH_PATH}`
+    : DEFAULT_POST_AUTH_PATH
 }
 
-function normalizeInternalRedirect(value: string | null): string {
+export function resolvePostAuthRedirect(
+  searchParams: SearchParamsLike,
+  locale?: string,
+): string {
+  return normalizeInternalRedirect(searchParams.get("from"), locale)
+}
+
+function normalizeInternalRedirect(value: string | null, locale?: string): string {
+  const fallback = localizedDefaultTarget(locale)
   if (!value || value.startsWith("//") || !value.startsWith("/")) {
-    return DEFAULT_POST_AUTH_PATH
+    return fallback
   }
 
   try {
     const url = new URL(value, "https://aitrans.video")
     if (url.pathname.startsWith("/auth")) {
-      return DEFAULT_POST_AUTH_PATH
+      return fallback
     }
     return `${url.pathname}${url.search}${url.hash}`
   } catch {
-    return DEFAULT_POST_AUTH_PATH
+    return fallback
   }
 }
 

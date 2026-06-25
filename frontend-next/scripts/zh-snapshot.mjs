@@ -41,4 +41,41 @@ assert.deepEqual(
 // en 分支声明可用（未被消费）：前缀正确，供 UI-03 翻旗
 assert.equal(site.absoluteUrl("/pricing", "en"), `${SITE_URL}/en/pricing`, "absoluteUrl en 前缀错误")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert 全部通过")
+// 3) auth 默认 zh 字节一致（UI-04 红线 1）：/auth · /auth/login · /auth/register ·
+//    /auth/forgot-password 四页 + 三表单 + captcha 的串迁入 messages/zh/auth.json 后，
+//    zh 值必须与改造前的内联字面量【逐字节】相同。下面钉死最易漂的标点敏感串：
+//    - phone-login-form 用【半角逗号 ,】+【全角省略号 …】
+//    - email-register-form 用【全角逗号 ，】+【半角三点 ...】
+//    （二者历史不一致——照搬，不得"修正"。改任一值即在此处 red。）
+const zhAuth = JSON.parse(readFileSync(path.join(root, "messages/zh/auth.json"), "utf8"))
+
+// 页壳标题/副标
+assert.equal(zhAuth.register.title, "注册 AITrans.Video", "auth register.title 漂移")
+assert.equal(zhAuth.register.subtitle, "默认使用手机号注册，也可以切换邮箱注册", "auth register.subtitle 漂移")
+assert.equal(zhAuth.login.title, "登录 AITrans.Video", "auth login.title 漂移")
+assert.equal(zhAuth.login.subtitlePassword, "使用手机号或邮箱和密码登录", "auth login.subtitlePassword 漂移")
+assert.equal(zhAuth.forgot.title, "找回密码", "auth forgot.title 漂移")
+
+// 半角逗号 + 全角省略号（phone-login-form 派系）
+assert.equal(zhAuth.phoneForm.verifying, "验证中…", "auth phoneForm.verifying 必须用全角省略号 …")
+assert.equal(zhAuth.phoneForm.sending, "发送中…", "auth phoneForm.sending 必须用全角省略号 …")
+assert.equal(zhAuth.phoneForm.toastRegisterSuccess, "注册成功,欢迎使用", "auth phoneForm.toastRegisterSuccess 必须用半角逗号 ,")
+assert.equal(zhAuth.phoneForm.toastCaptchaLoading, "人机验证仍在加载,请稍后再试", "auth phoneForm.toastCaptchaLoading 必须用半角逗号 ,")
+assert.equal(zhAuth.passwordLogin.toastNetworkError, "网络错误,请重试", "auth passwordLogin.toastNetworkError 必须用半角逗号 ,")
+
+// 全角逗号 + 半角三点（email-register-form 派系）
+assert.equal(zhAuth.emailForm.verifying, "验证中...", "auth emailForm.verifying 必须用半角三点 ...")
+assert.equal(zhAuth.emailForm.sending, "发送中...", "auth emailForm.sending 必须用半角三点 ...")
+assert.equal(zhAuth.emailForm.toastRegisterSuccess, "邮箱注册成功，欢迎使用", "auth emailForm.toastRegisterSuccess 必须用全角逗号 ，")
+assert.equal(zhAuth.emailForm.toastCaptchaLoading, "人机验证仍在加载，请稍后再试", "auth emailForm.toastCaptchaLoading 必须用全角逗号 ，")
+
+// ICU 模板（rich-text + 占位符）：固定 chrome 字节一致，占位符 verbatim
+assert.equal(zhAuth.phoneForm.codeSentTo, "已向 <highlight>{phone}</highlight> 发送验证码", "auth phoneForm.codeSentTo 模板漂移")
+assert.equal(zhAuth.phoneForm.resendCountdown, "{remaining}s 后可重发", "auth phoneForm.resendCountdown 模板漂移")
+assert.equal(zhAuth.phoneForm.passwordPlaceholder, "至少 {min} 位", "auth phoneForm.passwordPlaceholder 模板漂移")
+assert.equal(zhAuth.forgot.codeSentTo, "验证码已发送至 <highlight>{identity}</highlight>", "auth forgot.codeSentTo 模板漂移")
+assert.equal(zhAuth.emailForm.emailVerified, "邮箱已验证：<highlight>{normalizedEmail}</highlight>", "auth emailForm.emailVerified 模板漂移")
+assert.equal(zhAuth.captcha.configMissing, "验证码配置缺失（{var} 未设置）", "auth captcha.configMissing 模板漂移")
+assert.equal(zhAuth.passwordLogin.errorCsrfOriginRejected, "请求来源校验失败，请确认正在使用 {url} 访问，刷新页面后重试。", "auth passwordLogin.errorCsrfOriginRejected 模板漂移")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth 字节一致 全部通过")

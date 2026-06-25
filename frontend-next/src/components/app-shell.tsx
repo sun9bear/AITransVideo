@@ -2,6 +2,7 @@
 
 import { Link } from "@/i18n/navigation"
 import { usePathname } from "@/i18n/navigation"
+import { useLocale } from "next-intl"
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
@@ -122,6 +123,7 @@ const navGroups: NavGroup[] = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
+  const locale = useLocale()
   const { user, error: sessionError, refresh: refreshSession } = useSession()
   // Live unread count drives the sidebar "通知" badge. The hook polls
   // every 30s when the tab is visible and skips while hidden, so the
@@ -215,7 +217,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     clearPostAuthSessionHint()
     clearAnonConvertReady()
     toast.success("已登出")
-    window.location.href = "/auth/login"
+    // Hard reload to clear in-memory session state, but keep the visitor's UI
+    // locale (UI-04 Step 5.6): /en/workspace logs out to /en/auth/login, zh
+    // stays bare per localePrefix:"as-needed". locale is read, not a new lang
+    // source (R5); the hard-navigation semantics are unchanged.
+    window.location.href =
+      locale && locale !== "zh" ? `/${locale}/auth/login` : "/auth/login"
   }
 
   const renderSidebarContent = (isCollapsed: boolean, onNavigate?: () => void) => (
