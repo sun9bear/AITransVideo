@@ -843,13 +843,27 @@ def _derive_credits_from_minutes(job: Job, minutes: float | None) -> int:
     try:
         from credits_service import estimate_credits
 
-        return estimate_credits(
+        credits = estimate_credits(
             minutes,
             service_mode=job.service_mode or snapshot.get("service_mode") or "express",
             quality_tier=snapshot.get("quality_tier") or "standard",
         )
     except Exception:
+        # H2/EH-003: never silently bill 0 on error. Keep the fail-safe 0
+        # return (callers tolerate it) but make the failure loud so a
+        # pricing/import regression can't silently under-charge.
+        logger.exception(
+            "derive_credits_failed job=%s minutes=%s",
+            getattr(job, "job_id", "?"), minutes,
+        )
         return 0
+    if credits == 0 and minutes:
+        logger.error(
+            "ZERO_CREDITS_SUSPECT job=%s minutes=%s mode=%s",
+            getattr(job, "job_id", "?"), minutes,
+            getattr(job, "service_mode", None),
+        )
+    return credits
 
 
 def _estimate_job_revenue(

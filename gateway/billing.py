@@ -1309,7 +1309,7 @@ async def _process_payment_event(
                     expires_at=period_end,
                 )
             except Exception:
-                logger.warning("V3 shadow subscription grant failed (non-fatal)")
+                logger.warning("V3 shadow subscription grant failed (non-fatal)", exc_info=True)
                 logger.info("User %s upgraded %s → %s via payment order %s",
                             user.id, old_plan, order.target_plan_code, order_id)
 
