@@ -26,7 +26,7 @@
 |---|---|---|---|---|---|---|
 | TU-01 | [止血四修](TU-01-hotfix-stabilize.md) | ✅ | H2 H3 H4ᵐⁱⁿ H5 | S | 是 | [PR #40](https://github.com/sun9bear/AITransVideo/pull/40) 已合并 |
 | TU-02 | [部署构建卫生](TU-02-build-hygiene.md) | ☐ | DEP-02/04/05/06/07 | S(A)·需确认(B) | 是 | `quality/build-hygiene` |
-| TU-03 | [质量护栏脚手架](TU-03-quality-scaffold.md) | ☐ | TOOL-01/03/04 TEST-* | S–M | 部分 | `quality/quality-scaffold` |
+| TU-03 | [质量护栏脚手架](TU-03-quality-scaffold.md) | ✅ | TOOL-01/03/04 TEST-* | S–M | 部分 | [PR #41](https://github.com/sun9bear/AITransVideo/pull/41) 已合并 |
 
 ### Wave B — 低风险标准化（Phase 1）
 
@@ -76,6 +76,7 @@
 | 日期 | 单元 | PR | 审查 | 结果 |
 |---|---|---|---|---|
 | 2026-06-25 | TU-01 止血四修 | [#40](https://github.com/sun9bear/AITransVideo/pull/40) squash | 对抗式多 lens（抓出第 5 个 `en_text` 站点 + de-flake 预存 40% flaky 测试）→ CodeX CLI ×3（P2 免费档误报→P3 aligner 测试→clean）→ @codex bot 无问题 → CI 3/3 | ✅ 合并 main。deferral：credits_service 3 警告→TU-08；billing `logger.info` 误置→独立观察项 |
+| 2026-06-25 | TU-03 质量护栏脚手架 | [#41](https://github.com/sun9bear/AITransVideo/pull/41) squash (`dc12c071`) | 多 lens 对抗 Workflow（2×P2 删除文件误阻断 / addopts 漏 §10.4 -m + 1×P3）→ CodeX CLI ×3（r1 2P2+1dup → r2 2P2 FETCH_HEAD/只阻断新增 → r3 clean）→ @codex bot「no major issues」→ CI 5/5 blocking 绿 | ✅ 合并 main。**关键设计**：ruff 仅阻断**新增** .py（改动既有+全仓 report-only），file-size-guard 读 **base ref** 基线防同 PR grow+bump 绕过，asyncio_mode=auto 实证 collection 8687 不变。**待办**：backend-full-suite（continue-on-error 非阻断，271 预存测试债+ffprobe 环境缺失，非回归）后续可选挪 nightly / 装 ffmpeg / 升硬门；mypy 9 窄域债→TU-07 |
 
 ## 依赖关系（DAG）
 
