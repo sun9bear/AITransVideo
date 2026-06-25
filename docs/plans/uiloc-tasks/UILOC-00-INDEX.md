@@ -32,7 +32,7 @@
 | UI-03b | [营销·内联重文案 hero/pricing/trial](UI-03-marketing-en-seo.md) | ☐ | Phase 1·T1.2 | M | 是（依 UI-03a） | `uiloc/marketing-en-seo-b` |
 | UI-03c | [营销·legal 人审](UI-03-marketing-en-seo.md)（HARD 人审） | ☐ | Phase 1·T1.2 | M | 是（**并行，不阻塞 3a/b/d**） | `uiloc/marketing-en-seo-c` |
 | UI-03d | [营销·EN 排版 + SEO 翻旗](UI-03-marketing-en-seo.md) | ☐ | Phase 1·T1.3 | M | 否（依 UI-03a+b 合并） | `uiloc/marketing-en-seo-d` |
-| UI-04 | [最小 Auth 英文化](UI-04-min-auth-en.md) | ☐ | Phase 1.5 | M | 是（依 UI-02） | `uiloc/min-auth-en` |
+| UI-04 | [最小 Auth 英文化](UI-04-min-auth-en.md) | ✅ | Phase 1.5 | M | 是（依 UI-02） | [PR #49](https://github.com/sun9bear/AITransVideo/pull/49) 已合并（squash `85f2e7c3`） |
 
 ### Wave U-B — Phase 2 工作台（**枚举占位，§9.2 决策门**）
 
@@ -132,4 +132,5 @@ UI-05 ──→ UI-06            UI-07（独立，依 UI-02）
 |---|---|---|---|---|
 | 2026-06-25 | UI-01 i18n 基础设施 | [#46](https://github.com/sun9bear/AITransVideo/pull/46) squash `050722b2` | CodeX CLI（v4 AppConfig typo 保护，已修+探针验证）→ 多 lens（zh-snapshot node floor / cjk-guard fail-closed，已修）→ @codex bot（2×P2 守卫硬化：occurrence-count + env-independence，已修验证；1×P1 lockfile=false-positive，npm ci 实测 exit 0 已驳回）→ CI blocking 全绿 | ✅ 合并 main |
 | 2026-06-25 | UI-02 路由迁移 + proxy + 切换器 | [#48](https://github.com/sun9bear/AITransVideo/pull/48) squash `56404a55`（rebase 过 TU-07） | 多 lens 8-agent 对抗评审：**1 critical**（/paddle-checkout 被 next-intl rewrite 进 /zh → authed 支付 handoff 404；`next start` 实测确认）+ **1 high**（workspace/[jobId]/page.tsx 单引号 import 被双引号 sed 漏切→丢 /en 前缀）→ 均修+运行态复验。@codex bot：2×P2（登录/登出后 locale 连续性）→ **转 UI-04**（UI-02 Step 3 显式把 window.location/登出留原生）。gate 全绿：build/lint(0 err)/cjk-guard(重生成多集证明纯 relocation 2447 occ net-new=0)/key-parity/zh-snapshot；proxy curl 矩阵全过（R8 不跳、auth locale 保留、authed paddle-checkout 200） | ✅ 合并 main |
-| — | （续 → UI-03a/b/c/d 营销 + UI-04 最小 Auth，M1 边界停） | — | UI-02 已落地 [locale]+proxy+navigation+切换器，UI-03/04 解锁可并行 | ⏭ 下一步 |
+| 2026-06-25 | UI-04 最小 Auth 英文化 | [#49](https://github.com/sun9bear/AITransVideo/pull/49) squash `85f2e7c3` | 实现委派子 agent（4 commit）+ 我独立复跑全 gate。多 lens 6-agent 对抗评审 **0 critical/high/medium，7 low**（均聚 post-auth-redirect.ts）→ 收敛：回环守卫 locale-aware（`/en/auth/login` 漏 `startsWith('/auth')`→en 漏斗登录回环；deLocalizePath 剥前缀后判，from verbatim，7-case 逻辑测过）+ 中文 throw/zh-snapshot 值级局限标注转 UI-09。@codex bot **0 findings**（tsc⚠=其 sandbox next-intl 解析失败=false neg，本地+CI tsc 绿）。gate 全绿：lint(0err)/tsc/build(8 路由 SSG)/key-parity(152)/cjk-guard(net-new=0,移除182occ)/zh-snapshot(含 auth 字节一致) | ✅ 合并 main |
+| — | （续 → UI-03a 营销结构化文案抽取 → 03b → 03d；03c legal HARD 人审；M1 边界停） | — | UI-01/02/04 已合并 main，UI-03 解锁 | ⏭ 下一步 |
