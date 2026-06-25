@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,8 @@ from utils.coerce import (
     normalize_optional_text as _normalize_optional_text,
 )
 from utils.json_helpers import to_jsonable as _to_jsonable, write_json as _write_json
+
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_AUTODUB_LOCAL_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
@@ -107,9 +110,9 @@ class AssemblyAITranscriber:
             except Exception as exc:
                 if attempt < DEFAULT_MAX_RETRIES:
                     wait_seconds = _retry_wait_seconds(attempt)
-                    print(
-                        f"[S1] AssemblyAI请求失败，{wait_seconds}秒后重试"
-                        f"（{attempt + 1}/{DEFAULT_MAX_RETRIES}）: {exc}"
+                    logger.warning(
+                        "assemblyai_request_retry attempt=%d/%d wait_s=%d error=%s",
+                        attempt + 1, DEFAULT_MAX_RETRIES, wait_seconds, exc,
                     )
                     time.sleep(wait_seconds)
                     continue
@@ -183,11 +186,11 @@ class AssemblyAITranscriber:
 
         upload_path = source_path.with_name("original_upload.mp3")
         if upload_path.exists() and upload_path.stat().st_mtime >= source_path.stat().st_mtime:
-            print("[S1] 使用已有MP3上传优化文件")
+            logger.info("assemblyai_mp3_cache_hit")
             return str(upload_path.resolve(strict=False))
 
         try:
-            print(f"[S1] 音频文件较大（{file_size_mb:.0f}MB），生成MP3上传优化文件")
+            logger.info("assemblyai_mp3_optimize_start file_mb=%.0f", file_size_mb)
             subprocess.run(
                 [
                     "ffmpeg", "-i", str(source_path),
@@ -201,7 +204,7 @@ class AssemblyAITranscriber:
             )
             return str(upload_path.resolve(strict=False))
         except Exception as exc:
-            print(f"[S1] 生成MP3上传优化文件失败，回退原始音频上传：{exc}")
+            logger.warning("assemblyai_mp3_optimize_fallback error=%s", exc)
             return resolved_audio_path
 
 

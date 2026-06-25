@@ -13,11 +13,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any
 
 from services.assemblyai.transcriber import TranscriptLine, TranscriptResult
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_GEMINI_TRANSCRIPTION_MODEL = "gemini-3.1-flash-lite"
@@ -160,8 +163,7 @@ class GeminiTranscriber:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        print(f"[S1] Gemini 多模态转录：{normalized_url}")
-        print(f"[S1] 使用模型：{self.model_name}")
+        logger.info("gemini_transcribe_start url=%s model=%s", normalized_url, self.model_name)
 
         prompt = self._build_prompt(speaker_labels, speakers_expected, language=language)
         video_part = self._build_video_part(normalized_url)
@@ -170,7 +172,7 @@ class GeminiTranscriber:
 
         raw_response_path = output_root / "raw_gemini_transcript.json"
         raw_response_path.write_text(raw_response, encoding="utf-8")
-        print(f"[S1] Gemini 原始响应已保存：{raw_response_path}")
+        logger.debug("gemini_response_saved path=%s", raw_response_path)
 
         parsed = self._parse_response(raw_response)
         lines = self._build_transcript_lines(parsed)
@@ -207,7 +209,7 @@ class GeminiTranscriber:
             encoding="utf-8",
         )
 
-        print(f"[S1] Gemini 转录完成：共 {len(lines)} 条，总时长 {total_duration_ms}ms")
+        logger.info("gemini_transcribe_done lines=%d total_ms=%s", len(lines), total_duration_ms)
         return result
 
     def _build_prompt(
