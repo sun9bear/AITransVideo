@@ -1,20 +1,17 @@
 import type { Metadata } from "next"
-import "./globals.css"
+import { notFound } from "next/navigation"
+import { hasLocale, NextIntlClientProvider } from "next-intl"
+import { setRequestLocale, getMessages } from "next-intl/server"
+import "../globals.css"
 import { Toaster } from "@/components/ui/sonner"
 import { SessionProvider } from "@/components/providers/session-provider"
 import { defaultDescription, defaultTitle, siteName, siteUrl } from "@/lib/seo/site"
+import { routing } from "@/i18n/routing"
 
 /**
- * Root metadata — kept narrow on purpose.
- *
- * This layout wraps both `(marketing)` and `(app)` route groups, so anything
- * declared here leaks into `/workspace`, `/projects`, `/admin` etc. Things
- * that are safe to fall through (title template, default description as a
- * fallback before a page declares its own) stay here. Things that would
- * mis-attribute logged-in pages (`alternates.canonical`, marketing-only OG
- * title/description) MUST be declared per-page, not here.
- *
- * See docs/plans/2026-05-03-geo-optimization-plan.md §7.4.
+ * 本地化主子树的 **唯一 root layout**（UI-02：删顶层 app/layout.tsx 后此为 root）。
+ * Root metadata — 保持窄：title 模板/默认描述/OG locale/verification 等 fall-through 项留这里；
+ * canonical / 营销专属 OG title·description 仍只在 page 级（GEO §7.4，红线 4）。
  */
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -36,19 +33,11 @@ export const metadata: Metadata = {
     "爱译视频",
     "AITrans.Video",
   ],
-  // Defaults only — per-page metadata overrides title/description/url.
-  // Locale + siteName + type bubble through to legal/contact pages that
-  // don't declare their own openGraph block.
   openGraph: {
     siteName,
     locale: "zh_CN",
     type: "website",
   },
-  // Search-console site-verification tokens. Next.js renders these as the
-  // appropriate <meta> tags in the homepage <head>, which both tools accept
-  // for ownership verification. Adding more tokens here (e.g. Bing
-  // `msvalidate.01` under `verification.other`) is the single-deploy way to
-  // prove ownership across multiple webmaster tools.
   verification: {
     google: "VSf8VEhNmB5UDyf3asBHgFJtagelrwzkiC7xvpm5Hrs",
     other: {
@@ -57,13 +46,29 @@ export const metadata: Metadata = {
   },
 }
 
-export default function RootLayout({
+export function generateStaticParams() {
+  return routing.locales.map((locale) => ({ locale }))
+}
+
+export default async function LocaleLayout({
   children,
+  params,
 }: Readonly<{
   children: React.ReactNode
+  params: Promise<{ locale: string }>
 }>) {
+  const { locale } = await params
+  if (!hasLocale(routing.locales, locale)) {
+    notFound()
+  }
+  // 让本 layout + 其下静态页可静态渲染（漏调会静默退化为 dynamic，R10）。
+  setRequestLocale(locale)
+  const messages = await getMessages()
+  // zh→zh-Hans（注：旧 root 为 zh-CN，此为已登记的单点字节豁免），en→en。
+  const htmlLang = locale === "zh" ? "zh-Hans" : "en"
+
   return (
-    <html lang="zh-CN" className="dark h-full antialiased">
+    <html lang={htmlLang} className="dark h-full antialiased">
       <head>
         <meta name="theme-color" content="#0a1628" media="(prefers-color-scheme: dark)" />
         <meta name="theme-color" content="#f5f5f4" media="(prefers-color-scheme: light)" />
@@ -77,9 +82,9 @@ export default function RootLayout({
       </head>
       <body className="min-h-full bg-background">
         <a href="#main-content" className="skip-to-main">跳到主内容</a>
-        <SessionProvider>
-          {children}
-        </SessionProvider>
+        <NextIntlClientProvider messages={messages}>
+          <SessionProvider>{children}</SessionProvider>
+        </NextIntlClientProvider>
         <Toaster position="top-center" richColors />
       </body>
     </html>
