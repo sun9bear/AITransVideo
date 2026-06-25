@@ -66,22 +66,28 @@ class ErrorPayload:
         return payload
 
 
-# Well-known stable error codes (extend as needed; NEVER rename existing ones).
+# Curated subset of the error codes actually emitted by gateway/job_intercept.py —
+# that module is the RUNTIME source of truth. These are verified-real codes (NOT
+# speculative); extend as classifiers/tests need them, but NEVER rename a shipped
+# code (e.g. ``insufficient_credits`` is keyed on by the frontend smart-preview
+# reason union — see gateway ``_insufficient_credits_response``).
 RETRYABLE_CODES: frozenset[str] = frozenset(
     {
-        "db_write_failed",
-        "upstream_timeout",
-        "worker_unavailable",
+        "rate_limited",
+        "timeout",
+        "upstream_error",
+        "storage_error",
+        "gate_unavailable",
     }
 )
 
 NON_RETRYABLE_CODES: frozenset[str] = frozenset(
     {
+        "insufficient_credits",
         "job_not_found",
-        "job_not_owned",
-        "credit_insufficient",
-        "voice_clone_consent_required",
-        "plan_upgrade_required",
-        "invalid_request",
+        "unauthorized",
+        "invalid_body",
+        "feature_not_available",
+        "anonymous_preview_disabled",
     }
 )

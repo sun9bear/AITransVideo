@@ -186,6 +186,12 @@ class TestErrorPayload:
     def test_retryable_codes_disjoint_from_non_retryable(self) -> None:
         assert RETRYABLE_CODES.isdisjoint(NON_RETRYABLE_CODES)
 
+    def test_uses_real_shipped_insufficient_credits_code(self) -> None:
+        # @codex P2: must match the gateway-emitted code (frontend keys on it),
+        # not the fictional ``credit_insufficient``.
+        assert "insufficient_credits" in NON_RETRYABLE_CODES
+        assert "credit_insufficient" not in NON_RETRYABLE_CODES
+
 
 class TestUnpackRerankResult:
     def test_basic_extraction(self) -> None:
