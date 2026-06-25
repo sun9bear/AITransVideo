@@ -287,7 +287,7 @@ class TTSGenerator:
         self._active_job_record = effective_job_record
         decision = self._resolve_provider_decision(job_record=effective_job_record)
         self._job_provider = decision["provider"]
-        logger.info("tts_provider_selected provider=%s source=%s", self._job_provider, decision["source"])
+        print(f"[S4] TTS provider: {self._job_provider} (source: {decision['source']})")
 
         # Count how many actually need generation (not cached)
         pending_count = sum(

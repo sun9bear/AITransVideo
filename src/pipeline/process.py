@@ -1447,9 +1447,11 @@ def _emit_smart_audit(
     except Exception as _exc:
         # ValueError on enum typo OR any other programming bug. Log
         # but don't crash — audit sidecar is informational.
-        logger.error(
-            "smart_sidecar_emit_failed decision_type=%r decision=%r error=%s: %s",
-            decision_type, decision, type(_exc).__name__, _exc,
+        print(
+            f"[smart] sidecar emit failed (call-site bug?): "
+            f"decision_type={decision_type!r} decision={decision!r} "
+            f"err={type(_exc).__name__}: {_exc}",
+            flush=True,
         )
 
 
@@ -2923,6 +2925,10 @@ class ProcessPipeline:
         self.project_builder = project_builder or ProjectBuilder()
 
     def run(self, config: ProcessConfig) -> ProcessResult:
+        # TU-08: emit structured audit logs at runtime — pipeline runs via
+        # ``main.py process`` (subprocess, no logging config → root=WARNING drops INFO).
+        if not logging.getLogger().handlers:
+            logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
         # Commit copy_as_new / overwrite routes here with
         # resume_from='alignment' to skip S0-S3 (D28). All context the
         # alignment+publish block needs is rebuilt from the project_dir
