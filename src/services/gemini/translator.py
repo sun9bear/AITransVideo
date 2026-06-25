@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -31,6 +32,8 @@ from utils.coerce import (
     normalize_optional_text as _normalize_optional_text,
 )
 from utils.json_helpers import write_json as _write_json
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -653,7 +656,7 @@ class GeminiTranslator:
                 extra=extra,
             )
         except Exception as exc:
-            print(f"[metering] LLM usage record skipped: {exc}", flush=True)
+            logger.warning("llm_metering_skip error=%s", exc)
 
     def translate(
         self,
@@ -1492,7 +1495,7 @@ class GeminiTranslator:
                 response_text = ""
                 attempt_start_ms = int(time.time() * 1000)
                 try:
-                    print(f"[LLM] {task} using {m} ({_resolve_model_id(m)})")
+                    logger.info("llm_attempt_start task=%s model=%s model_id=%s", task, m, _resolve_model_id(m))
                     response_text = self._call_by_model(m, prompt, json_mode=json_mode)
                     provider_response_received = True
                     if validator is not None:
@@ -1548,7 +1551,10 @@ class GeminiTranslator:
                         },
                     )
                     if next_m is not None:
-                        print(f"[LLM] {task} {m} failed, falling back to {next_m}: {exc}")
+                        logger.warning(
+                            "llm_fallback_triggered task=%s model=%s fallback=%s error=%s",
+                            task, m, next_m, exc,
+                        )
                     continue
             if last_error is not None:
                 raise TranslationError(str(last_error)) from last_error
@@ -1564,7 +1570,7 @@ class GeminiTranslator:
             f"[LLM-ROUTER-LEGACY] hit task={task} prompt_key={prompt_key!r} "
             f"service_mode={mode!r} has_router={self.llm_router is not None}"
         )
-        print(_legacy_path_msg, flush=True)
+        logger.warning("llm_router_legacy_path %s", _legacy_path_msg)
         try:
             _runtime_logs_dir = os.environ.get(
                 "AIVIDEOTRANS_RUNTIME_LOGS_DIR",
@@ -1616,7 +1622,7 @@ class GeminiTranslator:
                                 model_name=override_model_name,
                             )
                     else:
-                        print(f"[LLM] {task} using {alias}")
+                        logger.info("llm_attempt_start task=%s alias=%s", task, alias)
                         response_text = self.llm_router.generate_via_alias(
                             alias,
                             prompt=prompt,
@@ -1679,9 +1685,9 @@ class GeminiTranslator:
                     )
                     if should_retry_same_alias:
                         wait_seconds = 3 * (retry_attempt + 1)
-                        print(
-                            f"[LLM] {task} {alias} transient failure, retrying same model "
-                            f"in {wait_seconds}s ({retry_attempt + 1}/{DEFAULT_ALIAS_RETRY_ATTEMPTS_BEFORE_FALLBACK}): {exc}"
+                        logger.warning(
+                            "llm_transient_retry task=%s alias=%s attempt=%d/%d wait_s=%s error=%s",
+                            task, alias, retry_attempt + 1, DEFAULT_ALIAS_RETRY_ATTEMPTS_BEFORE_FALLBACK, wait_seconds, exc,
                         )
                         time.sleep(wait_seconds)
                         continue
@@ -1689,7 +1695,10 @@ class GeminiTranslator:
             if index >= len(route) - 1:
                 break
             next_alias = route[index + 1]
-            print(f"[LLM] {task} {alias} failed, falling back to {next_alias}: {last_error}")
+            logger.warning(
+                "llm_fallback_triggered task=%s alias=%s fallback=%s error=%s",
+                task, alias, next_alias, last_error,
+            )
 
         if last_error is None:
             raise TranslationError(f"No LLM route is configured for task '{task}'.")
