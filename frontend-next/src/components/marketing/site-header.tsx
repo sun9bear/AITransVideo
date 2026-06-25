@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { usePathname } from "@/i18n/navigation"
 import { useSession } from "@/components/providers/session-provider"
@@ -9,10 +10,12 @@ import { buttonVariants } from "@/components/ui/button-variants"
 import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher"
 import { cn } from "@/lib/utils"
 
-const NAV_ITEMS: Array<{ href: string; label: string }> = [
-  { href: "/", label: "首页" },
-  { href: "/pricing", label: "定价" },
-  { href: "/trial", label: "免费试用" },
+// Nav `href` is locale-agnostic (the @/i18n/navigation Link adds the locale
+// prefix); `labelKey` resolves against `marketing.nav` per UI page locale.
+const NAV_ITEMS: Array<{ href: string; labelKey: "home" | "pricing" | "trial" }> = [
+  { href: "/", labelKey: "home" },
+  { href: "/pricing", labelKey: "pricing" },
+  { href: "/trial", labelKey: "trial" },
 ]
 
 /**
@@ -34,6 +37,7 @@ const NAV_ITEMS: Array<{ href: string; label: string }> = [
 export function SiteHeader() {
   const pathname = usePathname()
   const { user } = useSession()
+  const t = useTranslations("marketing.nav")
 
   const isHome = pathname === "/"
   // Derived state pattern (avoids `react-hooks/set-state-in-effect` rule):
@@ -65,11 +69,11 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border/70 bg-background/85 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
-        <Link href="/" className="flex items-center" aria-label="AITrans.Video 首页">
+        <Link href="/" className="flex items-center" aria-label={t("ariaBrandHome")}>
           <BrandLockup />
         </Link>
 
-        <nav className="hidden items-center gap-1 md:flex" aria-label="主导航">
+        <nav className="hidden items-center gap-1 md:flex" aria-label={t("ariaMainNav")}>
           {NAV_ITEMS.map((item) => {
             const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href)
             return (
@@ -83,7 +87,7 @@ export function SiteHeader() {
                     : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                {item.label}
+                {t(item.labelKey)}
               </Link>
             )
           })}
@@ -108,7 +112,7 @@ export function SiteHeader() {
               // compete with — so a strong fill is appropriate.
               className={cn(buttonVariants({ variant: "default", size: "sm" }), "h-8 px-3")}
             >
-              进入工作台
+              {t("enterWorkspace")}
             </Link>
           ) : (
             <>
@@ -134,7 +138,7 @@ export function SiteHeader() {
                   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[color:var(--cinnabar,#C73E3A)]",
                 )}
               >
-                登录
+                {t("login")}
               </Link>
               <Link
                 href="/auth"
@@ -155,8 +159,8 @@ export function SiteHeader() {
                     : "shadow-none",
                 )}
               >
-                <span className="sm:hidden">试用</span>
-                <span className="hidden sm:inline">免费开始试用</span>
+                <span className="sm:hidden">{t("trialShort")}</span>
+                <span className="hidden sm:inline">{t("trialCta")}</span>
               </Link>
             </>
           )}

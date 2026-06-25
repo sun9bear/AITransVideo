@@ -81,4 +81,72 @@ assert.equal(zhAuth.emailForm.emailVerified, "邮箱已验证：<highlight>{norm
 assert.equal(zhAuth.captcha.configMissing, "验证码配置缺失（{var} 未设置）", "auth captcha.configMissing 模板漂移")
 assert.equal(zhAuth.passwordLogin.errorCsrfOriginRejected, "请求来源校验失败，请确认正在使用 {url} 访问，刷新页面后重试。", "auth passwordLogin.errorCsrfOriginRejected 模板漂移")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth 字节一致 全部通过")
+// 4) marketing 默认 zh 字节一致（UI-03a 红线 1）：FAQ / 对比表 / 导航 / 页脚 chrome
+//    迁入 messages/zh/marketing.json 后，zh 值必须与改造前内联字面量【逐字节】相同。
+//    钉死标点/全半角/破折号敏感的代表串（任一漂移即在此 red）。改任一值都视为 zh 渲染回归。
+const zhMkt = JSON.parse(readFileSync(path.join(root, "messages/zh/marketing.json"), "utf8"))
+
+// nav / footer chrome（短串，标点敏感）
+assert.equal(zhMkt.nav.enterWorkspace, "进入工作台", "marketing.nav.enterWorkspace 漂移")
+assert.equal(zhMkt.nav.trialCta, "免费开始试用", "marketing.nav.trialCta 漂移")
+assert.equal(zhMkt.nav.ariaBrandHome, "AITrans.Video 首页", "marketing.nav.ariaBrandHome 漂移")
+assert.equal(
+  zhMkt.footer.tagline,
+  "爱译视频，让世界视频开口说中文。专注长视频的 AI 翻译配音工作台，支持中文字幕、中文配音、多格式导出和逐句修改。",
+  "marketing.footer.tagline 漂移",
+)
+// 版权行 ICU 模板（年份占位符 verbatim、间隔号 · 中点 verbatim）
+assert.equal(
+  zhMkt.footer.copyright,
+  "© {year} 爱译视频 AITrans.Video · 长视频翻译配音工作台",
+  "marketing.footer.copyright 模板漂移",
+)
+
+// comparison：破折号 1–3（en dash U+2013）+ 全角斜杠分隔，最易被"修正"成连字符
+assert.equal(
+  zhMkt.comparison.rows[0].workbench,
+  "支持 1–3 小时长视频，针对访谈、课程、播客优化",
+  "marketing.comparison.rows[0].workbench 破折号/标点漂移",
+)
+assert.equal(zhMkt.comparison.headerWorkbench, "爱译视频工作台", "marketing.comparison.headerWorkbench 漂移")
+assert.equal(zhMkt.comparison.labelOneClick, "一键生成工具：", "marketing.comparison.labelOneClick 全角冒号漂移")
+
+// faq：marquee 提示用间隔号 ·；supportNudge 用全角直角引号「」+ 全角问号？
+assert.equal(
+  zhMkt.faq.marqueeHint,
+  "鼠标悬停可暂停自动滚动 · 完整问答见",
+  "marketing.faq.marqueeHint 间隔号漂移",
+)
+assert.equal(
+  zhMkt.faq.supportNudge,
+  "还有疑问？点右下角「客服」浮窗，先 AI 后人工。",
+  "marketing.faq.supportNudge 标点漂移",
+)
+// faq 组数与顺序（pricing = general + pricingExtra；不变量 5 的源完整性）
+assert.equal(zhMkt.faq.general.length, 8, "marketing.faq.general 应为 8 条（home 集）")
+assert.equal(zhMkt.faq.pricingExtra.length, 3, "marketing.faq.pricingExtra 应为 3 条（pricing 追加）")
+assert.equal(
+  zhMkt.faq.general[0].q,
+  "为什么你们强调长视频？",
+  "marketing.faq.general[0].q 漂移（全角问号）",
+)
+
+// 5) seo 默认 zh 字节一致：site 级标题/描述与 site.ts 顶层常量同源同值（红线 1）
+const zhSeo = JSON.parse(readFileSync(path.join(root, "messages/zh/seo.json"), "utf8"))
+assert.equal(zhSeo.site.name, "爱译视频", "seo.site.name 漂移")
+assert.equal(zhSeo.site.defaultTitle, site.defaultTitle, "seo.site.defaultTitle 必须与 site.ts defaultTitle 同值")
+assert.equal(
+  zhSeo.site.defaultDescription,
+  site.defaultDescription,
+  "seo.site.defaultDescription 必须与 site.ts defaultDescription 同值",
+)
+// site.ts localeSeo.zh 仍镜像顶层常量（INERT zh 路径不变）
+assert.equal(site.localeSeo.zh.siteName, site.siteName, "localeSeo.zh.siteName ≠ 顶层 siteName（zh 必须 inert）")
+assert.equal(site.localeSeo.zh.defaultTitle, site.defaultTitle, "localeSeo.zh.defaultTitle ≠ 顶层（zh 必须 inert）")
+assert.equal(
+  site.localeSeo.zh.defaultDescription,
+  site.defaultDescription,
+  "localeSeo.zh.defaultDescription ≠ 顶层（zh 必须 inert）",
+)
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo 字节一致 全部通过")

@@ -1,1 +1,119 @@
-{}
+{
+  "nav": {
+    "home": "Home",
+    "pricing": "Pricing",
+    "trial": "Free trial",
+    "login": "Log in",
+    "enterWorkspace": "Open workspace",
+    "trialShort": "Try it",
+    "trialCta": "Start free trial",
+    "ariaMainNav": "Main navigation",
+    "ariaBrandHome": "AITrans.Video home"
+  },
+  "footer": {
+    "tagline": "AITrans.Video makes the world's videos speak Chinese. A long-form AI translation and dubbing workbench with Chinese subtitles, Chinese voiceover, multi-format export, and sentence-by-sentence editing.",
+    "ariaProductNav": "Product navigation",
+    "ariaLegalNav": "Legal & compliance",
+    "ariaSupportNav": "Support",
+    "colProduct": "Product",
+    "colLegal": "Legal & compliance",
+    "colSupport": "Support",
+    "linkHome": "Home",
+    "linkPricing": "Pricing",
+    "linkTrial": "Free trial",
+    "linkLogin": "Log in",
+    "linkTerms": "Terms of Service",
+    "linkPrivacy": "Privacy Policy",
+    "linkRefund": "Refund Policy",
+    "linkContact": "Contact us",
+    "copyright": "© {year} AITrans.Video · Long-form video translation & dubbing workbench"
+  },
+  "comparison": {
+    "eyebrow": "How it differs from one-click tools",
+    "heading": "One-click generators vs. a long-form translation & dubbing workbench",
+    "lead": "This isn't a competitor review — it explains two product shapes. For quick short-video tests a one-click generator is fine; for ongoing long-form localization that needs review and fine polishing, the workbench model saves more time and money.",
+    "headerDimension": "Dimension",
+    "headerOneClick": "One-click generators",
+    "headerWorkbench": "AITrans.Video workbench",
+    "labelOneClick": "One-click generators:",
+    "labelWorkbench": "AITrans.Video workbench:",
+    "rows": [
+      {
+        "dimension": "Suitable video length",
+        "oneClick": "Better for short-video tests (seconds to a few minutes)",
+        "workbench": "Handles 1–3 hour long videos, tuned for interviews, courses, and podcasts"
+      },
+      {
+        "dimension": "Can results be edited",
+        "oneClick": "After generation you can essentially only re-run the whole clip — expensive to change",
+        "workbench": "Review translation and dubbing sentence by sentence in the workbench, regenerate single segments"
+      },
+      {
+        "dimension": "Types of deliverables",
+        "oneClick": "Usually just a single finished clip",
+        "workbench": "Dubbed video / dubbed audio / subtitles / translated text / materials pack / Jianying draft"
+      },
+      {
+        "dimension": "Cost control",
+        "oneClick": "Changing one sentence means re-running the whole clip — minutes pile up fast",
+        "workbench": "Change one sentence and only pay for that one — fine-grained billing by duration"
+      }
+    ]
+  },
+  "faq": {
+    "eyebrow": "FAQ",
+    "heading": "You might be wondering",
+    "marqueeHint": "Hover to pause auto-scroll · see the full Q&A on the",
+    "marqueeHintLink": "pricing page",
+    "ariaList": "Frequently asked questions",
+    "supportNudge": "Still have questions? Click the \"Support\" widget at the bottom right — AI first, then a human.",
+    "general": [
+      {
+        "q": "Why do you emphasize long videos?",
+        "a": "A lot of knowledge content isn't a few-second short — it's a 30-minute, 1-hour, or even 3-hour interview, course, podcast, or talk. Our Pro plan supports a single video up to 180 minutes long, built exactly for translating and Chinese-dubbing this kind of long-form content."
+      },
+      {
+        "q": "Which source languages are supported?",
+        "a": "Right now we focus on translating overseas English long videos into Chinese-dubbed versions — interviews, courses, podcasts, and product demos work most reliably. Other source languages (Japanese, Spanish, etc.) are under evaluation and not yet available. If you plan to upload non-English material, please check with support first."
+      },
+      {
+        "q": "Which video sources are supported?",
+        "a": "We support importing your own or duly authorized content: local video file upload, YouTube links (for your own channel or videos you have rights to), and other video links. Before using, please confirm you hold the legal rights to the video — see the Terms of Service for details."
+      },
+      {
+        "q": "How is this different from Rask, HeyGen, or ElevenLabs?",
+        "a": "Rask, HeyGen, and ElevenLabs are all excellent global platforms, some very strong on digital avatars or voice cloning. AITrans.Video's focus is different — we care more about what Chinese creators actually need when handling overseas English long videos: longer video durations, a lower barrier to entry, multiple export formats, and the ability to edit sentence by sentence and regenerate single segments after generation."
+      },
+      {
+        "q": "What if I'm not happy with the AI translation?",
+        "a": "What the AI generates is a first draft, not the final version. In the workbench you can review the translation, subtitles, and dubbing sentence by sentence, edit any sentence you're not happy with, and regenerate just that segment."
+      },
+      {
+        "q": "Do I have to regenerate the whole video to change one sentence?",
+        "a": "No. AITrans.Video supports incremental regeneration: when you change just one sentence, the system reprocesses only that segment instead of re-synthesizing the whole video, saving both time and cost."
+      },
+      {
+        "q": "What's the difference between Studio mode and Express mode?",
+        "a": "Express mode runs the whole pipeline automatically — fast and low-cost, good for validating results first or producing in batches. Studio mode lets you review the translation sentence by sentence in the workbench and choose a more fitting Chinese dubbing voice, with more stable quality, better suited for content you'll publish or deliver to clients. With proper legal authorization, Studio also supports voice cloning."
+      },
+      {
+        "q": "Which results can I download?",
+        "a": "Once a job is done you can download: the Chinese-dubbed video, dubbed audio, Chinese subtitles (including English / bilingual subtitles), translated text, the raw materials pack, and a Jianying draft project — open the finished subtitle, dubbing, and material tracks directly in Jianying to keep fine-editing, without laying out the timeline from scratch."
+      }
+    ],
+    "pricingExtra": [
+      {
+        "q": "What happens after the trial ends?",
+        "a": "When the trial ends there's no automatic charge. You can keep using the free allowance of the Free plan, or upgrade to Plus or Pro on your own."
+      },
+      {
+        "q": "How is video duration calculated?",
+        "a": "By the actual duration of the source video. After processing completes, that duration counts toward your current allowance; failed or canceled jobs are not billed."
+      },
+      {
+        "q": "What exactly does \"no charge on failure\" mean?",
+        "a": "If a job fails during system processing and produces no downloadable result, the corresponding processing allowance is not deducted; jobs you cancel before completion are also not billed. Note that \"not satisfied\" doesn't count here — results that are completed and delivered are billed normally by duration, but you can edit sentence by sentence and regenerate single segments in the workbench to avoid paying to re-run the whole clip."
+      }
+    ]
+  }
+}

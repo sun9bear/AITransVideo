@@ -1,1 +1,7 @@
-{}
+{
+  "site": {
+    "name": "AITrans.Video",
+    "defaultTitle": "AITrans.Video · Make the world's videos speak Chinese",
+    "defaultDescription": "Turn long English videos into publish-ready Chinese-dubbed versions. AI video translation, Chinese voiceover, AI subtitles, YouTube video translation, SRT subtitle export, and a long-form localization workbench. Supports videos up to 3 hours, with sentence-by-sentence editing and single-sentence regeneration."
+  }
+}
