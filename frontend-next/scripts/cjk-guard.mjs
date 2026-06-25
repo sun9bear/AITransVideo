@@ -78,12 +78,22 @@ function scan() {
 const current = scan()
 const update = process.argv.includes("--update") || process.env.UILOC_CJK_UPDATE === "1"
 
-if (update || !existsSync(baselinePath)) {
+if (update) {
   const sorted = Object.fromEntries(Object.entries(current).sort(([a], [b]) => a.localeCompare(b)))
   writeFileSync(baselinePath, JSON.stringify(sorted, null, 2) + "\n")
   const n = Object.values(current).reduce((s, a) => s + a.length, 0)
   console.log(`[cjk-guard] baseline 写入：${Object.keys(current).length} 文件 / ${n} occurrences`)
   process.exit(0)
+}
+
+// fail-closed：check 模式缺 baseline 视为错误，不自动写入（多 lens 复审）。
+// 首次生成必须显式 --update / UILOC_CJK_UPDATE=1。
+if (!existsSync(baselinePath)) {
+  console.error(
+    `[cjk-guard] FAIL — 缺少 baseline：${rel(baselinePath)} 不存在。` +
+      `首次生成请显式运行 \`node scripts/cjk-guard.mjs --update\`（或 UILOC_CJK_UPDATE=1）。`
+  )
+  process.exit(1)
 }
 
 const baseline = JSON.parse(readFileSync(baselinePath, "utf8"))
