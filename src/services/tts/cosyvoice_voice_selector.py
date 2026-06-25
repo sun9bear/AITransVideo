@@ -441,7 +441,7 @@ def select_cosyvoice_voice_match(
     from services.tts.voice_reranker import (
         combined_rerank,
         load_profiles,
-        score_to_confidence,
+        unpack_rerank_result,
     )
 
     # PR-E re-CodeX P2: CosyVoice is Chinese-only — fail closed for ANY non-zh target
@@ -547,10 +547,7 @@ def select_cosyvoice_voice_match(
         target_chars_per_second=target_chars_per_second,
     )
 
-    best_vid = scored[0][0]
-    best_score = scored[0][1]
-    remaining = tuple(vid for vid, _ in scored[1:6])
-    confidence = score_to_confidence(best_score)
+    best_vid, best_score, remaining, confidence = unpack_rerank_result(scored)
 
     logger.info(
         "[CosyVoice-matcher] combined_rerank: %s (score=%.2f, gender=%s, age=%s, persona=%s, "

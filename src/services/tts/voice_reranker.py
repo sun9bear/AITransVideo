@@ -345,6 +345,25 @@ def score_to_confidence(score: float) -> str:
     return "low"
 
 
+def unpack_rerank_result(
+    scored: list[tuple[str, float]],
+    *,
+    backup_limit: int = 5,
+) -> tuple[str, float, tuple[str, ...], str]:
+    """Extract best voice, score, backup pool, and confidence from rerank output.
+
+    Returns ``(best_voice_id, best_score, backup_voices, confidence)``.
+    ``backup_voices`` contains up to *backup_limit* runner-up voice IDs.
+    Single source for the result-extraction boilerplate previously duplicated
+    across the volcengine / minimax / cosyvoice selectors (DRY-06).
+    """
+    best_vid = scored[0][0]
+    best_score = scored[0][1]
+    remaining: tuple[str, ...] = tuple(vid for vid, _ in scored[1 : 1 + backup_limit])
+    confidence = score_to_confidence(best_score)
+    return best_vid, best_score, remaining, confidence
+
+
 # ---------------------------------------------------------------------------
 # Profile loader (Gateway internal API, provider-agnostic)
 # ---------------------------------------------------------------------------
