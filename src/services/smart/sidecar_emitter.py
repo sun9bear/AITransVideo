@@ -211,6 +211,10 @@ def _atomic_write_json(target: Path, payload: Mapping[str, Any]) -> bool:
     voice_registry.save() pattern called out in _file_lock.py docstring.
 
     Returns True on success, False (with logged exception) on failure.
+
+    注：同见 utils.atomic_io.atomic_write_json（canonical helper，TU-04）。本函数
+    保留独立实现——它额外持有 file_lock() 并发安全语义，合并会强制所有调用方拿锁
+    （行为变化），故 DRY-02 不收口此处。
     """
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
     tmp_path = target.with_suffix(target.suffix + ".tmp")

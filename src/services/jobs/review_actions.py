@@ -22,6 +22,7 @@ from services.review_state import (
     VOICE_SELECTION_REVIEW_STAGE,
     ReviewStateManager,
 )
+from utils.atomic_io import atomic_write_json as _atomic_write_json_helper
 
 
 DUBBING_MODE_DUB = "dub"
@@ -1065,26 +1066,15 @@ def _find_source_audio(project_dir: Path) -> Path | None:
     return None
 
 
-def _atomic_write_json(path: Path, payload: object) -> None:
-    temp_path: Path | None = None
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f"{path.stem}_",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            json.dump(payload, temp_file, ensure_ascii=False, indent=2)
-            temp_file.write("\n")
-            temp_file.flush()
-            temp_path = Path(temp_file.name)
-        temp_path.replace(path)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+def _atomic_write_json(path: Path, payload: object, *, fsync: bool = True) -> None:
+    """Thin wrapper → utils.atomic_io.atomic_write_json（DRY-02 收口，TU-04）。
+
+    保留原有字节语义：sort_keys=False（插入顺序）+ 末尾换行。原实现无 sort_keys，
+    迁移传 sort_keys=False 以保字节等价（与 editing_* 一致，避免 diff 噪声）。
+    """
+    _atomic_write_json_helper(
+        path, payload, fsync=fsync, sort_keys=False, trailing_newline=True
+    )
 
 
 def _sync_dubbing_mode_to_segment_snapshots(

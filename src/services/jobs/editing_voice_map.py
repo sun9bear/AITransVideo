@@ -57,6 +57,7 @@ from services.jobs.editing_segments import (
     mark_segment_status,
 )
 from services.jobs.input_validators import validate_segment_id
+from utils.atomic_io import atomic_write_json as _atomic_write_json_helper
 
 logger = logging.getLogger(__name__)
 
@@ -84,23 +85,15 @@ def _voice_map_path(project_dir: str | Path) -> Path:
     return Path(project_dir) / VOICE_MAP_FILE
 
 
-def _atomic_write_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+def _atomic_write_json(path: Path, payload: object, *, fsync: bool = True) -> None:
+    """Thin wrapper → utils.atomic_io.atomic_write_json（DRY-02 收口，TU-04）。
+
+    保留 voice_map.json 原有字节语义：sort_keys=False（插入顺序）+ 末尾换行。
+    fsync 默认 True（原实现无 fsync，迁移时升级为落盘，CodeX 2026-06-25 决策）。
+    """
+    _atomic_write_json_helper(
+        path, payload, fsync=fsync, sort_keys=False, trailing_newline=True
     )
-    tmp_path = Path(tmp_name)
-    try:
-        with open(tmp_fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-        tmp_path.replace(path)
-    except Exception:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def load_voice_map(project_dir: str | Path) -> dict[str, dict[str, Any]]:

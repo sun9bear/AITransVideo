@@ -23,6 +23,7 @@ from modules.draft.schema import (
 )
 from modules.draft.schema_validator import DraftSchemaValidator
 from services.state_manager import utc_now_iso
+from utils.atomic_io import atomic_write_json as _atomic_write_json_helper
 
 
 @dataclass(slots=True)
@@ -248,27 +249,12 @@ class DraftWriter:
         return copied_materials
 
     def _write_json_atomic(self, output_path: Path, payload: dict[str, object]) -> None:
-        temp_path: Path | None = None
+        """DRY-02 收口（TU-04）：委托 utils.atomic_io.atomic_write_json，
+        保留 DraftError 包装（剪映 draft 调用方依赖此异常类型，红线）。"""
         try:
-            serialized_payload = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=output_path.parent,
-                prefix=f"{output_path.stem}_",
-                suffix=".tmp",
-                delete=False,
-            ) as temp_file:
-                temp_file.write(serialized_payload)
-                temp_file.flush()
-                os.fsync(temp_file.fileno())
-                temp_path = Path(temp_file.name)
-            os.replace(temp_path, output_path)
+            _atomic_write_json_helper(output_path, payload, sort_keys=True)
         except OSError as exc:
             raise DraftError(f"Failed to write draft JSON: {output_path}") from exc
-        finally:
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
 
     def _count_caption_items(self, draft_content: dict[str, object]) -> int:
         timeline = draft_content.get("timeline", {})

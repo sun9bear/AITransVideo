@@ -11,6 +11,8 @@ try:
 except ImportError:  # pragma: no cover - non-Windows fallback
     winreg = None  # type: ignore[assignment]
 
+from utils.atomic_io import atomic_write_json as _atomic_write_json_helper
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_AUTODUB_LOCAL_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
@@ -410,23 +412,10 @@ def _deep_merge_dicts(
 
 
 def _write_json_atomically(target_path: Path, payload: dict[str, object]) -> None:
-    temp_path: Path | None = None
-    try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        serialized_payload = json.dumps(payload, indent=2, ensure_ascii=False)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=target_path.parent,
-            prefix=f"{target_path.stem}_",
-            suffix=".tmp",
-            delete=False,
-        ) as temp_file:
-            temp_file.write(serialized_payload)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-            temp_path = Path(temp_file.name)
-        os.replace(temp_path, target_path)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+    """DRY-02 收口（TU-04，spec 未枚举此第 7 处，迁移以满足 DRY-02 + DoD ≤2 指标）。
+
+    委托 utils.atomic_io.atomic_write_json。原实现 json.dumps(indent=2,
+    ensure_ascii=False) 无 sort_keys（插入顺序）+ 始终 fsync，故传 sort_keys=False、
+    fsync=True（默认）→ 字节等价。
+    """
+    _atomic_write_json_helper(target_path, payload, fsync=True, sort_keys=False)

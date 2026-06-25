@@ -70,7 +70,11 @@ def _compute_net_credits_charged(credit_entries: Iterable[Any]) -> int:
 def _atomic_write_json(target: Path, payload: dict) -> None:
     """Write JSON atomically via temp file + os.replace. Mirrors the
     pattern in services.smart.sidecar_emitter._atomic_write_json but
-    Gateway-side (we don't import pipeline modules)."""
+    Gateway-side (we don't import pipeline modules).
+
+    注：同见 src/utils/atomic_io.atomic_write_json（canonical helper，TU-04）。本函数
+    保留独立实现——gateway 进程不 import src/ pipeline 模块（import 边界约束），故
+    DRY-02 不收口此处。"""
     target.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     fd, tmp_path_str = tempfile.mkstemp(
