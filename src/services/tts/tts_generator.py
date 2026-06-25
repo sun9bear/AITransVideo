@@ -287,7 +287,7 @@ class TTSGenerator:
         self._active_job_record = effective_job_record
         decision = self._resolve_provider_decision(job_record=effective_job_record)
         self._job_provider = decision["provider"]
-        print(f"[S4] TTS provider: {self._job_provider} (source: {decision['source']})")
+        logger.info("tts_provider_selected provider=%s source=%s", self._job_provider, decision["source"])
 
         # Count how many actually need generation (not cached)
         pending_count = sum(
@@ -410,9 +410,9 @@ class TTSGenerator:
                 try:
                     _, result = _worker(idx, seg)
                     results_dict[seg.segment_id] = result
-                    print(f"[S4] TTS 段 {seg.segment_id} 重试成功")
+                    logger.info("tts_segment_retry_success segment=%s", seg.segment_id)
                 except Exception as retry_exc:
-                    print(f"[S4] TTS 段 {seg.segment_id} 重试仍失败: {retry_exc}")
+                    logger.error("tts_segment_retry_exhausted segment=%s error=%s", seg.segment_id, retry_exc)
                     raise TTSGenerationError(
                         f"TTS 段 {seg.segment_id} 在重试后仍失败: {retry_exc}"
                     ) from retry_exc
@@ -677,7 +677,7 @@ class TTSGenerator:
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
-            print(f"[CosyVoice] speed_decision exception (fallback 1.0): {exc}", flush=True)
+            logger.warning("cosyvoice_speed_decision_fallback error=%s", exc)
             from services.tts.speed_decision import SpeedDecision
             decision = SpeedDecision(speed=1.0, reason="error", estimated_ms=0, ratio=0.0)
 
@@ -1114,7 +1114,7 @@ class TTSGenerator:
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
-            print(f"[VolcEngine] speed_decision exception (fallback 1.0): {exc}", flush=True)
+            logger.warning("volcengine_speed_decision_fallback error=%s", exc)
             from services.tts.speed_decision import SpeedDecision
             decision = SpeedDecision(speed=1.0, reason="error", estimated_ms=0, ratio=0.0)
 
@@ -1250,9 +1250,9 @@ class TTSGenerator:
                     raise
                 if attempt < max_attempts:
                     wait = self._OUTER_BACKOFF_SCHEDULE[attempt - 1]
-                    print(
-                        f"[S4] TTS 段 {segment.segment_id} ({provider}) 失败，"
-                        f"{wait}s 后重试 ({attempt}/{max_attempts})..."
+                    logger.warning(
+                        "tts_segment_attempt_failed segment=%s provider=%s attempt=%d/%d wait_s=%s",
+                        segment.segment_id, provider, attempt, max_attempts, wait,
                     )
                     time.sleep(wait)
 
@@ -1337,9 +1337,9 @@ class TTSGenerator:
                 # Continue to pause-and-retry below
 
         # All normal attempts exhausted — pause 5 minutes then try once more
-        print(
-            f"[S4] TTS 段 {segment.segment_id} 连续 {max_attempts} 次失败，"
-            f"暂停 {self._OUTER_PAUSE_SECONDS}s 后最后重试..."
+        logger.warning(
+            "tts_segment_pause_retry segment=%s attempts=%d pause_s=%s",
+            segment.segment_id, max_attempts, self._OUTER_PAUSE_SECONDS,
         )
         time.sleep(self._OUTER_PAUSE_SECONDS)
 
@@ -1595,7 +1595,7 @@ class TTSGenerator:
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
-            print(f"[MiniMax] speed_decision exception (fallback 1.0): {exc}", flush=True)
+            logger.warning("minimax_speed_decision_fallback error=%s", exc)
             from services.tts.speed_decision import SpeedDecision  # local import to avoid bootstrap cycles
             decision = SpeedDecision(speed=1.0, reason="error", estimated_ms=0, ratio=0.0)
 
@@ -1735,7 +1735,7 @@ class TTSGenerator:
                 extra=extra,
             )
         except Exception as exc:
-            print(f"[metering] TTS usage record skipped: {exc}", flush=True)
+            logger.warning("tts_metering_skip error=%s", exc)
 
 
 def load_tts_config() -> TTSConfig:
@@ -1853,8 +1853,9 @@ def _post_json(
 
         if attempt < max_retries and last_error is not None:
             wait_seconds = min(retry_backoff_seconds * (2 ** attempt), 60.0)
-            print(
-                f"[S4] MiniMax请求失败，{wait_seconds:g}秒后重试（{attempt + 1}/{max_retries}）：{last_error}"
+            logger.warning(
+                "minimax_request_retry attempt=%d/%d wait_s=%g error=%s",
+                attempt + 1, max_retries, wait_seconds, last_error,
             )
             time.sleep(wait_seconds)
         elif last_error is not None:
