@@ -15,6 +15,7 @@ from utils.coerce import (
     coerce_optional_int as _coerce_optional_int,
     normalize_optional_text as _normalize_optional_text,
 )
+from utils.json_helpers import to_jsonable as _to_jsonable, write_json as _write_json
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_AUTODUB_LOCAL_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
@@ -923,27 +924,3 @@ def _extract_raw_payload(transcript: Any) -> Any:
             "utterances": getattr(transcript, "utterances", None),
         }
     )
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(_to_jsonable(payload), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _to_jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_to_jsonable(item) for item in value]
-    if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
-    if hasattr(value, "__dict__"):
-        return {key: _to_jsonable(item) for key, item in vars(value).items() if not key.startswith("_")}
-    return str(value)
