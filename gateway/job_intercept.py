@@ -490,9 +490,28 @@ def _error_response(
     error_code: str,
     message: str,
     detail: dict | None = None,
+    retryable: bool = False,
+    user_action: str = "",
 ) -> Response:
-    """Return a JSON error with structured error_code for frontend consumption."""
-    body: dict = {"error": error_code, "message": message}
+    """Return a JSON error with structured error_code for frontend consumption.
+
+    Shape aligns with ``src/utils/error_payload.ErrorPayload`` (the canonical
+    backend error contract; gateway intentionally does NOT import that module —
+    see TU-06 invariant 3 — it only mirrors the shape).
+
+    Dual-write transition (CodeX 2026-06-25): both the legacy ``error`` field
+    and the new ``error_code`` field are emitted until the frontend has fully
+    migrated to ``error_code``. Do NOT drop ``error`` without a deprecation
+    window — existing consumers still read it. ``retryable`` / ``user_action``
+    are new optional fields with backward-compatible defaults.
+    """
+    body: dict = {
+        "error": error_code,
+        "error_code": error_code,
+        "message": message,
+        "retryable": retryable,
+        "user_action": user_action,
+    }
     if detail:
         body["detail"] = detail
     return Response(
