@@ -135,6 +135,19 @@ class TestSmartModeDefaults:
         assert llm_registry.get_prompt_model("express", "translate") == "deepseek"
         assert llm_registry.get_prompt_model("studio", "pass1") == "gemini_pro"
 
+    def test_flat_defaults_expose_single_rewrite_model_key(self):
+        """Strict pre-TTS retry uses the normal rewrite model setting.
+
+        The runtime task name remains ``s5_rewrite_strict`` for metering,
+        but admin/default model config should expose only one rewrite knob.
+        """
+        import importlib
+        import services.llm_registry as llm_registry
+        llm_registry = importlib.reload(llm_registry)
+
+        assert llm_registry._DEFAULTS["rewrite"] == "deepseek"
+        assert "rewrite_strict" not in llm_registry._DEFAULTS
+
     def test_mode_defaults_constant_exposes_smart_entry(self):
         """Pin the existence of _MODE_DEFAULTS['smart'] for downstream
         callers (admin_settings.py UI imports this to render defaults

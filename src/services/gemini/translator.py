@@ -12,6 +12,11 @@ import time
 from typing import Any
 
 from services.assemblyai.transcriber import TranscriptLine
+from services.language_registry import (
+    DEFAULT_LANGUAGE_PAIR_PROFILE,
+    get_language_descriptor,
+    resolve_language_pair,
+)
 from services.llm import LLMProviderError, LLMRouter
 from services.llm_registry import (
     MODEL_REGISTRY as _MODEL_REGISTRY,
@@ -86,6 +91,42 @@ __GROUPS_JSON__
   }
 ]"""
 
+# zh-CN -> en probe-translation variant (by-feel, no min/max char constraints).
+# Same token contract as PROBE_TRANSLATION_PROMPT_TEMPLATE; output stays cn_text
+# (canonical container, holds English here). lang_pair_marker: zh-CN->en
+_PROBE_TRANSLATION_PROMPT_TEMPLATE_ZH_EN = """You are a professional video dubbing translator. Translate the Chinese video transcript into natural, fluent English voice-over text.
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 来源：__YOUTUBE_URL__
+__GLOSSARY_SECTION__
+These translations feed an English TTS dub; the goal is for the English dub duration to roughly match the original Chinese duration. Note:
+1. Each segment has target_duration_seconds (original duration); translate so the spoken English length naturally approaches it.
+2. Judge the English length from the source pace and information density, not a character formula.
+3. Prefer concise, idiomatic English over literal translation that overruns.
+4. Translate Chinese names to their common English forms; keep already-English names.
+5. The result is for voice-over: natural, spoken English.
+__SPEAKER_INSTRUCTION__6. Keep natural spoken fillers when present to preserve the original rhythm.
+9. Translate each segment independently but keep coherence.
+10. Output JSON only, no other text.
+
+输入（JSON数组）：
+__GROUPS_JSON__
+
+请输出JSON数组，格式如下（只输出JSON，不要markdown代码块）：
+[
+  {
+    "segment_id": 1,
+    "cn_text": "translated English text"
+  }
+]"""
+
+#: Probe-translation template per language pair. Default en->zh-CN resolves via
+#: get_effective_probe_translation_prompt_template (override-or-PROBE, byte-identical).
+_PROBE_TEMPLATE_BY_PAIR: dict[tuple[str, str], str] = {
+    ("zh-CN", "en"): _PROBE_TRANSLATION_PROMPT_TEMPLATE_ZH_EN,
+}
+
 REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN = "__TTS_CN_TEXT__"
 REWRITE_PROMPT_TEMPLATE_SOURCE_TEXT_TOKEN = "__SOURCE_TEXT__"
 REWRITE_PROMPT_TEMPLATE_DIRECTION_TOKEN = "__DIRECTION_DESC__"
@@ -158,6 +199,55 @@ __GROUPS_JSON__
     "cn_text": "翻译后的中文文本"
   }
 ]"""
+
+# zh-CN -> en translation prompt. Mirrors DEFAULT_TRANSLATION_PROMPT_TEMPLATE's
+# token contract (__VIDEO_TITLE__ / __YOUTUBE_URL__ / __GLOSSARY_SECTION__ /
+# __SPEAKER_INSTRUCTION__ / __STRICT_LENGTH_INSTRUCTION__ / __GROUPS_JSON__) so
+# _build_prompt works unchanged, but translates Chinese -> English dubbing text.
+# The output field stays ``cn_text`` (the canonical target-text container, plan
+# v3 §4.3 — here it holds English). Per-segment length budget values
+# (target_chars/min_chars/max_chars) come from the groups JSON (set by the
+# language-pair length profile, PR-CD slice 3). lang_pair_marker: zh-CN->en
+_TRANSLATION_PROMPT_TEMPLATE_ZH_EN = """You are a professional video dubbing translator. Translate the Chinese video transcript into natural, fluent English voice-over text.
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 来源：__YOUTUBE_URL__
+__GLOSSARY_SECTION__
+These translations feed an English TTS dub; the core goal is for the English dub duration to roughly match the original Chinese segment duration. Note:
+1. Each segment is tagged with target_duration_seconds (original duration); translate so the spoken English length naturally approaches it.
+2. Do not pad to hit a character count mechanically — judge the English length from the source pace and information density.
+3. Prefer concise, idiomatic English over literal word-for-word translation that overruns the duration.
+4. For dense source content, use compact English that preserves the core information.
+5. The result is for voice-over: write spoken, natural English, not written-subtitle style.
+6. Translate Chinese personal names to their common English forms (e.g. 埃隆·马斯克 -> Elon Musk, 萨姆·奥特曼 -> Sam Altman); keep already-English names as-is.
+7. For companies / products / models, use the established English name.
+__SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__8. Preserve spoken rhythm (matters for TTS duration matching): when the source has fillers, hesitations or repetition, keep natural English equivalents ("well", "you know", "I mean", "I'd say", "uh", "kind of") rather than stripping them — over-tightening makes the dub far shorter than target and forces stretching later.
+9. Translate each segment independently but keep cross-segment coherence.
+10. Output JSON only, no other text.
+
+Per-segment metadata (by constraint strength). IMPORTANT: for this English voice-over the *_chars fields are ENGLISH WORD counts (spoken units), NOT characters — keep your output within the WORD band:
+**Hard constraints**: target_duration_seconds; target_chars (suggested target WORD count for this segment); min_chars ~ max_chars (the ±15% band, in ENGLISH WORDS — keep the translation within it).
+**Reference**: source_words_per_second (source pace); voice_chars_per_second (chosen voice synthesis speed, reference only); target_chars_hint (== target_chars, in words).
+
+输入（JSON数组）：
+__GROUPS_JSON__
+
+请输出JSON数组，格式如下（只输出JSON，不要markdown代码块）：
+[
+  {
+    "segment_id": 1,
+    "cn_text": "translated English text"
+  }
+]"""
+
+#: Translation prompt template per language pair. Default (en->zh-CN) is the exact
+#: legacy DEFAULT_TRANSLATION_PROMPT_TEMPLATE; zh-CN->en translates to English.
+_TRANSLATION_TEMPLATE_BY_PAIR: dict[tuple[str, str], str] = {
+    ("en", "zh-CN"): DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
+    ("zh-CN", "en"): _TRANSLATION_PROMPT_TEMPLATE_ZH_EN,
+}
+
 DEFAULT_REWRITE_PROMPT_TEMPLATE = """你是专业的中文配音文本改写专家。
 
 任务：对当前文本进行__DIRECTION_DESC__，使其更适合目标配音时长。
@@ -182,6 +272,41 @@ __SOURCE_TEXT__
 7. 只输出改写后的中文文本，不要任何解释
 
 改写后的文本："""
+
+# English-target rewrite variant (zh-CN->en). Same token contract as
+# DEFAULT_REWRITE_PROMPT_TEMPLATE; rewrites the English dub text for duration fit.
+# The "字" (Chinese-char) wording becomes spoken length / words. lang_pair_marker: zh-CN->en
+_REWRITE_PROMPT_TEMPLATE_ZH_EN = """You are a professional video-dubbing rewrite editor for English voice-over.
+
+Task: __DIRECTION_DESC__ the current text so it better fits the target dub duration.
+
+Current text (__CURRENT_CHARS__ units):
+__TTS_CN_TEXT__
+
+Source transcript (reference, do NOT re-translate):
+__SOURCE_TEXT__
+
+Target length: about __TARGET_CHARS__ units (aim for __TARGET_LOWER_CHARS__~__TARGET_UPPER_CHARS__).
+Target duration band: aim for __TARGET_LOWER_RATIO_PCT__%~__TARGET_UPPER_RATIO_PCT__% of the target duration.
+You currently need to __DIRECTION_DESC__ by about __CHANGE_PCT__%.
+
+Rules:
+1. Keep the meaning unchanged; do not add or drop core information.
+2. __DIRECTION_INSTRUCTION__
+3. Keep it natural and spoken, suitable for voice-over.
+4. Use the source transcript to make sure no core information is lost.
+5. When expanding, you may recover important details that were omitted.
+6. This adjusts the length of the current English text, not a re-translation — stay close to its core meaning.
+7. Output only the rewritten English text, no explanation.
+
+Rewritten text:"""
+
+#: Rewrite prompt template per TARGET language (the dub text being rewritten).
+#: Default zh-CN → the exact legacy Chinese template (byte-identical).
+_REWRITE_TEMPLATE_BY_TARGET: dict[str, str] = {
+    "zh-CN": DEFAULT_REWRITE_PROMPT_TEMPLATE,
+    "en": _REWRITE_PROMPT_TEMPLATE_ZH_EN,
+}
 
 _STRONG_LINE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+")
 _WEAK_LINE_SPLIT_PATTERN = re.compile(r"(?<=[,;])\s+")
@@ -259,6 +384,10 @@ class DubbingSegment:
     target_duration_ms: int
     source_text: str
     cn_text: str
+    # Dub target language (PR-E slice 6). None → zh-CN (the language-aware TTS hooks
+    # in tts_generator / fallback all treat None and "zh-CN" identically → byte-identical
+    # default). Populated by the pipeline from its resolved language profile.
+    target_language: str | None = None
     tts_audio_path: str | None = None
     aligned_audio_path: str | None = None
     actual_duration_ms: int = 0
@@ -536,7 +665,22 @@ class GeminiTranslator:
         speaker_voices: dict[str, str] | None = None,
         chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
         chars_per_second_by_speaker: dict[str, float] | None = None,
+        source_language: str = "en",
+        target_language: str = "zh-CN",
     ) -> TranslationResult:
+        # Resolve to CANONICAL codes first, then stash them, so _build_prompt /
+        # _build_translation_fingerprint / template selection (which compare exact
+        # canonical strings) dispatch correctly even when a caller passes an alias
+        # ("中文" / "English" / "EN"). resolve_language_pair fail-closes to None for
+        # an unsupported pair → default profile keeps the byte-identical en->zh-CN path.
+        _seg_lp_profile = resolve_language_pair(source_language, target_language) or DEFAULT_LANGUAGE_PAIR_PROFILE
+        self._translate_source_language = _seg_lp_profile.source_language
+        self._translate_target_language = _seg_lp_profile.target_language
+        # Per-pair length ratio + whether the target is CJK (drives the voice-cps
+        # metadata). Default en->zh-CN → ratio 1.8 / target CJK → byte-identical.
+        _seg_target_cps_ratio = _seg_lp_profile.natural_length_ratio
+        _seg_tgt_desc = get_language_descriptor(self._translate_target_language)
+        _seg_target_is_cjk = _seg_tgt_desc is not None and _seg_tgt_desc.script_family == "cjk"
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
         output_path = (output_root / "segments.json").resolve(strict=False)
@@ -557,6 +701,8 @@ class GeminiTranslator:
             max_segment_duration_ms=max_segment_duration_ms,
             chars_per_second=chars_per_second,
             chars_per_second_by_speaker=chars_per_second_by_speaker,
+            source_language=source_language,
+            target_language=target_language,
         )
 
         # Save glossary to translation/glossary.json for reference
@@ -648,7 +794,13 @@ class GeminiTranslator:
             # the runtime auto-match path in tts_generator can pass it into
             # VoiceMatchRequest. Falls back to 0.0 when source_wps is unknown.
             _src_wps = float(group.get("source_words_per_second") or 0.0)
-            _target_cps = round(_src_wps * 1.8, 3) if _src_wps > 0 else 0.0
+            # voice cps is comparable to the (hanzi/sec) catalog only when the
+            # target is CJK; disable it for a non-CJK target (v3 Phase 4.2).
+            _target_cps = (
+                round(_src_wps * _seg_target_cps_ratio, 3)
+                if (_src_wps > 0 and _seg_target_is_cjk)
+                else 0.0
+            )
             segments.append(
                 DubbingSegment(
                     segment_id=segment_id,
@@ -692,6 +844,8 @@ class GeminiTranslator:
         display_name: str = "Speaker A",
         voice_id_b: str | None = None,
         display_name_b: str | None = None,
+        source_language: str = "en",
+        target_language: str = "zh-CN",
     ) -> list[DubbingSegment]:
         """Translate probe segments without char constraints for TTS calibration.
 
@@ -699,6 +853,15 @@ class GeminiTranslator:
         so the LLM translates by feel guided only by target_duration_seconds.
         No checkpointing, no length retry — probe batches are small (≤10 segments).
         """
+        # Probe may run before translate(); stash the CANONICAL pair so prompt
+        # selection dispatches correctly even for aliases. Fail-closed to default.
+        # Default en->zh-CN → byte-identical.
+        _probe_lp_profile = (
+            resolve_language_pair(source_language, target_language)
+            or DEFAULT_LANGUAGE_PAIR_PROFILE
+        )
+        self._translate_source_language = _probe_lp_profile.source_language
+        self._translate_target_language = _probe_lp_profile.target_language
         groups = _build_probe_groups(lines)
         if not groups:
             return []
@@ -750,6 +913,22 @@ class GeminiTranslator:
             )
         return segments
 
+    def _select_probe_template(self, source_language: str, target_language: str) -> str:
+        """Pick the probe-translation template. Default en->zh-CN → the configured
+        template (admin override or PROBE, byte-identical). Non-default → honor the
+        override only when it declares the pair (§2.3 fail-closed), else registry."""
+        configured = get_effective_probe_translation_prompt_template()
+        if source_language == "en" and target_language == "zh-CN":
+            return configured
+        if (
+            configured != PROBE_TRANSLATION_PROMPT_TEMPLATE
+            and f"{source_language}->{target_language}" in configured
+        ):
+            return configured
+        return _PROBE_TEMPLATE_BY_PAIR.get(
+            (source_language, target_language), PROBE_TRANSLATION_PROMPT_TEMPLATE
+        )
+
     def _build_probe_prompt(
         self,
         groups: list[dict],
@@ -771,7 +950,10 @@ class GeminiTranslator:
             glossary_section = f"\n术语表（请严格遵循以下翻译）：\n{glossary_lines}\n"
         normalized_video_title = _normalize_optional_text(video_title) or "未提供"
         normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
-        effective_template = get_effective_probe_translation_prompt_template()
+        effective_template = self._select_probe_template(
+            getattr(self, "_translate_source_language", "en"),
+            getattr(self, "_translate_target_language", "zh-CN"),
+        )
         return (
             effective_template
             .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
@@ -815,6 +997,14 @@ class GeminiTranslator:
                 for group in groups
             ],
         }
+        # v3 §2.5/F: the DEFAULT pair adds NOTHING to the payload, so its
+        # fingerprint is byte-identical to the pre-multilingual one (no spurious
+        # cache miss → no paid re-translation of existing en->zh checkpoints).
+        # A non-default pair appends its key to avoid cross-direction cache reuse.
+        _fp_src = getattr(self, "_translate_source_language", "en")
+        _fp_tgt = getattr(self, "_translate_target_language", "zh-CN")
+        if not (_fp_src == "en" and _fp_tgt == "zh-CN"):
+            payload["language_pair"] = f"{_fp_src}->{_fp_tgt}"
         serialized_payload = json.dumps(
             payload,
             ensure_ascii=False,
@@ -1277,7 +1467,7 @@ class GeminiTranslator:
         prompt_key_map = {
             "s3_translate": "translate",
             "s5_rewrite": "rewrite",
-            "s5_rewrite_strict": "rewrite_strict",
+            "s5_rewrite_strict": "rewrite",
             "s5_short_content_compact": "rewrite",
             "s2_infer": "translate",  # speaker inference uses same model as translate
             "s2_review": "translate",  # legacy 2-speaker review fallback (process.py:_legacy_speaker_inference_and_review)
@@ -1573,6 +1763,27 @@ class GeminiTranslator:
         "voice_chars_per_second",
     })
 
+    def _select_translation_template(self, source_language: str, target_language: str) -> str:
+        """Pick the translation prompt template for the job's language pair.
+
+        Default pair (en->zh-CN): the configured template (admin override or
+        DEFAULT) — byte-identical to the legacy path. Non-default pair: honor the
+        admin override ONLY when it declares the canonical ``"src->tgt"`` key
+        (§2.3 fail-closed), otherwise the per-pair registry template — never reuse
+        the en->zh override/default for a different direction.
+        """
+        if source_language == "en" and target_language == "zh-CN":
+            return self.translation_prompt_template
+        override = self.translation_prompt_template
+        if (
+            override != DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+            and f"{source_language}->{target_language}" in override
+        ):
+            return override
+        return _TRANSLATION_TEMPLATE_BY_PAIR.get(
+            (source_language, target_language), DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+        )
+
     def _build_prompt(
         self,
         groups: list[dict],
@@ -1589,13 +1800,29 @@ class GeminiTranslator:
             for g in groups
         ]
         groups_json = json.dumps(llm_groups, ensure_ascii=False, indent=2)
-        strict_length_instruction = (
-            "12. 字数提醒：上一次翻译未达到 min_chars ~ max_chars 的字数要求。"
-            "如果偏长，请精简表达、删除冗余修饰；如果偏短，请适度补充细节、展开表述。"
-            "请严格将译文字数控制在 min_chars 到 max_chars 范围内。\n"
-            if strict_length_control
-            else ""
+        _strict_tgt_desc = get_language_descriptor(
+            getattr(self, "_translate_target_language", "zh-CN")
         )
+        _strict_target_is_latin = (
+            _strict_tgt_desc is not None and _strict_tgt_desc.script_family == "latin"
+        )
+        if not strict_length_control:
+            strict_length_instruction = ""
+        elif _strict_target_is_latin:
+            # For an English target the *_chars budget is measured in WORDS; keep the
+            # strict reminder English + word-framed so it matches the word validator.
+            strict_length_instruction = (
+                "12. Length reminder: the previous translation missed the min_chars ~ "
+                "max_chars budget, which for this English voice-over is counted in WORDS. "
+                "If it was too long, tighten and drop redundancy; if too short, add detail. "
+                "Keep the English word count strictly within min_chars ~ max_chars.\n"
+            )
+        else:
+            strict_length_instruction = (
+                "12. 字数提醒：上一次翻译未达到 min_chars ~ max_chars 的字数要求。"
+                "如果偏长，请精简表达、删除冗余修饰；如果偏短，请适度补充细节、展开表述。"
+                "请严格将译文字数控制在 min_chars 到 max_chars 范围内。\n"
+            )
         speaker_ids = {str(group.get("speaker_id", "")).strip() for group in groups}
         speaker_instruction = (
             "9. 这是双人访谈，请区分两个说话人的语气、措辞和交流关系。\n"
@@ -1609,7 +1836,10 @@ class GeminiTranslator:
         normalized_video_title = _normalize_optional_text(video_title) or "未提供"
         normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
         return (
-            self.translation_prompt_template
+            self._select_translation_template(
+                getattr(self, "_translate_source_language", "en"),
+                getattr(self, "_translate_target_language", "zh-CN"),
+            )
             .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
             .replace(TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN, normalized_youtube_url)
             .replace(TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN, glossary_section)
@@ -1642,7 +1872,10 @@ class GeminiTranslator:
                 raise TranslationError(f"Gemini response contains duplicate segment_id: {segment_id}")
             translated_by_id[segment_id] = {
                 "segment_id": segment_id,
-                "cn_text": _normalize_optional_text(item.get("cn_text")) or "",
+                # Accept ``target_text`` as an alias for ``cn_text`` (plan v3 §4.5);
+                # cn_text stays the canonical container (§4.3). en->zh-CN output
+                # uses cn_text → byte-identical.
+                "cn_text": _normalize_optional_text(item.get("target_text") or item.get("cn_text")) or "",
             }
 
         if set(translated_by_id) != set(expected_segment_ids):
@@ -1710,6 +1943,14 @@ class GeminiTranslator:
         return False
 
     def _count_cn_chars(self, text: str) -> int:
+        # Length-gate unit must match the target unit of the budget (min/max_chars).
+        # CJK target (default): per-char count (byte-identical legacy). Latin
+        # target: word count, since the budget is target_chars = source \u00d7 ratio in
+        # English *words* \u2014 counting letters would be ~5x off and always retry.
+        target_language = getattr(self, "_translate_target_language", "zh-CN")
+        desc = get_language_descriptor(target_language)
+        if desc is not None and desc.script_family == "latin":
+            return len(re.findall(r"[A-Za-z0-9']+", text or ""))
         clean = re.sub(r"[^\u4e00-\u9fff\u3400-\u4dbfa-zA-Z0-9]", "", text)
         return len(clean)
 
@@ -2239,6 +2480,8 @@ def _build_groups(
     max_segment_duration_ms: int,
     chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
     chars_per_second_by_speaker: dict[str, float] | None = None,
+    source_language: str = "en",
+    target_language: str = "zh-CN",
 ) -> list[dict[str, object]]:
     """Build translation groups from transcript lines.
 
@@ -2253,6 +2496,14 @@ def _build_groups(
     """
     if not lines:
         return []
+
+    # Language-pair length profile (default en->zh-CN → ratio 1.8 / Latin source,
+    # i.e. the exact legacy numbers, so target_chars/min/max and the translation
+    # fingerprint are byte-identical for the default pair).
+    _lp_profile = resolve_language_pair(source_language, target_language) or DEFAULT_LANGUAGE_PAIR_PROFILE
+    _length_ratio = _lp_profile.natural_length_ratio
+    _src_desc = get_language_descriptor(source_language)
+    _source_script = _src_desc.script_family if _src_desc is not None else "latin"
 
     groups: list[dict[str, object]] = []
     for segment_id, line in enumerate(lines, start=1):
@@ -2280,7 +2531,7 @@ def _build_groups(
 
     for group in groups:
         source_text = str(group["source_text"])
-        source_word_count = _count_source_words(source_text)
+        source_word_count = _count_source_words(source_text, _source_script)
         target_duration_ms = int(group["target_duration_ms"])
         source_words_per_second = 0.0
         if target_duration_ms > 0 and source_word_count > 0:
@@ -2316,6 +2567,7 @@ def _build_groups(
             density_factor=density_factor,
             chars_per_second=effective_cps,
             source_word_count=source_word_count,
+            ratio=_length_ratio,
         )
         min_chars, max_chars = _estimate_target_char_range(target_chars)
         group["reference_words_per_second"] = round(reference_words_per_second, 3)
@@ -2331,7 +2583,7 @@ def _build_groups(
         # original content density", NOT a hard constraint. min/max_chars
         # remain the binding duration envelope.
         source_word_count = int(group.get("source_word_count") or 0)
-        group["target_chars_hint"] = max(1, int(round(source_word_count * 1.8)))
+        group["target_chars_hint"] = max(1, int(round(source_word_count * _length_ratio)))
         # Record the effective chars/sec used to derive min/max, so the LLM
         # can see why the envelope is what it is. Comes from either the
         # voice_catalog pre-calibrated value (Phase 1) or probe calibration.
@@ -2479,7 +2731,19 @@ def _estimate_target_chars(
     return max(1, int(target_duration_ms / 1000 * chars_per_second))
 
 
-def _count_source_words(source_text: str) -> int:
+def _count_source_words(source_text: str, source_script: str = "latin") -> int:
+    """Count source spoken units. Latin (default) → word-like tokens
+    (byte-identical to the legacy English count); CJK → per-ideograph count, so a
+    Chinese source produces a non-zero count instead of ~0 (which would collapse
+    the whole length budget)."""
+    if source_script == "cjk":
+        han = sum(1 for ch in (source_text or "") if "一" <= ch <= "鿿")
+        # Mixed-script CJK transcripts carry Latin terms / numbers (OpenAI, GPT-4,
+        # an "OK" backchannel) that are spoken source units too. Count them so the
+        # English word budget isn't undercounted, and a Latin-only segment isn't ~0
+        # (which would collapse the budget to the duration fallback). (re-CodeX P2)
+        latin_tokens = len(re.findall(r"[A-Za-z0-9']+", source_text or ""))
+        return han + latin_tokens
     return len(re.findall(r"[A-Za-z0-9']+", source_text))
 
 
@@ -2549,6 +2813,7 @@ def _estimate_dynamic_target_chars(
     density_factor: float,
     chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
     source_word_count: int = 0,
+    ratio: float = _ENGLISH_TO_CHINESE_CHAR_RATIO,
 ) -> int:
     """Plan C: target_chars = source_word_count × 1.8 (×density), independent of voice_cps.
 
@@ -2562,7 +2827,7 @@ def _estimate_dynamic_target_chars(
     voice physical speed.
     """
     if source_word_count > 0:
-        natural_chars = source_word_count * _ENGLISH_TO_CHINESE_CHAR_RATIO
+        natural_chars = source_word_count * ratio
         return max(1, int(round(natural_chars * density_factor)))
     # Fallback: probe groups (no source_word_count yet) or empty text.
     base_target_chars = _estimate_target_chars(target_duration_ms, chars_per_second)

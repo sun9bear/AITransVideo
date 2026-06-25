@@ -24,7 +24,7 @@
 
 | 单元 | 文档 | 状态 | 关联 ID | 工时 | 可并行 | 建议分支 |
 |---|---|---|---|---|---|---|
-| TU-01 | [止血四修](TU-01-hotfix-stabilize.md) | ☐ | H2 H3 H4ᵐⁱⁿ H5 | S | 是 | `quality/hotfix-stabilize` |
+| TU-01 | [止血四修](TU-01-hotfix-stabilize.md) | ✅ | H2 H3 H4ᵐⁱⁿ H5 | S | 是 | [PR #40](https://github.com/sun9bear/AITransVideo/pull/40) 已合并 |
 | TU-02 | [部署构建卫生](TU-02-build-hygiene.md) | ☐ | DEP-02/04/05/06/07 | S(A)·需确认(B) | 是 | `quality/build-hygiene` |
 | TU-03 | [质量护栏脚手架](TU-03-quality-scaffold.md) | ☐ | TOOL-01/03/04 TEST-* | S–M | 部分 | `quality/quality-scaffold` |
 
@@ -70,6 +70,12 @@
 - [TU-09 intercept 拆分](TU-09-intercept-split.md) · [TU-10 编辑页 shell](TU-10-edit-page-shell.md) · [TU-11 语音选择共享](TU-11-voice-select-shared.md) · [TU-12 jobs/api dispatch](TU-12-jobsapi-dispatch.md) · [TU-13 JobService post-edit](TU-13-jobservice-postedit.md)
 - [TU-14 process Option B 收敛](TU-14-process-converge-1.md) · [TU-15 性能有界优化](TU-15-perf-bounded.md) · [TU-16 DB 卫生](TU-16-db-hygiene.md) · [TU-17 events/benchmark](TU-17-events-benchmark.md)
 - [TU-18 治理决策门](TU-18-governance-gate.md)
+
+## 实施 LOG
+
+| 日期 | 单元 | PR | 审查 | 结果 |
+|---|---|---|---|---|
+| 2026-06-25 | TU-01 止血四修 | [#40](https://github.com/sun9bear/AITransVideo/pull/40) squash | 对抗式多 lens（抓出第 5 个 `en_text` 站点 + de-flake 预存 40% flaky 测试）→ CodeX CLI ×3（P2 免费档误报→P3 aligner 测试→clean）→ @codex bot 无问题 → CI 3/3 | ✅ 合并 main。deferral：credits_service 3 警告→TU-08；billing `logger.info` 误置→独立观察项 |
 
 ## 依赖关系（DAG）
 

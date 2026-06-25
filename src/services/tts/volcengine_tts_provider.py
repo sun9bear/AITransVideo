@@ -129,12 +129,29 @@ def _build_headers(app_id: str, access_key: str, resource_id: str) -> dict[str, 
     }
 
 
+def _explicit_language_for_target(target_language: str | None) -> str | None:
+    """Map a dub target language to VolcEngine's ``audio_params.explicit_language``.
+
+    Empirically (scripts/test_volcengine_explicit_language.py, 2026-04-15): zh voices
+    synthesize English with or without this; en voices are English-bound. Setting it
+    for an English target improves cross-language stability. Default (None / zh-CN)
+    returns None → the key is omitted → byte-identical payload.
+    """
+    if not target_language:
+        return None
+    code = target_language.split("-")[0].lower()
+    if code == "en":
+        return "en-us"
+    return None  # zh / unknown → omit (zh voices are natively multilingual)
+
+
 def _build_payload(
     text: str,
     speaker: str,
     *,
     model: str | None = None,
     speech_rate: int = 0,
+    target_language: str | None = None,
 ) -> dict[str, Any]:
     """Build V3 request body.
 
@@ -168,6 +185,9 @@ def _build_payload(
     }
     if speech_rate:
         req_params["audio_params"]["speech_rate"] = int(speech_rate)
+    _explicit_language = _explicit_language_for_target(target_language)
+    if _explicit_language:
+        req_params["audio_params"]["explicit_language"] = _explicit_language
     if model:
         req_params["model"] = model
     return {
@@ -236,6 +256,7 @@ def synthesize(
     speech_rate: int = 0,
     endpoint: str = DEFAULT_ENDPOINT,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    target_language: str | None = None,
 ) -> bytes:
     """Synthesize text to WAV audio using VolcEngine V3 Chunked API.
 
@@ -277,6 +298,7 @@ def synthesize(
         effective_voice_id,
         model=model,
         speech_rate=speech_rate,
+        target_language=target_language,
     )
 
     log_id = ""

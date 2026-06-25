@@ -62,6 +62,14 @@ def _make_user(*, role="user", plan_code="free"):
 def _make_request(body: dict) -> MagicMock:
     """Create a mock FastAPI Request with given JSON body."""
     req = MagicMock()
+    if body.get("service_mode", "express") == "express" and "express_consent" not in body:
+        body = {
+            **body,
+            "express_consent": {
+                "auto_voice_clone": True,
+                "client_confirmed_at": "2026-06-22T00:00:00Z",
+            },
+        }
     encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req.body = AsyncMock(return_value=encoded)
     req.headers = {"content-type": "application/json"}
@@ -430,6 +438,10 @@ class TestCreateJobSuccess:
             "service_mode": "express",
             "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=abc"},
             "estimated_duration_seconds": 300,
+            "express_consent": {
+                "auto_voice_clone": True,
+                "client_confirmed_at": "2026-06-22T00:00:00Z",
+            },
         })
         user = _make_user(plan_code="free")
         db = _make_db_session(active_job_count=0, user_for_quota=user)
@@ -442,10 +454,12 @@ class TestCreateJobSuccess:
         # Verify snapshot fields in upstream payload
         assert captured_body["service_mode"] == "express"
         assert captured_body["tts_provider"] == "cosyvoice"
-        assert captured_body["tts_model"] == "cosyvoice-v3-flash"
+        assert captured_body["tts_model"] == "cosyvoice-v3.5-flash"
         assert captured_body["requires_review"] is False
-        assert captured_body["voice_clone_enabled"] is False
-        assert captured_body["voice_strategy"] == "preset_mapping"
+        assert captured_body["voice_clone_enabled"] is True
+        assert captured_body["voice_strategy"] == "express_auto_clone"
+        assert captured_body["express_consent"]["auto_voice_clone"] is True
+        assert captured_body["express_consent"]["server_confirmed_at"]
         assert captured_body["plan_code_snapshot"] == "free"
         assert captured_body["role_snapshot"] == "user"
         assert captured_body["estimated_duration_seconds"] == 300
@@ -455,6 +469,29 @@ class TestCreateJobSuccess:
         assert captured_body["display_name"].startswith("油管视频 ")
         # user_id injected for workspace isolation
         assert captured_body["user_id"] == "uid-1"
+
+    def test_express_cosyvoice_clone_only_requires_consent(self):
+        """CosyVoice Express no longer accepts preset fallback when consent is absent."""
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=abc"},
+            "estimated_duration_seconds": 300,
+            "express_consent": {
+                "auto_voice_clone": False,
+                "client_confirmed_at": None,
+            },
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        with patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                resp = _run(intercept_create_job(req, db, user))
+
+        body = json.loads(resp.body)
+        assert resp.status_code == 403
+        assert body["error"] == "express_clone_consent_required"
+        assert proxy.await_count == 0
 
     def test_youtube_probe_command_uses_configured_cookie_file(self, tmp_path):
         cookie_file = tmp_path / "youtube.cookies.txt"
@@ -1242,6 +1279,7 @@ class TestQualityTierTruthChain:
         upstream_record = mirror.await_args.args[2]
         assert upstream_record.job_id == "job-settle-qt"
         assert upstream_record.status == "succeeded"
+        assert mirror.await_args.kwargs["settle_smart_clone"] is True
 
 
 # ===================================================================

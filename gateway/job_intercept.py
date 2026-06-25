@@ -762,6 +762,8 @@ _VALID_EXPRESS_PROVIDERS = {"cosyvoice", "mimo", "volcengine"}
 _VALID_STUDIO_PROVIDERS = {"minimax", "mimo", "volcengine", "cosyvoice"}
 _DEFAULT_EXPRESS_PROVIDER = "cosyvoice"
 _DEFAULT_STUDIO_PROVIDER = "minimax"
+_EXPRESS_COSYVOICE_CLONE_STRATEGY = "express_auto_clone"
+_EXPRESS_COSYVOICE_CLONE_TARGET_MODEL_DEFAULT = "cosyvoice-v3.5-flash"
 
 
 def _apply_validated_express_consent(
@@ -927,16 +929,34 @@ def compute_job_policy(user, service_mode: str) -> dict:
         if tts_provider == "volcengine":
             # 豆包 1.0 — use seed-tts-1.1 for improved quality / latency.
             tts_model = "seed-tts-1.1"
+            voice_clone_enabled = False
+            voice_strategy = "preset_mapping"
+        elif tts_provider == "cosyvoice":
+            # CosyVoice Express is clone-only: never create new preset-mapping
+            # jobs. The worker clone path is CosyVoice v3.5 and the concrete
+            # model remains admin-configurable for flash/plus canaries.
+            tts_model = str(
+                getattr(
+                    admin,
+                    "express_cosyvoice_auto_clone_target_model",
+                    _EXPRESS_COSYVOICE_CLONE_TARGET_MODEL_DEFAULT,
+                )
+                or _EXPRESS_COSYVOICE_CLONE_TARGET_MODEL_DEFAULT
+            ).strip() or _EXPRESS_COSYVOICE_CLONE_TARGET_MODEL_DEFAULT
+            voice_clone_enabled = True
+            voice_strategy = _EXPRESS_COSYVOICE_CLONE_STRATEGY
         else:
-            tts_model = "cosyvoice-v3-flash"
+            tts_model = "mimo-v2.5-tts"
+            voice_clone_enabled = False
+            voice_strategy = "preset_mapping"
 
         return {
             "service_mode": "express",
             "tts_provider": tts_provider,
             "tts_model": tts_model,
             "requires_review": False,
-            "voice_clone_enabled": False,
-            "voice_strategy": "preset_mapping",
+            "voice_clone_enabled": voice_clone_enabled,
+            "voice_strategy": voice_strategy,
             "plan_code_snapshot": plan,
             "role_snapshot": role,
             "quality_tier": "standard",
@@ -1492,6 +1512,7 @@ async def intercept_list_jobs(
                                     else None
                                 ),
                             ),
+                            settle_smart_clone=True,
                         )
                 except Exception:
                     mirror_failed = True
@@ -1926,6 +1947,25 @@ async def intercept_create_job(
     # "降级预设、不阻断"语义。由 Gate A 在确认 "smart" not in effective_modes 后置 True。
     _smart_preview_via_exemption = False
 
+    if service_mode in ("express", "studio", "free"):
+        from entitlements import get_runtime_enabled_service_modes
+        _runtime_modes = get_runtime_enabled_service_modes()
+        if service_mode not in _runtime_modes:
+            _mode_label = {
+                "express": "快捷版",
+                "studio": "工作台版",
+                "free": "免费版",
+            }.get(service_mode, service_mode)
+            return _error_response(
+                403,
+                "service_mode_offline",
+                f"{_mode_label}当前未上线，请选择其它任务方案。",
+                {
+                    "requested_mode": service_mode,
+                    "enabled_modes": list(_runtime_modes),
+                },
+            )
+
     if service_mode == "smart" and user is not None:
         from entitlements import get_effective_allowed_service_modes
         effective_modes = get_effective_allowed_service_modes(user)
@@ -2331,6 +2371,21 @@ async def intercept_create_job(
 
     # --- 5. Compute execution snapshot ---
     policy = compute_job_policy(user, service_mode) if user else {}
+    if policy.get("voice_strategy") == _EXPRESS_COSYVOICE_CLONE_STRATEGY:
+        if not (
+            express_consent_payload is not None
+            and express_consent_payload.get("auto_voice_clone") is True
+            and express_consent_payload.get("server_confirmed_at")
+        ):
+            return _error_response(
+                403,
+                "express_clone_consent_required",
+                "快捷版 CosyVoice 已切换为国内克隆音色路径，请先确认自动克隆主说话人音色授权。",
+                {
+                    "requested_mode": "express",
+                    "voice_strategy": _EXPRESS_COSYVOICE_CLONE_STRATEGY,
+                },
+            )
 
     # --- 5a. Language pair resolution + entitlement gate (PR-A part 2 §3) ---
     # Zero-regression default: a request with NO — or INCOMPLETE — language
@@ -2371,9 +2426,9 @@ async def intercept_create_job(
         # entitled / admin user cannot create a pair the END-TO-END pipeline
         # can't run yet. `pipeline_ready` is a registry CONSTANT — only a
         # pipeline PR (PR-W/CD/F) flips it, so flipping `language_pairs_enabled`
-        # can NEVER produce a broken paid job. zh-CN->en stays blocked here until
-        # the execution path is adapted. (The admin flag still controls facts
-        # visibility, so the selector can show it as 即将上线 / disabled.)
+        # can NEVER produce a broken paid job. The admin flag still controls
+        # facts visibility; ``pipeline_ready`` controls whether an entitled
+        # non-default pair is selectable/creatable.
         if not resolved_pair.pipeline_ready:
             return _error_response(
                 409,
@@ -3269,6 +3324,7 @@ async def intercept_get_job(
                     db,
                     db_job,
                     _job_json_record_from_payload(job_id, payload),
+                    settle_smart_clone=True,
                 )
             # Commit notification rows plus any mirror/settlement changes here
             # because the surrounding handler returns through several paths.

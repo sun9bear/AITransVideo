@@ -37,6 +37,20 @@ import { formatDurationSeconds, formatMs } from "@/lib/format"
 
 // ---------- helpers ----------
 
+// PR-G: subtitle textarea auto-size by display width, script-aware + slot-agnostic, so a
+// non-default pair (zh source / en target) sizes by the text's real script, not its slot.
+const _CJK_RE = /[㐀-鿿豈-﫿぀-ヿ가-힯]/g
+function rowsForText(text: string): number {
+  const len = text.length || 1
+  const cjk = (text.match(_CJK_RE) || []).length
+  // Effective display width: CJK ~2 columns, others ~1; a row holds ~80 columns.
+  // Summing width before dividing sizes mixed CJK/Latin correctly (re-CodeX P2) and
+  // is byte-identical to the legacy per-slot divisors for pure-script text
+  // (pure Latin → ceil(len/80); pure CJK → ceil(2·len/80) = ceil(len/40)).
+  const effectiveWidth = cjk * 2 + (len - cjk)
+  return Math.max(1, Math.ceil(effectiveWidth / 80))
+}
+
 function isPreTtsLengthWarningStatus(status: SegmentStatus): boolean {
   return status === "text_dirty" || status === "voice_dirty" || status === "tts_failed"
 }
@@ -458,7 +472,7 @@ export function SegmentRow({
         {/* English source — inline editable */}
         <textarea
           className="w-full text-[10.5px] leading-snug text-muted-foreground font-sans bg-transparent border-0 resize-none p-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40 focus-visible:ring-offset-0 rounded"
-          rows={Math.max(1, Math.ceil((localSource.length || 1) / 80))}
+          rows={rowsForText(localSource)}
           value={localSource}
           disabled={buttonsDisabled}
           onChange={(e) => setLocalSource(e.currentTarget.value)}
@@ -473,7 +487,7 @@ export function SegmentRow({
         {/* Chinese translation — primary edit target */}
         <textarea
           className="w-full text-[12px] leading-relaxed text-foreground bg-transparent border-0 resize-none p-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40 focus-visible:ring-offset-0 rounded"
-          rows={Math.max(1, Math.ceil((localText.length || 1) / 40))}
+          rows={rowsForText(localText)}
           value={localText}
           disabled={buttonsDisabled}
           onChange={(e) => setLocalText(e.currentTarget.value)}

@@ -248,9 +248,140 @@ def test_clone_failure_leaves_preset_path(monkeypatch):
     assert sv == {} and sr == {}, "失败必须保持预设路径（空 → 下游 preset 匹配）"
 
 
+def test_clone_only_fans_out_clone_voice_to_unassigned_speakers():
+    """zh->en CosyVoice clone-only must not let secondary speakers fall
+    back into the zh-only preset matcher.  Any still-unassigned speaker should
+    use the cloned worker voice for this Express run, while already-worker-routed
+    speakers stay untouched."""
+    from pipeline.process import _fan_out_express_clone_to_unassigned_speakers
+
+    class _Outcome:
+        cloned = True
+        voice_id = "cosyvoice-v3.5-flash-avtspeak-main"
+        main_speaker_id = "speaker_b"
+
+    speaker_voices = {
+        "speaker_a": "auto",
+        "speaker_b": "cosyvoice-v3.5-flash-avtspeak-main",
+        "speaker_c": "cosyvoice-v3.5-flash-avtspeak-existing",
+    }
+    speaker_routing = {
+        "speaker_b": {
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        },
+        "speaker_c": {
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        },
+    }
+
+    filled = _fan_out_express_clone_to_unassigned_speakers(
+        speaker_voices,
+        speaker_routing,
+        _Outcome(),
+    )
+
+    assert filled == ["speaker_a"]
+    assert speaker_voices["speaker_a"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_routing["speaker_a"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+    assert speaker_voices["speaker_c"] == "cosyvoice-v3.5-flash-avtspeak-existing"
+    assert speaker_routing["speaker_c"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+
+
 # ===========================================================================
 # register-smart payload + upload multipart 适配器
 # ===========================================================================
+
+
+def test_clone_only_fans_out_clone_voice_over_non_worker_preset_speakers():
+    """zh->en clone-only jobs must not preserve concrete CosyVoice presets.
+
+    A concrete preset without worker routing still reaches the zh-only
+    CosyVoice matcher for an English target and fails closed.  In clone-only
+    Express runs, every non-worker speaker should reuse the cloned worker voice.
+    """
+    from pipeline.process import _fan_out_express_clone_to_unassigned_speakers
+
+    class _Outcome:
+        cloned = True
+        voice_id = "cosyvoice-v3.5-flash-avtspeak-main"
+        main_speaker_id = "speaker_b"
+
+    speaker_voices = {
+        "speaker_a": "auto",
+        "speaker_b": "cosyvoice-v3.5-flash-avtspeak-main",
+        "speaker_c": "longshuo_v3",
+    }
+    speaker_routing = {
+        "speaker_b": {
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        }
+    }
+
+    filled = _fan_out_express_clone_to_unassigned_speakers(
+        speaker_voices,
+        speaker_routing,
+        _Outcome(),
+    )
+
+    assert filled == ["speaker_a", "speaker_c"]
+    assert speaker_voices["speaker_a"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_voices["speaker_c"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_routing["speaker_a"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+    assert speaker_routing["speaker_c"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
+
+
+def test_clone_only_fans_out_clone_voice_to_missing_transcript_speakers():
+    """Clone-only must cover speakers absent from the current voice map.
+
+    In auto speaker mode the voice map may contain only the cloned main speaker,
+    while transcript/review data still contains speaker_a.  That missing speaker
+    would otherwise reach CosyVoice without worker routing.
+    """
+    from pipeline.process import _fan_out_express_clone_to_unassigned_speakers
+
+    class _Outcome:
+        cloned = True
+        voice_id = "cosyvoice-v3.5-flash-avtspeak-main"
+        main_speaker_id = "speaker_b"
+
+    speaker_voices = {
+        "speaker_b": "cosyvoice-v3.5-flash-avtspeak-main",
+    }
+    speaker_routing = {
+        "speaker_b": {
+            "requires_worker": True,
+            "worker_target_model": "cosyvoice-v3.5-flash",
+        }
+    }
+
+    filled = _fan_out_express_clone_to_unassigned_speakers(
+        speaker_voices,
+        speaker_routing,
+        _Outcome(),
+        speaker_ids=["speaker_a", "speaker_b"],
+    )
+
+    assert filled == ["speaker_a"]
+    assert speaker_voices["speaker_a"] == "cosyvoice-v3.5-flash-avtspeak-main"
+    assert speaker_routing["speaker_a"] == {
+        "requires_worker": True,
+        "worker_target_model": "cosyvoice-v3.5-flash",
+    }
 
 
 def test_register_payload_has_required_cosyvoice_fields(monkeypatch):
@@ -323,6 +454,26 @@ def test_upload_sends_multipart_with_internal_key(monkeypatch, tmp_path):
     assert captured["url"].endswith("/api/internal/cosyvoice/express-sample-upload")
 
 
+def test_upload_uses_production_safe_timeout_by_default(monkeypatch, tmp_path):
+    sample = tmp_path / "speaker_a.wav"
+    sample.write_bytes(b"RIFFfake-wav-bytes")
+    captured: dict = {}
+
+    def _fake_post(url, headers=None, files=None, data=None, timeout=None):
+        captured["timeout"] = timeout
+        return _FakeResp(200, {"ok": True, "presigned_get_url": "https://oss/x", "sha256": "abc"})
+
+    monkeypatch.delenv("AVT_EXPRESS_SAMPLE_UPLOAD_TIMEOUT_S", raising=False)
+    monkeypatch.setattr(pc.requests, "post", _fake_post)
+
+    res = pc._http_upload_sample(
+        sample_path=str(sample), user_id="user-1", job_id="job-1", speaker_id="speaker_a"
+    )
+
+    assert res.ok
+    assert captured["timeout"] >= 90.0
+
+
 def test_upload_malformed_200_is_malformed(monkeypatch, tmp_path):
     sample = tmp_path / "s.wav"
     sample.write_bytes(b"x")
@@ -331,6 +482,31 @@ def test_upload_malformed_200_is_malformed(monkeypatch, tmp_path):
     )
     res = pc._http_upload_sample(sample_path=str(sample), user_id="u", job_id="j", speaker_id="speaker_a")
     assert not res.ok and res.error == "malformed_upload_response"
+
+
+def test_upload_non_200_preserves_gateway_error_code(monkeypatch, tmp_path):
+    sample = tmp_path / "s.wav"
+    sample.write_bytes(b"x")
+    monkeypatch.setattr(
+        pc.requests,
+        "post",
+        lambda *a, **k: _FakeResp(
+            503,
+            {
+                "error": {
+                    "code": "uploader_runtime_error",
+                    "detail": "ConnectionClosedError",
+                }
+            },
+        ),
+    )
+
+    res = pc._http_upload_sample(
+        sample_path=str(sample), user_id="u", job_id="j", speaker_id="speaker_a"
+    )
+
+    assert not res.ok
+    assert res.error == "http_503:uploader_runtime_error:ConnectionClosedError"
 
 
 # ===========================================================================
@@ -424,6 +600,13 @@ def test_process_wires_express_auto_clone_in_express_branch():
     assert "speaker_routing=_speaker_voice_routing" in src
     # 传 consent（无 consent → 内部 skip）
     assert 'express_consent=_snap("express_consent", None)' in src
+
+
+def test_process_express_clone_only_failure_is_fatal():
+    """CosyVoice Express clone-only jobs must fail closed instead of falling back to presets."""
+    src = (_SRC / "pipeline" / "process.py").read_text(encoding="utf-8")
+    assert "express_clone_required" in src
+    assert "Express auto-clone required but not completed" in src
 
 
 def test_process_express_clone_failure_is_non_fatal():

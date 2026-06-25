@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
@@ -143,6 +143,7 @@ async def internal_voice_catalog(
     provider: str = Query(..., description="Provider name"),
     resource_id: str | None = Query(None, description="Resource ID (e.g. seed-tts-1.0). Optional for CosyVoice."),
     endpoint_mode: str | None = Query(None, description="Endpoint mode filter (international/mainland). CosyVoice only."),
+    target_language: str | None = Query(None, description="Dub target language (e.g. zh-CN / en). Filters by compatible_target_languages when the kill switch is on. PR-E."),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Return matchable + verified voices for app runtime.
@@ -167,6 +168,46 @@ async def internal_voice_catalog(
     if endpoint_mode:
         # Filter CosyVoice by endpoint_modes array containing this mode
         query = query.where(VoiceCatalog.provider_config.op("@>")({"endpoint_modes": [endpoint_mode]}))
+    # PR-E matchable migration (kill switch): when enabled, also require the voice to
+    # declare the requested dub target language, so a zh dub never returns en voices
+    # (and vice versa). Default OFF → legacy matchable-only query (byte-identical).
+    # The kill switch gates THIS legacy query directly per plan Phase 5 (B).
+    if target_language:
+        from admin_settings import load_settings as _load_admin_settings
+
+        if getattr(
+            _load_admin_settings(), "voice_catalog_target_language_filter_enabled", False
+        ):
+            _matches_target = VoiceCatalog.compatible_target_languages.op("@>")(
+                [target_language]
+            )
+            # re-CodeX P2: un-stamped (NULL) rows are legacy zh-CN-only, included ONLY for
+            # a zh-CN target so enabling the switch never silently drops zh voices. BUT an
+            # admin-added, still-unstamped *English* voice (matchable=True) must never
+            # satisfy the zh query — so exclude rows whose provider ``language`` / voice_id
+            # marks them English (mirrors the migration 042 en-detection). A non-zh target
+            # still excludes NULL entirely (an unstamped row is not known to be that language).
+            if target_language == "zh-CN":
+                _lang = func.lower(func.coalesce(VoiceCatalog.language, ""))
+                _is_english_row = or_(
+                    _lang.like("en%"),
+                    _lang == "english",
+                    func.coalesce(VoiceCatalog.language, "") == "英语",
+                    VoiceCatalog.voice_id.like("en\\_%", escape="\\"),
+                    VoiceCatalog.voice_id.like("ICL\\_en\\_%", escape="\\"),
+                    VoiceCatalog.voice_id.like("English%"),
+                )
+                query = query.where(
+                    or_(
+                        _matches_target,
+                        and_(
+                            VoiceCatalog.compatible_target_languages.is_(None),
+                            ~_is_english_row,
+                        ),
+                    )
+                )
+            else:
+                query = query.where(_matches_target)
     result = await db.execute(query)
     voices = result.scalars().all()
 

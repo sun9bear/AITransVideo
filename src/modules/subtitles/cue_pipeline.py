@@ -463,6 +463,7 @@ def build_subtitle_cues_for_blocks(
     *,
     min_display_ms: int = 500,
     context: str = "publish",
+    target_language: str | None = None,
 ) -> SubtitleCuePipelineResult:
     """High-level pipeline: SemanticBlock list → SubtitleCue list + ValidationReport.
 
@@ -502,6 +503,14 @@ def build_subtitle_cues_for_blocks(
     """
     caption_map = _build_caption_map(subtitle_lines)
 
+    # PR-F slice 1: the whisper char-level DTW path forces whisper ``language="zh"``
+    # (cue_pipeline ~line 240) and DTW-aligns per Han character — both produce garbage
+    # for a non-zh dub (English audio + Latin text). For a non-default target we bypass
+    # it entirely and use the proportional cue builder (content-correct; optimal Latin
+    # word-level DTW/line-breaking is GA-deferred per plan §6). Default (None / zh-CN)
+    # keeps the whisper-aligned path → byte-identical.
+    _use_whisper_align = target_language is None or target_language in ("zh-CN", "zh")
+
     all_cues: list[SubtitleCue] = []
     block_specs: list[BlockSpec] = []
 
@@ -530,13 +539,17 @@ def build_subtitle_cues_for_blocks(
         # None for any precondition failure / runtime error, so we always
         # have the proportional fallback below as the safety net. CodeX
         # guardrail #5: publish must never fail because of whisper trouble.
-        cues: list[SubtitleCue] | None = _try_whisper_aligned_cues(
-            block,
-            en_text=en_text,
-            block_start_ms=block_start_ms,
-            block_end_ms=block_end_ms,
-            min_display_ms=min_display_ms,
-            context=context,
+        cues: list[SubtitleCue] | None = (
+            _try_whisper_aligned_cues(
+                block,
+                en_text=en_text,
+                block_start_ms=block_start_ms,
+                block_end_ms=block_end_ms,
+                min_display_ms=min_display_ms,
+                context=context,
+            )
+            if _use_whisper_align
+            else None  # non-zh target: bypass char-DTW → proportional fallback below
         )
 
         if cues is None:

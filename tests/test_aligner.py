@@ -67,6 +67,23 @@ def test_aligner_uses_direct_copy_when_diff_is_within_ideal_threshold(tmp_path: 
     _assert_jianying_wav_format(output_path)
 
 
+def test_aligner_propagates_source_text_to_en_text(tmp_path: Path) -> None:
+    """H5/TS-01: AlignedSegment.en_text is populated from segment.source_text.
+
+    DubbingSegment is @dataclass(slots=True) with a source_text field and no
+    en_text field, so the old getattr(segment, "en_text", "") always produced
+    "". This locks the corrected contract through a real SegmentAligner path so
+    a future refactor can't silently reintroduce empty bilingual subtitles.
+    """
+    input_path = _export_tone_wav(tmp_path / "input" / "srctext.wav", duration_ms=1_000)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=1_020)
+
+    aligned = SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
+
+    assert segment.source_text == "Demo source text."
+    assert aligned.en_text == segment.source_text  # not "" (the pre-fix bug)
+
+
 def test_aligner_avoids_direct_copy_for_long_overflow_even_within_ideal_ratio(tmp_path: Path) -> None:
     input_path = _export_tone_wav(tmp_path / "input" / "overflow_dsp.wav", duration_ms=66_800)
     segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=64_000)

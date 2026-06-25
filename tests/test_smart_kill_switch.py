@@ -61,6 +61,22 @@ def _fake_admin_settings(*, smart_mode_enabled: bool = False):
     return SimpleNamespace(smart_mode_enabled=smart_mode_enabled)
 
 
+def _fake_mode_admin_settings(
+    *,
+    express: bool = True,
+    free: bool = False,
+    studio: bool = True,
+    smart: bool = False,
+):
+    """Minimal stand-in for AdminSettings service-mode rollout toggles."""
+    return SimpleNamespace(
+        service_mode_express_enabled=express,
+        service_mode_free_enabled=free,
+        service_mode_studio_enabled=studio,
+        smart_mode_enabled=smart,
+    )
+
+
 def _fake_user(*, role: str = "user", plan_code: str = "plus"):
     """Minimal stand-in for ``models.User``."""
     return SimpleNamespace(
@@ -90,6 +106,55 @@ def _patch_plan_gate_with_smart():
 
 class TestEffectiveAllowedServiceModesHelper:
     """Pure helper — single source of truth feeding all 3 gates."""
+
+    def test_runtime_modes_default_free_off_preserves_paid_modes(self):
+        """Fresh admin settings keep Express/Studio online but Free offline."""
+        from entitlements import get_runtime_enabled_service_modes
+
+        admin = _fake_mode_admin_settings(free=False, smart=False)
+        settings = SimpleNamespace(enable_smart_mode=False, enable_free_tier=True)
+
+        modes = get_runtime_enabled_service_modes(settings=settings, admin=admin)
+
+        assert modes == ["express", "studio"]
+
+    def test_runtime_modes_require_admin_free_toggle_even_when_env_on(self):
+        """Free requires BOTH AVT_ENABLE_FREE_TIER and admin rollout toggle."""
+        from entitlements import get_runtime_enabled_service_modes
+
+        settings = SimpleNamespace(enable_smart_mode=False, enable_free_tier=True)
+
+        off = get_runtime_enabled_service_modes(
+            settings=settings,
+            admin=_fake_mode_admin_settings(free=False),
+        )
+        on = get_runtime_enabled_service_modes(
+            settings=settings,
+            admin=_fake_mode_admin_settings(free=True),
+        )
+
+        assert "free" not in off
+        assert "free" in on
+
+    def test_admin_rollout_toggle_removes_non_smart_modes(self):
+        """Service-mode rollout switches can take Express/Studio offline."""
+        from entitlements import get_effective_allowed_service_modes
+
+        user = _fake_user(role="admin", plan_code="plus")
+        with _patch_plan_gate_with_smart(), patch(
+            "admin_settings.load_settings",
+            return_value=_fake_mode_admin_settings(express=False, studio=True),
+        ):
+            modes = get_effective_allowed_service_modes(
+                user,
+                settings=SimpleNamespace(
+                    enable_smart_mode=False,
+                    enable_free_tier=False,
+                ),
+            )
+
+        assert "express" not in modes
+        assert "studio" in modes
 
     def test_smart_present_when_env_and_admin_both_enabled(self):
         """env=True AND admin=True AND plan contains smart → smart kept."""
@@ -257,6 +322,17 @@ class TestKillSwitchFieldsExist:
 # ─────────────────────────────────────────────────────────────────────
 # Call-site contract tests — source-level pinning
 # ─────────────────────────────────────────────────────────────────────
+
+
+def test_admin_settings_has_service_mode_rollout_defaults():
+    """AdminSettings must own rollout switches for visible task plans."""
+    from admin_settings import AdminSettings
+
+    fields = AdminSettings.model_fields
+
+    assert fields["service_mode_express_enabled"].default is True
+    assert fields["service_mode_free_enabled"].default is False
+    assert fields["service_mode_studio_enabled"].default is True
 
 
 class TestKillSwitchCallSitesUseHelper:
@@ -465,6 +541,29 @@ class TestSmartKillSwitchBehavior:
             f"must distinguish itself from generic service_mode_not_allowed "
             f"so ops can identify the cause from access logs."
         )
+
+    def test_admin_blocked_when_express_rollout_off(self):
+        """Global service-mode rollout switches apply to admin users too."""
+        req = _create_job_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+        })
+        db = _create_job_db()
+        user = _create_job_user(role="admin", plan_code="plus")
+
+        with patch(
+            "admin_settings.load_settings",
+            return_value=_fake_mode_admin_settings(express=False, studio=True),
+        ), patch(
+            "config.settings",
+            _fake_settings(enable_smart_mode=False),
+        ):
+            resp = _run_create_job(req, db, user)
+
+        body = _json.loads(resp.body)
+        assert resp.status_code == 403
+        assert body["error"] == "service_mode_offline"
+        assert body["detail"]["requested_mode"] == "express"
 
     def test_admin_blocked_when_admin_toggle_off(self):
         """Admin + env=True + admin toggle=False + smart → 403.

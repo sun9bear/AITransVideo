@@ -822,6 +822,43 @@ class TestCheckoutConfig:
             assert "amount_cny" not in entry
             assert "plan_code" not in entry
 
+    @pytest.mark.parametrize(
+        ("user_agent", "expected_surface"),
+        [
+            (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
+                "mobile_web",
+            ),
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "pc_web",
+            ),
+        ],
+    )
+    def test_wechatpay_is_recommended_on_mobile_and_desktop(
+        self,
+        monkeypatch,
+        user_agent,
+        expected_surface,
+    ):
+        from billing import get_checkout_config
+
+        monkeypatch.setattr(
+            "billing.list_providers",
+            lambda: ["wechatpay", "paddle", "fake"],
+        )
+        monkeypatch.setattr(
+            "billing.is_provider_operational",
+            lambda code: code in {"wechatpay", "paddle"},
+        )
+
+        user = _make_user(plan_code="free")
+        request = SimpleNamespace(headers={"user-agent": user_agent})
+        result = _run(get_checkout_config(user=user, request=request))
+
+        assert result["checkout_surface"] == expected_surface
+        assert result["recommended_provider"] == "wechatpay"
+
 
 # ===================================================================
 # Alipay non-operational path (create_order rejection) — Task 5

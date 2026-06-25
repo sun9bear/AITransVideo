@@ -61,19 +61,30 @@ def get_tts_rpm(provider: str) -> int:
 get_provider_rpm = get_tts_rpm
 
 
-def get_fallback_provider(provider: str, voice_clone_enabled: bool = False) -> str | None:
+def get_fallback_provider(
+    provider: str,
+    voice_clone_enabled: bool = False,
+    target_language: str | None = None,
+) -> str | None:
     """Return the fallback provider to try when *provider* fails.
 
     Returns ``None`` when no fallback is available.
+
+    PR-E slice 3 (fail-closed, plan Phase 5 D): CosyVoice is a Chinese-only provider,
+    so it must NEVER be the fallback for a non-zh dub target — that would dub e.g.
+    English with Chinese voices. For a non-zh target the CosyVoice fallback is dropped
+    (fail-closed: no fallback) rather than leaking a wrong-language voice. Default
+    (None / zh-CN) keeps the legacy CosyVoice fallback (byte-identical).
     """
+    _cosy_ok = target_language in (None, "", "zh-CN", "zh")
     if provider == "cosyvoice":
         return None
     if provider == "minimax":
         if voice_clone_enabled:
             return None          # cloning is minimax-only, no fallback
-        return "cosyvoice"
+        return "cosyvoice" if _cosy_ok else None
     if provider == "volcengine":
-        return "cosyvoice"
+        return "cosyvoice" if _cosy_ok else None
     # mimo → no fallback
     return None
 

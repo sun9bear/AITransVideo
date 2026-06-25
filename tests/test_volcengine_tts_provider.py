@@ -282,6 +282,27 @@ def test_default_speaker_for_unknown_returns_1_0() -> None:
     assert default_speaker_for_resource("some-unknown-resource") == DEFAULT_SPEAKER_1_0
 
 
+# --- PR-E slice 4: explicit_language for a non-zh target ---
+
+def test_explicit_language_for_target() -> None:
+    assert vc_module._explicit_language_for_target("en") == "en-us"
+    assert vc_module._explicit_language_for_target("en-US") == "en-us"
+    assert vc_module._explicit_language_for_target(None) is None
+    assert vc_module._explicit_language_for_target("zh-CN") is None
+
+
+def test_build_payload_en_adds_explicit_language() -> None:
+    p = vc_module._build_payload("hello", "en_male_tim", target_language="en")
+    assert p["req_params"]["audio_params"]["explicit_language"] == "en-us"
+
+
+def test_build_payload_zh_omits_explicit_language_byte_identical() -> None:
+    p_default = vc_module._build_payload("你好", "zh_female_x")
+    p_zh = vc_module._build_payload("你好", "zh_female_x", target_language="zh-CN")
+    assert "explicit_language" not in p_default["req_params"]["audio_params"]
+    assert p_default == p_zh  # zh target → byte-identical to the no-arg payload
+
+
 # --- Explicit resource_id parameter ---
 
 def test_explicit_resource_id_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:

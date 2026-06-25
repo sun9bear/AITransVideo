@@ -43,7 +43,7 @@ TARGET_MODEL_DEFAULT = "cosyvoice-v3.5-flash"
 _TEMPORARY_TTL_DAYS = 7
 _UPLOAD_PATH = "/api/internal/cosyvoice/express-sample-upload"
 _REGISTER_PATH = "/api/internal/user-voices/register-smart"
-_UPLOAD_TIMEOUT_S = 30.0
+_UPLOAD_TIMEOUT_S = 120.0
 _REGISTER_TIMEOUT_S = 15.0
 
 # admin_settings keys（主 spec §7）
@@ -96,7 +96,7 @@ def _http_upload_sample(*, sample_path: str, user_id, job_id, speaker_id) -> Upl
         logger.warning("express upload transport error: %s", type(exc).__name__)
         return UploadResult(ok=False, error="transport_error")
     if resp.status_code != 200:
-        return UploadResult(ok=False, error=f"http_{resp.status_code}")
+        return UploadResult(ok=False, error=_upload_error_from_response(resp))
     try:
         body = resp.json()
     except ValueError:
@@ -108,6 +108,47 @@ def _http_upload_sample(*, sample_path: str, user_id, job_id, speaker_id) -> Upl
             sha256=str(body["sha256"]),
         )
     return UploadResult(ok=False, error="malformed_upload_response")
+
+
+def _upload_error_from_response(resp) -> str:
+    base = f"http_{resp.status_code}"
+    try:
+        body = resp.json()
+    except ValueError:
+        return base
+    if not isinstance(body, dict):
+        return base
+
+    code = None
+    detail = None
+    error = body.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        detail = error.get("detail")
+    elif error:
+        code = error
+    if code is None:
+        code = body.get("code")
+    if detail is None:
+        detail = body.get("detail")
+
+    parts = [base]
+    for value in (code, detail):
+        part = _safe_upload_error_part(value)
+        if part:
+            parts.append(part)
+    return ":".join(parts)
+
+
+def _safe_upload_error_part(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    safe = "".join(
+        ch if ch.isalnum() or ch in {"_", "-", "."} else "_"
+        for ch in text
+    )
+    return safe[:80]
 
 
 def _http_register_smart(

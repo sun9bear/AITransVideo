@@ -43,6 +43,8 @@ export interface TranslationFormProps {
   initialSourceUrl?: string
 }
 
+type ServiceMode = "express" | "studio" | "smart" | "free"
+
 export function TranslationForm({ onCreated, mode, initialSourceUrl }: TranslationFormProps) {
   const { user } = useSession()
   const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">("youtube_url")
@@ -56,7 +58,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [chunkedLimits, setChunkedLimits] = useState<ChunkedUploadLimits | null>(null)
   const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
-  const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart" | "free">("express")
+  const [serviceMode, setServiceMode] = useState<ServiceMode>("express")
   // PR-A part 2 §7: language direction. Facts are entitlement-filtered by the
   // gateway (default-only for most users → selector stays hidden); the selector
   // appears only when the account has access to a 内测 direction.
@@ -135,11 +137,36 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       : !uploadedFilePath
         ? "请先上传视频文件。"
         : null
+  const allowedServiceModes = entitlements?.limits.allowed_service_modes ?? []
+  const isServiceModeSelectable = (mode: ServiceMode) =>
+    entitlements
+      ? allowedServiceModes.includes(mode) && (mode !== "free" || freeTierEnabled)
+      : mode === "express"
+  const expressAllowed = isServiceModeSelectable("express")
+  const freeAllowed = isServiceModeSelectable("free")
+  const studioAllowed = isServiceModeSelectable("studio")
+  const smartAllowed = isServiceModeSelectable("smart")
+  const isAdminUser = entitlements?.role === "admin"
+  const hasPaidPlan = entitlements?.plan_code === "plus" || entitlements?.plan_code === "pro"
+  const hasStudioPlanEntitlement = isAdminUser || hasPaidPlan || entitlements?.ui.in_trial === true
+  const hasSmartPlanEntitlement = isAdminUser || hasPaidPlan
+  const studioRolloutOffline = Boolean(entitlements) && hasStudioPlanEntitlement && !studioAllowed
+  const smartRolloutOffline = Boolean(entitlements) && hasSmartPlanEntitlement && !smartAllowed
+  const hasAnyServiceMode = expressAllowed || freeAllowed || studioAllowed || smartAllowed
+  const serviceModeUnavailableError =
+    entitlements && !isServiceModeSelectable(serviceMode)
+      ? "当前选择的任务方案暂未上线，请选择其它方案。"
+      : null
   // Phase 2a LAUNCH GATE: a free job requires the voice-rights attestation
   // (《民法典》1023). Keep submit blocked until it is checked — the backend
   // HARD-fails (403 consent_required) otherwise.
   const validationError =
     sourceValidationError ??
+    (!hasAnyServiceMode ? "当前没有可用的任务方案，请联系管理员。" : null) ??
+    serviceModeUnavailableError ??
+    (serviceMode === "express" && expressAutoCloneAvailable && !expressAutoVoiceClone
+      ? "快捷版 CosyVoice 需要先确认自动克隆主说话人音色。"
+      : null) ??
     (serviceMode === "free" && !freeVoiceRightsConfirmed
       ? "请先阅读并勾选免费版声音授权声明。"
       : null)
@@ -185,6 +212,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const planCardBaseClass = "relative rounded-xl border-2 p-4 text-left transition"
   const planCardSelectedClass = `${planCardBaseClass} border-transparent`
   const planCardIdleClass = `${planCardBaseClass} border-border bg-muted/20 hover:border-primary/30`
+  const planCardDisabledClass = `${planCardBaseClass} border-border bg-muted/20 opacity-60 cursor-not-allowed`
   const selectedPlanStyle = {
     borderColor: "color-mix(in oklab, var(--primary) 52%, transparent)",
     backgroundColor: "color-mix(in oklab, var(--primary) 7%, transparent)",
@@ -272,6 +300,19 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       .catch(() => setLanguageFacts([GA_DEFAULT_LANGUAGE_FACT]))
   }, [])
 
+  useEffect(() => {
+    if (!entitlements) return
+    const canUseMode = (mode: ServiceMode) =>
+      entitlements.limits.allowed_service_modes.includes(mode) &&
+      (mode !== "free" || freeTierEnabled)
+    if (canUseMode(serviceMode)) return
+    const fallback = (["express", "studio", "smart", "free"] as ServiceMode[])
+      .find((mode) => canUseMode(mode))
+    if (fallback) {
+      setServiceMode(fallback)
+    }
+  }, [entitlements, freeTierEnabled, serviceMode])
+
   // D7：mount 时读认领成功写入的 preview_id（avt_anon_convert_ready）→ 进入「转完整」
   // 模式（用认领的完整原视频作源，免重新上传）。localStorage key 在转完整成功 或
   // 用户「更换视频」时才清，故刷新页面不丢（提交失败可重试）。
@@ -293,7 +334,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   useEffect(() => {
     if (serviceMode !== "express" || !expressAutoCloneAvailable) {
       setExpressAutoVoiceClone(false)
+      return
     }
+    setExpressAutoVoiceClone(true)
   }, [serviceMode, expressAutoCloneAvailable])
 
   // Phase 2a LAUNCH GATE: leaving free mode clears the attestation so a stale
@@ -658,10 +701,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               {/* Express mode */}
               <button
                 type="button"
-                className={serviceMode === "express" ? planCardSelectedClass : planCardIdleClass}
-                style={serviceMode === "express" ? selectedPlanStyle : undefined}
-                disabled={isBlockedByConcurrency || submitState === "submitting"}
-                onClick={() => setServiceMode("express")}
+                className={!expressAllowed ? planCardDisabledClass : serviceMode === "express" ? planCardSelectedClass : planCardIdleClass}
+                style={expressAllowed && serviceMode === "express" ? selectedPlanStyle : undefined}
+                disabled={!expressAllowed || isBlockedByConcurrency || submitState === "submitting"}
+                onClick={() => {
+                  if (expressAllowed) setServiceMode("express")
+                }}
               >
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-sm font-semibold text-foreground">快捷版</span>
@@ -675,6 +720,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   >
                     Express
                   </span>
+                  {!expressAllowed ? (
+                    <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                      已下线
+                    </span>
+                  ) : null}
                 </div>
                 <p className="text-xs text-muted-foreground leading-relaxed">全自动流程，AI 识别说话人、翻译、配音，无需人工操作。</p>
                 {serviceMode === "express" && (
@@ -688,10 +738,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               {freeTierEnabled && (
                 <button
                   type="button"
-                  className={serviceMode === "free" ? planCardSelectedClass : planCardIdleClass}
-                  style={serviceMode === "free" ? selectedPlanStyle : undefined}
-                  disabled={isBlockedByConcurrency || submitState === "submitting"}
-                  onClick={() => setServiceMode("free")}
+                  className={!freeAllowed ? planCardDisabledClass : serviceMode === "free" ? planCardSelectedClass : planCardIdleClass}
+                  style={freeAllowed && serviceMode === "free" ? selectedPlanStyle : undefined}
+                  disabled={!freeAllowed || isBlockedByConcurrency || submitState === "submitting"}
+                  onClick={() => {
+                    if (freeAllowed) setServiceMode("free")
+                  }}
                 >
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-sm font-semibold text-foreground">免费版</span>
@@ -702,10 +754,15 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                         color: "var(--bamboo)",
                         border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
                       }}
-                    >
-                      Free
-                    </span>
-                  </div>
+                      >
+                        Free
+                      </span>
+                      {!freeAllowed ? (
+                        <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                          已下线
+                        </span>
+                      ) : null}
+                    </div>
                   <p className="text-xs text-muted-foreground leading-relaxed">免费保留原声 AI 配音（限时），每日 1 次、单条 ≤10 分钟，成品带水印。</p>
                   {serviceMode === "free" && (
                     <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
@@ -717,7 +774,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
 
               {/* Studio mode — locked unless plan allows it */}
               {(() => {
-                const studioAllowed = entitlements?.limits.allowed_service_modes.includes("studio") ?? false
                 return studioAllowed ? (
                   <button
                     type="button"
@@ -762,7 +818,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
-                    {entitlements?.ui.allow_upgrade ? (
+                    {studioRolloutOffline ? (
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        已下线
+                      </div>
+                    ) : entitlements?.ui.allow_upgrade ? (
                       <Link
                         href="/settings/billing"
                         className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"
@@ -782,7 +842,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                 * 100 credits/min fixed price, AI auto-decisions for translation
                 * review + voice cloning. plan_catalog gates plus + pro. */}
               {(() => {
-                const smartAllowed = entitlements?.limits.allowed_service_modes.includes("smart") ?? false
                 return smartAllowed ? (
                   <button
                     type="button"
@@ -811,7 +870,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </div>
                     )}
                   </button>
-                ) : smartPreviewEntryEnabled && !reuseAnonPreviewId ? (
+                ) : !smartRolloutOffline && smartPreviewEntryEnabled && !reuseAnonPreviewId ? (
                   // P3e-4c：免费 / 未获 smart 的登录用户的预览入口。点击校验源 →
                   // 打开预扣确认弹窗（付费克隆的用户显式触发面）。
                   // 转完整模式隐藏（用户已预览过，不再二次预览；源也不是 fresh upload）。
@@ -857,7 +916,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">100 点/分钟固定价，AI 自动审核翻译并自动克隆音色，无需人工操作。</p>
-                    {entitlements?.ui.allow_upgrade ? (
+                    {smartRolloutOffline ? (
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        已下线
+                      </div>
+                    ) : entitlements?.ui.allow_upgrade ? (
                       <Link
                         href="/settings/billing"
                         className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"

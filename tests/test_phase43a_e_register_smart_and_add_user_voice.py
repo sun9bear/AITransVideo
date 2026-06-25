@@ -313,3 +313,47 @@ def test_add_user_voice_signature_has_temporary_params():
         "is_temporary 默认值必须 False（Smart MiniMax / Studio backward-compat）"
     )
     assert sig.parameters["temporary_expires_at"].default is None
+
+
+def test_add_user_voice_stamps_compatible_target_languages():
+    # PR-E slice 5b: an en-target clone records compatible_target_languages=["en"].
+    async def _t():
+        sm = await _make_session()
+        async with sm() as db:
+            voice = await add_user_voice(
+                db,
+                user_id=_USER_ID,
+                voice_id="v_en_clone",
+                label="EN",
+                provider="cosyvoice_voice_clone",
+                created_from="studio_manual",
+                compatible_target_languages=["en"],
+            )
+        assert voice.compatible_target_languages == ["en"]
+    _run(_t())
+
+
+def test_add_user_voice_default_compatible_target_languages_is_none():
+    # Default → NULL → language-aware matching treats it as zh-CN-only (byte-identical).
+    async def _t():
+        sm = await _make_session()
+        async with sm() as db:
+            voice = await add_user_voice(
+                db,
+                user_id=_USER_ID,
+                voice_id="v_zh_default",
+                label="ZH",
+                provider="cosyvoice_voice_clone",
+                created_from="studio_manual",
+            )
+        assert voice.compatible_target_languages is None
+    _run(_t())
+
+
+def test_add_user_voice_signature_has_compatible_target_languages() -> None:
+    # PR-E slice 5b guard: the metadata-only stamping param must exist, default None
+    # (paid-API rule: never changes whether/which clone runs).
+    import inspect
+    sig = inspect.signature(add_user_voice)
+    assert "compatible_target_languages" in sig.parameters
+    assert sig.parameters["compatible_target_languages"].default is None

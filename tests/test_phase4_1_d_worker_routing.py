@@ -59,6 +59,7 @@ from services.tts.tts_generator import (  # noqa: E402
     TTSGenerationError,
     TTSGenerator,
 )
+from services.usage_meter import UsageMeter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +470,52 @@ def test_generate_one_does_not_overwrite_worker_billed_chars(
 # ---------------------------------------------------------------------------
 # HC#3a: artifact 解包
 # ---------------------------------------------------------------------------
+
+def test_worker_tts_usage_records_worker_target_model(
+    monkeypatch, make_generator, worker_segment, tmp_path
+):
+    """Worker-routed CosyVoice TTS must report the worker target model.
+
+    Production regression: usage_events recorded provider=cosyvoice but
+    model=speech-2.8-turbo, making admin reports attribute worker TTS to the
+    legacy MiniMax model instead of cosyvoice-v3.5-*.
+    """
+    worker_segment.worker_target_model = "cosyvoice-v3.5-plus"
+    fake = _FakeClient(
+        response=_make_batch_response(
+            target_model="cosyvoice-v3.5-plus",
+            billed_chars=23,
+        )
+    )
+    import services.mainland_worker.client_factory as cf_mod
+    monkeypatch.setattr(cf_mod, "build_client_from_env", lambda: fake)
+
+    gen = make_generator()
+    meter = UsageMeter(tmp_path / "project", job_id="job-worker-usage")
+    gen.set_usage_meter(meter)
+
+    gen._generate_one(
+        worker_segment,
+        str(tmp_path / "tts"),
+        provider="cosyvoice",
+    )
+
+    events = [event for event in meter.events if event.get("kind") == "tts"]
+    assert len(events) == 1
+    assert events[0]["provider"] == "cosyvoice"
+    assert events[0]["model"] == "cosyvoice-v3.5-plus"
+    assert events[0]["worker_target_model"] == "cosyvoice-v3.5-plus"
+    assert events[0]["requires_worker"] is True
+    assert events[0]["billed_chars"] == 23
+
+    summary = meter.summarize()
+    assert summary["tts_call_count_by_provider_model"] == {
+        "cosyvoice:cosyvoice-v3.5-plus": 1,
+    }
+    assert summary["tts_billed_chars_by_provider_model"] == {
+        "cosyvoice:cosyvoice-v3.5-plus": 23,
+    }
+
 
 def test_worker_synthesize_extract_artifact_writes_wav_and_returns_tts_result(
     monkeypatch, make_generator, worker_segment, tmp_path

@@ -621,10 +621,21 @@ class TTSGenerator:
                 persona_style=persona,
                 energy_level=energy,
                 voice_description=voice_desc,
+                # PR-E re-CodeX P2: drive language-aware selection in the main path.
+                target_language=getattr(segment, "target_language", None),
                 target_chars_per_second=(
                     float(getattr(segment, "target_chars_per_second", 0.0)) or None
                 ),
             ))
+            # PR-E re-CodeX P2: a fail_closed match must actually abort — returning the
+            # (Chinese) fallback voice_id here would let _generate_one_cosyvoice synthesize
+            # wrong-language audio. zh never produces a fail_closed reason → byte-identical.
+            if str(match_result.match_reason or "").startswith("fail_closed"):
+                raise TTSGenerationError(
+                    f"CosyVoice has no voice for target_language="
+                    f"{getattr(segment, 'target_language', None)!r}; failing closed "
+                    f"({match_result.match_reason})"
+                )
             voice = match_result.voice_id
             confidence = match_result.match_confidence
             resolution_source = f"resolver({match_result.match_reason})"
@@ -1043,10 +1054,21 @@ class TTSGenerator:
                 persona_style=getattr(segment, "persona_style", None),
                 energy_level=getattr(segment, "energy_level", None),
                 voice_description=getattr(segment, "voice_description", None),
+                # PR-E re-CodeX P2: drive language-aware selection in the main path.
+                target_language=getattr(segment, "target_language", None),
                 target_chars_per_second=(
                     float(getattr(segment, "target_chars_per_second", 0.0)) or None
                 ),
             ))
+            # PR-E re-CodeX P2: a fail_closed match must abort, not synthesize the
+            # (Chinese) fallback voice for a non-zh target. zh never fail_closes →
+            # byte-identical.
+            if str(match_result.match_reason or "").startswith("fail_closed"):
+                raise TTSGenerationError(
+                    f"VolcEngine has no voice for target_language="
+                    f"{getattr(segment, 'target_language', None)!r}; failing closed "
+                    f"({match_result.match_reason})"
+                )
             voice_id = match_result.voice_id
             confidence = match_result.match_confidence
             resolution_source = f"resolver({match_result.match_reason})"
@@ -1107,6 +1129,9 @@ class TTSGenerator:
             )
 
         # --- 3. Call provider with mismatch retry ---
+        # PR-E slice 4: pass the dub target language so VolcEngine can hint
+        # explicit_language for a non-zh dub (default zh → omitted → byte-identical).
+        _vc_target_language = getattr(segment, "target_language", None)
         try:
             audio_bytes = vc_synthesize(
                 text=tts_text,
@@ -1114,9 +1139,21 @@ class TTSGenerator:
                 resource_id=resource_id,
                 model=model,
                 speech_rate=speech_rate_param,
+                target_language=_vc_target_language,
             )
         except Exception as exc:
             if voice_id != fallback_voice and _is_volcengine_voice_resource_mismatch(exc):
+                # PR-E re-CodeX P2: fallback_voice is the Chinese resource default. For a
+                # non-zh target, retrying with it (even with the language hint) would emit a
+                # wrong-language voice, bypassing the fail-closed selector — so fail closed
+                # (non-retryable) instead. zh keeps the legacy mismatch-retry (byte-identical).
+                _mr_lang = (_vc_target_language or "zh-CN").split("-")[0].lower()
+                if _mr_lang != "zh":
+                    raise TTSGenerationError(
+                        f"VolcEngine voice/resource mismatch for target_language="
+                        f"{_vc_target_language!r}; failing closed instead of retrying with the "
+                        f"Chinese default (resource {resource_id})"
+                    ) from exc
                 print(
                     f"[VolcEngine] Voice {voice_id} / resource {resource_id} mismatch; "
                     f"retrying with default {fallback_voice}",
@@ -1131,6 +1168,7 @@ class TTSGenerator:
                     resource_id=resource_id,
                     model=model,
                     speech_rate=speech_rate_param,
+                    target_language=_vc_target_language,
                 )
             else:
                 raise
@@ -1247,7 +1285,10 @@ class TTSGenerator:
 
         # --- Fallback provider ---
         voice_clone_enabled = bool(getattr(segment, "voice_id", None))
-        fallback = get_fallback_provider(provider, voice_clone_enabled)
+        # PR-E slice 3: pass the dub target language so a non-zh dub never falls back
+        # to the Chinese-only CosyVoice (fail-closed). Default (no attr → zh) unchanged.
+        _seg_target_language = getattr(segment, "target_language", None)
+        fallback = get_fallback_provider(provider, voice_clone_enabled, _seg_target_language)
         if fallback:
             # T7: user-visible warning AND structured log for traceability.
             # The primary provider here is the one the user selected (e.g.
@@ -1378,6 +1419,11 @@ class TTSGenerator:
             # fallback 到国际 DashScope endpoint，**不允许** 用 ``len(text)*2``
             # 覆盖 worker 的 authoritative billed_chars。
             requires_worker = bool(getattr(segment, "requires_worker", False))
+            worker_target_model = (
+                _normalize_optional_text(getattr(segment, "worker_target_model", None))
+                if requires_worker
+                else None
+            )
             try:
                 if requires_worker:
                     result = self._generate_one_cosyvoice_via_worker(
@@ -1394,7 +1440,16 @@ class TTSGenerator:
                     result,
                     bucket=usage_bucket,
                     provider="cosyvoice",
+                    model=worker_target_model,
                     text=tts_text,
+                    extra=(
+                        {
+                            "requires_worker": True,
+                            "worker_target_model": worker_target_model,
+                        }
+                        if worker_target_model
+                        else None
+                    ),
                 )
                 return result
             except TTSGenerationError:
@@ -1570,6 +1625,11 @@ class TTSGenerator:
                 "sample_rate": 24000,
             },
         }
+        # PR-E slice 4: hint the dub language for a non-zh target (MiniMax
+        # language_boost). Default zh / no target → key omitted → byte-identical.
+        _mm_target = getattr(segment, "target_language", None)
+        if _mm_target and _mm_target.split("-")[0].lower() == "en":
+            payload["language_boost"] = "English"
 
         response_payload = _post_json(
             endpoint=endpoint,
@@ -1645,6 +1705,7 @@ class TTSGenerator:
         provider: str,
         model: str | None = None,
         text: str,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         meter = getattr(self, "_usage_meter", None)
         if meter is None:
@@ -1661,6 +1722,7 @@ class TTSGenerator:
                 selected_voice=result.selected_voice,
                 duration_ms=result.duration_ms,
                 fallback_used_provider=result.fallback_used_provider,
+                extra=extra,
             )
         except Exception as exc:
             print(f"[metering] TTS usage record skipped: {exc}", flush=True)
@@ -1826,7 +1888,10 @@ def _is_retryable_tts_error(error_obj: TTSGenerationError) -> bool:
 
 def _is_non_retryable_tts_input_error(error_obj: TTSGenerationError) -> bool:
     message = str(error_obj)
-    return "segment.cn_text is required" in message
+    # Deterministic failures retrying cannot fix: a missing cn_text input, and a PR-E
+    # language fail-closed (no target-language voice / Chinese-only provider for a non-zh
+    # dub). Classifying fail-closed non-retryable avoids the 5-minute final-retry stall.
+    return "segment.cn_text is required" in message or "failing closed" in message
 
 
 def _normalize_optional_text(value: object) -> str | None:

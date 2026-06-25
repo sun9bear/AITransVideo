@@ -147,6 +147,11 @@ class AdminSettings(BaseModel):
     # never opens a paid API. MiMo voiceclone itself is the free promotional path
     # (inline reference, no MiniMax/CosyVoice paid clone).
     free_tier_voiceclone_enabled: bool = True
+    # Runtime rollout switches for visible task-plan cards. Smart reuses
+    # smart_mode_enabled below because it already is the global kill switch.
+    service_mode_express_enabled: StrictBool = True
+    service_mode_free_enabled: StrictBool = False
+    service_mode_studio_enabled: StrictBool = True
     enable_pre_tts_rewrite: bool = True            # Pre-TTS rewrite to match target duration
     express_tts_provider: str = "cosyvoice"        # Default TTS provider for express mode
     studio_tts_provider: str = "minimax"           # Default TTS provider for studio mode
@@ -175,6 +180,15 @@ class AdminSettings(BaseModel):
     # synced content (subtitles, lip-sync) when LLM translation length
     # control is unreliable.
     force_dsp_alignment: bool = False
+    # --- PR-E matchable migration — language-aware voice catalog query (kill switch) ---
+    # When True, the internal voice-catalog query additionally filters by
+    # compatible_target_languages @> [target_language], so a zh dub never returns en
+    # voices (and vice versa). Default OFF → legacy matchable-only query
+    # (byte-identical). Turn ON only after migration 042 backfilled
+    # compatible_target_languages AND the "zh target returns 0 en" assertion passes;
+    # turning OFF instantly reverts to the legacy query (the kill switch). See
+    # plan 2026-06-13 ...-v3.md Phase 5 (B).
+    voice_catalog_target_language_filter_enabled: bool = False
     # --- Phase D — Whisper subtitle alignment (2026-05-05) ---
     # Master switch + sub-policy fields. The runtime additionally requires
     # ``AVT_WHISPER_ALIGN_ENABLED=1`` env var to be set (ops capability

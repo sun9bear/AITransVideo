@@ -317,12 +317,22 @@ def _regenerate_whisper_cues(
             cn_text=cn_text,
         ))
 
+    # PR-F: derive the dub target language from the stamped segments (PR-E slice 6)
+    # so a non-zh deliverable bypasses the zh-only whisper char-DTW exactly like the
+    # publish path. Legacy jobs without the stamp resolve to None → whisper path
+    # unchanged (byte-identical for the en->zh default).
+    _target_language = next(
+        (s.get("target_language") for s in segs if s.get("target_language")), None
+    )
+
     # D-5: context="deliverable" tells the trigger gate this is the
     # post-publish deliverable handoff. trigger ∈ {"publish",
     # "deliverable"} both permit; "manual" blocks (the helper
     # already short-circuited above on the same gate, so this
     # primarily documents intent).
-    result = build_subtitle_cues_for_blocks(blocks, lines, context="deliverable")
+    result = build_subtitle_cues_for_blocks(
+        blocks, lines, context="deliverable", target_language=_target_language
+    )
 
     output_dir = project_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -400,14 +410,20 @@ def _regenerate_whisper_cues(
         encoding="utf-8",
     )
 
-    # SRT files
+    # SRT files. zh_srt is cue.text (always the dub/TARGET language) and en_srt is
+    # cue.en_text (always the SOURCE) — the "zh"/"en" names are legacy. PR-F mirrors
+    # them under script-neutral subtitles_source/target.srt so non-default pairs expose
+    # the correct language; subtitles.srt stays the target copy (byte-identical for
+    # en->zh). Mirrors EditorPackageWriter._write_source_target_srt_copies.
     zh_srt = write_zh_srt(result.cues)
     en_srt = write_en_srt(result.cues)
     bi_srt = write_bilingual_srt(result.cues)
     (output_dir / "subtitles_zh.srt").write_text(zh_srt, encoding="utf-8")
-    (output_dir / "subtitles.srt").write_text(zh_srt, encoding="utf-8")  # alias
+    (output_dir / "subtitles.srt").write_text(zh_srt, encoding="utf-8")  # target copy
     (output_dir / "subtitles_en.srt").write_text(en_srt, encoding="utf-8")
     (output_dir / "subtitles_bilingual.srt").write_text(bi_srt, encoding="utf-8")
+    (output_dir / "subtitles_target.srt").write_text(zh_srt, encoding="utf-8")
+    (output_dir / "subtitles_source.srt").write_text(en_srt, encoding="utf-8")
 
     return len(result.block_specs)
 

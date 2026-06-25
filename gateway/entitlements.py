@@ -25,6 +25,54 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["entitlements"])
 
 
+def _admin_bool(admin, field_name: str, default: bool) -> bool:
+    value = getattr(admin, field_name, default) if admin is not None else default
+    return value if isinstance(value, bool) else default
+
+
+def _load_admin_settings_for_service_modes():
+    try:
+        from admin_settings import load_settings as _load_admin_settings
+        return _load_admin_settings()
+    except Exception as exc:
+        logger.warning(
+            "service-mode rollout: admin_settings unreadable, using safe "
+            "defaults (express/studio on, smart/free off). cause=%s",
+            exc,
+        )
+        return None
+
+
+def get_runtime_enabled_service_modes(*, settings=None, admin=None) -> list[str]:
+    """Return globally online service modes before per-user plan gating."""
+    if settings is None:
+        from config import settings as _global_settings
+        settings = _global_settings
+
+    if admin is None:
+        admin = _load_admin_settings_for_service_modes()
+
+    modes: list[str] = []
+
+    if _admin_bool(admin, "service_mode_express_enabled", True):
+        modes.append("express")
+
+    if _admin_bool(admin, "service_mode_studio_enabled", True):
+        modes.append("studio")
+
+    if bool(getattr(settings, "enable_smart_mode", False)) and _admin_bool(
+        admin, "smart_mode_enabled", False
+    ):
+        modes.append("smart")
+
+    if bool(getattr(settings, "enable_free_tier", False)) and _admin_bool(
+        admin, "service_mode_free_enabled", False
+    ):
+        modes.append("free")
+
+    return modes
+
+
 def get_effective_allowed_service_modes(
     user: User | None, *, settings=None
 ) -> list[str]:
@@ -44,9 +92,9 @@ def get_effective_allowed_service_modes(
       settings: Optional override for tests. Defaults to live config.
 
     Returns:
-      A NEW list (caller can mutate safely). Always preserves
-      express / studio order from the plan; only removes smart when the
-      kill switch is off.
+      A NEW list (caller can mutate safely). Preserves plan order while
+      filtering out runtime-off service modes; free is appended only when
+      both env and admin rollout layers are enabled.
 
     Defensive: if admin_settings is unreadable for any reason, the helper
     fails CLOSED (treats admin toggle as False → smart removed). This
@@ -62,48 +110,32 @@ def get_effective_allowed_service_modes(
     plan_info = get_effective_plan_gate(user)
     base = list(plan_info.get("allowed_service_modes", ()))
 
-    # Special-case: legacy admin behavior allowed admin to see all
-    # non-smart modes regardless of plan. Preserve that — kill switch
-    # only affects ``smart``, not express/studio.
+    # Special-case: legacy admin behavior allowed admin to see all non-smart
+    # modes regardless of plan. Preserve that plan bypass first, then apply
+    # runtime rollout filters below.
     role = getattr(user, "role", "user") or "user"
     if role == "admin":
         for mode in ("express", "studio"):
             if mode not in base:
                 base.append(mode)
 
-    # Now apply the kill switch to ``smart`` regardless of source (plan
-    # or admin-augmented).
+    # Apply global runtime rollout switches regardless of source (plan or
+    # admin-augmented).
     if settings is None:
         from config import settings as _global_settings
         settings = _global_settings
 
-    env_enabled = bool(getattr(settings, "enable_smart_mode", False))
-    admin_enabled = False
-    try:
-        from admin_settings import load_settings as _load_admin_settings
-        admin_enabled = bool(
-            getattr(_load_admin_settings(), "smart_mode_enabled", False)
-        )
-    except Exception as exc:
-        # Fail-closed: unreadable admin_settings → smart removed.
-        logger.warning(
-            "smart kill switch: admin_settings unreadable, treating as "
-            "disabled (smart removed). cause=%s", exc,
-        )
-        admin_enabled = False
+    admin = _load_admin_settings_for_service_modes()
+    runtime_modes = set(
+        get_runtime_enabled_service_modes(settings=settings, admin=admin)
+    )
 
-    if not (env_enabled and admin_enabled) and "smart" in base:
-        base.remove("smart")
+    base = [mode for mode in base if mode in runtime_modes]
 
-    # Phase 2a free tier — when AVT_ENABLE_FREE_TIER is on, "free" is an
-    # allowed mode for everyone (freemium funnel; eligibility is universal,
-    # the daily-quota gate in Task 4 limits usage). Off (default) → not in the
-    # list, so job_intercept's allowed-modes gate rejects free with the flag off.
-    if bool(getattr(settings, "enable_free_tier", False)) and "free" not in base:
+    if "free" in runtime_modes and "free" not in base:
         base.append("free")
 
     return base
-
 
 def get_effective_allowed_language_pairs(
     user: User | None, *, admin=None

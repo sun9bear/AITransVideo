@@ -100,6 +100,8 @@ def load_youtube_download_config() -> dict[str, object]:
 
 class YouTubeDownloader:
     metadata_filename: str = "download_metadata.json"
+    default_format: str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+    hls_fallback_format: str = "best[protocol*=m3u8][ext=mp4]/best[protocol*=m3u8]/best"
 
     def download(self, request: DownloadRequest) -> DownloadResult:
         validate_video_url(request.url)
@@ -177,7 +179,7 @@ class YouTubeDownloader:
         video_dir.mkdir(parents=True, exist_ok=True)
 
         base_ydl_opts = {
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "format": self.default_format,
             "outtmpl": str(video_dir / "original.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
@@ -202,6 +204,19 @@ class YouTubeDownloader:
                     break
                 except Exception as exc:  # pragma: no cover - exercised via tests with mocked failures
                     round_errors.append((attempt_label, exc))
+                    if not self._should_try_hls_fallback(exc):
+                        continue
+                    hls_label = f"{attempt_label}:hls_fallback"
+                    hls_opts = {
+                        **ydl_opts,
+                        "format": self.hls_fallback_format,
+                    }
+                    try:
+                        with yt_dlp.YoutubeDL(hls_opts) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                        break
+                    except Exception as hls_exc:  # pragma: no cover - exercised via mocked failures
+                        round_errors.append((hls_label, hls_exc))
                     continue
             errors.extend(round_errors)
             if info is not None:
@@ -250,7 +265,7 @@ class YouTubeDownloader:
             cookie_path = Path(normalized_cookie_file).expanduser().resolve(strict=False)
             attempts.append(
                 (
-                    f"cookie_file:{cookie_path}",
+                    f"cookie_file:{cookie_path}:default",
                     {
                         **base_ydl_opts,
                         "cookiefile": str(cookie_path),
@@ -261,7 +276,7 @@ class YouTubeDownloader:
         if normalized_browser:
             attempts.append(
                 (
-                    f"cookies_from_browser:{normalized_browser}",
+                    f"cookies_from_browser:{normalized_browser}:default",
                     {
                         **base_ydl_opts,
                         "cookiesfrombrowser": (normalized_browser,),
@@ -269,8 +284,12 @@ class YouTubeDownloader:
                 )
             )
 
-        attempts.append(("anonymous", dict(base_ydl_opts)))
+        attempts.append(("anonymous:default", dict(base_ydl_opts)))
         return attempts
+
+    def _should_try_hls_fallback(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "403" in message or "forbidden" in message
 
     def _should_retry_download(self, errors: list[tuple[str, Exception]]) -> bool:
         if not errors:

@@ -1483,6 +1483,45 @@ def _build_translator_with_meter(*, llm_router=None, service_mode: str | None = 
     return translator, meter
 
 
+def test_strict_rewrite_uses_regular_rewrite_prompt_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    translator, meter = _build_translator_with_meter(service_mode="express")
+
+    prompt_model_calls: list[tuple[str, str]] = []
+
+    def fake_get_prompt_model(mode: str, prompt_key: str) -> str:
+        prompt_model_calls.append((mode, prompt_key))
+        return "deepseek"
+
+    called_models: list[str] = []
+
+    def fake_call_by_model(
+        model_name: str, prompt: str, json_mode: bool = False
+    ) -> str:
+        called_models.append(model_name)
+        return "OK"
+
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_prompt_model",
+        fake_get_prompt_model,
+    )
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_fallback_candidates",
+        lambda model_name, requires_audio=False: [],
+    )
+    monkeypatch.setattr(translator, "_call_by_model", fake_call_by_model)
+
+    response = translator._call_task_with_fallback("s5_rewrite_strict", "prompt")
+
+    assert response == "OK"
+    assert prompt_model_calls == [("express", "rewrite")]
+    assert called_models == ["deepseek"]
+    assert meter.calls[0]["task"] == "s5_rewrite_strict"
+
+
 def test_classify_llm_error_buckets_provider_invalid_auth_config_length(
 ) -> None:
     from services.gemini.translator import (

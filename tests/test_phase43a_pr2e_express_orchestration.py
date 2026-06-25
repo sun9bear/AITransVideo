@@ -39,6 +39,7 @@ from services.express.auto_clone import (  # noqa: E402
     run_express_auto_clone,
 )
 from services.express.main_speaker import identify_express_main_speaker  # noqa: E402
+from services.usage_meter import UsageMeter  # noqa: E402
 
 _EXPRESS_DIR = _SRC / "services" / "express"
 
@@ -322,6 +323,53 @@ def test_happy_path_order_and_routing(captured_audit):
     assert sr["speaker_a"] == {"requires_worker": True, "worker_target_model": "cosyvoice-v3.5-flash"}
     # 必写一行决策 audit
     assert any(r.get("decision") == "cloned" for r in captured_audit)
+
+
+def test_happy_path_records_cosyvoice_clone_usage(tmp_path, captured_audit):
+    """Express clone success must be visible in UsageMeter cost/reporting.
+
+    Production regression: the clone succeeded and routing used the temporary
+    CosyVoice voice, but usage_summary still showed zero clone calls.
+    """
+    rec: list = []
+    sv: dict = {}
+    sr: dict = {}
+    outcome = run_express_auto_clone(
+        user_id="user-1",
+        job_id="job-1",
+        project_dir=tmp_path,
+        transcript_lines=_TRANSCRIPT,
+        speaker_voices=sv,
+        speaker_routing=sr,
+        express_consent=_CONSENT_OK,
+        clients=_clients(rec),
+        target_model="cosyvoice-v3.5-flash",
+    )
+
+    assert outcome.cloned is True
+    meter = UsageMeter(tmp_path, job_id="job-1")
+    events = [event for event in meter.events if event.get("kind") == "voice_clone"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["provider"] == "cosyvoice_voice_clone"
+    assert event["model"] == "cosyvoice-v3.5-flash"
+    assert event["voice_id"] == "cosyvoice-v3.5-flash-xyz"
+    assert event["speaker_id"] == "speaker_a"
+    assert event["source_audio_seconds"] == 14.2
+    assert event["selected_segment_count"] == 3
+    assert event["clone_count"] == 1
+    assert event["billable"] is True
+    assert event["success"] is True
+    assert event["source"] == "express_auto_clone"
+    assert event["worker_target_model"] == "cosyvoice-v3.5-flash"
+
+    summary = meter.summarize()
+    assert summary["voice_clone_call_count"] == 1
+    assert summary["voice_clone_success_call_count"] == 1
+    assert summary["voice_clone_billable_count"] == 1
+    assert summary["voice_clone_count_by_provider"] == {
+        "cosyvoice_voice_clone": 1,
+    }
 
 
 def test_consent_not_given_skips_everything(captured_audit):

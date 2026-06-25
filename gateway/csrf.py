@@ -144,6 +144,18 @@ def _request_origin(request: Request) -> str | None:
     return _normalize_origin(_header(headers, "referer"))
 
 
+def _has_explicit_origin_or_referer(request: Request) -> bool:
+    headers = request.headers
+    origin = _header(headers, "origin")
+    referer = _header(headers, "referer")
+    return bool(origin and origin.strip()) or bool(referer and referer.strip())
+
+
+def _fetch_metadata_same_origin(request: Request) -> bool:
+    value = _header(request.headers, "sec-fetch-site")
+    return bool(value and value.strip().lower() == "same-origin")
+
+
 def require_same_origin_state_change(request: Request) -> None:
     """Reject cross-site state-changing requests that rely on ambient cookies.
 
@@ -156,6 +168,9 @@ def require_same_origin_state_change(request: Request) -> None:
 
     origin = _request_origin(request)
     if origin and origin in _allowed_origins(request):
+        return
+
+    if not _has_explicit_origin_or_referer(request) and _fetch_metadata_same_origin(request):
         return
 
     raise HTTPException(status_code=403, detail="csrf_origin_rejected")

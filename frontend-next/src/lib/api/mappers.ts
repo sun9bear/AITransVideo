@@ -66,6 +66,21 @@ const downloadDescriptions = {
   },
 } as const
 
+// PR-G: render subtitle download labels/descriptions from the job's ACTUAL languages
+// instead of the hard-coded 中文/英文 — editor.subtitles is always the dub (TARGET)
+// language and editor.subtitles_en always the SOURCE, so the legacy "中文/英文" names
+// are wrong for a non-default pair (zh->en). Absent languages fall back to the en->zh
+// default (target=zh-CN→中文, source=en→英文) → byte-identical for the GA pair.
+const _LANG_DISPLAY: Record<string, string> = {
+  'zh-CN': '中文',
+  zh: '中文',
+  en: '英文',
+}
+function langDisplay(code: string | null | undefined): string {
+  if (!code) return ''
+  return _LANG_DISPLAY[code] ?? _LANG_DISPLAY[code.split('-')[0]] ?? code
+}
+
 const downloadDisplayOrder = [
   'publish.dubbed_video',
   'editor.dubbed_audio_complete',
@@ -168,11 +183,37 @@ export function toResultDownloadItems(payload: ApiJobArtifactsResponse): ResultD
       } => Boolean(artifact),
     )
 
+  // PR-G: editor.subtitles is the dub (TARGET) language, editor.subtitles_en the SOURCE.
+  // Label them by the job's actual languages; absent → en->zh default (byte-identical).
+  const targetLang = payload.target_language ?? 'zh-CN'
+  const sourceLang = payload.source_language ?? 'en'
+  const subtitleLangLabel = (key: string): string | null => {
+    if (key === 'editor.subtitles') return `${langDisplay(targetLang)}字幕`
+    if (key === 'editor.subtitles_en') return `${langDisplay(sourceLang)}字幕`
+    return null
+  }
+  // Role-aware so the default en->zh stays byte-identical: the TARGET (dub) subtitle
+  // keeps the "剪映风格" note, the SOURCE subtitle does not (mirrors the legacy
+  // editor.subtitles vs editor.subtitles_en descriptions).
+  const subtitleLangDescription = (key: string, exists: boolean): string | null => {
+    if (key === 'editor.subtitles') {
+      const lang = langDisplay(targetLang)
+      return exists ? `${lang}短句字幕，剪映风格。` : `${lang}字幕还没有生成。`
+    }
+    if (key === 'editor.subtitles_en') {
+      const lang = langDisplay(sourceLang)
+      return exists ? `${lang}短句字幕。` : `${lang}字幕还没有生成。`
+    }
+    return null
+  }
+
   const items = orderedArtifacts.map((artifact) => ({
     available: artifact.exists,
-    description: artifact.exists
-      ? downloadDescriptions[artifact.key].available
-      : downloadDescriptions[artifact.key].unavailable,
+    description:
+      subtitleLangDescription(artifact.key, artifact.exists) ??
+      (artifact.exists
+        ? downloadDescriptions[artifact.key].available
+        : downloadDescriptions[artifact.key].unavailable),
     downloadUrl: artifact.exists
       ? buildResultDownloadUrl({
           downloadKey: artifact.key,
@@ -181,7 +222,7 @@ export function toResultDownloadItems(payload: ApiJobArtifactsResponse): ResultD
         })
       : null,
     key: artifact.key,
-    label: downloadLabels[artifact.key],
+    label: subtitleLangLabel(artifact.key) ?? downloadLabels[artifact.key],
   }))
 
   // Add TTS segments zip entry (virtual — not in backend artifacts, on-demand zip)
