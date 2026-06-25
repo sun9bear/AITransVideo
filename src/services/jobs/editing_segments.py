@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -183,6 +184,8 @@ def _atomic_write_json(path: Path, payload: object) -> None:
         with open(tmp_fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())  # H4: flush bytes to disk before the atomic rename
         # os.replace is atomic on both POSIX and Windows (ReplaceFileW).
         tmp_path.replace(path)
     except Exception:
