@@ -229,6 +229,37 @@ class TestJobPolicyShape:
 
     @pytest.mark.parametrize("mode", ["express", "studio", "smart", "free"])
     def test_tts_model_is_str_or_none(self, mode):
-        """tts_model 是 str | None（studio+volcengine 时可为 None）。"""
+        """tts_model 形状契约：str | None（本测试断言形状，两者皆接受）。
+
+        None 值仅在 studio + volcengine（豆包 2.0 公共音色）时产生；该具体值分支
+        由 tests/test_gateway_job_policy.py::test_studio_volcengine_model_none
+        （monkeypatch volcengine 后断言 is None）确定性覆盖。默认 admin 配置下
+        本参数化不会构造 None，故此处只锁形状不锁该值。
+        """
         p = compute_job_policy(_make_user(), mode)
         assert p["tts_model"] is None or isinstance(p["tts_model"], str), f"mode={mode}"
+
+
+# ── 4. 源码守卫：清理过的两个模块不得回归 getattr(segment) ────────────
+
+
+class TestNoGetattrSegmentRegression:
+    """TU-07 永久守卫：被清理的模块不得重新引入 getattr(segment, …)。
+
+    若未来有人删掉某 DubbingSegment 字段并用 getattr(seg, "x", default) 兜底，
+    会再次架空 slots 的类型安全（TS-02 原始问题）。本守卫在源码层挡住回归——
+    与 test_legacy_cleanup_guards 同思路（契约级、source-grep）。
+    """
+
+    @pytest.mark.parametrize(
+        "relpath",
+        [
+            "src/services/tts/tts_generator.py",
+            "src/services/alignment/aligner.py",
+        ],
+    )
+    def test_no_getattr_segment(self, relpath):
+        root = __import__("pathlib").Path(__file__).resolve().parent.parent
+        src = (root / relpath).read_text(encoding="utf-8")
+        hits = [f"L{i}: {ln.strip()}" for i, ln in enumerate(src.splitlines(), 1) if "getattr(segment" in ln]
+        assert not hits, f"{relpath} 重新引入 getattr(segment)（TU-07 回归）: {hits[:5]}"
