@@ -98,3 +98,93 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx tsc --noEmit
+
+  # ---------------------------------------------------------------------------
+  # TU-03 质量护栏脚手架（2026-06-25）。首周一律不把历史 lint/type 债或全量
+  # 测试失败变成 PR 硬门：ruff 仅对「改动文件」阻断、mypy 与 full-suite 均
+  # report-only / continue-on-error。见
+  # docs/plans/code-quality-tasks/TU-03-quality-scaffold.md。
+  # ---------------------------------------------------------------------------
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 三点 diff 需要 merge-base；浅克隆会让 origin/$BASE...HEAD 失效。
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ruff mypy pydantic pydantic-settings
+      - name: Ruff — 改动文件阻断 + 全仓 report-only
+        run: |
+          BASE="${{ github.base_ref }}"
+          FILES=""
+          if [ -n "$BASE" ]; then
+            git fetch origin "$BASE" || true
+            FILES=$(git diff --name-only "origin/$BASE...HEAD" -- '*.py' | tr '\n' ' ')
+          fi
+          if [ -n "${FILES// /}" ]; then
+            echo "Changed .py files: $FILES"
+            ruff check $FILES --output-format=github
+            ruff format --check $FILES
+          else
+            echo "No changed .py files — changed-files ruff gate is a no-op."
+          fi
+          echo "::group::Full-repo ruff (report-only, never blocks)"
+          ruff check src/ gateway/ --exit-zero --output-format=github
+          echo "::endgroup::"
+      - name: Mypy — 窄域（首周 report-only，不阻断）
+        # 窄域模块当前仍有历史 type 债（debt baseline 记于 PR）；清理交 TU-07，
+        # 禁止批量 `# type: ignore` 换绿。稳定后删除本行转硬门。
+        continue-on-error: true
+        run: mypy src/core/ src/utils/ src/services/llm/ gateway/storage/ --ignore-missing-imports --check-untyped-defs
+
+  # 首周 report-only：continue-on-error 不阻断 PR。跑出稳定 baseline 后删除本行
+  # 并把 --cov-fail-under 设为实测值，逐季棘轮。别第一周就把「全量 + 覆盖率」做成
+  # PR 硬门。排除 real_provider（红线：CI 永不触发真实付费外部调用）/ benchmark
+  # （非 pass/fail）/ postgres（由独立 backend-pg-integration job 覆盖）/ slow。
+  backend-full-suite:
+    runs-on: ubuntu-latest
+    continue-on-error: true        # ← 首周不阻断；稳定后删除本行转为硬门
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-dev.txt -r gateway/requirements.txt pytest-cov pytest-timeout pytest-xdist
+      - name: Full suite — 超时守护 + 分片 + 覆盖率（仅收集，不设硬门）
+        run: >
+          pytest -q -n auto --timeout=120 --timeout-method=thread
+          --ignore=tests/test_phase43a_pr2_reservation_pg_atomic.py
+          --ignore=tests/test_phase43b_voice_cleanup_pg_concurrent.py
+          -m "not real_provider and not benchmark and not postgres and not slow"
+          --cov=src --cov=gateway --cov-report=term-missing
+
+  file-size-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: File-size ratchet (新文件 ≤800；白名单文件不许超过基线行数)
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          BASELINE = json.load(open("tools/file_size_baseline.json", encoding="utf-8"))
+          targets = list(pathlib.Path("src").rglob("*.py")) + list(pathlib.Path("gateway").rglob("*.py")) + [pathlib.Path("main.py")]
+          viol = []
+          for p in targets:
+              rel = str(p).replace("\\", "/")
+              n = sum(1 for _ in open(p, encoding="utf-8", errors="ignore"))
+              cap = BASELINE.get(rel, 800)   # 白名单文件=其基线行数；其余=800 上限
+              if n > cap:
+                  viol.append((rel, n, cap))
+          if viol:
+              print("File exceeds size budget (new file >800, or whitelisted file grew past baseline):")
+              for f, n, cap in viol:
+                  print(f"  {f}: {n} > {cap}")
+              sys.exit(1)
+          print("file-size ratchet OK")
+          PY
