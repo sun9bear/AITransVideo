@@ -47,6 +47,9 @@ assert.equal(site.absoluteUrl("/pricing", "en"), `${SITE_URL}/en/pricing`, "abso
 //    - phone-login-form 用【半角逗号 ,】+【全角省略号 …】
 //    - email-register-form 用【全角逗号 ，】+【半角三点 ...】
 //    （二者历史不一致——照搬，不得"修正"。改任一值即在此处 red。）
+//    注意：此守卫是【字典值级】校验（assert message catalog 值），非【渲染 DOM 级】快照——
+//    不覆盖 JSX 在 rich-text <span> 周边的空白折叠漂移。frontend-next 无 JS test runner，属
+//    可接受范围（单元卡允许 build+grep+node 断言）；若 zh-snapshot 后续获真 SSR/DOM 快照能力，再接入 4 页。
 const zhAuth = JSON.parse(readFileSync(path.join(root, "messages/zh/auth.json"), "utf8"))
 
 // 页壳标题/副标
