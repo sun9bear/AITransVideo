@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 from urllib import error, request
 
 logger = logging.getLogger(__name__)
@@ -128,13 +128,29 @@ def _is_volcengine_voice_resource_mismatch(exc: Exception) -> bool:
     return sum(1 for kw in keywords if kw in msg) >= 2
 
 
-def _read_job_field(job_record: Any, key: str) -> Any:
+class JobRecordLike(Protocol):
+    """tts_generator 访问的 job_record 字段子集（结构型子类型 / TS-07）。
+
+    job_record 在流水线里有两种形态：``dict``（JSON 快照反序列化）或
+    runtime 的 JobRecord ORM 对象。tts_generator 位于 ``src/services/tts/``，
+    不能 import gateway 的 ORM 类（跨层 + 循环依赖），故用 Protocol 表达
+    "具备这些字段" 的契约，而非继承。仅列常读字段，不强求穷尽——
+    ``_read_job_field`` 通过动态 getattr 读取任意 key。
+    """
+
+    job_id: str
+    tts_model: str | None
+    tts_provider: str
+    service_mode: str
+
+
+def _read_job_field(job_record: dict | JobRecordLike | None, key: str) -> Any:
     if isinstance(job_record, dict):
         return job_record.get(key)
     return getattr(job_record, key, None)
 
 
-def _resolve_minimax_model_for_job(job_record: Any, fallback_model: str) -> str:
+def _resolve_minimax_model_for_job(job_record: dict | JobRecordLike | None, fallback_model: str) -> str:
     raw_model = _read_job_field(job_record, "tts_model") if job_record is not None else None
     model = _normalize_optional_text(raw_model)
     if model in MINIMAX_TTS_MODELS:
@@ -172,7 +188,7 @@ class TTSResult:
 
 
 class TTSGenerator:
-    def __init__(self, config: TTSConfig, *, job_record: Any = None):
+    def __init__(self, config: TTSConfig, *, job_record: dict | JobRecordLike | None = None):
         normalized_api_key = _normalize_optional_text(config.api_key)
         if normalized_api_key is None:
             raise TTSGenerationError("TTS api_key is required.")
@@ -243,7 +259,7 @@ class TTSGenerator:
     _PARALLEL_WORKERS = 3
 
     def _resolve_provider_decision(
-        self, *, job_record: Any = None
+        self, *, job_record: dict | JobRecordLike | None = None
     ) -> dict[str, str]:
         """Resolve TTS provider and record decision source.
 
@@ -259,7 +275,7 @@ class TTSGenerator:
         segments: list[DubbingSegment],
         output_dir: str,
         *,
-        job_record: Any = None,
+        job_record: dict | JobRecordLike | None = None,
         usage_bucket: str = TTS_BUCKET_FIRST,
     ) -> list[TTSResult]:
         output_root = Path(output_dir).resolve(strict=False)
