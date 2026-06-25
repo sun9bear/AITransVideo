@@ -98,3 +98,113 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx tsc --noEmit
+
+  # ---------------------------------------------------------------------------
+  # TU-03 质量护栏脚手架（2026-06-25）。首周一律不把历史 lint/type 债或全量
+  # 测试失败变成 PR 硬门：ruff 仅对「改动文件」阻断、mypy 与 full-suite 均
+  # report-only / continue-on-error。见
+  # docs/plans/code-quality-tasks/TU-03-quality-scaffold.md。
+  # ---------------------------------------------------------------------------
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install ruff mypy pydantic pydantic-settings
+      - name: Ruff — 新增文件阻断 + 改动/全仓 report-only
+        run: |
+          # 首周「不阻断历史债」：只对【新增】.py 阻断（新文件无历史债，理应 ruff-clean），
+          # 对【改动的既有文件】只报告（否则碰一下满是历史债的 process.py / job_intercept.py
+          # 就会被旧债阻断 —— 这正是 CodeX 复审 + Phase 0「ruff report-only」要避免的）。
+          # base 解析用 FETCH_HEAD 两点 diff：默认 checkout 的 HEAD=PR merge ref，
+          # base-tip..merge = PR 净改动；不依赖 origin/$BASE 远程跟踪 ref（浅 fetch 不创建它）。
+          BASE="${{ github.base_ref }}"
+          ADDED=""; EXISTING=""
+          if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+            ADDED=$(git diff --name-only --diff-filter=A FETCH_HEAD HEAD -- '*.py' | tr '\n' ' ')
+            EXISTING=$(git diff --name-only --diff-filter=MRC FETCH_HEAD HEAD -- '*.py' | tr '\n' ' ')
+          fi
+          if [ -n "${ADDED// /}" ]; then
+            echo "Newly-added .py (blocking — must be ruff-clean): $ADDED"
+            ruff check $ADDED --output-format=github
+            ruff format --check $ADDED
+          else
+            echo "No newly-added .py files to block on."
+          fi
+          echo "::group::Ruff report-only (modified existing files + full repo, never blocks)"
+          if [ -n "${EXISTING// /}" ]; then
+            echo "Modified existing .py (report-only): $EXISTING"
+            ruff check $EXISTING --exit-zero --output-format=github || true
+          fi
+          ruff check src/ gateway/ --exit-zero --output-format=github
+          echo "::endgroup::"
+      - name: Mypy — 窄域（首周 report-only，不阻断）
+        # 窄域模块当前仍有历史 type 债（debt baseline 记于 PR）；清理交 TU-07，
+        # 禁止批量 `# type: ignore` 换绿。稳定后删除本行转硬门。
+        continue-on-error: true
+        run: mypy src/core/ src/utils/ src/services/llm/ gateway/storage/ --ignore-missing-imports --check-untyped-defs
+
+  # 首周 report-only：continue-on-error 不阻断 PR。跑出稳定 baseline 后删除本行
+  # 并把 --cov-fail-under 设为实测值，逐季棘轮。别第一周就把「全量 + 覆盖率」做成
+  # PR 硬门。排除 real_provider（红线：CI 永不触发真实付费外部调用）/ benchmark
+  # （非 pass/fail）/ postgres（由独立 backend-pg-integration job 覆盖）/ slow。
+  backend-full-suite:
+    runs-on: ubuntu-latest
+    continue-on-error: true        # ← 首周不阻断；稳定后删除本行转为硬门
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-dev.txt -r gateway/requirements.txt pytest-cov pytest-timeout pytest-xdist
+      - name: Full suite — 超时守护 + 分片 + 覆盖率（仅收集，不设硬门）
+        run: >
+          pytest -q -n auto --timeout=120 --timeout-method=thread
+          --ignore=tests/test_phase43a_pr2_reservation_pg_atomic.py
+          --ignore=tests/test_phase43b_voice_cleanup_pg_concurrent.py
+          -m "not real_provider and not benchmark and not postgres and not slow"
+          --cov=src --cov=gateway --cov-report=term-missing
+
+  file-size-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: File-size ratchet (新文件 ≤800；白名单文件不许超过基线行数)
+        run: |
+          # 防同一 PR 同时撑大文件并抬高其基线 cap（自我授权绕过）：优先用 base ref 的基线
+          # 衡量当前行数。base ref 没有该文件（如本 PR 首次引入基线）或非 PR 事件 → 回退到
+          # 当前 checkout 的基线（fail-open 到本地基线，避免基础设施抖动误阻断）。
+          # 用 FETCH_HEAD 读 base 基线：浅 fetch 只更新 FETCH_HEAD，不创建 origin/$BASE
+          # 远程跟踪 ref（CodeX 复审实测），故 git show origin/$BASE:... 会静默失败回退到
+          # 本 PR 自改的基线 → 绕过失效。FETCH_HEAD 指向刚 fetch 的 base tip，可靠。
+          BASE="${{ github.base_ref }}"
+          BASELINE_FILE=tools/file_size_baseline.json
+          if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+            if git show "FETCH_HEAD:tools/file_size_baseline.json" > /tmp/base_baseline.json 2>/dev/null; then
+              BASELINE_FILE=/tmp/base_baseline.json
+            fi
+          fi
+          echo "Using baseline: $BASELINE_FILE"
+          BASELINE_FILE="$BASELINE_FILE" python - <<'PY'
+          import json, os, pathlib, sys
+          BASELINE = json.load(open(os.environ["BASELINE_FILE"], encoding="utf-8"))
+          targets = list(pathlib.Path("src").rglob("*.py")) + list(pathlib.Path("gateway").rglob("*.py")) + [pathlib.Path("main.py")]
+          viol = []
+          for p in targets:
+              rel = str(p).replace("\\", "/")
+              n = sum(1 for _ in open(p, encoding="utf-8", errors="ignore"))
+              cap = BASELINE.get(rel, 800)   # 白名单文件=其基线行数；其余=800 上限
+              if n > cap:
+                  viol.append((rel, n, cap))
+          if viol:
+              print("File exceeds size budget (new file >800, or whitelisted file grew past base-branch baseline):")
+              for f, n, cap in viol:
+                  print(f"  {f}: {n} > {cap}")
+              sys.exit(1)
+          print("file-size ratchet OK")
+          PY

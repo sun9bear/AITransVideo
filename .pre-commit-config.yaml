@@ -1,0 +1,33 @@
+# TU-03 quality scaffold — pre-commit hooks (2026-06-25).
+# 见 docs/plans/code-quality-tasks/TU-03-quality-scaffold.md §10.5。
+#
+# 约定（CodeX 2026-06-25 决策）：本文件进仓库供愿意的开发者 opt-in；
+# 不强制每位贡献者 `pre-commit install`。首周质量护栏一律 report-only，
+# 这些 hook 仅作本地辅助，不挂为 PR 硬门。
+#
+# 版本说明：ruff / mypy 的 pre-commit pin 与 CI/本地 CLI 版本可能有 skew
+# （pre-commit 用各自隔离环境）。首周可接受；后续单元统一对齐。
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: debug-statements
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.0
+    hooks:
+      - id: mypy
+        # 窄域：仅最干净模块（与 CI python-lint mypy 步骤一致）。
+        # 历史 type 债不在本单元清理（交 TU-07），首周报告即可。
+        files: ^src/core/|^src/utils/|^gateway/storage/|^src/services/llm
+        additional_dependencies: ["pydantic>=2.11", "pydantic-settings>=2.9"]
