@@ -27,7 +27,7 @@
 | 单元 | 文档 | 状态 | 母方案 Phase | 工时 | 可并行 | 建议分支 |
 |---|---|---|---|---|---|---|
 | UI-01 | [i18n 基础设施](UI-01-i18n-foundation.md) | ✅ | P0a | M | 否（先行） | [PR #46](https://github.com/sun9bear/AITransVideo/pull/46) 已合并 |
-| UI-02 | [路由迁移 + proxy + 切换器](UI-02-locale-routing-migration.md) | ☐ | P0b | L | 否（依 UI-01，spike 先行） | `uiloc/locale-routing-migration` |
+| UI-02 | [路由迁移 + proxy + 切换器](UI-02-locale-routing-migration.md) | ◐ | P0b | L | 否（依 UI-01，spike 先行） | `uiloc/locale-routing-migration`（WIP `941cb3b7` 已推） |
 | UI-03a | [营销·结构化文案抽取](UI-03-marketing-en-seo.md)（§子单元拆分） | ☐ | Phase 1·T1.1 | M | 是（依 UI-02） | `uiloc/marketing-en-seo-a` |
 | UI-03b | [营销·内联重文案 hero/pricing/trial](UI-03-marketing-en-seo.md) | ☐ | Phase 1·T1.2 | M | 是（依 UI-03a） | `uiloc/marketing-en-seo-b` |
 | UI-03c | [营销·legal 人审](UI-03-marketing-en-seo.md)（HARD 人审） | ☐ | Phase 1·T1.2 | M | 是（**并行，不阻塞 3a/b/d**） | `uiloc/marketing-en-seo-c` |
@@ -131,4 +131,5 @@ UI-05 ──→ UI-06            UI-07（独立，依 UI-02）
 | 日期 | 单元 | PR | 审查 | 结果 |
 |---|---|---|---|---|
 | 2026-06-25 | UI-01 i18n 基础设施 | [#46](https://github.com/sun9bear/AITransVideo/pull/46) squash `050722b2` | CodeX CLI（v4 AppConfig typo 保护，已修+探针验证）→ 多 lens（zh-snapshot node floor / cjk-guard fail-closed，已修）→ @codex bot（2×P2 守卫硬化：occurrence-count + env-independence，已修验证；1×P1 lockfile=false-positive，npm ci 实测 exit 0 已驳回）→ CI blocking 全绿 | ✅ 合并 main |
-| — | （UI-02 待派发） | — | — | — |
+| 2026-06-25 | UI-02 路由迁移（◐ 进行中） | 分支 `uiloc/locale-routing-migration` WIP `941cb3b7`（已推 origin） | **spike GREEN**：`app/[locale]/layout.tsx` 作唯一 root + paddle-checkout 独立 root + not-found/error 迁入 [locale]，`next build` 通过（/zh/*+/en/* SSG、paddle-checkout OK）| ◐ 结构骨架已落，**未完成**：proxy 合并(Step 4，默认 zh 不前缀靠它)/内部 Link→@/i18n/navigation(Step 3)/LocaleSwitcher(Step 5)/sitemap-robots locale(Step 6)/zh 字节一致验证/review。续做从 WIP commit 起 |
+| — | （续 UI-02 → UI-03a/b/c/d + UI-04） | — | — | — |
