@@ -9,6 +9,13 @@ import subprocess
 import time
 from typing import Any
 
+from utils.coerce import (
+    coerce_bool as _coerce_bool,
+    coerce_int as _coerce_int,
+    coerce_optional_int as _coerce_optional_int,
+    normalize_optional_text as _normalize_optional_text,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_AUTODUB_LOCAL_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
 DEFAULT_LANGUAGE_CODE = "en"
@@ -940,38 +947,3 @@ def _to_jsonable(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return {key: _to_jsonable(item) for key, item in vars(value).items() if not key.startswith("_")}
     return str(value)
-
-
-def _normalize_optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
-def _coerce_bool(value: object, *, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    normalized = _normalize_optional_text(value)
-    if normalized is None:
-        return default
-    lowered = normalized.lower()
-    if lowered in {"1", "true", "yes", "on"}:
-        return True
-    if lowered in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _coerce_optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_int(value: object, *, default: int) -> int:
-    coerced = _coerce_optional_int(value)
-    return default if coerced is None else coerced

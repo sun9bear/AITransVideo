@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from utils.coerce import coerce_int as _coerce_int, normalize_optional_text as _normalize_optional_text
 from typing import Any
 
 from services.config_loader import DEFAULT_AUTODUB_LOCAL_CONFIG_PATH
@@ -399,22 +400,8 @@ def _ensure_dict(value: object) -> dict[str, object]:
     return {}
 
 
-def _normalize_optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
 def _coerce_float(value: object, *, default: float) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
-
-
-def _coerce_int(value: object, *, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)
