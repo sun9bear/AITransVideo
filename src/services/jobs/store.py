@@ -12,6 +12,7 @@ from typing import Callable
 from services._file_lock import file_lock
 from services.jobs.events import JobEvent
 from services.jobs.models import JobRecord
+from utils.atomic_io import atomic_write_json as _atomic_write_json_helper
 
 logger = logging.getLogger(__name__)
 
@@ -442,40 +443,12 @@ class JobStore:
         *,
         fsync: bool = True,
     ) -> None:
-        """Atomic temp + rename JSON write.
+        """Atomic temp + rename JSON write（DRY-02 收口，TU-04）。
 
-        ``fsync=True`` (default) flushes the temp file's bytes to disk
-        before the rename, so a crash mid-rename leaves either the old
-        or the new file content but never corrupted partial bytes.
+        ``fsync=True``（默认）：rename 前 fsync，内容落盘，防断电后截断。
+        ``fsync=False``（P1-12b group-commit 快速路径）：跳 fsync，仅保证 rename
+        原子性；durability 由后续 events.jsonl tail 重建。
 
-        ``fsync=False`` (P1-12b group-commit mode) skips that fsync.
-        The temp + rename still preserves crash atomicity at the
-        filesystem-rename level (POSIX rename is atomic on the same
-        directory, journaling FS like ext4 / NTFS guarantee the
-        rename either lands or doesn't). What we lose is durability
-        of the bytes themselves: a kernel-level crash between the
-        rename and the next FS journal flush could leave the renamed
-        path pointing at zeroed blocks. For the per-line log-update
-        use case this is acceptable — the next pipeline / API restart
-        re-derives state from the persisted events.jsonl tail.
+        委托 utils.atomic_io.atomic_write_json 实现（保留 sort_keys=True + fsync 语义）。
         """
-        temp_path: Path | None = None
-        try:
-            serialized_payload = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=output_path.parent,
-                prefix=f"{output_path.stem}_",
-                suffix=".tmp",
-                delete=False,
-            ) as temp_file:
-                temp_file.write(serialized_payload)
-                temp_file.flush()
-                if fsync:
-                    os.fsync(temp_file.fileno())
-                temp_path = Path(temp_file.name)
-            os.replace(temp_path, output_path)
-        finally:
-            if temp_path is not None and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
+        _atomic_write_json_helper(output_path, payload, fsync=fsync, sort_keys=True)

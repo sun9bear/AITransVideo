@@ -34,6 +34,7 @@ from typing import Any
 from services._file_lock import file_lock
 from services.jobs.editing import EDITING_SUBDIR, EditingConflictError
 from services.jobs.input_validators import validate_segment_id
+from utils.atomic_io import atomic_write_json as _atomic_write_json_helper
 
 logger = logging.getLogger(__name__)
 
@@ -170,31 +171,15 @@ def _ensure_editing_dir(project_dir: str | Path) -> Path:
     return d
 
 
-def _atomic_write_json(path: Path, payload: object) -> None:
-    """Write JSON via temp file + os.replace so readers never see half-written
-    content (important because the cleanup scanner also reads segments.json)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=str(path.parent),
+def _atomic_write_json(path: Path, payload: object, *, fsync: bool = True) -> None:
+    """Thin wrapper → utils.atomic_io.atomic_write_json（DRY-02 收口，TU-04）。
+
+    保留 segments.json 原有字节语义：sort_keys=False（插入顺序）+ 末尾换行 + fsync
+    （H4：rename 前落盘，cleanup 扫描器也读 segments.json）。
+    """
+    _atomic_write_json_helper(
+        path, payload, fsync=fsync, sort_keys=False, trailing_newline=True
     )
-    tmp_path = Path(tmp_name)
-    try:
-        with open(tmp_fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())  # H4: flush bytes to disk before the atomic rename
-        # os.replace is atomic on both POSIX and Windows (ReplaceFileW).
-        tmp_path.replace(path)
-    except Exception:
-        # Best-effort cleanup of the temp file if swap failed.
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-        raise
 
 
 # ---------------------------------------------------------------------------
