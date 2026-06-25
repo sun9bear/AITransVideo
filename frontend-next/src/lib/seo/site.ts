@@ -85,8 +85,45 @@ export const blockedRoutes = [
   "/voices",
 ] as const
 
-/** Build an absolute URL for a path. `/` returns siteUrl with no trailing slash. */
-export function absoluteUrl(path: string): string {
-  if (path === "/" || path === "") return siteUrl
-  return `${siteUrl}${path.startsWith("/") ? path : `/${path}`}`
+/**
+ * 界面语言（UI page locale）。默认 zh 裸路径，en 走 `/en`（方案 §1.2）。
+ */
+export type Locale = "zh" | "en"
+
+/**
+ * Per-locale SEO 文案。`zh` 镜像上方既有顶层常量以保持兼容；`en` 由 UI-03 填充真实
+ * 英文并在翻旗时启用。本单元（UI-01）仅声明，无任何消费方 —— INERT，对默认 zh 渲染零影响。
+ */
+export const localeSeo: Record<
+  Locale,
+  { siteName: string; defaultTitle: string; defaultDescription: string }
+> = {
+  zh: { siteName, defaultTitle, defaultDescription },
+  // TODO(UI-03)：填充真实英文文案；当前为占位（未被消费，INERT）。
+  en: { siteName: "AITrans.Video", defaultTitle, defaultDescription },
+}
+
+/**
+ * Build an absolute URL for a path. `/` returns siteUrl with no trailing slash.
+ *
+ * 可选 `locale`：非默认 locale 加 `/<locale>` 前缀（默认 zh = 裸路径）。
+ * **zh / 省略 locale 时输出与旧实现逐字节等价**（红线 1：既有 sitemap/robots/layout/seo
+ * 调用点全部单参调用，行为不变）。
+ */
+export function absoluteUrl(path: string, locale?: Locale): string {
+  const prefix = locale && locale !== "zh" ? `/${locale}` : ""
+  if (path === "/" || path === "") return `${siteUrl}${prefix}`
+  return `${siteUrl}${prefix}${path.startsWith("/") ? path : `/${path}`}`
+}
+
+/**
+ * hreflang `languages` map for a path（方案 §1.8）。
+ * **INERT in UI-01**：只产 `zh-Hans` + `x-default`（均指 zh）；`en` 条目由 UI-03 翻旗时加入。
+ * hreflang 必须互惠 + 自指 + 恰好一个 x-default（指 zh 主市场）。
+ */
+export function hreflangLanguages(path: string): Record<string, string> {
+  return {
+    "zh-Hans": absoluteUrl(path, "zh"),
+    "x-default": absoluteUrl(path, "zh"),
+  }
 }
