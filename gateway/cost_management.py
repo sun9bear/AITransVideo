@@ -14,10 +14,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from admin_auth import _require_admin
 from auth import get_current_user
 from database import get_db
 from models import CreditsLedger, Job, User
@@ -269,14 +270,6 @@ class RevenueEstimate:
     source: str
     point_price_rmb: float
     revenue_rmb: float | None
-
-
-def _require_admin(user: User | None) -> User:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if (getattr(user, "role", None) or "user") != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
 
 
 def _coerce_int(value: object) -> int:

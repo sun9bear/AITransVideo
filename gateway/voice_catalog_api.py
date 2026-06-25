@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from admin_auth import _require_admin
 from auth import get_current_user
 from config import settings
 from csrf import require_same_origin_state_change
@@ -49,14 +50,6 @@ router = APIRouter(
     tags=["voice-catalog"],
     dependencies=[Depends(require_same_origin_state_change)],
 )
-
-
-def _require_admin(user: User | None) -> User:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if (getattr(user, "role", None) or "user") != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
 
 
 # ---------------------------------------------------------------------------

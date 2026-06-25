@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from admin_settings import _require_admin
+from admin_auth import _require_admin
 from auth import get_current_user
 from csrf import require_same_origin_state_change
 from database import get_db

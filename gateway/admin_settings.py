@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, StrictBool, field_validator
 from sqlalchemy import select, delete as sa_delete
 
+from admin_auth import _require_admin
 from auth import get_current_user
 from config import settings as app_settings
 from csrf import require_same_origin_state_change
@@ -828,23 +829,6 @@ class AdminSettings(BaseModel):
 
 
 # --- Helpers ---
-
-def _is_admin(user: User) -> bool:
-    """Check admin via role field only.
-
-    After running Alembic 002, all users get role='user' by default.
-    To bootstrap an admin: UPDATE users SET role='admin' WHERE email='your-admin@example.com';
-    """
-    return (getattr(user, "role", None) or "user") == "admin"
-
-
-def _require_admin(user: User | None) -> User:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if not _is_admin(user):
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
-
 
 def validate_anonymous_express_tts_exclusion(s: AdminSettings) -> None:
     """MiMo 组合硬拒（plan 2026-06-12 §E 双层之一：admin 保存校验 422）。

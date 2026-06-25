@@ -13,7 +13,8 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, StrictBool
 
-from admin_settings import AdminSettings, _require_admin, load_settings, save_settings
+from admin_auth import _require_admin
+from admin_settings import AdminSettings, load_settings, save_settings
 from auth import User, get_current_user
 from config import settings as gateway_settings
 from cosyvoice_clone.api import _resolve_runtime_ready

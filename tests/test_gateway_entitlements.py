@@ -36,7 +36,7 @@ sys.modules.setdefault("database", _fake_database)
 # Now import the real gateway business-logic modules
 from auth import me_handler  # noqa: E402
 from entitlements import get_entitlements  # noqa: E402
-from admin_settings import _is_admin  # noqa: E402
+from admin_auth import _is_admin  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ class TestEntitlements:
 
 
 # ===================================================================
-# _is_admin — tests against real gateway/admin_settings.py::_is_admin
+# _is_admin — tests against real gateway/admin_auth.py::is_admin (TU-05 DRY-01)
 # ===================================================================
 
 class TestAdminRoleCheck:

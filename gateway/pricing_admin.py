@@ -11,6 +11,7 @@ from sqlalchemy import select, desc, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from admin_auth import _require_admin
 from auth import get_current_user
 from csrf import require_same_origin_state_change
 from database import async_session
@@ -24,22 +25,6 @@ router = APIRouter(
     tags=["admin-pricing"],
     dependencies=[Depends(require_same_origin_state_change)],
 )
-
-
-# ---------------------------------------------------------------------------
-# Admin auth helpers (self-contained, matching admin_settings.py pattern)
-# ---------------------------------------------------------------------------
-
-def _is_admin(user: User) -> bool:
-    return (getattr(user, "role", None) or "user") == "admin"
-
-
-def _require_admin(user: User | None) -> User:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if not _is_admin(user):
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
 
 
 # ---------------------------------------------------------------------------

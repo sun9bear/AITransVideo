@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
-from admin_settings import _require_admin
+from admin_auth import _require_admin
 from auth import get_current_user
 from database import get_db
 from models import Job, User

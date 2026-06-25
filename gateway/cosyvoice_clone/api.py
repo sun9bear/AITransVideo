@@ -77,7 +77,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from admin_settings import _is_admin, load_settings
+from admin_auth import _is_admin
+from admin_settings import load_settings
 from auth import get_current_user
 from config import settings as gw_settings
 from cosyvoice_clone.audio_processor import (

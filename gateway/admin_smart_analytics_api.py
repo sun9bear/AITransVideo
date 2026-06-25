@@ -49,6 +49,7 @@ for _candidate in [
         sys.path.insert(0, str(_candidate))
 
 import admin_settings as admin_settings_store
+from admin_auth import _require_admin
 from auth import get_current_user
 from csrf import require_same_origin_state_change
 from database import get_db
@@ -65,19 +66,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/api/admin/smart-analytics", tags=["admin-smart-analytics"]
 )
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Admin gate (mirror ``admin_cost_api._require_admin`` shape)
-# ─────────────────────────────────────────────────────────────────────
-
-
-def _require_admin(user: User | None) -> User:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if (getattr(user, "role", None) or "user") != "admin":
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
 
 
 # ─────────────────────────────────────────────────────────────────────

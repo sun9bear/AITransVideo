@@ -20,10 +20,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, distinct, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from admin_auth import _require_admin
 from auth import get_current_user
 from config import settings
 from database import get_db
@@ -150,18 +151,6 @@ _CRAWLER_FAMILIES: tuple[tuple[str, str, str, re.Pattern[str]], ...] = (
     ("ccbot", "CCBot", "ai", re.compile(r"ccbot", re.I)),
     ("bytespider", "Bytespider", "ai", re.compile(r"bytespider", re.I)),
 )
-
-
-def _is_admin(user: User | None) -> bool:
-    return bool(user and getattr(user, "role", None) == "admin")
-
-
-def _require_admin(user: User | None) -> User:
-    if user is None:
-        raise HTTPException(status_code=401, detail="未登录")
-    if not _is_admin(user):
-        raise HTTPException(status_code=403, detail="需要管理员权限")
-    return user
 
 
 def _runtime_logs_dir() -> Path:
