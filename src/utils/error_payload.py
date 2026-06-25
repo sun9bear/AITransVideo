@@ -36,6 +36,10 @@ class ErrorPayload:
         Whether the client should offer a retry action.
     detail : dict[str, Any]
         Optional structured diagnostic (no secrets, no PII). Default: empty.
+        Omitted from ``to_dict()`` / the wire when empty, matching the gateway
+        ``_error_response`` convention — the frontend branches on
+        ``'detail' in payload`` (see lib/api/client.ts), so an empty ``{}``
+        must never be serialized.
     user_action : str
         Suggested next step for the user (Chinese, one sentence). Empty string
         means no action needed.
@@ -48,13 +52,18 @@ class ErrorPayload:
     user_action: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        # ``detail`` omitted when empty to mirror the gateway wire convention
+        # (gateway/job_intercept._error_response) and keep the contract a faithful
+        # model of what clients actually receive. retryable/user_action always present.
+        payload: dict[str, Any] = {
             "error_code": self.error_code,
             "message": self.message,
             "retryable": self.retryable,
-            "detail": self.detail,
             "user_action": self.user_action,
         }
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
 
 
 # Well-known stable error codes (extend as needed; NEVER rename existing ones).

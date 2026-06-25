@@ -156,9 +156,17 @@ class TestWriteJson:
 
 
 class TestErrorPayload:
-    def test_to_dict_has_all_fields(self) -> None:
+    def test_to_dict_omits_empty_detail(self) -> None:
+        # Mirrors the gateway wire convention: empty detail is not serialized
+        # (frontend branches on `'detail' in payload`).
         d = ErrorPayload("job_not_found", "任务不存在").to_dict()
-        assert set(d) == {"error_code", "message", "retryable", "detail", "user_action"}
+        assert set(d) == {"error_code", "message", "retryable", "user_action"}
+        assert "detail" not in d
+
+    def test_to_dict_includes_nonempty_detail(self) -> None:
+        d = ErrorPayload("x", "y", detail={"k": "v"}).to_dict()
+        assert d["detail"] == {"k": "v"}
+        assert set(d) == {"error_code", "message", "retryable", "user_action", "detail"}
 
     def test_defaults_are_safe(self) -> None:
         p = ErrorPayload("x", "y")
