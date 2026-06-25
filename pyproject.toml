@@ -69,6 +69,17 @@ check_untyped_defs = true
 ignore_missing_imports = true
 exclude = ["gateway/alembic/", "\\.codex_worktrees/", "\\.claude/", "\\.codex_tmp/"]
 
+# TU-07 窄域硬化：把已清理 getattr 架空 + 收窄 job_record Any 的两个模块纳入更严的
+# 局部检查，让构建期能捕获同类回归。仅这两个模块——gateway.job_intercept（6900+ 行）
+# 纳入延后至 TU-09 拆分后专项处理（CodeX 2026-06-25 决策）。禁批量 `# type: ignore`。
+[[tool.mypy.overrides]]
+module = [
+    "src.services.tts.tts_generator",
+    "src.services.alignment.aligner",
+]
+disallow_untyped_defs = true
+warn_return_any = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 # 默认排除 slow / real_provider / benchmark（§10.4 + DoD）：这些 mark 的语义本就是

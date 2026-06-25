@@ -53,6 +53,7 @@ from auth import require_auth
 from config import settings
 from database import get_db
 from display_name_orchestrator import DisplayNameContext, compute_display_name
+from job_policy_types import JobPolicy
 from models import Job, User, UserVoice
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
@@ -796,7 +797,7 @@ def _apply_validated_express_consent(
         request_data["express_consent_parse_error"] = express_consent_parse_error
 
 
-def compute_job_policy(user, service_mode: str) -> dict:
+def compute_job_policy(user, service_mode: str) -> JobPolicy:
     """Compute job execution policy based on user role, plan, and service mode.
 
     TTS provider is read from admin settings (express_tts_provider / studio_tts_provider).

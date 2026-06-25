@@ -59,7 +59,9 @@ def test_requires_worker_forces_cosyvoice_provider_seam_present():
     → 强制 provider='cosyvoice'。这是 preset_mapping 下克隆段路由到 worker 的关键，
     删/改此行须同步评审方案 A。"""
     src = _read(_TTS_GEN)
-    assert "if not force_mimo_preset and bool(getattr(segment, \"requires_worker\", False)):" in src
+    # TU-07: getattr(segment,"requires_worker",False) → segment.requires_worker（字节等价，
+    # slots dataclass 字段恒存在）。seam 语义不变，仅更新被 pin 的实现文本。
+    assert "if not force_mimo_preset and bool(segment.requires_worker):" in src
     # 强制 cosyvoice（不允许 mismatched 付费 provider）
     assert "Refusing to call paid" in src  # mismatch → 抛错而非静默调付费
 

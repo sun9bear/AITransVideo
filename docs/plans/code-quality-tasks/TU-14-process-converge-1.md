@@ -2,6 +2,7 @@
 
 - **目标 / 价值**：严格遵照 ADR `docs/architecture/PROCESS_WORKFLOW_CONVERGENCE.md` 的 **Option B Step 1**（输出收敛优先），让 `process.py` 的输出路径更完整地走 `OutputDispatcher`，削减 legacy 输出分支，消除"两套输出真源"的架构债。本切片聚焦**可见行为不变**的机械收敛：先补 golden/contract 测试再动代码，收尾用 `file-size-guard` 强制 `process.py` 不再增长。
 - **关联发现**：STRUCT-01（`process.py` 自 ADR 后 +52% 达 12,806 行，收敛停滞）· PRIOR-17（Option B 被违背，无强制执行门）
+- **承接 [TU-07](TU-07-type-contracts.md) 移交**：`process.py` ~90 处 `getattr(segment, …)`（指向已声明 `DubbingSegment` 字段的架空访问，slots dataclass 上 default 是死代码）由 TU-07 移交本单元——在输出收敛触碰相关代码时一并改为直接属性访问（字节等价，同 TU-07 做法）。TU-07 仅清理 aligner + tts_generator，未触碰 process.py。
 - **前置依赖**：独占 `process.py`（与 TU-15 若有 `process` 内性能点重叠，TU-14 先执行）；TU-03（`file-size-guard` 配置落地后可把 `process.py` 纳入基线）可并行但 TU-14 的 file-size 棘轮依赖 TU-03 的 `tools/file_size_baseline.json` 基础设施——若 TU-03 尚未合并，TU-14 需在本分支内自建最小 size-guard CI 脚本。
 - **建议分支**：`quality/process-converge-1`
 - **预估工时**：L（3–5 天，分段标注于各 Step）

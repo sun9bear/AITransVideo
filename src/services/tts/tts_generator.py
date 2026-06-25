@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 from urllib import error, request
 
 logger = logging.getLogger(__name__)
@@ -128,13 +128,22 @@ def _is_volcengine_voice_resource_mismatch(exc: Exception) -> bool:
     return sum(1 for kw in keywords if kw in msg) >= 2
 
 
-def _read_job_field(job_record: Any, key: str) -> Any:
+class JobRecordLike(Protocol):
+    """job_record 结构型子类型（TS-07）：dict（JSON 快照）或 JobRecord ORM；不 import gateway ORM 避跨层循环依赖，仅列常读字段，_read_job_field 动态读任意 key。"""
+
+    job_id: str
+    tts_model: str | None
+    tts_provider: str
+    service_mode: str
+
+
+def _read_job_field(job_record: dict | JobRecordLike | None, key: str) -> Any:
     if isinstance(job_record, dict):
         return job_record.get(key)
     return getattr(job_record, key, None)
 
 
-def _resolve_minimax_model_for_job(job_record: Any, fallback_model: str) -> str:
+def _resolve_minimax_model_for_job(job_record: dict | JobRecordLike | None, fallback_model: str) -> str:
     raw_model = _read_job_field(job_record, "tts_model") if job_record is not None else None
     model = _normalize_optional_text(raw_model)
     if model in MINIMAX_TTS_MODELS:
@@ -172,7 +181,7 @@ class TTSResult:
 
 
 class TTSGenerator:
-    def __init__(self, config: TTSConfig, *, job_record: Any = None):
+    def __init__(self, config: TTSConfig, *, job_record: dict | JobRecordLike | None = None):
         normalized_api_key = _normalize_optional_text(config.api_key)
         if normalized_api_key is None:
             raise TTSGenerationError("TTS api_key is required.")
@@ -243,7 +252,7 @@ class TTSGenerator:
     _PARALLEL_WORKERS = 3
 
     def _resolve_provider_decision(
-        self, *, job_record: Any = None
+        self, *, job_record: dict | JobRecordLike | None = None
     ) -> dict[str, str]:
         """Resolve TTS provider and record decision source.
 
@@ -259,7 +268,7 @@ class TTSGenerator:
         segments: list[DubbingSegment],
         output_dir: str,
         *,
-        job_record: Any = None,
+        job_record: dict | JobRecordLike | None = None,
         usage_bucket: str = TTS_BUCKET_FIRST,
     ) -> list[TTSResult]:
         output_root = Path(output_dir).resolve(strict=False)
@@ -427,7 +436,7 @@ class TTSGenerator:
         stale_text_witness = False
         if is_valid_output(str(output_path)) and current_tts_text is not None:
             cached_tts_text = _normalize_optional_text(
-                getattr(segment, "tts_input_cn_text", None)
+                segment.tts_input_cn_text
             )
             stale_text_witness = (
                 cached_tts_text is not None
@@ -441,10 +450,10 @@ class TTSGenerator:
             duration_ms = _ffprobe_duration_ms(output_path)
             # Preserve selected_voice/match_confidence from a previous run if
             # already on the segment; otherwise derive from explicit voice_id.
-            cached_voice = getattr(segment, "selected_voice", "") or ""
-            cached_conf = getattr(segment, "match_confidence", "") or ""
+            cached_voice = segment.selected_voice or ""
+            cached_conf = segment.match_confidence or ""
             if not cached_voice:
-                explicit = _normalize_optional_text(getattr(segment, "voice_id", None))
+                explicit = _normalize_optional_text(segment.voice_id)
                 if explicit and is_cosyvoice_v3_flash_builtin_voice(explicit):
                     cached_voice = explicit
                     cached_conf = cached_conf or "high"
@@ -510,7 +519,7 @@ class TTSGenerator:
         output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
 
         # Pass voice_description directly to MiMo TTS as style
-        mimo_style = getattr(segment, "voice_description", "") or ""
+        mimo_style = segment.voice_description or ""
         print(f"[MiMo-TTS] style={mimo_style[:80] or '(none)'}, text={tts_text[:40]}...", flush=True)
 
         audio_bytes = mimo_synthesize(text=tts_text, voice_id=mimo_style)
@@ -574,7 +583,7 @@ class TTSGenerator:
 
         output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
 
-        explicit_voice_id = _normalize_optional_text(getattr(segment, "voice_id", None))
+        explicit_voice_id = _normalize_optional_text(segment.voice_id)
         confidence = ""
         # Only a fresh resolver match writes the speaker cache, and only *after* a
         # successful synth (see below).  Caching before synth persists a voice that the
@@ -583,31 +592,31 @@ class TTSGenerator:
         if explicit_voice_id and is_cosyvoice_v3_flash_builtin_voice(explicit_voice_id):
             # Explicit builtin voice — use directly, do NOT cache (user-chosen).
             voice = explicit_voice_id
-            gender = getattr(segment, "gender", None)
-            age_group = getattr(segment, "age_group", None)
-            persona = getattr(segment, "persona_style", None)
-            energy = getattr(segment, "energy_level", None)
+            gender = segment.gender
+            age_group = segment.age_group
+            persona = segment.persona_style
+            energy = segment.energy_level
             resolution_source = "explicit_builtin_voice_id"
             confidence = "high"
         elif segment.speaker_id in self._speaker_voice_cache:
             # Speaker cache hit — reuse the auto-matched voice from an earlier
             # segment of the same speaker_id.  This prevents matcher jitter.
             voice, confidence = self._speaker_voice_cache[segment.speaker_id]
-            gender = getattr(segment, "gender", None)
-            age_group = getattr(segment, "age_group", None)
-            persona = getattr(segment, "persona_style", None)
-            energy = getattr(segment, "energy_level", None)
+            gender = segment.gender
+            age_group = segment.age_group
+            persona = segment.persona_style
+            energy = segment.energy_level
             resolution_source = f"speaker_cache({segment.speaker_id})"
         else:
             # Auto-match via shared resolver (same pipeline as VolcEngine).
             from services.tts.voice_match_resolver import resolve_voice_match
             from services.tts.voice_match_types import VoiceMatchRequest
 
-            gender = getattr(segment, "gender", None)
-            age_group = getattr(segment, "age_group", None)
-            persona = getattr(segment, "persona_style", None)
-            energy = getattr(segment, "energy_level", None)
-            voice_desc = getattr(segment, "voice_description", None) or ""
+            gender = segment.gender
+            age_group = segment.age_group
+            persona = segment.persona_style
+            energy = segment.energy_level
+            voice_desc = segment.voice_description or ""
             if not gender:
                 print(
                     f"[CosyVoice] WARNING: segment {segment.segment_id} ({segment.speaker_id}) "
@@ -623,9 +632,9 @@ class TTSGenerator:
                 energy_level=energy,
                 voice_description=voice_desc,
                 # PR-E re-CodeX P2: drive language-aware selection in the main path.
-                target_language=getattr(segment, "target_language", None),
+                target_language=segment.target_language,
                 target_chars_per_second=(
-                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                    float(segment.target_chars_per_second) or None
                 ),
             ))
             # PR-E re-CodeX P2: a fail_closed match must actually abort — returning the
@@ -634,7 +643,7 @@ class TTSGenerator:
             if str(match_result.match_reason or "").startswith("fail_closed"):
                 raise TTSGenerationError(
                     f"CosyVoice has no voice for target_language="
-                    f"{getattr(segment, 'target_language', None)!r}; failing closed "
+                    f"{segment.target_language!r}; failing closed "
                     f"({match_result.match_reason})"
                 )
             voice = match_result.voice_id
@@ -664,7 +673,7 @@ class TTSGenerator:
             from services.tts.speed_decision import decide_tts_speed
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
@@ -790,7 +799,7 @@ class TTSGenerator:
         )
 
         # ---- Head guard #1 (D v3 #2)：voice_id 必填 ----
-        voice_id = _normalize_optional_text(getattr(segment, "voice_id", None))
+        voice_id = _normalize_optional_text(segment.voice_id)
         if not voice_id:
             raise TTSGenerationError(
                 "requires_worker=True but voice_id is empty; "
@@ -798,7 +807,7 @@ class TTSGenerator:
             )
 
         # ---- Head guard #2 (D v3 #2)：worker_target_model 必填 ----
-        target_model = _normalize_optional_text(getattr(segment, "worker_target_model", None))
+        target_model = _normalize_optional_text(segment.worker_target_model)
         if not target_model:
             raise TTSGenerationError(
                 f"requires_worker=True but worker_target_model is empty for voice_id={voice_id!r}; "
@@ -813,7 +822,7 @@ class TTSGenerator:
             from services.tts.speed_decision import decide_tts_speed
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # 与 legacy 一致：speed_decision 异常不阻塞 TTS
@@ -856,7 +865,7 @@ class TTSGenerator:
             voice_id=voice_id,
             text=tts_text,
             speech_rate=effective_speed,
-            target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0) or None,
+            target_duration_ms=int(segment.target_duration_ms or 0) or None,
             text_hash=compute_text_hash(tts_text),
         )
         batch_req = WorkerSynthesizeBatchRequest(
@@ -1013,7 +1022,7 @@ class TTSGenerator:
         #   a) not the literal string "auto" (studio auto-match placeholder), AND
         #   b) compatible with the current resource_id (suffix check).
         # Otherwise it falls through to the resolver auto-match path.
-        raw_explicit = _normalize_optional_text(getattr(segment, "voice_id", None))
+        raw_explicit = _normalize_optional_text(segment.voice_id)
         explicit_voice = (
             raw_explicit
             if raw_explicit and _is_volcengine_usable_explicit_voice(raw_explicit, resource_id)
@@ -1023,7 +1032,7 @@ class TTSGenerator:
         confidence = ""
         resolution_source = ""
         # Hoisted so the post-synth cache guard can read it in every branch.
-        gender = getattr(segment, "gender", None)
+        gender = segment.gender
         # Only a fresh resolver match writes the speaker cache, and only after a
         # successful synth (mirrors the CosyVoice path) — caching before synth would
         # persist a voice the provider then rejects, poisoning every later segment.
@@ -1051,14 +1060,14 @@ class TTSGenerator:
                 resource_id=resource_id,
                 mode="auto",
                 gender=gender,
-                age_group=getattr(segment, "age_group", None),
-                persona_style=getattr(segment, "persona_style", None),
-                energy_level=getattr(segment, "energy_level", None),
-                voice_description=getattr(segment, "voice_description", None),
+                age_group=segment.age_group,
+                persona_style=segment.persona_style,
+                energy_level=segment.energy_level,
+                voice_description=segment.voice_description,
                 # PR-E re-CodeX P2: drive language-aware selection in the main path.
-                target_language=getattr(segment, "target_language", None),
+                target_language=segment.target_language,
                 target_chars_per_second=(
-                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                    float(segment.target_chars_per_second) or None
                 ),
             ))
             # PR-E re-CodeX P2: a fail_closed match must abort, not synthesize the
@@ -1067,7 +1076,7 @@ class TTSGenerator:
             if str(match_result.match_reason or "").startswith("fail_closed"):
                 raise TTSGenerationError(
                     f"VolcEngine has no voice for target_language="
-                    f"{getattr(segment, 'target_language', None)!r}; failing closed "
+                    f"{segment.target_language!r}; failing closed "
                     f"({match_result.match_reason})"
                 )
             voice_id = match_result.voice_id
@@ -1101,7 +1110,7 @@ class TTSGenerator:
             )
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
@@ -1132,7 +1141,7 @@ class TTSGenerator:
         # --- 3. Call provider with mismatch retry ---
         # PR-E slice 4: pass the dub target language so VolcEngine can hint
         # explicit_language for a non-zh dub (default zh → omitted → byte-identical).
-        _vc_target_language = getattr(segment, "target_language", None)
+        _vc_target_language = segment.target_language
         try:
             audio_bytes = vc_synthesize(
                 text=tts_text,
@@ -1215,7 +1224,7 @@ class TTSGenerator:
         # 这里**不进** ``_OUTER_BACKOFF_SCHEDULE`` 循环、**不 sleep**、**不**走
         # ``get_fallback_provider`` 改调 MiniMax 等其它 provider（CLAUDE.md 付费
         # API 硬约束 + 客户期望同一克隆音色不被静默切换）。
-        if bool(getattr(segment, "requires_worker", False)):
+        if bool(segment.requires_worker):
             return self._generate_one(
                 segment,
                 output_dir,
@@ -1257,7 +1266,7 @@ class TTSGenerator:
         # so user/admin see it — never silent (CLAUDE.md + plan Task 6).
         if (
             getattr(self, "_voice_strategy", "") == "free_voiceclone"
-            and getattr(segment, "voiceclone_reference_path", None)
+            and segment.voiceclone_reference_path
         ):
             logger.warning(
                 "free_voiceclone_fallback_to_preset segment=%s reason=%s",
@@ -1285,10 +1294,10 @@ class TTSGenerator:
                 # fall through to the generic handling below
 
         # --- Fallback provider ---
-        voice_clone_enabled = bool(getattr(segment, "voice_id", None))
+        voice_clone_enabled = bool(segment.voice_id)
         # PR-E slice 3: pass the dub target language so a non-zh dub never falls back
         # to the Chinese-only CosyVoice (fail-closed). Default (no attr → zh) unchanged.
-        _seg_target_language = getattr(segment, "target_language", None)
+        _seg_target_language = segment.target_language
         fallback = get_fallback_provider(provider, voice_clone_enabled, _seg_target_language)
         if fallback:
             # T7: user-visible warning AND structured log for traceability.
@@ -1371,7 +1380,7 @@ class TTSGenerator:
         _cn_chars = len(tts_text)
 
         # Resolve provider: force_mimo_preset > segment override > explicit arg > job-level > legacy
-        segment_provider = getattr(segment, "tts_provider", None)
+        segment_provider = segment.tts_provider
         if force_mimo_preset:
             # Task 6 (gate #6) hard pin (CodeX P1): the free-voiceclone preset
             # fallback MUST stay on MiMo (free) regardless of any
@@ -1399,12 +1408,12 @@ class TTSGenerator:
         #   2) ``segment.tts_provider`` 空 / None → 强制 ``provider="cosyvoice"``
         #      覆盖 job-level fallback；clone voice 只能在 cosyvoice provider 下用，
         #      强制锁定不产生歧义。
-        if not force_mimo_preset and bool(getattr(segment, "requires_worker", False)):
-            seg_tts_provider = (getattr(segment, "tts_provider", "") or "").strip()
+        if not force_mimo_preset and bool(segment.requires_worker):
+            seg_tts_provider = (segment.tts_provider or "").strip()
             if seg_tts_provider and seg_tts_provider != "cosyvoice":
                 raise TTSGenerationError(
                     f"requires_worker=True but segment.tts_provider={seg_tts_provider!r}; "
-                    f"CosyVoice cloned voice (voice_id={getattr(segment, 'voice_id', None)!r}) "
+                    f"CosyVoice cloned voice (voice_id={segment.voice_id!r}) "
                     f"cannot be used with non-cosyvoice provider. "
                     f"Refusing to call paid {seg_tts_provider!r} provider with mismatched voice."
                 )
@@ -1419,9 +1428,9 @@ class TTSGenerator:
             # ``requires_worker=True`` 走武汉 mainland worker，**不允许** 静默
             # fallback 到国际 DashScope endpoint，**不允许** 用 ``len(text)*2``
             # 覆盖 worker 的 authoritative billed_chars。
-            requires_worker = bool(getattr(segment, "requires_worker", False))
+            requires_worker = bool(segment.requires_worker)
             worker_target_model = (
-                _normalize_optional_text(getattr(segment, "worker_target_model", None))
+                _normalize_optional_text(segment.worker_target_model)
                 if requires_worker
                 else None
             )
@@ -1469,7 +1478,7 @@ class TTSGenerator:
                 if (
                     not force_mimo_preset
                     and getattr(self, "_voice_strategy", "") == "free_voiceclone"
-                    and getattr(segment, "voiceclone_reference_path", None)
+                    and segment.voiceclone_reference_path
                 ):
                     result = self._generate_one_mimo_voiceclone(segment, tts_text, output_root)
                 else:
@@ -1504,11 +1513,11 @@ class TTSGenerator:
                 raise TTSGenerationError(f"VolcEngine: {exc}") from exc
 
         # --- MiniMax voice resolution (same pattern as VolcEngine/CosyVoice) ---
-        explicit_voice = _normalize_optional_text(getattr(segment, "voice_id", None))
+        explicit_voice = _normalize_optional_text(segment.voice_id)
         mm_confidence = ""
         mm_resolution = ""
         # Hoisted so the post-synth cache guard can read it in every branch.
-        mm_gender = getattr(segment, "gender", None)
+        mm_gender = segment.gender
         # Only a fresh resolver match writes the speaker cache, and only after a
         # successful synth (mirrors CosyVoice/VolcEngine) — caching before synth would
         # persist a voice the provider then rejects, poisoning every retry / later segment.
@@ -1537,13 +1546,13 @@ class TTSGenerator:
                 tts_provider="minimax",
                 mode="auto",
                 gender=mm_gender,
-                age_group=getattr(segment, "age_group", None),
-                persona_style=getattr(segment, "persona_style", None),
-                energy_level=getattr(segment, "energy_level", None),
-                voice_description=getattr(segment, "voice_description", None),
-                target_language=getattr(segment, "target_language", None),
+                age_group=segment.age_group,
+                persona_style=segment.persona_style,
+                energy_level=segment.energy_level,
+                voice_description=segment.voice_description,
+                target_language=segment.target_language,
                 target_chars_per_second=(
-                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                    float(segment.target_chars_per_second) or None
                 ),
             ))
             mm_voice = match_result.voice_id
@@ -1553,7 +1562,7 @@ class TTSGenerator:
             mm_resolved_fresh = True
 
         segment_model = _normalize_optional_text(
-            getattr(segment, "tts_model_key", None)
+            segment.tts_model_key
         )
         minimax_model = (
             segment_model
@@ -1582,7 +1591,7 @@ class TTSGenerator:
             from services.tts.speed_decision import decide_tts_speed
             decision = decide_tts_speed(
                 cn_text=tts_text,
-                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                target_duration_ms=int(segment.target_duration_ms or 0),
                 chars_per_second=float(speaker_cps) if speaker_cps else None,
             )
         except Exception as exc:  # never let metric path break TTS
@@ -1628,7 +1637,7 @@ class TTSGenerator:
         }
         # PR-E slice 4: hint the dub language for a non-zh target (MiniMax
         # language_boost). Default zh / no target → key omitted → byte-identical.
-        _mm_target = getattr(segment, "target_language", None)
+        _mm_target = segment.target_language
         if _mm_target and _mm_target.split("-")[0].lower() == "en":
             payload["language_boost"] = "English"
 

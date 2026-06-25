@@ -666,6 +666,8 @@ python -m pytest tests/test_legacy_cleanup_guards.py -q 2>&1 | tail -3
 | `_read_job_field` 第一参数类型 | `Any` | `Union[dict, JobRecordLike, None]` |
 | mypy 对 `tts_generator.py` 的本单元改动处 | 无检查 | 无 error |
 
+> **process.py `getattr(segment, …)` 清理移交 [TU-14](TU-14-process-converge-1.md)**：本单元 goal 行 + Step 0 曾提及 process.py `getattr(segment,…)`「比 baseline 有所下降」，但 DoD 清单**无 process.py 验收项**、out-of-scope 又把 process.py 结构性收敛划归 TU-14。process.py 是 13.3k 行、在 ADR Option B 收敛轨上的最高风险文件，本单元**零触碰**（与 main 字节一致，90 处 `getattr(segment,…)` 不变），该清理移交 TU-14 在输出收敛触碰相关代码时一并做（字节等价，同本单元做法）。此处显式记录以免该指标被静默丢弃（对抗式审查 completeness lens，2026-06-25）。
+
 ---
 
 ## 回滚方案
