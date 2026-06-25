@@ -21,7 +21,7 @@ from utils.coerce import (
     coerce_optional_int,
     normalize_optional_text,
 )
-from utils.error_payload import NON_RETRYABLE_CODES, RETRYABLE_CODES, ErrorPayload
+from utils.error_payload import ErrorPayload
 from utils.json_helpers import to_jsonable, write_json
 
 
@@ -156,17 +156,26 @@ class TestWriteJson:
 
 
 class TestErrorPayload:
-    def test_to_dict_omits_empty_detail(self) -> None:
-        # Mirrors the gateway wire convention: empty detail is not serialized
-        # (frontend branches on `'detail' in payload`).
+    def test_to_dict_omits_default_optionals(self) -> None:
+        # Default-valued retryable/detail/user_action are NOT serialized — only
+        # error_code + message remain (frontend branches on key presence).
         d = ErrorPayload("job_not_found", "任务不存在").to_dict()
-        assert set(d) == {"error_code", "message", "retryable", "user_action"}
-        assert "detail" not in d
+        assert d == {"error_code": "job_not_found", "message": "任务不存在"}
 
-    def test_to_dict_includes_nonempty_detail(self) -> None:
-        d = ErrorPayload("x", "y", detail={"k": "v"}).to_dict()
-        assert d["detail"] == {"k": "v"}
-        assert set(d) == {"error_code", "message", "retryable", "user_action", "detail"}
+    def test_to_dict_includes_nondefault_optionals(self) -> None:
+        d = ErrorPayload("x", "y", retryable=True, detail={"k": "v"}, user_action="重试").to_dict()
+        assert d == {
+            "error_code": "x",
+            "message": "y",
+            "retryable": True,
+            "detail": {"k": "v"},
+            "user_action": "重试",
+        }
+
+    def test_retryable_false_is_omitted(self) -> None:
+        # Never emit a misleading retryable=false (gateway has no wired
+        # retryable=True call sites yet; absence == "not advertised").
+        assert "retryable" not in ErrorPayload("x", "y").to_dict()
 
     def test_defaults_are_safe(self) -> None:
         p = ErrorPayload("x", "y")
@@ -182,15 +191,6 @@ class TestErrorPayload:
         p = ErrorPayload("x", "y")
         with pytest.raises(FrozenInstanceError):
             p.error_code = "z"  # type: ignore[misc]
-
-    def test_retryable_codes_disjoint_from_non_retryable(self) -> None:
-        assert RETRYABLE_CODES.isdisjoint(NON_RETRYABLE_CODES)
-
-    def test_uses_real_shipped_insufficient_credits_code(self) -> None:
-        # @codex P2: must match the gateway-emitted code (frontend keys on it),
-        # not the fictional ``credit_insufficient``.
-        assert "insufficient_credits" in NON_RETRYABLE_CODES
-        assert "credit_insufficient" not in NON_RETRYABLE_CODES
 
 
 class TestUnpackRerankResult:

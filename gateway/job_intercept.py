@@ -493,11 +493,11 @@ def _error_response(
     retryable: bool = False,
     user_action: str = "",
 ) -> Response:
-    # Dual-write JSON error (TU-06): keep legacy ``error`` AND new ``error_code`` until FE migrates
-    # (do NOT drop ``error``); ``retryable``/``user_action`` optional; shape mirrors utils.error_payload (NOT imported, invariant 3).
-    body: dict = {"error": error_code, "error_code": error_code, "message": message, "retryable": retryable, "user_action": user_action}
-    if detail:
-        body["detail"] = detail
+    # Dual-write (legacy ``error`` + new ``error_code``); retryable/user_action/detail omitted when default (no misleading false/""/{}; shape mirrors utils.error_payload, NOT imported — invariant 3).
+    body: dict = {"error": error_code, "error_code": error_code, "message": message}
+    for _k, _v in (("retryable", retryable), ("user_action", user_action), ("detail", detail)):
+        if _v:
+            body[_k] = _v
     return Response(content=json.dumps(body, ensure_ascii=False), status_code=status_code, headers={"content-type": "application/json"})
 
 
