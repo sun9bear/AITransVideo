@@ -33,7 +33,7 @@
 | 单元 | 文档 | 状态 | 关联 ID | 工时 | 可并行 | 建议分支 |
 |---|---|---|---|---|---|---|
 | TU-04 | 统一 JSON 原子写 helper | ✅ | DRY-02（含 H4 完整版） | M | 否（依 TU-01） | [PR #42](https://github.com/sun9bear/AITransVideo/pull/42) 已合并 |
-| TU-05 | 统一 admin 鉴权依赖 | ☐ | DRY-01 | M | 是 | `quality/admin-auth-dep` |
+| TU-05 | 统一 admin 鉴权依赖 | ✅ | DRY-01 | M | 是 | [PR #43](https://github.com/sun9bear/AITransVideo/pull/43) 已合并 |
 | TU-06 | coerce/normalize + 统一 error payload | ☐ | DRY-03/04/06 | M | 是 | `quality/shared-helpers` |
 | TU-07 | 类型契约硬化 + mypy 窄域 | ☐ | TS-01/02/05/07/10 | M | 否（依 TU-03） | `quality/type-contracts` |
 | TU-08 | 计费&付费路径结构化日志 | ☐ | EH-001/002/008/011 | M | 是 | `quality/billing-logging` |
@@ -78,6 +78,7 @@
 | 2026-06-25 | TU-01 止血四修 | [#40](https://github.com/sun9bear/AITransVideo/pull/40) squash | 对抗式多 lens（抓出第 5 个 `en_text` 站点 + de-flake 预存 40% flaky 测试）→ CodeX CLI ×3（P2 免费档误报→P3 aligner 测试→clean）→ @codex bot 无问题 → CI 3/3 | ✅ 合并 main。deferral：credits_service 3 警告→TU-08；billing `logger.info` 误置→独立观察项 |
 | 2026-06-25 | TU-03 质量护栏脚手架 | [#41](https://github.com/sun9bear/AITransVideo/pull/41) squash (`dc12c071`) | 多 lens 对抗 Workflow（2×P2 删除文件误阻断 / addopts 漏 §10.4 -m + 1×P3）→ CodeX CLI ×3（r1 2P2+1dup → r2 2P2 FETCH_HEAD/只阻断新增 → r3 clean）→ @codex bot「no major issues」→ CI 5/5 blocking 绿 | ✅ 合并 main。**关键设计**：ruff 仅阻断**新增** .py（改动既有+全仓 report-only），file-size-guard 读 **base ref** 基线防同 PR grow+bump 绕过，asyncio_mode=auto 实证 collection 8687 不变。**待办**：backend-full-suite（continue-on-error 非阻断，271 预存测试债+ffprobe 环境缺失，非回归）后续可选挪 nightly / 装 ffmpeg / 升硬门；mypy 9 窄域债→TU-07 |
 | 2026-06-25 | TU-04 统一 JSON 原子写 | [#42](https://github.com/sun9bear/AITransVideo/pull/42) squash (`3f8508f3`) | 多 lens Workflow 0 real + CodeX CLI clean + @codex bot「no major issues」+ set-diff 实证 0 回归（失败集与 main 完全一致，37→复跑 36=flaky）+ CI 5/5 blocking 绿 | ✅ 合并 main。canonical helper 升级（str\|Path/Any/fsync/sort_keys/trailing_newline）收口 **7 处**（spec 6 + 发现 config_loader 第7）；保字节等价（review_actions 纠正 spec 遗漏的 sort_keys=False、store 保 fsync=False group-commit、draft 保 DraftError 红线）。net −169 行。**deferral**：另 4 处命名不同内联原子写（editing_speakers._write_speakers / editing_split_suggest._write_usage / video_render_async._write_status_atomic / speaker_evidence inline）→ 后续 DRY 微单元 |
+| 2026-06-25 | TU-05 统一 admin 鉴权依赖 | [#43](https://github.com/sun9bear/AITransVideo/pull/43) squash (`592dc226`) | 多 lens Workflow 0 real + CodeX CLI「no introduced correctness issues」+ @codex bot「no major issues」+ 8696 收集 0 collection error / 341 admin + 105 cosyvoice 测试绿 + CI 5/5 blocking 绿 | ✅ 合并 main。13 文件 `_require_admin`/`_is_admin` 副本收口到单一 `gateway/admin_auth.py`（消除返回 None vs User、role 判断带不带 `or "user"` 兜底两类分叉）。**完整性 lens 抓真 bug**：首轮顶层 grep 漏扫子目录→`cosyvoice_clone/api.py:80` 仍 import 被删的 `_is_admin`，被 test_admin_cosyvoice_control 4 连挂暴露并修，递归复核确认唯一遗漏。gate-coverage 纳入 admin_support_api.py（baseline 51→80）。pan/ 独立认证上下文显式例外保留。net −110 行。CI fix：ruff format 新增文件 + 删 cosyvoice pre-existing 未用 import 抵消 file-size ratchet +1 |
 
 ## 依赖关系（DAG）
 
