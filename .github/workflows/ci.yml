@@ -109,32 +109,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # 三点 diff 需要 merge-base；浅克隆会让 origin/$BASE...HEAD 失效。
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install ruff mypy pydantic pydantic-settings
-      - name: Ruff — 改动文件阻断 + 全仓 report-only
+      - name: Ruff — 新增文件阻断 + 改动/全仓 report-only
         run: |
+          # 首周「不阻断历史债」：只对【新增】.py 阻断（新文件无历史债，理应 ruff-clean），
+          # 对【改动的既有文件】只报告（否则碰一下满是历史债的 process.py / job_intercept.py
+          # 就会被旧债阻断 —— 这正是 CodeX 复审 + Phase 0「ruff report-only」要避免的）。
+          # base 解析用 FETCH_HEAD 两点 diff：默认 checkout 的 HEAD=PR merge ref，
+          # base-tip..merge = PR 净改动；不依赖 origin/$BASE 远程跟踪 ref（浅 fetch 不创建它）。
           BASE="${{ github.base_ref }}"
-          FILES=""
-          if [ -n "$BASE" ]; then
-            git fetch origin "$BASE" || true
-            # --diff-filter=ACMR：只取 Added/Copied/Modified/Renamed（去掉 Deleted），
-            # 否则被删 .py 的路径会进 $FILES，ruff 对不存在的文件 E902 退出 → 误阻断纯删除 PR。
-            FILES=$(git diff --name-only --diff-filter=ACMR "origin/$BASE...HEAD" -- '*.py' | tr '\n' ' ')
+          ADDED=""; EXISTING=""
+          if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+            ADDED=$(git diff --name-only --diff-filter=A FETCH_HEAD HEAD -- '*.py' | tr '\n' ' ')
+            EXISTING=$(git diff --name-only --diff-filter=MRC FETCH_HEAD HEAD -- '*.py' | tr '\n' ' ')
           fi
-          if [ -n "${FILES// /}" ]; then
-            echo "Changed .py files: $FILES"
-            ruff check $FILES --output-format=github
-            ruff format --check $FILES
+          if [ -n "${ADDED// /}" ]; then
+            echo "Newly-added .py (blocking — must be ruff-clean): $ADDED"
+            ruff check $ADDED --output-format=github
+            ruff format --check $ADDED
           else
-            echo "No changed .py files — changed-files ruff gate is a no-op."
+            echo "No newly-added .py files to block on."
           fi
-          echo "::group::Full-repo ruff (report-only, never blocks)"
+          echo "::group::Ruff report-only (modified existing files + full repo, never blocks)"
+          if [ -n "${EXISTING// /}" ]; then
+            echo "Modified existing .py (report-only): $EXISTING"
+            ruff check $EXISTING --exit-zero --output-format=github || true
+          fi
           ruff check src/ gateway/ --exit-zero --output-format=github
           echo "::endgroup::"
       - name: Mypy — 窄域（首周 report-only，不阻断）
@@ -175,11 +179,13 @@ jobs:
           # 防同一 PR 同时撑大文件并抬高其基线 cap（自我授权绕过）：优先用 base ref 的基线
           # 衡量当前行数。base ref 没有该文件（如本 PR 首次引入基线）或非 PR 事件 → 回退到
           # 当前 checkout 的基线（fail-open 到本地基线，避免基础设施抖动误阻断）。
+          # 用 FETCH_HEAD 读 base 基线：浅 fetch 只更新 FETCH_HEAD，不创建 origin/$BASE
+          # 远程跟踪 ref（CodeX 复审实测），故 git show origin/$BASE:... 会静默失败回退到
+          # 本 PR 自改的基线 → 绕过失效。FETCH_HEAD 指向刚 fetch 的 base tip，可靠。
           BASE="${{ github.base_ref }}"
           BASELINE_FILE=tools/file_size_baseline.json
-          if [ -n "$BASE" ]; then
-            git fetch origin "$BASE" --depth=1 || true
-            if git show "origin/$BASE:tools/file_size_baseline.json" > /tmp/base_baseline.json 2>/dev/null; then
+          if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+            if git show "FETCH_HEAD:tools/file_size_baseline.json" > /tmp/base_baseline.json 2>/dev/null; then
               BASELINE_FILE=/tmp/base_baseline.json
             fi
           fi

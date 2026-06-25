@@ -44,25 +44,31 @@ else
   echo "  [skip] 未安装 mypy（pip install mypy）"
 fi
 
-echo "==> [4/4] changed-files ruff (阻断口径，决定退出码)"
+echo "==> [4/4] 新增 .py 阻断 + 改动既有 .py report-only (决定退出码；与 CI python-lint 对齐)"
 if have ruff; then
   git fetch -q origin "${BASE#origin/}" --depth=1 2>/dev/null || true
-  # --diff-filter=ACMR 去掉 Deleted，避免 ruff 对被删文件 E902（与 CI python-lint 对齐）。
-  FILES="$(git diff --name-only --diff-filter=ACMR "${BASE}...HEAD" -- '*.py' 2>/dev/null | tr '\n' ' ')"
-  if [ -n "${FILES// /}" ]; then
-    echo "  改动 .py 文件: $FILES"
-    ruff check $FILES --output-format=concise || fail=1
-    ruff format --check $FILES || fail=1
+  # 本地是普通分支 checkout（非 PR merge ref），用三点 diff（merge-base）取 PR 净改动。
+  # 只对【新增】文件阻断（无历史债）；【改动既有】文件仅报告，不拿历史债卡退出码。
+  ADDED="$(git diff --name-only --diff-filter=A "${BASE}...HEAD" -- '*.py' 2>/dev/null | tr '\n' ' ')"
+  EXISTING="$(git diff --name-only --diff-filter=MRC "${BASE}...HEAD" -- '*.py' 2>/dev/null | tr '\n' ' ')"
+  if [ -n "${ADDED// /}" ]; then
+    echo "  新增 .py（阻断）: $ADDED"
+    ruff check $ADDED --output-format=concise || fail=1
+    ruff format --check $ADDED || fail=1
   else
-    echo "  无改动的 .py 文件，跳过 changed-files 阻断检查"
+    echo "  无新增 .py 文件"
+  fi
+  if [ -n "${EXISTING// /}" ]; then
+    echo "  改动既有 .py（report-only）: $EXISTING"
+    ruff check $EXISTING --exit-zero --output-format=concise || true
   fi
 else
-  echo "  [skip] 未安装 ruff，无法做 changed-files 阻断检查"
+  echo "  [skip] 未安装 ruff，无法做 changed-files 检查"
 fi
 
 echo
 if [ "$fail" -ne 0 ]; then
-  echo "==> 结果: changed-files 存在 ruff/format 问题 ✗"
+  echo "==> 结果: 新增 .py 存在 ruff/format 问题 ✗"
   exit 1
 fi
-echo "==> 结果: changed-files 干净 ✓ （全仓 ruff / 窄域 mypy / 守卫为报告项）"
+echo "==> 结果: 新增 .py 干净 ✓ （改动既有 .py / 全仓 ruff / 窄域 mypy / 守卫为报告项）"
