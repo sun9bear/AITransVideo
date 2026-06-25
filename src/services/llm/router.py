@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from utils.coerce import coerce_int as _coerce_int, normalize_optional_text as _normalize_optional_text
 from typing import Any
 
 from services.config_loader import DEFAULT_AUTODUB_LOCAL_CONFIG_PATH
@@ -34,7 +33,12 @@ from services.llm.base import LLMCallConfig, LLMProvider, LLMProviderError
 from services.llm.providers.anthropic_provider import AnthropicProvider
 from services.llm.providers.deepseek_provider import DeepSeekProvider
 from services.llm.providers.openai_provider import OpenAIProvider
-
+from utils.coerce import (
+    coerce_int as _coerce_int,
+)
+from utils.coerce import (
+    normalize_optional_text as _normalize_optional_text,
+)
 
 DEFAULT_OPENAI_MODEL_NAME = "gpt-4.1"
 DEFAULT_ANTHROPIC_MODEL_NAME = "claude-sonnet-4-6"

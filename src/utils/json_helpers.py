@@ -32,7 +32,10 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [to_jsonable(item) for item in value]
     if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
+        # Recurse after asdict(): asdict() preserves nested Path/objects as-is,
+        # which json.dumps cannot serialize. Feeding the result back through
+        # to_jsonable() honors the "recursive" contract (TU-06 CodeX P2).
+        return to_jsonable(asdict(value))
     if hasattr(value, "__dict__"):
         return {key: to_jsonable(item) for key, item in vars(value).items() if not key.startswith("_")}
     return str(value)

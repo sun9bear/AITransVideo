@@ -97,6 +97,11 @@ class _SampleDC:
     b: str
 
 
+@dataclass
+class _DCWithPath:
+    p: Path
+
+
 class _PlainObj:
     def __init__(self) -> None:
         self.public = "v"
@@ -120,6 +125,11 @@ class TestToJsonable:
 
     def test_dataclass_via_asdict(self) -> None:
         assert to_jsonable(_SampleDC(a=1, b="x")) == {"a": 1, "b": "x"}
+
+    def test_dataclass_with_nested_path_recurses(self) -> None:
+        # Regression (TU-06 CodeX P2): a dataclass holding a Path must serialize
+        # to a str, not leak a Path that json.dumps would reject.
+        assert to_jsonable(_DCWithPath(p=Path("x") / "y")) == {"p": str(Path("x") / "y")}
 
     def test_object_with_dunder_dict(self) -> None:
         assert to_jsonable(_PlainObj()) == {"public": "v"}
