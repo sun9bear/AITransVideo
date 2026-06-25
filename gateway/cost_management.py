@@ -836,16 +836,23 @@ def _server_cost_from_runtime() -> tuple[float, str]:
         return 0.03, "pricing_schema.default_cost_model.server_cost_rmb_per_src_min"
 
 
+# Service modes whose debit rate is 0 by design (free tier) — a 0-credit result
+# there is expected, not a suspicious under-charge, so it must NOT raise
+# ZERO_CREDITS_SUSPECT (CodeX review P2; DEBIT_RATES[("free", *)] == 0).
+_ZERO_RATE_SERVICE_MODES = frozenset({"free"})
+
+
 def _derive_credits_from_minutes(job: Job, minutes: float | None) -> int:
     if not minutes:
         return 0
     snapshot = job.metering_snapshot if isinstance(job.metering_snapshot, dict) else {}
+    service_mode = job.service_mode or snapshot.get("service_mode") or "express"
     try:
         from credits_service import estimate_credits
 
         credits = estimate_credits(
             minutes,
-            service_mode=job.service_mode or snapshot.get("service_mode") or "express",
+            service_mode=service_mode,
             quality_tier=snapshot.get("quality_tier") or "standard",
         )
     except Exception:
@@ -857,11 +864,13 @@ def _derive_credits_from_minutes(job: Job, minutes: float | None) -> int:
             getattr(job, "job_id", "?"), minutes,
         )
         return 0
-    if credits == 0 and minutes:
+    # ZERO_CREDITS_SUSPECT only for charged modes — free tier legitimately
+    # computes 0, so alerting there is a false positive that drowns real
+    # under-charge regressions (CodeX review P2).
+    if credits == 0 and service_mode not in _ZERO_RATE_SERVICE_MODES:
         logger.error(
             "ZERO_CREDITS_SUSPECT job=%s minutes=%s mode=%s",
-            getattr(job, "job_id", "?"), minutes,
-            getattr(job, "service_mode", None),
+            getattr(job, "job_id", "?"), minutes, service_mode,
         )
     return credits
 

@@ -50,6 +50,19 @@ def test_zero_credits_suspect_warns_when_minutes_present(monkeypatch, caplog):
     assert any("ZERO_CREDITS_SUSPECT" in r.getMessage() for r in caplog.records)
 
 
+def test_no_suspect_alert_for_free_tier_zero_credits(monkeypatch, caplog):
+    """Free tier has a zero debit rate by design — a 0 there is expected and
+    must NOT raise ZERO_CREDITS_SUSPECT (CodeX review P2)."""
+    import credits_service
+
+    monkeypatch.setattr(credits_service, "estimate_credits", lambda *_a, **_k: 0)
+    with caplog.at_level(logging.ERROR, logger="cost_management"):
+        result = cost_management._derive_credits_from_minutes(_job(service_mode="free"), 5.0)
+
+    assert result == 0
+    assert not any("ZERO_CREDITS_SUSPECT" in r.getMessage() for r in caplog.records)
+
+
 def test_no_estimate_and_no_warn_when_minutes_zero(monkeypatch, caplog):
     import credits_service
 
