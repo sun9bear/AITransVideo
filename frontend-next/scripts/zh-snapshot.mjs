@@ -149,4 +149,16 @@ assert.equal(
   "localeSeo.zh.defaultDescription ≠ 顶层（zh 必须 inert）",
 )
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo 字节一致 全部通过")
+// 6) en seo 双源同步守卫（UI-03a 多 lens：messages/en/seo.json 与 site.ts localeSeo.en
+//    各存一份 en SEO 标题/描述，当前靠手工保持一致。把『同源同值』从注释承诺升级为机器守卫，
+//    防止 03d 接入 generateMetadata 前两份悄悄漂移（03d 须收敛为单一真源消费）。
+const enSeo = JSON.parse(readFileSync(path.join(root, "messages/en/seo.json"), "utf8"))
+assert.equal(enSeo.site.name, site.localeSeo.en.siteName, "en seo.site.name ≠ site.ts localeSeo.en.siteName（en 双源漂移）")
+assert.equal(enSeo.site.defaultTitle, site.localeSeo.en.defaultTitle, "en seo.site.defaultTitle ≠ localeSeo.en.defaultTitle（en 双源漂移）")
+assert.equal(
+  enSeo.site.defaultDescription,
+  site.localeSeo.en.defaultDescription,
+  "en seo.site.defaultDescription ≠ localeSeo.en.defaultDescription（en 双源漂移）",
+)
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo 字节一致 + en seo 双源同步 全部通过")
