@@ -1,5 +1,6 @@
 from io import BytesIO
 import json
+import logging
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -433,8 +434,9 @@ def test_load_tts_config_reads_existing_tts_section(
 def test_tts_generator_retries_transient_request_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.WARNING)
     wav_bytes = _build_wav_bytes(duration_ms=1_000)
     calls = _install_fake_requests(
         monkeypatch,
@@ -467,8 +469,9 @@ def test_tts_generator_retries_transient_request_failures(
     assert len(results) == 1
     assert len(calls) == 2
     assert sleep_calls == [0.5]
-    captured = capsys.readouterr().out
-    assert "MiniMax请求失败，0.5秒后重试（1/2）" in captured
+    # TU-08: retry diagnostic migrated print→structured logger (minimax_request_retry).
+    assert "minimax_request_retry" in caplog.text
+    assert "attempt=1/2" in caplog.text
 
 
 def test_tts_generator_does_not_retry_empty_text_input(

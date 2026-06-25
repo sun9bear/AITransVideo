@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict as _dc_asdict, dataclass, fields as _dc_fields, replace as _dc_replace
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -128,6 +129,8 @@ from services.voice.sample_extractor import (
 from services.voice.voice_lookup import VoiceLookupError, lookup_voice_ids
 from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
 from utils.audio_fit import fit_audio_to_slot as _fit_audio_to_slot
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -688,10 +691,7 @@ def _apply_smart_reused_voice_decision(
             },
         )
     except Exception:
-        print(
-            f"[smart] voice reuse usage audit failed speaker={decision.speaker_id}",
-            flush=True,
-        )
+        logger.warning("smart_voice_reuse_audit_failed speaker=%s", decision.speaker_id)
     # Task #27 (prereq for Task #26) — 2026-05-24 audit contract fix:
     # Don't hardcode reason_code or drop Phase 5 metrics. Three tiers
     # of REUSED decisions land here (strong same-source, strong_named,
@@ -1447,8 +1447,6 @@ def _emit_smart_audit(
     except Exception as _exc:
         # ValueError on enum typo OR any other programming bug. Log
         # but don't crash — audit sidecar is informational.
-        # process.py uses ``print`` for diagnostic output throughout
-        # (no module-level logger configured); follow the convention.
         print(
             f"[smart] sidecar emit failed (call-site bug?): "
             f"decision_type={decision_type!r} decision={decision!r} "
@@ -1583,11 +1581,10 @@ def _register_smart_clone_in_user_voices(
         # → 业务白克隆。这种本不该发生（reservation 在场必有 job_id），loud log
         # 供 ops 排查。注意：fail-safe 方向（用户**不**被扣，只是业务漏收）。
         if _reservation_id and not _task_id:
-            print(
-                f"[smart][MONEY] reservation present ({_reservation_id}) but task_id "
-                f"empty — routing to register-smart (NO billing event). voice={voice_id}. "
-                f"finalizer will release; business eats clone cost. Needs reconcile.",
-                flush=True,
+            logger.error(
+                "smart_billing_inconsistency reservation=%s voice=%s reason=task_id_empty "
+                "(routing to register-smart, NO billing event; finalizer releases, business eats clone cost; needs reconcile)",
+                _reservation_id, voice_id,
             )
     try:
         resp = requests.post(
@@ -1603,22 +1600,19 @@ def _register_smart_clone_in_user_voices(
             # → 业务白克隆 + 留下孤儿 MiniMax voice。loud log 供 ops 对账 +
             # best-effort 清理（自动删 voice 待后续接 MiniMax client，本期 follow-up）。
             if _is_billed:
-                print(
-                    f"[smart][MONEY] register-billed FAILED status={resp.status_code} "
-                    f"task={_task_id} reservation={_reservation_id} voice={voice_id} "
-                    f"— clone done but NOT billed; finalizer will release. Needs reconcile.",
-                    flush=True,
+                logger.error(
+                    "smart_register_billed_failed status=%s task=%s reservation=%s voice=%s "
+                    "(clone done but NOT billed; finalizer releases; needs reconcile)",
+                    resp.status_code, _task_id, _reservation_id, voice_id,
                 )
             return False
         data = resp.json()
     except Exception as _reg_exc:
         if _is_billed:
-            print(
-                f"[smart][MONEY] register-billed EXCEPTION task={_task_id} "
-                f"reservation={_reservation_id} voice={voice_id}: "
-                f"{type(_reg_exc).__name__} — clone done but NOT billed; finalizer "
-                f"will release. Needs reconcile.",
-                flush=True,
+            logger.error(
+                "smart_register_billed_exception task=%s reservation=%s voice=%s error=%s "
+                "(clone done but NOT billed; finalizer releases; needs reconcile)",
+                _task_id, _reservation_id, voice_id, type(_reg_exc).__name__,
             )
         return False
     return bool(data.get("ok"))
@@ -2259,9 +2253,9 @@ def _report_job_metering(
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            print(f"[metering] Reported job metering to gateway: {resp.status}", flush=True)
+            logger.info("job_metering_reported status=%s", resp.status)
     except Exception as e:
-        print(f"[metering] Warning: failed to report job metering: {e}", flush=True)
+        logger.warning("job_metering_report_failed error=%s", e)
 
 
 def _report_job_smart_state(job_id: str, smart_state: dict[str, object]) -> bool:
@@ -2284,10 +2278,10 @@ def _report_job_smart_state(job_id: str, smart_state: dict[str, object]) -> bool
         with urllib.request.urlopen(req, timeout=5) as resp:
             ok = 200 <= int(getattr(resp, "status", 0) or 0) < 300
         if ok:
-            print("[smart] Reported smart_state to gateway", flush=True)
+            logger.info("smart_state_reported")
         return ok
     except Exception as e:
-        print(f"[smart] Warning: failed to report smart_state: {e}", flush=True)
+        logger.warning("smart_state_report_failed error=%s", e)
         return False
 
 
@@ -2415,7 +2409,7 @@ def _set_usage_meter_if_supported(target: object, usage_meter: UsageMeter | None
         try:
             setter(usage_meter)
         except Exception as exc:
-            print(f"[metering] set_usage_meter skipped: {exc}", flush=True)
+            logger.warning("metering_setup_skip error=%s", exc)
 
 
 def _write_usage_summary(usage_meter: UsageMeter | None) -> dict[str, object]:
@@ -2424,7 +2418,7 @@ def _write_usage_summary(usage_meter: UsageMeter | None) -> dict[str, object]:
     try:
         return usage_meter.write_summary()
     except Exception as exc:
-        print(f"[metering] usage summary skipped: {exc}", flush=True)
+        logger.warning("metering_summary_skip error=%s", exc)
         return {}
 
 

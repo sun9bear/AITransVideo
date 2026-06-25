@@ -112,7 +112,8 @@ def test_register_billed_failure_logs_money_event():
     finalizer release（业务白克隆）。必须 loud log [smart][MONEY] 供 ops 对账
     （fail-safe 方向：用户不被扣，只业务漏收 + 孤儿 voice）。"""
     body = _func_src(_PROCESS_PY, "_register_smart_clone_in_user_voices")
-    assert "[smart][MONEY]" in body
-    assert "register-billed FAILED" in body
+    # TU-08: [smart][MONEY] loud print → structured logger.error（审计 event 名）。
+    assert "smart_register_billed_failed" in body
+    assert "smart_billing_inconsistency" in body
     # task_id 缺失但 reservation 在场的不一致也要 log
     assert "_reservation_id and not _task_id" in " ".join(body.split())
