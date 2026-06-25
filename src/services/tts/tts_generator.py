@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 from services.gemini.translator import DubbingSegment
 from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
 from utils.atomic_io import atomic_write_bytes, is_valid_output
+from utils.coerce import coerce_int as _coerce_int, normalize_optional_text as _normalize_optional_text
 from services.tts.rate_limiter import RateLimiter
 from services.tts.tts_strategy import (
     get_tts_provider,
@@ -1894,13 +1895,6 @@ def _is_non_retryable_tts_input_error(error_obj: TTSGenerationError) -> bool:
     return "segment.cn_text is required" in message or "failing closed" in message
 
 
-def _normalize_optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
 def _normalize_cache_text(value: object) -> str:
     return _re.sub(r"\s+", "", str(value or "")).strip()
 
@@ -1910,12 +1904,5 @@ def _coerce_float(value: object, *, default: float) -> float:
         return default
     try:
         return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _coerce_int(value: object, *, default: int) -> int:
-    try:
-        return int(value)
     except (TypeError, ValueError):
         return default

@@ -17,7 +17,7 @@ from services.tts.voice_reranker import (
     combined_rerank,
     load_profiles,
     resolve_age_bucket,
-    score_to_confidence,
+    unpack_rerank_result,
 )
 from services.tts.volcengine_voice_catalog import (
     get_default_voice_id,
@@ -187,10 +187,7 @@ def select_volcengine_voice_match(
         target_chars_per_second=target_chars_per_second,
     )
 
-    best_vid = scored[0][0]
-    best_score = scored[0][1]
-    remaining = tuple(vid for vid, _ in scored[1:6])
-    confidence = score_to_confidence(best_score)
+    best_vid, best_score, remaining, confidence = unpack_rerank_result(scored)
 
     logger.info(
         "[VolcEngine-matcher] combined_rerank: %s (score=%.2f, gender=%s, age=%s, persona=%s, "

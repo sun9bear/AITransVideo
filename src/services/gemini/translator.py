@@ -26,6 +26,11 @@ from services.llm_registry import (
     get_fallback_candidates as _get_fallback_candidates,
     normalize_openai_usage as _normalize_openai_usage_shared,
 )
+from utils.coerce import (
+    coerce_optional_int as _coerce_optional_int,
+    normalize_optional_text as _normalize_optional_text,
+)
+from utils.json_helpers import write_json as _write_json
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -2945,14 +2950,6 @@ def _should_retry_same_alias_before_fallback(exc: Exception) -> bool:
     return any(marker in message for marker in transient_markers)
 
 
-def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(_to_jsonable(payload), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
 def _maybe_write_translation_quality_report(
     output_root: Path,
     result: TranslationResult,
@@ -2975,48 +2972,11 @@ def _maybe_write_translation_quality_report(
         )
 
 
-def _to_jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_to_jsonable(item) for item in value]
-    if hasattr(value, "__dataclass_fields__"):
-        return asdict(value)
-    if hasattr(value, "__dict__"):
-        return {key: _to_jsonable(item) for key, item in vars(value).items() if not key.startswith("_")}
-    return str(value)
-
-
-def _normalize_optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
 def _normalize_sdk_backend(value: object) -> str:
     normalized = (_normalize_optional_text(value) or DEFAULT_SDK_BACKEND).lower()
     if normalized in {"legacy", "old", LEGACY_SDK_BACKEND}:
         return LEGACY_SDK_BACKEND
     return DEFAULT_SDK_BACKEND
-
-
-def _coerce_optional_int(value: object) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_int(value: object, *, default: int) -> int:
-    coerced = _coerce_optional_int(value)
-    return default if coerced is None else coerced
 
 
 def _normalize_max_output_tokens(value: object) -> int:

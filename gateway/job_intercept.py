@@ -490,16 +490,15 @@ def _error_response(
     error_code: str,
     message: str,
     detail: dict | None = None,
+    retryable: bool = False,
+    user_action: str = "",
 ) -> Response:
-    """Return a JSON error with structured error_code for frontend consumption."""
-    body: dict = {"error": error_code, "message": message}
-    if detail:
-        body["detail"] = detail
-    return Response(
-        content=json.dumps(body, ensure_ascii=False),
-        status_code=status_code,
-        headers={"content-type": "application/json"},
-    )
+    # Dual-write (legacy ``error`` + new ``error_code``); retryable/user_action/detail omitted when default (no misleading false/""/{}; shape mirrors utils.error_payload, NOT imported — invariant 3).
+    body: dict = {"error": error_code, "error_code": error_code, "message": message}
+    for _k, _v in (("retryable", retryable), ("user_action", user_action), ("detail", detail)):
+        if _v:
+            body[_k] = _v
+    return Response(content=json.dumps(body, ensure_ascii=False), status_code=status_code, headers={"content-type": "application/json"})
 
 
 async def _idempotent_convert_job_response(job_id: str) -> Response:

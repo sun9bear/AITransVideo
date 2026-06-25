@@ -33,7 +33,12 @@ from services.llm.base import LLMCallConfig, LLMProvider, LLMProviderError
 from services.llm.providers.anthropic_provider import AnthropicProvider
 from services.llm.providers.deepseek_provider import DeepSeekProvider
 from services.llm.providers.openai_provider import OpenAIProvider
-
+from utils.coerce import (
+    coerce_int as _coerce_int,
+)
+from utils.coerce import (
+    normalize_optional_text as _normalize_optional_text,
+)
 
 DEFAULT_OPENAI_MODEL_NAME = "gpt-4.1"
 DEFAULT_ANTHROPIC_MODEL_NAME = "claude-sonnet-4-6"
@@ -399,22 +404,8 @@ def _ensure_dict(value: object) -> dict[str, object]:
     return {}
 
 
-def _normalize_optional_text(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
 def _coerce_float(value: object, *, default: float) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
-
-
-def _coerce_int(value: object, *, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)

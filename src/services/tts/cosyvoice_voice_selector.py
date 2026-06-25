@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from services.tts.voice_reranker import resolve_age_bucket
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -106,11 +108,6 @@ _STYLE_OVERRIDES: dict[tuple[str, str, str], str] = {
 
 FALLBACK_VOICE = "longanyang"
 
-# Age group aliases
-_AGE_ELDERLY = {"elderly", "old", "senior"}
-_AGE_YOUNG = {"young", "youth"}
-_AGE_MIDDLE = {"middle", "adult", "mature"}
-
 
 def select_voice(
     gender: str | None,
@@ -131,19 +128,11 @@ def select_voice(
         return FALLBACK_VOICE
 
     g = gender.lower().strip()
-    age = (age_group or "").lower().strip()
     persona = (persona_style or "").lower().strip()
     energy = (energy_level or "").lower().strip()
 
-    # Resolve age bucket
-    if age in _AGE_ELDERLY:
-        age_bucket = "elderly"
-    elif age in _AGE_YOUNG:
-        age_bucket = "young"
-    elif age in _AGE_MIDDLE:
-        age_bucket = "middle"
-    else:
-        age_bucket = ""
+    # Resolve age bucket (shared single source — voice_reranker, DRY-04)
+    age_bucket = resolve_age_bucket(age_group)
 
     # 1. Try style override
     if persona and age_bucket:
@@ -194,17 +183,6 @@ class VoiceMatchResult:
     match_score: float
     match_confidence: str  # "high" | "medium" | "low"
     backup_voices: tuple[str, ...]
-
-
-def _resolve_age_bucket(age_group: str | None) -> str:
-    age = (age_group or "").lower().strip()
-    if age in _AGE_ELDERLY:
-        return "elderly"
-    if age in _AGE_YOUNG:
-        return "young"
-    if age in _AGE_MIDDLE:
-        return "middle"
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +338,7 @@ def select_voice_match(
         )
 
     g = effective_gender.lower().strip()
-    age_bucket = _resolve_age_bucket(age_group)
+    age_bucket = resolve_age_bucket(age_group)
     persona = (persona_style or "").lower().strip()
 
     def _ensure_available(voice: str, reason: str, score: float, confidence: str) -> VoiceMatchResult:
@@ -463,8 +441,7 @@ def select_cosyvoice_voice_match(
     from services.tts.voice_reranker import (
         combined_rerank,
         load_profiles,
-        resolve_age_bucket,
-        score_to_confidence,
+        unpack_rerank_result,
     )
 
     # PR-E re-CodeX P2: CosyVoice is Chinese-only — fail closed for ANY non-zh target
@@ -570,10 +547,7 @@ def select_cosyvoice_voice_match(
         target_chars_per_second=target_chars_per_second,
     )
 
-    best_vid = scored[0][0]
-    best_score = scored[0][1]
-    remaining = tuple(vid for vid, _ in scored[1:6])
-    confidence = score_to_confidence(best_score)
+    best_vid, best_score, remaining, confidence = unpack_rerank_result(scored)
 
     logger.info(
         "[CosyVoice-matcher] combined_rerank: %s (score=%.2f, gender=%s, age=%s, persona=%s, "
