@@ -26,6 +26,9 @@ class CheckoutResult:
     # (WeChat Native returns a weixin:// string, not a web URL).
     display_mode: str = "redirect"
     qr_code_url: str | None = None
+    # PayPal lane: the USD cents charged at create time, surfaced so billing can
+    # stamp it onto the order as the settlement snapshot (plan 2026-06-26 B2).
+    expected_usd_cents: int | None = None
 
 
 @dataclass
@@ -451,6 +454,101 @@ class PaddleProvider:
         )
 
 
+class PayPalProvider:
+    """PayPal Orders v2 (overseas USD lane). Mechanics in payment_provider_paypal.py."""
+
+    name = "paypal"
+
+    @property
+    def operational(self) -> bool:
+        from payment_provider_paypal import is_paypal_live_ready
+
+        return is_paypal_live_ready()
+
+    def create_checkout(
+        self,
+        *,
+        order_id: str,
+        amount_cny: int,
+        target_plan_code: str,
+        billing_period: str,
+        checkout_surface: str = "pc_web",
+        customer_email: str | None = None,
+    ) -> CheckoutResult:
+        # PayPal charges the independent USD list price; amount_cny / surface /
+        # email are not needed to build the order. expected_usd_cents is surfaced
+        # so billing stamps it onto the order for the settlement snapshot (B2).
+        del amount_cny, checkout_surface, customer_email
+        from payment_provider_paypal import PayPalConfig, create_order
+
+        config = PayPalConfig.from_env()
+        if config is None:
+            raise NotImplementedError(
+                "payment provider paypal is not configured; set AVT_PAYPAL_* env vars first"
+            )
+        checkout_url, paypal_order_id, expected_usd_cents = create_order(
+            config,
+            order_id=order_id,
+            target_plan_code=target_plan_code,
+            billing_period=billing_period,
+        )
+        return CheckoutResult(
+            checkout_url=checkout_url,
+            provider_order_id=paypal_order_id,
+            expected_usd_cents=expected_usd_cents,
+        )
+
+    def verify_signature(self, raw_body: bytes, headers: dict[str, str]) -> bool:
+        from payment_provider_paypal import PayPalConfig, verify_paypal_signature
+
+        return verify_paypal_signature(PayPalConfig.from_env(), raw_body, headers)
+
+    def parse_webhook(self, raw_body: bytes) -> NormalizedWebhookEvent:
+        from payment_provider_paypal import parse_paypal_webhook
+
+        parsed = parse_paypal_webhook(raw_body)
+        return NormalizedWebhookEvent(
+            provider_event_id=parsed.provider_event_id,
+            event_type=parsed.event_type,
+            order_id=parsed.order_id,
+            new_status=parsed.new_status,
+            raw_payload=dict(parsed.raw),
+        )
+
+    def map_status(self, provider_status: str) -> str:
+        from payment_provider_paypal import map_paypal_order_status
+
+        return map_paypal_order_status(provider_status)
+
+    async def query_order(
+        self,
+        *,
+        order_id: str,
+        provider_order_id: str | None = None,
+    ) -> ProviderOrderQueryResult | None:
+        # Read-only order status. The APPROVED→capture money-moving action lives
+        # in billing's dedicated paypal refresh branch (plan §7.4/S2), not here.
+        del order_id
+        if not provider_order_id:
+            return None
+        import anyio
+
+        from payment_provider_paypal import PayPalConfig, query_order
+
+        result = await anyio.to_thread.run_sync(
+            lambda: query_order(PayPalConfig.from_env(), paypal_order_id=provider_order_id)
+        )
+        if result is None:
+            return None
+        provider_event_id = f"paypal_query_{result.paypal_order_id}_{result.order_status}"
+        return ProviderOrderQueryResult(
+            provider_event_id=provider_event_id,
+            provider_order_id=result.paypal_order_id,
+            provider_status=result.order_status,
+            raw_payload=dict(result.raw),
+        )
+
+
 _PROVIDERS: dict[str, PaymentProvider] = {}
 
 
@@ -489,6 +587,7 @@ def _init_registry() -> None:
         "alipay": AlipayProvider(),
         "wechatpay": WechatPayProvider(),
         "paddle": PaddleProvider(),
+        "paypal": PayPalProvider(),
     }
 
 
