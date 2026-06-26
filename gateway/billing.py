@@ -209,6 +209,15 @@ async def create_order(
     order.checkout_url = checkout.checkout_url
     if checkout.provider_order_id:
         order.provider_order_id = checkout.provider_order_id
+    # B2: stamp the USD cents charged AT CREATE TIME onto the order so the
+    # PayPal settlement/refund gate compares against this snapshot, immune to a
+    # later admin USD price edit (plan 2026-06-26 §17 B2). PaymentOrder.amount_cny
+    # stays the canonical ledger unit; this is a metadata side-record.
+    expected_usd_cents = getattr(checkout, "expected_usd_cents", None)
+    if expected_usd_cents is not None:
+        metadata = dict(getattr(order, "metadata_json", None) or {})
+        metadata["paypal_expected_usd_cents"] = int(expected_usd_cents)
+        order.metadata_json = metadata
     order.status = "pending"
     await db.commit()
 
@@ -398,6 +407,7 @@ _PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "wechatpay": "微信支付",
     "stripe": "Stripe",
     "paddle": "信用卡 / 微信 (Paddle)",
+    "paypal": "PayPal",
 }
 
 
@@ -464,27 +474,61 @@ async def get_checkout_config(
         "fake",
     )
 
-    # Checkout recommendation: prefer own WeChat Native QR on both desktop and
-    # mobile when operational. Mobile users can pay by scanning from a second
-    # phone or by sending the screenshot to a desktop.
-    # default_provider keeps its historical "first operational" semantics for
-    # backward compatibility; the frontend should prefer recommended_provider.
-    operational_codes = {p["code"] for p in providers_payload if p["operational"]}
     surface = detect_checkout_surface(
         None,
         request.headers.get("user-agent") if request is not None else None,
     )
-    surface_preference = ["wechatpay", "paddle"]
+
+    # --- Geo-based recommendation + visibility (plan 2026-06-26 §7.5) ---
+    # Region from Cloudflare's Cf-Ipcountry (forwarded by Caddy). Empty when
+    # request is None (e.g. default_provider unit tests) or direct/non-CF access
+    # → fail-open: no geo filtering, recommend the universal Paddle rail.
+    # IMPORTANT (G-HIGH-1): default_provider above is derived from the UNFILTERED
+    # providers_payload to preserve historical "first operational" semantics for
+    # non-geo callers; the geo filter below only produces a separate VISIBLE list.
+    country = ""
+    if request is not None:
+        country = (request.headers.get("cf-ipcountry") or "").strip().upper()
+    country_known = bool(country) and country not in ("XX", "T1", "UNKNOWN")
+    is_cn = country == "CN"
+
+    def _geo_hidden(code: str) -> bool:
+        # Hide the cross-region-unusable rail; Paddle stays as universal backup.
+        if not country_known:
+            return False  # fail-open: show all
+        if is_cn:
+            return code == "paypal"  # PayPal unusable in mainland China
+        return code == "wechatpay"  # WeChat unusable overseas
+
+    visible_payload = [p for p in providers_payload if not _geo_hidden(p["code"])]
+    # Never filter to zero operational rails (plan §7.5 invariant): if geo
+    # filtering left nothing operational visible, fall back to the full list —
+    # better to show a cross-region rail than block payment entirely.
+    if not any(p["operational"] for p in visible_payload):
+        visible_payload = providers_payload
+    visible_codes = {p["code"] for p in visible_payload if p["operational"]}
+
+    # recommended_provider MUST be a member of the visible list (G-HIGH-2):
+    # CN → wechatpay, overseas → paypal, unknown → paddle, then any visible
+    # operational. The frontend trusts recommended_provider blindly, so a
+    # recommendation absent from `providers` would mislabel the CTA.
+    if is_cn:
+        region_pref = ["wechatpay", "paddle"]
+    elif country_known:
+        region_pref = ["paypal", "paddle"]
+    else:
+        region_pref = ["paddle"]
     recommended_provider = next(
-        (code for code in surface_preference if code in operational_codes),
-        default_provider,
+        (code for code in region_pref if code in visible_codes),
+        next((p["code"] for p in visible_payload if p["operational"]), default_provider),
     )
 
     return {
         "default_provider": default_provider,
         "recommended_provider": recommended_provider,
         "checkout_surface": surface,
-        "providers": providers_payload,
+        # Only geo-visible providers are emitted; recommended_provider ∈ this set.
+        "providers": visible_payload,
     }
 
 

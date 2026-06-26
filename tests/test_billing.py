@@ -822,42 +822,64 @@ class TestCheckoutConfig:
             assert "amount_cny" not in entry
             assert "plan_code" not in entry
 
-    @pytest.mark.parametrize(
-        ("user_agent", "expected_surface"),
-        [
-            (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
-                "mobile_web",
-            ),
-            (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "pc_web",
-            ),
-        ],
-    )
-    def test_wechatpay_is_recommended_on_mobile_and_desktop(
-        self,
-        monkeypatch,
-        user_agent,
-        expected_surface,
-    ):
+    def _geo_config(self, monkeypatch, country, *, operational=("wechatpay", "paypal", "paddle")):
         from billing import get_checkout_config
 
         monkeypatch.setattr(
             "billing.list_providers",
-            lambda: ["wechatpay", "paddle", "fake"],
+            lambda: ["wechatpay", "paypal", "paddle", "fake"],
         )
         monkeypatch.setattr(
             "billing.is_provider_operational",
-            lambda code: code in {"wechatpay", "paddle"},
+            lambda code: code in set(operational),
         )
-
         user = _make_user(plan_code="free")
-        request = SimpleNamespace(headers={"user-agent": user_agent})
-        result = _run(get_checkout_config(user=user, request=request))
+        headers = {"user-agent": "Mozilla/5.0"}
+        if country is not None:
+            headers["cf-ipcountry"] = country
+        return _run(get_checkout_config(user=user, request=SimpleNamespace(headers=headers)))
 
-        assert result["checkout_surface"] == expected_surface
+    def test_geo_cn_recommends_wechat_hides_paypal(self, monkeypatch):
+        # plan 2026-06-26 §7.5 (replaces the old surface-based recommendation;
+        # G-HIGH-3). CN buyers: WeChat recommended, PayPal hidden, Paddle backup.
+        result = self._geo_config(monkeypatch, "CN")
+        codes = {p["code"] for p in result["providers"]}
         assert result["recommended_provider"] == "wechatpay"
+        assert "paypal" not in codes
+        assert {"wechatpay", "paddle"} <= codes
+        # Invariant (G-HIGH-2): recommended ∈ visible providers.
+        assert result["recommended_provider"] in codes
+
+    def test_geo_overseas_recommends_paypal_hides_wechat(self, monkeypatch):
+        result = self._geo_config(monkeypatch, "US")
+        codes = {p["code"] for p in result["providers"]}
+        assert result["recommended_provider"] == "paypal"
+        assert "wechatpay" not in codes
+        assert {"paypal", "paddle"} <= codes
+        assert result["recommended_provider"] in codes
+
+    def test_geo_unknown_recommends_paddle_shows_all(self, monkeypatch):
+        # No Cf-Ipcountry → fail-open: recommend universal Paddle, show all.
+        result = self._geo_config(monkeypatch, None)
+        codes = {p["code"] for p in result["providers"]}
+        assert result["recommended_provider"] == "paddle"
+        assert {"wechatpay", "paypal", "paddle"} <= codes
+        assert result["recommended_provider"] in codes
+
+    def test_geo_xx_sentinel_is_fail_open(self, monkeypatch):
+        result = self._geo_config(monkeypatch, "XX")
+        codes = {p["code"] for p in result["providers"]}
+        assert result["recommended_provider"] == "paddle"
+        assert {"wechatpay", "paypal"} <= codes
+
+    def test_geo_never_filters_to_zero(self, monkeypatch):
+        # Overseas but only WeChat operational → hiding it would block payment;
+        # the never-zero invariant falls back to the full list (plan §7.5).
+        result = self._geo_config(monkeypatch, "US", operational=("wechatpay",))
+        operational_codes = {p["code"] for p in result["providers"] if p["operational"]}
+        assert "wechatpay" in operational_codes
+        all_codes = {p["code"] for p in result["providers"]}
+        assert result["recommended_provider"] in all_codes
 
 
 # ===================================================================
