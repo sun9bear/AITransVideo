@@ -125,6 +125,7 @@ from startup_checks import (
     validate_internal_api_key,
     validate_mainland_voice_worker_config,
     validate_pan_backup_config,
+    validate_paypal_config,
     validate_production_safety,
     validate_r2_backend,
 )
@@ -197,6 +198,9 @@ async def lifespan(app: FastAPI):
     # enable_anonymous_preview to False if secret is missing or too short.
     # Fail-graceful: logs CRITICAL + downgrade, does not crash gateway.
     validate_anonymous_preview_config(settings)
+    # PayPal (plan 2026-06-26) — default-OFF; logs CRITICAL if enabled but
+    # misconfigured, never crashes (the rail just stays hidden).
+    validate_paypal_config()
     # T3 — DB credentials are resolved and engine is built here. Raises if
     # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
     # avt:avt fallback).

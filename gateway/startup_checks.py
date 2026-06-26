@@ -8,8 +8,11 @@ be directly unit-testable without stubbing `database`, `auth`, etc.
 from __future__ import annotations
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 _KNOWN_ENVS = {"dev", "test", "staging", "prod", "production"}
 _PRODUCTION_ENVS = {"prod", "production"}
@@ -281,4 +284,37 @@ def validate_anonymous_preview_config(settings) -> None:
         settings.anonymous_preview_cap_per_ip,
         settings.anonymous_preview_cap_per_device,
         settings.anonymous_preview_cap_per_source,
+    )
+
+
+def validate_paypal_config() -> None:
+    """Log PayPal config status at startup. Fail-graceful — never raises.
+
+    PayPal is default-OFF (plan 2026-06-26). When ``AVT_PAYPAL_ENABLED=true`` but
+    a required credential is missing, ``PayPalConfig.from_env()`` returns ``None``
+    so the rail stays non-operational/hidden — but emit CRITICAL so the misconfig
+    surfaces at startup instead of silently as a never-appearing PayPal option.
+    Reads env at call time (no import-time side effects); USD price availability
+    is enforced separately by ``is_paypal_live_ready`` at request time (§17 S3).
+    """
+    enabled = (os.environ.get("AVT_PAYPAL_ENABLED") or "").strip().lower() in _TRUE_ENV_VALUES
+    if not enabled:
+        return
+    missing = [
+        name
+        for name in ("AVT_PAYPAL_CLIENT_ID", "AVT_PAYPAL_SECRET", "AVT_PAYPAL_WEBHOOK_ID")
+        if not (os.environ.get(name) or "").strip()
+    ]
+    if missing:
+        logger.critical(
+            "AVT_PAYPAL_ENABLED=true but required config missing: %s. "
+            "PayPal stays non-operational (hidden); set the var(s) and recreate "
+            "the gateway container to enable.",
+            ", ".join(missing),
+        )
+        return
+    env = (os.environ.get("AVT_PAYPAL_ENV", "sandbox") or "sandbox").strip().lower()
+    logger.info(
+        "PayPal payment ENABLED (env=%s, webhook_id set; USD prices read from runtime).",
+        env,
     )
