@@ -292,6 +292,13 @@ async def _refresh_order_from_provider(
     order: PaymentOrder,
     raise_on_error: bool = False,
 ) -> None:
+    # PayPal needs a money-moving capture on APPROVED, which the read-only
+    # generic query→map→settle path cannot express (plan §7.4 / §17 S2) — handled
+    # by a dedicated branch so capture never leaks into query_order/map_status.
+    if order.provider == "paypal":
+        await _refresh_paypal_order(db=db, order=order, raise_on_error=raise_on_error)
+        return
+
     try:
         provider = get_provider(order.provider)
     except KeyError:
@@ -396,6 +403,128 @@ def _load_live_alipay_config():
     from payment_provider_alipay import AlipayConfig
 
     return AlipayConfig.from_env()
+
+
+def _paypal_expected_usd_cents(order: PaymentOrder) -> int | None:
+    """The USD cents snapshot stamped onto the order at create time (B2)."""
+    raw = (getattr(order, "metadata_json", None) or {}).get("paypal_expected_usd_cents")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _settle_paypal_capture(
+    *,
+    db: AsyncSession,
+    order: PaymentOrder,
+    capture_resource: dict,
+    raise_on_error: bool = False,
+) -> bool:
+    """Fact-gate a PayPal capture object against the order, then settle.
+
+    Shared by the return endpoint (B3) and the reconciliation/refresh path. The
+    settling ``provider_event_id`` is the PayPal capture id, so a synchronous
+    return-path settle and a later CAPTURE.COMPLETED webhook dedupe at the event
+    level (plan §17 G-finding). Settlement compares the captured USD against the
+    per-order snapshot, never ``amount_cny``.
+    """
+    from payment_provider_paypal import PayPalConfig, validate_paypal_webhook_payload
+
+    try:
+        validate_paypal_webhook_payload(
+            PayPalConfig.from_env(),
+            capture_resource,
+            order_id=str(order.id),
+            expected_usd_cents=_paypal_expected_usd_cents(order),
+            provider_order_id=order.provider_order_id,
+        )
+    except ValueError as exc:
+        logger.warning("PayPal capture fact-gate failed for %s: %s", order.id, exc)
+        if raise_on_error:
+            raise
+        return False
+
+    capture_id = str((capture_resource or {}).get("id") or "").strip()
+    if not capture_id:
+        logger.warning("PayPal capture for %s had no capture id", order.id)
+        return False
+
+    return await _process_payment_event(
+        db=db,
+        provider="paypal",
+        provider_event_id=capture_id,
+        event_type="payment.capture.completed",
+        order_id=str(order.id),
+        new_status="paid",
+        signature_valid=True,  # fact-gate above is the trust boundary on this path
+        raw_payload=capture_resource,
+    )
+
+
+async def _refresh_paypal_order(
+    *,
+    db: AsyncSession,
+    order: PaymentOrder,
+    raise_on_error: bool = False,
+) -> None:
+    """Query a PayPal order; capture if APPROVED, settle if already COMPLETED.
+
+    APPROVED = buyer approved but not yet captured → capture now (the abandoned-
+    return / lost-webhook backstop). COMPLETED = already captured → settle from
+    the existing capture. Anything else stays pending. Capture is idempotent via
+    PayPal-Request-Id; cross-entry settle dedup is the capture-id event key plus
+    the order-row terminal guard.
+    """
+    import anyio
+
+    from payment_provider_paypal import PayPalConfig, capture_order, query_order
+
+    config = PayPalConfig.from_env()
+    if config is None or not order.provider_order_id:
+        return
+    try:
+        result = await anyio.to_thread.run_sync(
+            lambda: query_order(config, paypal_order_id=order.provider_order_id)
+        )
+    except Exception as exc:
+        logger.warning("PayPal order query failed for %s: %s", order.id, exc)
+        if raise_on_error:
+            raise
+        return
+    if result is None:
+        return
+
+    status = (result.order_status or "").strip().upper()
+    capture_resource: dict | None = None
+    if status == "COMPLETED":
+        capture_resource = result.captures[0] if result.captures else None
+    elif status == "APPROVED":
+        try:
+            captured = await anyio.to_thread.run_sync(
+                lambda: capture_order(
+                    config,
+                    paypal_order_id=order.provider_order_id,
+                    order_id=str(order.id),
+                )
+            )
+        except Exception as exc:
+            logger.warning("PayPal capture failed for %s: %s", order.id, exc)
+            if raise_on_error:
+                raise
+            return
+        capture_resource = captured.resource if captured else None
+    else:
+        order.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        return
+
+    if not capture_resource:
+        logger.warning("PayPal order %s %s but no capture resource found", order.id, status)
+        return
+    await _settle_paypal_capture(
+        db=db, order=order, capture_resource=capture_resource, raise_on_error=raise_on_error
+    )
 
 
 # --- Checkout config (Task 5) ---
@@ -727,6 +856,57 @@ async def fake_pay_browser(
     )
 
 
+# --- PayPal return endpoint (browser redirect after buyer approval) ---
+
+
+@router.get("/paypal/return", response_model=None)
+async def paypal_return(
+    order_id: str = "",
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Browser-navigable PayPal return URL (plan §7.4 / §17 B3).
+
+    PayPal redirects the buyer here after approval (with its own ``token`` /
+    ``PayerID`` query params, which we ignore). We resolve the order by OUR
+    ``order_id``, capture against the STORED ``provider_order_id`` (never the
+    browser ``token``), run the USD fact-gate, and settle ONLY on pass. No
+    caller-ownership check: this is a provider-driven redirect, exactly like the
+    webhook path — replay is blocked by the terminal guard + capture idempotency,
+    and the fact-gate is the trust boundary (a forged return cannot settle an
+    unapproved or foreign order, because PayPal only captures an approved order
+    and the gate must pass). Never raises 4xx/5xx to the browser — always lands
+    the user back on the billing page with a status; the banner polls
+    GET /orders/{id} for the settlement truth.
+    """
+    base = "/settings/billing?provider=paypal"
+    if not order_id:
+        return RedirectResponse(f"{base}&status=error", status_code=303)
+    try:
+        result = await db.execute(
+            select(PaymentOrder).where(PaymentOrder.id == order_id)
+        )
+        order = result.scalar_one_or_none()
+    except Exception:
+        logger.warning("PayPal return order lookup failed for %s", order_id, exc_info=True)
+        return RedirectResponse(f"{base}&status=error", status_code=303)
+
+    if order is None or order.provider != "paypal":
+        return RedirectResponse(f"{base}&status=error", status_code=303)
+    if order.status not in ("created", "pending"):
+        return RedirectResponse(f"{base}&status=already_settled", status_code=303)
+
+    try:
+        await _refresh_paypal_order(db=db, order=order)
+    except Exception:
+        # Capture/settle is best-effort here; the webhook + reconciliation
+        # sweeper are the settlement backstops. Never fail the user's redirect.
+        logger.warning("PayPal return capture error for %s", order_id, exc_info=True)
+
+    return RedirectResponse(
+        f"{base}&status=processing&order_id={order_id}", status_code=303
+    )
+
+
 # --- Webhook endpoint (provider-dispatched) ---
 
 @router.post("/webhooks/{provider_name}", response_model=None)
@@ -848,6 +1028,13 @@ async def receive_webhook(
             payload=event.raw_payload,
         )
 
+    if provider_name == "paypal":
+        signature_valid = signature_valid and await _validate_paypal_event_against_order(
+            db=db,
+            order_id=resolved_order_id,
+            payload=event.raw_payload,
+        )
+
     settled = await _process_payment_event(
         db=db,
         provider=provider_name,
@@ -886,6 +1073,15 @@ async def _resolve_refund_order_id(
         token = str(((payload.get("data") or {}).get("transaction_id")) or "").strip()
     elif provider_name == "wechatpay":
         token = str(((payload.get("transaction") or {}).get("out_trade_no")) or "").strip()
+    elif provider_name == "paypal":
+        # custom_id on the refund/reversed resource IS our order id directly; no
+        # provider_order_id reverse lookup needed. (Usually already set by
+        # parse; this is the empty-custom_id fallback — returns "" → unbound,
+        # recorded but never settled.)
+        from payment_provider_paypal import _extract_custom_id
+
+        cid = _extract_custom_id((payload.get("resource") or {}))
+        return cid
     if not token:
         return ""
     result = await db.execute(
@@ -913,6 +1109,14 @@ def _is_refund_resource_event(
         data = payload.get("data") or {}
         action = str(data.get("action") or "").strip().lower()
         return action in ("refund", "chargeback")
+    if provider_name == "paypal":
+        # REFUNDED = merchant refund; REVERSED = chargeback/dispute reversal —
+        # both claw funds back from us, so both must reach entitlement recall
+        # (plan §17 S4; dropping REVERSED would let a disputed buyer keep the plan).
+        return raw_event_type in (
+            "PAYMENT.CAPTURE.REFUNDED",
+            "PAYMENT.CAPTURE.REVERSED",
+        )
     return False
 
 
@@ -924,6 +1128,18 @@ def _extract_refund_amount_fen(provider_name: str, raw_payload: dict | None) -> 
         return int(str(value)) if value not in (None, "") else None
 
     try:
+        if provider_name == "paypal":
+            # B1 (CRITICAL): PayPal refunds are USD; this value feeds the
+            # `cumulative_refund_amount_fen < order.amount_cny` (CNY fen)
+            # partial-vs-full comparison. Returning a USD-cents value there would
+            # mis-classify a full refund as partial and SKIP entitlement recall
+            # (buyer keeps the plan after a full refund). Return None → treated
+            # as full → clawback fires. PayPal partial refunds (rare, owner-
+            # initiated) over-claw, which errs toward removing access, never
+            # toward revenue leak. Proper USD-basis partial detection is a future
+            # task; it must compare to metadata.paypal_expected_usd_cents, NOT
+            # amount_cny.
+            return None
         if provider_name == "wechatpay":
             amount = ((payload.get("transaction") or {}).get("amount")) or {}
             refund = amount.get("refund")
@@ -1074,6 +1290,65 @@ async def _validate_paddle_event_against_order(
         return True
     except ValueError as exc:
         logger.warning("Paddle payload validation failed for %s: %s", order_id, exc)
+        return False
+
+
+async def _validate_paypal_event_against_order(
+    *,
+    db: AsyncSession,
+    order_id: str,
+    payload: dict | None,
+) -> bool:
+    """Bind a PayPal webhook to our order via custom_id, then fact-gate by type.
+
+    Settlement (CAPTURE.COMPLETED): full USD snapshot gate (custom_id + currency
+    == USD + captured == per-order ``paypal_expected_usd_cents``). Refund/
+    reversal (REFUNDED/REVERSED): bind + currency only — the resource amount is
+    the refund amount, not the original, so it must NOT be compared to the
+    settlement snapshot. Never compares against ``amount_cny`` (USD lane, B1).
+    """
+    result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if order is None:
+        # Order-less event: recorded by _process_payment_event and no-op'd — safe
+        # 200-ACK. INVARIANT (mirrors Paddle F-E): safe ONLY because a missing
+        # order cannot settle downstream; a settlement event with an unknown
+        # order_id must never bypass binding.
+        return True
+
+    from payment_provider_paypal import (
+        PayPalConfig,
+        _extract_amount,
+        _extract_custom_id,
+        validate_paypal_webhook_payload,
+    )
+
+    resource = (payload or {}).get("resource") or {}
+    event_type = str((payload or {}).get("event_type") or "").strip()
+
+    # custom_id binding anchors EVERY event type to our order.
+    if _extract_custom_id(resource) != str(order.id):
+        logger.warning("PayPal custom_id mismatch for %s", order_id)
+        return False
+
+    if event_type in ("PAYMENT.CAPTURE.REFUNDED", "PAYMENT.CAPTURE.REVERSED"):
+        currency, _ = _extract_amount(resource)
+        if currency != "USD":
+            logger.warning("PayPal refund currency mismatch for %s: %s", order_id, currency)
+            return False
+        return True
+
+    try:
+        validate_paypal_webhook_payload(
+            PayPalConfig.from_env(),
+            resource,
+            order_id=str(order.id),
+            expected_usd_cents=_paypal_expected_usd_cents(order),
+            provider_order_id=order.provider_order_id,
+        )
+        return True
+    except ValueError as exc:
+        logger.warning("PayPal payload validation failed for %s: %s", order_id, exc)
         return False
 
 
