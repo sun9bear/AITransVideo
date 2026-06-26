@@ -21,6 +21,9 @@ export type BillingInvoice = {
   billing_period: string
   amount_cny: number
   currency: string
+  // For PayPal invoices, the amount actually charged to the buyer in USD cents
+  // (amount_cny stays the canonical ledger unit). null/undefined for other rails.
+  charged_usd_cents?: number | null
   status: BillingInvoiceStatus
   issued_at: string | null
   paid_at: string | null

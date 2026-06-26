@@ -506,6 +506,80 @@ class TestBillingHistoryScope:
         db.execute.assert_awaited_once()
         sent_stmt = str(db.execute.call_args.args[0])
         assert "billing_invoices" in sent_stmt.lower()
+        # Non-USD rails carry no USD charge amount.
+        assert first["charged_usd_cents"] is None
+
+    def test_paypal_invoice_surfaces_charged_usd_cents(self):
+        """PayPal invoices expose the per-order USD snapshot the buyer actually
+        paid; ``amount_cny`` stays the canonical CNY ledger value (not overwritten)."""
+        user = _make_user(uid=uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        order_id = uuid.uuid4()
+        inv = SimpleNamespace(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            subscription_id=None,
+            payment_order_id=order_id,
+            provider="paypal",
+            provider_order_id="0EC260925C948832M",
+            plan_code="pro",
+            billing_period="monthly",
+            amount_cny=29900,
+            currency="CNY",
+            status="paid",
+            issued_at=now,
+            paid_at=now,
+            created_at=now,
+        )
+        order = SimpleNamespace(
+            id=order_id, metadata_json={"paypal_expected_usd_cents": 4999}
+        )
+        inv_scalars = MagicMock(); inv_scalars.all.return_value = [inv]
+        inv_wrap = MagicMock(); inv_wrap.scalars.return_value = inv_scalars
+        order_scalars = MagicMock(); order_scalars.all.return_value = [order]
+        order_wrap = MagicMock(); order_wrap.scalars.return_value = order_scalars
+        db = _make_db()
+        db.execute = AsyncMock(side_effect=[inv_wrap, order_wrap])
+
+        result = _run(list_billing_history(db=db, user=user))
+        row = result["invoices"][0]
+        assert row["provider"] == "paypal"
+        assert row["charged_usd_cents"] == 4999
+        assert row["amount_cny"] == 29900  # canonical ledger preserved
+        assert row["currency"] == "CNY"
+
+    def test_paypal_invoice_without_usd_snapshot_serializes_none(self):
+        """Defensive: a PayPal invoice whose order lacks the USD snapshot still
+        serializes with ``charged_usd_cents=None`` rather than raising."""
+        user = _make_user(uid=uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        order_id = uuid.uuid4()
+        inv = SimpleNamespace(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            subscription_id=None,
+            payment_order_id=order_id,
+            provider="paypal",
+            provider_order_id=None,
+            plan_code="pro",
+            billing_period="monthly",
+            amount_cny=29900,
+            currency="CNY",
+            status="paid",
+            issued_at=now,
+            paid_at=now,
+            created_at=now,
+        )
+        order = SimpleNamespace(id=order_id, metadata_json={})
+        inv_scalars = MagicMock(); inv_scalars.all.return_value = [inv]
+        inv_wrap = MagicMock(); inv_wrap.scalars.return_value = inv_scalars
+        order_scalars = MagicMock(); order_scalars.all.return_value = [order]
+        order_wrap = MagicMock(); order_wrap.scalars.return_value = order_scalars
+        db = _make_db()
+        db.execute = AsyncMock(side_effect=[inv_wrap, order_wrap])
+
+        result = _run(list_billing_history(db=db, user=user))
+        assert result["invoices"][0]["charged_usd_cents"] is None
 
 
 # ---------------------------------------------------------------------------

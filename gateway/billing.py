@@ -664,7 +664,9 @@ async def get_checkout_config(
 # --- Billing history (Task 4) ---
 
 
-def _serialize_invoice(invoice: BillingInvoice) -> dict:
+def _serialize_invoice(
+    invoice: BillingInvoice, charged_usd_cents: int | None = None
+) -> dict:
     return {
         "id": str(invoice.id),
         "subscription_id": (
@@ -677,6 +679,10 @@ def _serialize_invoice(invoice: BillingInvoice) -> dict:
         "billing_period": invoice.billing_period,
         "amount_cny": invoice.amount_cny,
         "currency": invoice.currency,
+        # PayPal invoices are charged in USD; ``amount_cny`` stays the canonical
+        # ledger unit. This surfaces the per-order USD snapshot so the billing UI
+        # can show what the buyer actually paid. None for non-USD rails.
+        "charged_usd_cents": charged_usd_cents,
         "status": invoice.status,
         "issued_at": invoice.issued_at.isoformat() if invoice.issued_at else None,
         "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None,
@@ -709,7 +715,31 @@ async def list_billing_history(
         .order_by(BillingInvoice.created_at.desc())
     )
     invoices = list(result.scalars().all())
-    return {"invoices": [_serialize_invoice(inv) for inv in invoices]}
+
+    # PayPal invoices were charged in USD (``amount_cny`` stays the canonical
+    # ledger unit). Surface the per-order USD snapshot so the billing UI can show
+    # the amount the buyer actually paid; other rails have no USD and render CNY.
+    usd_by_order: dict = {}
+    paypal_order_ids = [
+        inv.payment_order_id for inv in invoices if inv.provider == "paypal"
+    ]
+    if paypal_order_ids:
+        order_rows = await db.execute(
+            select(PaymentOrder).where(PaymentOrder.id.in_(paypal_order_ids))
+        )
+        for order in order_rows.scalars().all():
+            usd = _paypal_expected_usd_cents(order)
+            if usd is not None:
+                usd_by_order[order.id] = usd
+
+    return {
+        "invoices": [
+            _serialize_invoice(
+                inv, charged_usd_cents=usd_by_order.get(inv.payment_order_id)
+            )
+            for inv in invoices
+        ]
+    }
 
 
 # --- Fake pay endpoint ---

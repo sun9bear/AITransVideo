@@ -40,6 +40,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   alipay: "支付宝",
   wechatpay: "微信支付",
   stripe: "Stripe",
+  paypal: "PayPal",
 }
 
 const STATUS_META: Record<
@@ -56,6 +57,15 @@ function formatYuan(amountFen: number, currency: string): string {
   const body = yuan % 1 === 0 ? yuan.toFixed(0) : yuan.toFixed(2)
   if (currency === "CNY") return `¥${body}`
   return `${body} ${currency}`
+}
+
+function formatInvoiceAmount(inv: BillingInvoice): string {
+  // PayPal invoices are charged in USD — show the actual USD amount the buyer
+  // paid. amount_cny stays the canonical ledger value used by other rails.
+  if (inv.provider === "paypal" && inv.charged_usd_cents != null) {
+    return `$${(inv.charged_usd_cents / 100).toFixed(2)}`
+  }
+  return formatYuan(inv.amount_cny, inv.currency)
 }
 
 function formatDateTime(iso: string | null): string {
@@ -200,7 +210,7 @@ export function OrderHistory() {
                       <StatusPill status={inv.status} />
                     </td>
                     <td className="py-3 text-right font-medium tabular-nums text-foreground">
-                      {formatYuan(inv.amount_cny, inv.currency)}
+                      {formatInvoiceAmount(inv)}
                     </td>
                   </tr>
                 ))}
