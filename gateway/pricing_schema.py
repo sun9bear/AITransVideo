@@ -4,7 +4,9 @@ from pydantic import BaseModel, model_validator
 
 
 class PlanPriceConfig(BaseModel):
-    monthly: int    # CNY fen
+    # Generic per-period integer triple. price_cny_fen uses CNY fen (分);
+    # price_usd_cents reuses the same shape for USD cents (PayPal lane).
+    monthly: int
     quarterly: int
     annual: int
 
@@ -17,6 +19,10 @@ class PlanConfig(BaseModel):
     allowed_service_modes: list[str]
     self_serve: bool
     price_cny_fen: PlanPriceConfig | None = None
+    # PayPal lane USD list price (USD cents), set independently of CNY in the
+    # admin pricing page (plan 2026-06-26 §5, option c). Optional so existing
+    # on-disk pricing_runtime.json without this field still validates.
+    price_usd_cents: PlanPriceConfig | None = None
     monthly_grant_credits: int | None = None
 
 
@@ -117,12 +123,15 @@ def detect_frozen_field_changes(
 
     Frozen fields:
     - plans.*.price_cny_fen
+    - plans.*.price_usd_cents (PayPal lane; the actually-charged USD amount —
+      flagged because a mid-flight USD price edit can false-reject an in-flight
+      PayPal settlement, plan 2026-06-26 §17 B2/M6)
     - credits.debit_rates
     - trial.days, trial.source_minutes, trial.grant_credits
     """
     changes: list[str] = []
 
-    # plans.*.price_cny_fen
+    # plans.*.price_cny_fen / plans.*.price_usd_cents
     all_plan_keys = set(old.plans.keys()) | set(new.plans.keys())
     for key in sorted(all_plan_keys):
         old_plan = old.plans.get(key)
@@ -131,6 +140,10 @@ def detect_frozen_field_changes(
         new_price = new_plan.price_cny_fen if new_plan else None
         if old_price != new_price:
             changes.append(f"plans.{key}.price_cny_fen")
+        old_usd = old_plan.price_usd_cents if old_plan else None
+        new_usd = new_plan.price_usd_cents if new_plan else None
+        if old_usd != new_usd:
+            changes.append(f"plans.{key}.price_usd_cents")
 
     # credits.debit_rates
     if old.credits.debit_rates != new.credits.debit_rates:
@@ -166,6 +179,14 @@ def build_default_pricing_payload() -> PricingPayload:
                     quarterly=26900,
                     annual=99900,
                 ),
+                # PayPal USD list price (USD cents), plan 2026-06-26 §5.1.
+                # $16.99 / $44.99 / $159.99 — covers PayPal cross-border +
+                # FX repatriation cost so net CNY ≥ CNY list price.
+                price_usd_cents=PlanPriceConfig(
+                    monthly=1699,
+                    quarterly=4499,
+                    annual=15999,
+                ),
                 max_duration_minutes=45,
                 max_concurrent_jobs=3,
                 # Task #24 (P2 launch blocker #2): smart added to mirror
@@ -181,6 +202,13 @@ def build_default_pricing_payload() -> PricingPayload:
                     monthly=29900,
                     quarterly=79900,
                     annual=299900,
+                ),
+                # PayPal USD list price (USD cents), plan 2026-06-26 §5.1.
+                # $49.99 / $129.99 / $469.99.
+                price_usd_cents=PlanPriceConfig(
+                    monthly=4999,
+                    quarterly=12999,
+                    annual=46999,
                 ),
                 max_duration_minutes=180,
                 max_concurrent_jobs=5,

@@ -37,11 +37,19 @@ from fastapi import APIRouter
 
 @dataclass(frozen=True)
 class PlanPrice:
-    """CNY fen (分) prices for a given billing period. ``None`` means unavailable."""
+    """Per-period prices. ``None`` means unavailable.
+
+    CNY fen (分) is the canonical ledger unit. USD cents is the independent
+    PayPal-lane list price (plan 2026-06-26 §5, option c) — set separately in
+    the admin pricing page, NOT derived from CNY by an FX rate.
+    """
 
     monthly_cny_fen: int | None
     quarterly_cny_fen: int | None
     annual_cny_fen: int | None
+    monthly_usd_cents: int | None = None
+    quarterly_usd_cents: int | None = None
+    annual_usd_cents: int | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,9 @@ PLANS: dict[str, PlanDefinition] = {
             monthly_cny_fen=9900,      # ¥99 / 月
             quarterly_cny_fen=26900,   # ¥269 / 季
             annual_cny_fen=99900,      # ¥999 / 年
+            monthly_usd_cents=1699,    # $16.99 / mo (plan §5.1)
+            quarterly_usd_cents=4499,  # $44.99 / qtr
+            annual_usd_cents=15999,    # $159.99 / yr
         ),
         self_serve=True,
     ),
@@ -105,6 +116,9 @@ PLANS: dict[str, PlanDefinition] = {
             monthly_cny_fen=29900,     # ¥299 / 月
             quarterly_cny_fen=79900,   # ¥799 / 季
             annual_cny_fen=299900,     # ¥2999 / 年
+            monthly_usd_cents=4999,    # $49.99 / mo (plan §5.1)
+            quarterly_usd_cents=12999, # $129.99 / qtr
+            annual_usd_cents=46999,    # $469.99 / yr
         ),
         self_serve=True,
     ),
@@ -152,11 +166,16 @@ def _get_runtime_plans() -> dict[str, PlanDefinition]:
         result: dict[str, PlanDefinition] = {}
         for code, pc in payload.plans.items():
             price: PlanPrice | None = None
-            if pc.price_cny_fen is not None:
+            cny = pc.price_cny_fen
+            usd = getattr(pc, "price_usd_cents", None)
+            if cny is not None or usd is not None:
                 price = PlanPrice(
-                    monthly_cny_fen=pc.price_cny_fen.monthly,
-                    quarterly_cny_fen=pc.price_cny_fen.quarterly,
-                    annual_cny_fen=pc.price_cny_fen.annual,
+                    monthly_cny_fen=cny.monthly if cny else None,
+                    quarterly_cny_fen=cny.quarterly if cny else None,
+                    annual_cny_fen=cny.annual if cny else None,
+                    monthly_usd_cents=usd.monthly if usd else None,
+                    quarterly_usd_cents=usd.quarterly if usd else None,
+                    annual_usd_cents=usd.annual if usd else None,
                 )
             result[code] = PlanDefinition(
                 code=code,
@@ -268,6 +287,27 @@ def get_price(plan_code: str, billing_period: str) -> int | None:
     return None
 
 
+def get_price_usd(plan_code: str, billing_period: str) -> int | None:
+    """Return the PayPal-lane price in USD cents, or ``None`` if unavailable.
+
+    Runtime-aware (reads the same ``_get_runtime_plans`` bridge as ``get_price``).
+    ``None`` when the plan has no USD price published — callers (PayPal
+    ``create_order``) must treat that as "PayPal not ready for this plan" and
+    refuse to build a checkout (plan 2026-06-26 §7.1 / S3), never fall back to
+    a CNY amount.
+    """
+    plan = _get_runtime_plans().get(plan_code)
+    if plan is None or plan.price is None:
+        return None
+    if billing_period == "monthly":
+        return plan.price.monthly_usd_cents
+    if billing_period == "quarterly":
+        return plan.price.quarterly_usd_cents
+    if billing_period == "annual":
+        return plan.price.annual_usd_cents
+    return None
+
+
 def valid_target_plan_codes() -> set[str]:
     """Plan codes that can be the *target* of a paid upgrade (i.e. priced plans)."""
     return {code for code, plan in _get_runtime_plans().items() if plan.price is not None}
@@ -368,12 +408,27 @@ def _plan_to_public_dict(plan: PlanDefinition) -> dict[str, Any]:
     """
     if plan.price is None:
         price_payload: dict[str, int | None] | None = None
+        usd_payload: dict[str, int | None] | None = None
     else:
         price_payload = {
             "monthly": plan.price.monthly_cny_fen,
             "quarterly": plan.price.quarterly_cny_fen,
             "annual": plan.price.annual_cny_fen,
         }
+        # PayPal-lane USD list price (USD cents). None when not published; the
+        # frontend uses it only to show "≈ $X" when PayPal is the picked rail.
+        if (
+            plan.price.monthly_usd_cents is None
+            and plan.price.quarterly_usd_cents is None
+            and plan.price.annual_usd_cents is None
+        ):
+            usd_payload = None
+        else:
+            usd_payload = {
+                "monthly": plan.price.monthly_usd_cents,
+                "quarterly": plan.price.quarterly_usd_cents,
+                "annual": plan.price.annual_usd_cents,
+            }
     entry: dict[str, Any] = {
         "code": plan.code,
         "display_name": plan.display_name,
@@ -382,6 +437,7 @@ def _plan_to_public_dict(plan: PlanDefinition) -> dict[str, Any]:
         "allowed_service_modes": list(plan.allowed_service_modes),
         "self_serve": plan.self_serve,
         "price_cny_fen": price_payload,
+        "price_usd_cents": usd_payload,
     }
     if plan.free_quota_total is not None:
         entry["free_quota_total"] = plan.free_quota_total
