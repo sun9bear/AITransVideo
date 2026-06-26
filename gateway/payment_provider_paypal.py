@@ -236,6 +236,29 @@ def _extract_amount(resource: dict) -> tuple[str, int | None]:
     return _amount_to_usd_cents(amount.get("value"), amount.get("currency_code"))
 
 
+def _extract_related_capture_id(resource: dict) -> str:
+    """Capture id a refund/reversal resource references (for refund→order bind).
+
+    A REFUNDED/REVERSED resource is a refund object whose ``custom_id`` may be
+    absent (owner dashboard refunds, chargebacks don't echo the original
+    capture's custom_id). It always references the original capture though — via
+    ``supplementary_data.related_ids.capture_id`` or a ``links`` entry with
+    ``rel == "up"`` pointing at ``/captures/{id}``. Used as the binding fallback
+    (plan §17 S5) against the capture id we persist on the order at settlement.
+    """
+    res = resource or {}
+    related = (res.get("supplementary_data") or {}).get("related_ids") or {}
+    cap = str(related.get("capture_id") or "").strip()
+    if cap:
+        return cap
+    for link in res.get("links") or []:
+        if str((link or {}).get("rel") or "").strip().lower() == "up":
+            href = str((link or {}).get("href") or "").strip()
+            if "/captures/" in href:
+                return href.rstrip("/").rsplit("/", 1)[-1]
+    return ""
+
+
 # --- checkout (sync — billing.create_order calls create_checkout in a thread) ---
 
 

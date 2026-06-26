@@ -1074,14 +1074,33 @@ async def _resolve_refund_order_id(
     elif provider_name == "wechatpay":
         token = str(((payload.get("transaction") or {}).get("out_trade_no")) or "").strip()
     elif provider_name == "paypal":
-        # custom_id on the refund/reversed resource IS our order id directly; no
-        # provider_order_id reverse lookup needed. (Usually already set by
-        # parse; this is the empty-custom_id fallback — returns "" → unbound,
-        # recorded but never settled.)
-        from payment_provider_paypal import _extract_custom_id
+        # custom_id on the refund/reversed resource IS our order id directly when
+        # present. But PayPal does NOT guarantee it echoes the original capture's
+        # custom_id (owner dashboard refunds + chargebacks frequently omit it),
+        # so fall back to the related capture id, matched against the capture id
+        # we persisted on the order at settlement (plan §17 S5). Without this a
+        # chargeback/refund would go unbound → entitlement recall skipped → the
+        # refunded buyer keeps their plan.
+        from payment_provider_paypal import (
+            _extract_custom_id,
+            _extract_related_capture_id,
+        )
 
-        cid = _extract_custom_id((payload.get("resource") or {}))
-        return cid
+        resource = payload.get("resource") or {}
+        cid = _extract_custom_id(resource)
+        if cid:
+            return cid
+        capture_id = _extract_related_capture_id(resource)
+        if not capture_id:
+            return ""
+        result = await db.execute(
+            select(PaymentOrder).where(
+                PaymentOrder.provider == "paypal",
+                PaymentOrder.metadata_json["paypal_capture_id"].astext == capture_id,
+            )
+        )
+        order = result.scalar_one_or_none()
+        return str(order.id) if order is not None else ""
     if not token:
         return ""
     result = await db.execute(
@@ -1506,6 +1525,17 @@ async def _process_payment_event(
         trade_no = str(raw_payload.get("trade_no", "")).strip()
         if trade_no and order.provider_order_id != trade_no:
             order.provider_order_id = trade_no
+
+    if provider == "paypal" and new_status == "paid" and provider_event_id:
+        # Persist the capture id (== provider_event_id on a paid PayPal event) so
+        # a later refund/chargeback whose resource omits our custom_id can still
+        # bind to this order by capture id (plan §17 S5 fallback). provider_order_id
+        # stays the PayPal ORDER id (needed for query/capture); the capture id is a
+        # separate metadata side-record.
+        _meta = dict(getattr(order, "metadata_json", None) or {})
+        if _meta.get("paypal_capture_id") != provider_event_id:
+            _meta["paypal_capture_id"] = provider_event_id
+            order.metadata_json = _meta
 
     # Terminal-state guard.
     #

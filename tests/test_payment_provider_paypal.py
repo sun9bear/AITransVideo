@@ -54,6 +54,20 @@ def test_amount_to_usd_cents():
     assert p._amount_to_usd_cents("bad", "USD") == ("USD", None)
 
 
+def test_extract_related_capture_id():
+    # supplementary_data path
+    assert p._extract_related_capture_id(
+        {"supplementary_data": {"related_ids": {"capture_id": "CAP-1"}}}
+    ) == "CAP-1"
+    # links rel=up path
+    assert p._extract_related_capture_id(
+        {"links": [{"rel": "up", "href": "https://api/v2/payments/captures/CAP-2"}]}
+    ) == "CAP-2"
+    # absent → empty (caller treats as unbound, never mis-settles)
+    assert p._extract_related_capture_id({}) == ""
+    assert p._extract_related_capture_id({"links": [{"rel": "self", "href": "x"}]}) == ""
+
+
 def test_map_event_and_order_status():
     assert p.map_paypal_event_type("PAYMENT.CAPTURE.COMPLETED") == "paid"
     assert p.map_paypal_event_type("PAYMENT.CAPTURE.REFUNDED") == "refunded"

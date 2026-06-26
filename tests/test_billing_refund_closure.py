@@ -244,6 +244,72 @@ async def test_resolve_refund_order_id_no_token_skips_db():
     assert session.executed == []
 
 
+# --- PayPal refund/chargeback binding (plan §17 S5: capture-id fallback) ------
+
+
+@pytest.mark.asyncio
+async def test_resolve_refund_order_id_paypal_custom_id_present():
+    # custom_id == our order id directly → no DB query (empty session would
+    # IndexError if it tried to look up).
+    session = _FakeSession([])
+    oid = await billing._resolve_refund_order_id(
+        session,
+        provider_name="paypal",
+        raw_payload={"resource": {"custom_id": "ord-42"}},
+    )
+    assert oid == "ord-42"
+    assert session.executed == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_refund_order_id_paypal_capture_id_fallback():
+    # custom_id absent (owner dashboard refund / chargeback) → bind by the
+    # related capture id, matched against the capture id persisted on the order.
+    order = _order(provider="paypal")
+    session = _FakeSession([[order]])
+    oid = await billing._resolve_refund_order_id(
+        session,
+        provider_name="paypal",
+        raw_payload={
+            "resource": {
+                "supplementary_data": {"related_ids": {"capture_id": "CAP-9"}}
+            }
+        },
+    )
+    assert oid == "ord-1"
+    assert len(session.executed) == 1  # the capture-id lookup ran
+
+
+@pytest.mark.asyncio
+async def test_resolve_refund_order_id_paypal_capture_id_via_links():
+    order = _order(provider="paypal")
+    session = _FakeSession([[order]])
+    oid = await billing._resolve_refund_order_id(
+        session,
+        provider_name="paypal",
+        raw_payload={
+            "resource": {
+                "links": [
+                    {"rel": "up", "href": "https://api/v2/payments/captures/CAP-9"}
+                ]
+            }
+        },
+    )
+    assert oid == "ord-1"
+
+
+@pytest.mark.asyncio
+async def test_resolve_refund_order_id_paypal_unbound_skips_db():
+    # No custom_id AND no related capture id → unbound, never queries (recorded
+    # but not settled downstream — must never mis-settle).
+    session = _FakeSession([])
+    oid = await billing._resolve_refund_order_id(
+        session, provider_name="paypal", raw_payload={"resource": {}}
+    )
+    assert oid == ""
+    assert session.executed == []
+
+
 # ---------------------------------------------------------------------------
 # 退款 fact-gate
 # ---------------------------------------------------------------------------
@@ -690,6 +756,46 @@ async def test_paid_settlement_locks_user_row_before_subscription_upsert(monkeyp
     user_stmt = session.executed[3]
     assert getattr(user_stmt, "_for_update_arg", None) is not None
     assert user_stmt.get_execution_options().get("populate_existing") is True
+
+
+@pytest.mark.asyncio
+async def test_paypal_paid_persists_capture_id_for_refund_binding(monkeypatch):
+    # plan §17 S5: settling a PayPal order stamps the capture id (= the paid
+    # event id) onto the order, so a later refund/chargeback that omits custom_id
+    # can still bind by capture id. Without this the fallback query finds nothing.
+    order = _order(id="ord-pp", provider="paypal", status="pending", target_plan_code="plus")
+    user = SimpleNamespace(id="u1", plan_code="free")
+    event = SimpleNamespace(processed=False, error_message=None, processed_at=None)
+    session = _FakeSession([["evt-row-1"], [event], [order], [user]])
+
+    async def fake_record_invoice_for_order(db, *, order, settled_at, status):
+        return SimpleNamespace(subscription_id=None)
+
+    async def fake_upsert_active_subscription(db, *, user, order, paid_at):
+        return SimpleNamespace(id="sub-1", current_period_end=None)
+
+    async def fake_ensure_subscription_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(billing, "record_invoice_for_order", fake_record_invoice_for_order)
+    monkeypatch.setattr(billing, "upsert_active_subscription", fake_upsert_active_subscription)
+    import credits_service
+    monkeypatch.setattr(
+        credits_service, "ensure_subscription_bucket", fake_ensure_subscription_bucket
+    )
+
+    await billing._process_payment_event(
+        db=session,
+        provider="paypal",
+        provider_event_id="CAP-xyz",  # capture id on a paid PayPal event
+        event_type="payment.capture.completed",
+        order_id=order.id,
+        new_status="paid",
+        signature_valid=True,
+        raw_payload={"id": "CAP-xyz"},
+    )
+
+    assert (order.metadata_json or {}).get("paypal_capture_id") == "CAP-xyz"
 
 
 def test_upsert_active_subscription_locks_active_subscription_row():
