@@ -20,6 +20,9 @@ export interface PlanConfig {
   allowed_service_modes: string[]
   self_serve: boolean
   price_cny_fen: { monthly: number; quarterly: number; annual: number } | null
+  // PayPal-lane USD list price (USD cents), set independently of CNY (plan
+  // 2026-06-26). Optional so an older runtime payload without it still parses.
+  price_usd_cents?: { monthly: number; quarterly: number; annual: number } | null
   monthly_grant_credits: number | null
 }
 

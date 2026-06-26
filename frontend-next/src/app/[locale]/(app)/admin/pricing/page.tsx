@@ -770,6 +770,43 @@ function PlansEditor({
               />
             </>
           )}
+          {plan.price_usd_cents && (
+            <>
+              <NumberInput
+                label="PayPal 月付(美分)"
+                value={plan.price_usd_cents.monthly}
+                frozen={frozen}
+                onChange={(v) =>
+                  updatePlan(key, {
+                    price_usd_cents: { ...plan.price_usd_cents!, monthly: v },
+                  })
+                }
+              />
+              <NumberInput
+                label="PayPal 季付(美分)"
+                value={plan.price_usd_cents.quarterly}
+                frozen={frozen}
+                onChange={(v) =>
+                  updatePlan(key, {
+                    price_usd_cents: {
+                      ...plan.price_usd_cents!,
+                      quarterly: v,
+                    },
+                  })
+                }
+              />
+              <NumberInput
+                label="PayPal 年付(美分)"
+                value={plan.price_usd_cents.annual}
+                frozen={frozen}
+                onChange={(v) =>
+                  updatePlan(key, {
+                    price_usd_cents: { ...plan.price_usd_cents!, annual: v },
+                  })
+                }
+              />
+            </>
+          )}
           {plan.monthly_grant_credits !== null && (
             <NumberInput
               label="月赠点数"

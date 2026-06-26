@@ -8,6 +8,7 @@ import common from "../messages/zh/common.json"
 import marketing from "../messages/zh/marketing.json"
 import auth from "../messages/zh/auth.json"
 import seo from "../messages/zh/seo.json"
+import billing from "../messages/zh/billing.json"
 import { routing } from "./i18n/routing"
 
 type Messages = {
@@ -15,6 +16,7 @@ type Messages = {
   marketing: typeof marketing
   auth: typeof auth
   seo: typeof seo
+  billing: typeof billing
 }
 
 declare module "next-intl" {

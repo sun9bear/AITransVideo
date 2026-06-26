@@ -1,0 +1,10 @@
+{
+  "checkout": {
+    "providerHint": {
+      "wechatpay": "微信扫码,手续费最低",
+      "paddle": "银行卡/国际支付,手机端推荐",
+      "paypal": "PayPal 钱包/国际支付"
+    },
+    "paypalUsdNotice": "PayPal 按美元结算,约 {amount}"
+  }
+}

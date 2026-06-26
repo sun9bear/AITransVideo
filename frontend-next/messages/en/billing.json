@@ -1,0 +1,10 @@
+{
+  "checkout": {
+    "providerHint": {
+      "wechatpay": "WeChat QR, lowest fee",
+      "paddle": "Card / international, mobile-friendly",
+      "paypal": "PayPal wallet / international"
+    },
+    "paypalUsdNotice": "Billed by PayPal in USD, about {amount}"
+  }
+}

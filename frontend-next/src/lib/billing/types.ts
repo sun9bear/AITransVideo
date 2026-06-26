@@ -12,7 +12,10 @@ export type PlanCode = "free" | "plus" | "pro"
 
 export type BillingPeriod = "monthly" | "quarterly" | "annual"
 
-/** CNY fen (分) prices keyed by billing period. `null` means unavailable. */
+/**
+ * Integer prices keyed by billing period. `null` means unavailable.
+ * `price_cny_fen` is CNY fen (分); `price_usd_cents` is USD cents (PayPal lane).
+ */
 export type PlanPriceMap = {
   monthly: number | null
   quarterly: number | null
@@ -28,6 +31,12 @@ export type Plan = {
   self_serve: boolean
   /** `null` for free-tier plans that have no checkout path. */
   price_cny_fen: PlanPriceMap | null
+  /**
+   * PayPal-lane USD list price (USD cents), set independently of CNY in the
+   * admin pricing page (plan 2026-06-26). `null`/absent when not published;
+   * used only to show "≈ $X" when PayPal is the picked rail.
+   */
+  price_usd_cents?: PlanPriceMap | null
   /** Present only on free-tier plans. */
   free_quota_total?: number
   /**

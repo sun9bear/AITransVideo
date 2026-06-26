@@ -25,6 +25,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react"
+import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -92,6 +93,7 @@ export function CheckoutCard({
   checkoutConfig,
   onOrderSettled,
 }: CheckoutCardProps) {
+  const t = useTranslations("billing")
   const paidPlans = useMemo(
     () => plans.filter((p) => p.price_cny_fen !== null),
     [plans],
@@ -137,6 +139,11 @@ export function CheckoutCard({
 
   const priceFen =
     selectedPlan?.price_cny_fen?.[effectivePeriod] ?? null
+  // PayPal lane USD price (USD cents) for the selected plan/period, surfaced as
+  // an "≈ $X" notice when PayPal is the picked rail (USD comes from the backend
+  // /api/plans, never computed/converted on the client).
+  const paypalUsdCents =
+    selectedPlan?.price_usd_cents?.[effectivePeriod] ?? null
 
   const currentRank = currentPlanRank(subscription)
   const selectedRank = PLAN_RANK[selectedPlanCode] ?? 0
@@ -307,12 +314,17 @@ export function CheckoutCard({
           <div className="mt-2 grid gap-2 sm:grid-cols-2">
             {operationalProviders.map((p) => {
               const active = p.code === selectedProvider
+              // Provider hint copy via next-intl message keys (no inline CJK —
+              // uiloc:cjk-guard). Static keys (next-intl needs literal keys for
+              // type-checking). Codes without a hint (e.g. fake) render none.
               const hint =
                 p.code === "wechatpay"
-                  ? "微信扫码,手续费最低"
+                  ? t("checkout.providerHint.wechatpay")
                   : p.code === "paddle"
-                    ? "银行卡/国际支付,手机端推荐"
-                    : null
+                    ? t("checkout.providerHint.paddle")
+                    : p.code === "paypal"
+                      ? t("checkout.providerHint.paypal")
+                      : null
               return (
                 <button
                   key={p.code}
@@ -356,6 +368,13 @@ export function CheckoutCard({
             {!providerOperational && <span className="ml-1">(暂未开放)</span>}
           </span>
         </div>
+        {selectedProvider === "paypal" && paypalUsdCents != null && (
+          <div className="mt-1 text-right text-[11px] text-muted-foreground">
+            {t("checkout.paypalUsdNotice", {
+              amount: `$${(paypalUsdCents / 100).toFixed(2)}`,
+            })}
+          </div>
+        )}
       </div>
 
       {/* CTA */}
