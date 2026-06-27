@@ -1,5 +1,6 @@
 "use client"
 
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { buttonVariants } from "@/components/ui/button"
 import { useSession } from "@/components/providers/session-provider"
@@ -29,14 +30,15 @@ type PrimaryCtaProps = {
  * Button primitive does not support Slot-style asChild composition.
  */
 export function PrimaryCta({
-  guestLabel = "免费开始试用",
-  loggedInLabel = "进入工作台",
+  guestLabel,
+  loggedInLabel,
   className,
 }: PrimaryCtaProps) {
+  const t = useTranslations("marketing.primaryCta")
   const { user } = useSession()
   const isAuthenticated = Boolean(user)
   const href = isAuthenticated ? "/translations/new" : "/auth"
-  const label = isAuthenticated ? loggedInLabel : guestLabel
+  const label = isAuthenticated ? (loggedInLabel ?? t("loggedIn")) : (guestLabel ?? t("guest"))
   return (
     <Link
       href={href}

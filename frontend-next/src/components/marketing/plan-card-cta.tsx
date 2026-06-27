@@ -1,5 +1,6 @@
 "use client"
 
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { buttonVariants } from "@/components/ui/button"
 import { useSession } from "@/components/providers/session-provider"
@@ -20,16 +21,23 @@ import type { Plan } from "@/lib/billing/types"
  *     CheckoutCard reads `?plan=` to preselect. Server-side create_order
  *     still owns the same/lower-tier guard.
  */
+type PlanCtaLabelKey =
+  | "enterWorkspace"
+  | "freeStart"
+  | "upgrade"
+  | "select"
+  | "contact"
+
 function planCtaHref(
   plan: Plan,
   isAuthenticated: boolean,
-): { href: string; label: string } {
+): { href: string; labelKey: PlanCtaLabelKey; labelArgs?: { name: string } } {
   const authedHref = "/translations/new"
   const guestHref = "/auth"
   if (plan.code === "free") {
     return {
       href: isAuthenticated ? authedHref : guestHref,
-      label: isAuthenticated ? "进入工作台" : "免费开始",
+      labelKey: isAuthenticated ? "enterWorkspace" : "freeStart",
     }
   }
   if (plan.self_serve) {
@@ -37,14 +45,13 @@ function planCtaHref(
       href: isAuthenticated
         ? `/settings/billing?plan=${encodeURIComponent(plan.code)}`
         : guestHref,
-      label: isAuthenticated
-        ? `升级到 ${plan.display_name}`
-        : `选择 ${plan.display_name}`,
+      labelKey: isAuthenticated ? "upgrade" : "select",
+      labelArgs: { name: plan.display_name },
     }
   }
   return {
     href: isAuthenticated ? authedHref : guestHref,
-    label: "联系我们",
+    labelKey: "contact",
   }
 }
 
@@ -55,9 +62,11 @@ export function PlanCardCta({
   plan: Plan
   highlight: boolean
 }) {
+  const t = useTranslations("marketing.planCardCta")
   const { user } = useSession()
   const isAuthenticated = Boolean(user)
   const cta = planCtaHref(plan, isAuthenticated)
+  const label = t(cta.labelKey, cta.labelArgs)
 
   return (
     <Link
@@ -67,7 +76,7 @@ export function PlanCardCta({
         "h-11 w-full",
       )}
     >
-      {cta.label}
+      {label}
     </Link>
   )
 }

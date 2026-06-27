@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { useTranslations } from "next-intl"
 import { ChevronLeft, ChevronRight, Volume2, VolumeX } from "lucide-react"
 import type { Demo } from "./featured-demo-card"
 
@@ -47,6 +48,7 @@ function getHoverServerSnapshot() {
 }
 
 export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
+  const t = useTranslations("marketing.heroSamplePlayer")
   const [index, setIndex] = useState(0)
   const [tab, setTab] = useState<"dubbed" | "original">("dubbed")
 
@@ -212,14 +214,14 @@ export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
           height={demo.natural_height}
           className="h-full w-full object-contain"
         >
-          您的浏览器不支持 video 标签。
+          {t("videoFallback")}
         </video>
 
         {/* Translucent A/B toggle — overlaid top-right, clear of native controls
             (which sit along the bottom). Default highlights 中文配音. */}
         <div
           role="tablist"
-          aria-label="配音版 / 原片切换"
+          aria-label={t("ariaTablist")}
           className="absolute right-3 top-3 z-10 flex overflow-hidden rounded-full border border-white/25 bg-black/45 backdrop-blur-md"
         >
           <button
@@ -229,7 +231,7 @@ export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
             onClick={() => handleTabChange("dubbed")}
             className={`${toggleBase} ${tab === "dubbed" ? toggleActive : toggleIdle}`}
           >
-            中文配音
+            {t("tabDubbed")}
           </button>
           <button
             type="button"
@@ -238,7 +240,7 @@ export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
             onClick={() => handleTabChange("original")}
             className={`${toggleBase} ${tab === "original" ? toggleActive : toggleIdle}`}
           >
-            英文原片
+            {t("tabOriginal")}
           </button>
         </div>
 
@@ -247,7 +249,7 @@ export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
         <button
           type="button"
           onClick={toggleSound}
-          aria-label={soundOn ? "静音" : "开启声音试听"}
+          aria-label={soundOn ? t("ariaMute") : t("ariaSoundOn")}
           className="absolute left-3 top-3 z-10 flex items-center gap-1 rounded-full border border-white/25 bg-black/45 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-md transition hover:bg-black/65"
         >
           {soundOn ? (
@@ -255,7 +257,7 @@ export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
           ) : (
             <>
               <Volume2 className="h-4 w-4" aria-hidden="true" />
-              开启声音
+              {t("soundOn")}
             </>
           )}
         </button>
@@ -265,7 +267,7 @@ export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
         {hasPrev && (
           <button
             type="button"
-            aria-label="上一段样本"
+            aria-label={t("ariaPrev")}
             onClick={() => changeDemo(index - 1)}
             className={`${navButton} left-2`}
           >
@@ -275,7 +277,7 @@ export function HeroSamplePlayer({ demos }: { demos: Demo[] }) {
         {hasNext && (
           <button
             type="button"
-            aria-label="下一段样本"
+            aria-label={t("ariaNext")}
             onClick={() => changeDemo(index + 1)}
             className={`${navButton} right-2`}
           >

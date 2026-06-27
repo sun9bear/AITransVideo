@@ -1,4 +1,5 @@
 import { Link } from "@/i18n/navigation"
+import { getTranslations } from "next-intl/server"
 import { ShieldCheck } from "lucide-react"
 import { buttonVariants } from "@/components/ui/button-variants"
 import { cn } from "@/lib/utils"
@@ -27,6 +28,7 @@ import { getPlansSafeServer } from "@/lib/billing/get-plans"
  *   should switch to qualitative phrasing — see plan §9 O6 for verification.
  */
 export async function TrialBanner() {
+  const t = await getTranslations("marketing.trialBanner")
   const data = await getPlansSafeServer()
   const trial = data.trial
 
@@ -45,8 +47,12 @@ export async function TrialBanner() {
   // two ("项目数据会一直保留") which read inconsistently with the 7-day
   // promise; corrected per user note 2026-05-01.
   const description = hasNumbers
-    ? `注册即享 ${trial!.days} 天试用，含 ${trial!.source_minutes} 分钟源视频额度${trial!.includes_studio ? "与 Studio 精校模式" : ""}。试用结束不会自动扣费，你的账户信息和已购点数会一直保留。`
-    : "注册即享免费试用，亲自验证对齐质量与配音自然度。试用结束不会自动扣费，你的账户信息和已购点数会一直保留。"
+    ? t("descriptionWithNumbers", {
+        days: trial!.days!,
+        minutes: trial!.source_minutes!,
+        studio: trial!.includes_studio ? t("studioSuffix") : "",
+      })
+    : t("descriptionFallback")
 
   return (
     <div className="rounded-2xl border border-border bg-card p-6 md:p-8">
@@ -58,11 +64,11 @@ export async function TrialBanner() {
           >
             <ShieldCheck className="h-4 w-4" aria-hidden="true" />
             <span className="ink-heading text-xs font-semibold uppercase tracking-widest">
-              免费试用
+              {t("eyebrow")}
             </span>
           </div>
           <h3 className="ink-heading text-xl font-semibold text-foreground">
-            无需绑卡，先体验再决定
+            {t("heading")}
           </h3>
           <p className="zh-body text-muted-foreground max-w-2xl">{description}</p>
         </div>
@@ -73,7 +79,7 @@ export async function TrialBanner() {
             "h-11 shrink-0 px-6",
           )}
         >
-          查看试用说明
+          {t("cta")}
         </Link>
       </div>
     </div>

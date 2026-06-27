@@ -60,6 +60,85 @@
       }
     ]
   },
+  "hero": {
+    "eyebrow": "爱译视频 · AITrans.Video",
+    "title": "让世界视频，<br></br>开口说中文",
+    "lead": "把英文长视频变成可发布的中文配音版。免注册先预览效果——前 3 分钟中文配音，满意再注册下载、生成完整视频。",
+    "ctaPricing": "查看套餐价格",
+    "trustLine": "免注册试用 · 英文转中文 · 失败不计费 · 支持长视频",
+    "playerHint": "鼠标移到画面上自动播放，点左上角 <strong>开启声音</strong> 试听；右上角切换 <strong>英文原片 / 中文配音</strong> 对比。"
+  },
+  "pricing": {
+    "eyebrow": "定价",
+    "heading": "长视频也用得起的 AI 翻译配音",
+    "lead": "从个人试用到团队高频生产，按你真正需要的处理能力选择套餐。试用无需绑卡，任务失败不计费，修改片段不必重跑全片。"
+  },
+  "pricingGrid": {
+    "unitMonthly": "/ 月",
+    "unitQuarterly": "/ 季",
+    "unitAnnual": "/ 年",
+    "free": "免费",
+    "popular": "最受欢迎",
+    "emptyState": "套餐信息暂时无法加载，请稍后重试。",
+    "subtitleFree": "适合个人创作者试水与小型项目",
+    "subtitlePlus": "适合稳定输出的独立创作者",
+    "subtitlePro": "适合高频输出的团队与工作室",
+    "benefitMaxDuration": "单次视频最长 {minutes} 分钟",
+    "benefitConcurrency": "最多 {jobs} 个任务并行处理",
+    "benefitGrantWithMinutes": "每月 {credits} 点处理额度（约 {expMin} 分钟 Express / {studioMin} 分钟 Studio 标准）",
+    "benefitGrantOnly": "每月 {credits} 点处理额度",
+    "benefitGrantQualitative": "包含月度处理额度，按视频实际时长计费",
+    "benefitExpress": "Express 快速模式",
+    "benefitStudio": "Studio 精校模式（支持人工复核）",
+    "benefitFreeQuota": "{quota} 条免费任务额度"
+  },
+  "pricingAssurance": {
+    "eyebrow": "购买与开通说明",
+    "heading": "购买的是账户内视频处理能力和数字化交付结果",
+    "lead": "AITrans.Video 为在线数字化服务。用户完成支付后，可在账户内创建翻译任务、查看历史项目、下载交付结果并继续人工复核。 不同套餐解锁的是处理时长、并发能力、工作台模式和下载权限。",
+    "paymentChannelNote": "付款方式以站内结算页展示为准，支付成功后，相应套餐权益或处理额度会自动发放至当前账户。",
+    "deliverables": [
+      "配音视频",
+      "配音音频",
+      "字幕/素材包",
+      "剪映草稿工程",
+      "人工复核工作台",
+      "增量重生成能力"
+    ],
+    "settlementTitle": "结算规则",
+    "afterTitle": "开通后得到什么",
+    "rules": [
+      "购买后权益自动发放至当前登录账户，无需人工开通。",
+      "试用结束不会自动扣费；是否升级由用户主动决定。",
+      "付款方式以结算页展示为准，支付成功后才会确认开通。"
+    ],
+    "previewTitle": "购买前可查看",
+    "linkTrial": "免费试用说明",
+    "linkRefund": "退款政策",
+    "linkContact": "联系客服"
+  },
+  "trialBanner": {
+    "eyebrow": "免费试用",
+    "heading": "无需绑卡，先体验再决定",
+    "descriptionWithNumbers": "注册即享 {days} 天试用，含 {minutes} 分钟源视频额度{studio}。试用结束不会自动扣费，你的账户信息和已购点数会一直保留。",
+    "descriptionFallback": "注册即享免费试用，亲自验证对齐质量与配音自然度。试用结束不会自动扣费，你的账户信息和已购点数会一直保留。",
+    "studioSuffix": "与 Studio 精校模式",
+    "cta": "查看试用说明"
+  },
+  "trial": {
+    "badge": "无需绑卡",
+    "heading": "先免费体验，再决定是否升级",
+    "leadWithNumbers": "注册即享 {days} 天试用，含 {minutes} 分钟源视频额度{studio}。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，账户信息和已购点数也会保留下来。",
+    "leadFallback": "注册即享免费试用。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，账户信息和已购点数也会保留下来。",
+    "studioSuffix": "与 Studio 精校模式",
+    "asideLabel": "开始试用",
+    "asideTitle": "立即开始",
+    "asideDescription": "创建账户即可查看并领取你的试用额度，整个过程不超过一分钟。",
+    "asidePricingLink": "先看看定价",
+    "asideNote1": "· 无需绑定支付方式",
+    "asideNote2": "· 试用结束不会自动扣费",
+    "asideNote3": "· 账户信息和已购点数始终保留"
+  },
   "faq": {
     "eyebrow": "常见问题",
     "heading": "你可能想知道",
@@ -115,5 +194,55 @@
         "a": "如果任务因系统处理失败未生成可下载结果，不扣除对应处理额度；用户主动取消未完成的任务也不计费。注意「不满意」不属于此情形——已完成并交付的结果按时长正常计费，但你可以在工作台里逐句修改并单段重生成，避免重复付费跑全片。"
       }
     ]
+  },
+  "primaryCta": {
+    "guest": "免费开始试用",
+    "loggedIn": "进入工作台"
+  },
+  "planCardCta": {
+    "enterWorkspace": "进入工作台",
+    "freeStart": "免费开始",
+    "upgrade": "升级到 {name}",
+    "select": "选择 {name}",
+    "contact": "联系我们"
+  },
+  "anonymousTrialLauncher": {
+    "cta": "立即试用",
+    "dialogTitle": "免注册上传试用 · 即将开放",
+    "dialogDescription": "上传本地视频、看前 3 分钟中文配音预览的免注册流程正在开放中。现在可以先看上方的真实译制样本感受效果。",
+    "uploadZone": "上传你的视频（即将开放）",
+    "uploadHint": "本地视频 · 前 3 分钟预览 · 带水印",
+    "registerCta": "注册账号，开放后第一时间体验",
+    "comingSoon": "上传与实时预览即将上线，敬请期待。"
+  },
+  "heroSamplePlayer": {
+    "videoFallback": "您的浏览器不支持 video 标签。",
+    "ariaTablist": "配音版 / 原片切换",
+    "tabDubbed": "中文配音",
+    "tabOriginal": "英文原片",
+    "ariaMute": "静音",
+    "ariaSoundOn": "开启声音试听",
+    "soundOn": "开启声音",
+    "ariaPrev": "上一段样本",
+    "ariaNext": "下一段样本"
+  },
+  "sealStamp": {
+    "ariaLabel": "AITrans.Video 章印"
+  },
+  "trialDetails": {
+    "benefit1Title": "体验完整工作流",
+    "benefit1Body": "从导入、翻译、配音、复核到导出剪映草稿,每一步都可以亲手走一遍。",
+    "benefit2Title": "账户与点数保留",
+    "benefit2Body": "试用结束后账户信息和已购点数会一直保留；项目文件默认保留 7 天，到期前可随时下载或继续修改。",
+    "benefit3Title": "无需绑卡",
+    "benefit3Body": "不需要提前绑定支付方式,也不会有任何隐藏扣费。",
+    "benefit4Title": "结束后会怎样?",
+    "benefit4Body": "试用到期后不会自动扣费。你可以继续使用账户中的免费额度,或在需要时主动升级。",
+    "allowanceTitle": "试用权益",
+    "allowanceDays": "· 试用时长：{days} 天",
+    "allowanceMinutes": "· 源视频额度：{minutes} 分钟",
+    "allowanceStudio": "· 包含 Studio 精校模式",
+    "allowanceNoCharge": "· 试用结束不会自动扣费",
+    "unfrozenNote": "注册后即可查看并领取你的试用额度。"
   }
 }
