@@ -1,5 +1,6 @@
 import { CheckCircle2 } from "lucide-react"
 import type { CSSProperties } from "react"
+import { getTranslations } from "next-intl/server"
 import { InkDivider } from "./ink-divider"
 
 /**
@@ -87,19 +88,11 @@ function ScrollingScreenshot({
  * Anchor `id="product-proof"` lets the Hero secondary CTA jump here.
  */
 
-const TASK_FLOW = [
-  "支持 YouTube 链接和视频上传两种入口，适合真实业务输入。",
-  "快捷版适合自动流程，工作台版适合人工复核和精调。",
-  "可选转录方案、说话人数与处理模式，不是模板表单占位页。",
-]
+export async function ProductProof() {
+  const t = await getTranslations("marketing.productProof")
+  const taskFlow = t.raw("taskFlow") as string[]
+  const resultFlow = t.raw("resultFlow") as string[]
 
-const RESULT_FLOW = [
-  "任务完成后保留项目列表、到期时间、处理状态和历史记录。",
-  "每个项目都能下载配音视频、配音音频和素材包。",
-  "这类结果页能直接证明网站提供的是可交付的数字化服务。",
-]
-
-export function ProductProof() {
   return (
     <section
       id="product-proof"
@@ -108,13 +101,13 @@ export function ProductProof() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-            真实产品证明
+            {t("eyebrow")}
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            不是一次性生成工具，而是可复核、可修改、可下载的工作台
+            {t("heading")}
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            爱译视频在站内提供完整的视频翻译配音流程：创建任务、查看进度、逐句复核、修改与重生成，最后下载配音视频、配音音频、字幕和素材包。下面的截图来自当前正在运行的产品界面。
+            {t("lead")}
           </p>
         </div>
 
@@ -127,10 +120,10 @@ export function ProductProof() {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-                  真实界面 01
+                  {t("realUi", { n: "01" })}
                 </p>
                 <h3 className="ink-heading mt-2 text-xl text-foreground">
-                  新建翻译任务
+                  {t("card1Title")}
                 </h3>
               </div>
               <span
@@ -141,21 +134,21 @@ export function ProductProof() {
                   color: "var(--cinnabar)",
                 }}
               >
-                任务创建页
+                {t("card1Badge")}
               </span>
             </div>
 
             <div className="mt-5">
               <ScrollingScreenshot
                 src="/marketing/screenshots/new-translation.jpg"
-                alt="新建翻译任务页：YouTube 链接 / 上传视频切换 + 快捷版（Express）/ 工作台版（Studio）双方案选择 + 创建任务按钮"
+                alt={t("card1Alt")}
                 naturalW={1280}
                 naturalH={956}
               />
             </div>
 
             <ul className="mt-5 space-y-3 text-sm text-muted-foreground">
-              {TASK_FLOW.map((item) => (
+              {taskFlow.map((item) => (
                 <li key={item} className="flex items-start gap-2">
                   <CheckCircle2
                     className="mt-0.5 h-4 w-4 shrink-0"
@@ -171,10 +164,10 @@ export function ProductProof() {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-                  真实界面 02
+                  {t("realUi", { n: "02" })}
                 </p>
                 <h3 className="ink-heading mt-2 text-xl text-foreground">
-                  项目结果与下载交付物
+                  {t("card2Title")}
                 </h3>
               </div>
               <span
@@ -185,21 +178,21 @@ export function ProductProof() {
                   color: "var(--cinnabar)",
                 }}
               >
-                结果列表页
+                {t("card2Badge")}
               </span>
             </div>
 
             <div className="mt-5">
               <ScrollingScreenshot
                 src="/marketing/screenshots/project-list.jpg"
-                alt="项目结果列表页：每个任务卡片显示标题、过期时间、配音视频/音频/素材包下载按钮和修改入口"
+                alt={t("card2Alt")}
                 naturalW={1280}
                 naturalH={1181}
               />
             </div>
 
             <ul className="mt-5 space-y-3 text-sm text-muted-foreground">
-              {RESULT_FLOW.map((item) => (
+              {resultFlow.map((item) => (
                 <li key={item} className="flex items-start gap-2">
                   <CheckCircle2
                     className="mt-0.5 h-4 w-4 shrink-0"
@@ -220,17 +213,17 @@ export function ProductProof() {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-                  真实界面 03
+                  {t("realUi", { n: "03" })}
                 </p>
                 <h3 className="ink-heading mt-2 text-xl text-foreground">
-                  时间轴上逐句复核译文
+                  {t("card3Title")}
                 </h3>
               </div>
             </div>
             <div className="mt-5">
               <ScrollingScreenshot
                 src="/marketing/screenshots/translation-review.jpg"
-                alt="Studio 翻译审核界面：九步进度条 + 说话人确认 + 中英文逐句对照编辑"
+                alt={t("card3Alt")}
                 naturalW={1280}
                 naturalH={2029}
               />
@@ -241,17 +234,17 @@ export function ProductProof() {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-                  真实界面 04
+                  {t("realUi", { n: "04" })}
                 </p>
                 <h3 className="ink-heading mt-2 text-xl text-foreground">
-                  三引擎音色选择
+                  {t("card4Title")}
                 </h3>
               </div>
             </div>
             <div className="mt-5">
               <ScrollingScreenshot
                 src="/marketing/screenshots/voice-selection.jpg"
-                alt="Studio 音色选择界面：MiniMax / CosyVoice / 豆包 三引擎切换 + 试听 / 核对原音 / 克隆音色"
+                alt={t("card4Alt")}
                 naturalW={1280}
                 naturalH={1381}
               />

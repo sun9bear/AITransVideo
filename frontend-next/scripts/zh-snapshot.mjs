@@ -203,6 +203,39 @@ assert.equal(zhMkt.sealStamp.ariaLabel, "AITrans.Video 章印", "marketing.sealS
 assert.equal(zhMkt.trialDetails.benefit1Title, "体验完整工作流", "marketing.trialDetails.benefit1Title 漂移")
 assert.equal(zhMkt.trialDetails.allowanceTitle, "试用权益", "marketing.trialDetails.allowanceTitle 漂移")
 
+// 4d) UI-03e：4 个上半区营销组件（painPoints / productProof / workflowShowcase /
+//     featuredDemos）的内联中文迁入字典后，默认 zh 值必须与改造前组件源【逐字节】相同
+//     （红线 R1）。下面钉死每个子 namespace 的代表性串，重点覆盖标点/全半角/破折号/ICU 敏感处：
+//     - closing 钉死全角弯引号 “一键生成” + <strong> rich 标签
+//     - realUi 钉死 ICU 占位符 {n}
+//     - workflowShowcase.steps[3].body / featuredDemos.lead 钉死全角破折号 ——（U+2014）
+//     任一漂移即 red = 默认 zh 渲染回归。ICU/纯结构串走 key-parity 即可。
+assert.equal(zhMkt.painPoints.eyebrow, "为什么需要专门的工作台", "marketing.painPoints.eyebrow 漂移")
+assert.equal(zhMkt.painPoints.points[0].title, "视频太长", "marketing.painPoints.points[0].title 漂移")
+assert.equal(
+  zhMkt.painPoints.closing,
+  "爱译视频不是只做“一键生成”，而是把<strong>长视频翻译、AI 配音、多格式交付和逐句修改</strong>放进同一个工作台。",
+  "marketing.painPoints.closing 全角弯引号/<strong> rich 标签漂移",
+)
+assert.equal(zhMkt.productProof.eyebrow, "真实产品证明", "marketing.productProof.eyebrow 漂移")
+assert.equal(zhMkt.productProof.realUi, "真实界面 {n}", "marketing.productProof.realUi ICU 占位符漂移")
+assert.equal(
+  zhMkt.workflowShowcase.heading,
+  "从英文视频到中文成片，四步完成",
+  "marketing.workflowShowcase.heading 漂移",
+)
+assert.equal(
+  zhMkt.workflowShowcase.steps[3].body,
+  "下载中文配音视频、音频、字幕、素材包，或直接导出剪映草稿——在剪映里继续精剪不必从零铺时间线。",
+  "marketing.workflowShowcase.steps[3].body 全角破折号漂移",
+)
+assert.equal(
+  zhMkt.featuredDemos.lead,
+  "直接听一段——译文是否像人话、配音是否自然、节奏是否对得上原片。",
+  "marketing.featuredDemos.lead 全角破折号漂移",
+)
+assert.equal(zhMkt.featuredDemos.tabDubbed, "中文配音版", "marketing.featuredDemos.tabDubbed 漂移")
+
 // 5) seo 默认 zh 字节一致：site 级标题/描述与 site.ts 顶层常量同源同值（红线 1）
 const zhSeo = JSON.parse(readFileSync(path.join(root, "messages/zh/seo.json"), "utf8"))
 assert.equal(zhSeo.site.name, "爱译视频", "seo.site.name 漂移")

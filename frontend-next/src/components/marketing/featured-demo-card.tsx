@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import { useFeaturedDemos } from "./featured-demos-context"
 
 /**
@@ -37,6 +38,7 @@ export type Demo = {
 }
 
 export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ariaHidden?: boolean }) {
+  const t = useTranslations("marketing.featuredDemos")
   const [tab, setTab] = useState<"zh" | "en">("zh")
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Captured currentTime stashed across the src-swap remount — see handleTabChange.
@@ -147,7 +149,7 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
           retained so touch devices still work (synthetic mouseenter on
           tap also fires handleTabChange, then the click is a no-op
           because handleTabChange short-circuits when next === current). */}
-      <div role="tablist" aria-label="原片 / 配音版" className="flex border-b border-border">
+      <div role="tablist" aria-label={t("tablistAria")} className="flex border-b border-border">
         <button
           type="button"
           role="tab"
@@ -161,7 +163,7 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
               : "bg-[color:var(--cinnabar-soft,rgba(199,62,58,0.08))] text-[color:var(--cinnabar,#C73E3A)]"
           }`}
         >
-          中文配音版
+          {t("tabDubbed")}
         </button>
         <button
           type="button"
@@ -176,7 +178,7 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
               : "bg-[color:var(--cinnabar-soft,rgba(199,62,58,0.08))] text-[color:var(--cinnabar,#C73E3A)]"
           }`}
         >
-          英文原片
+          {t("tabOriginal")}
         </button>
       </div>
 
@@ -211,7 +213,7 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
           height={demo.natural_height}
           className="h-full w-full"
         >
-          您的浏览器不支持 video 标签。
+          {t("videoFallback")}
         </video>
       </div>
 
