@@ -31,12 +31,22 @@ assert.equal(site.absoluteUrl("/pricing"), `${SITE_URL}/pricing`, "absoluteUrl('
 assert.equal(site.absoluteUrl("/pricing", "zh"), `${SITE_URL}/pricing`, "absoluteUrl(zh) ≠ 单参（zh 必须 inert）")
 assert.equal(site.absoluteUrl("pricing"), `${SITE_URL}/pricing`, "absoluteUrl 无前导斜杠 漂移")
 
-// UI-03d-1 翻旗：home 属 localizedRoutes → hreflangLanguages("/") 现含 en（互惠）。
+// UI-03d-1-followup（@codex #66 P2，项目主决策）：home `/` 暂移出 localizedRoutes
+// （NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW=1 时 AnonymousTrialPanel /en 泄漏中文，待 UI-03g）
+// → hreflangLanguages("/") 回到只挂 zh-Hans + x-default，无 en。
 const hl = site.hreflangLanguages("/")
 assert.deepEqual(
   hl,
-  { "zh-Hans": SITE_URL, "en": `${SITE_URL}/en`, "x-default": SITE_URL },
-  "hreflang('/') 翻旗后应含 zh-Hans + en + x-default（home 已 localizedRoute）"
+  { "zh-Hans": SITE_URL, "x-default": SITE_URL },
+  "hreflang('/') 应只含 zh-Hans + x-default（home 暂未翻旗、无 en — 待 UI-03g 本地化 panel）"
+)
+
+// 已翻旗页（/pricing）互惠含 en：正向用例，防误把 localizedRoutes 清空导致全站无 en hreflang。
+const hlPricing = site.hreflangLanguages("/pricing")
+assert.deepEqual(
+  hlPricing,
+  { "zh-Hans": `${SITE_URL}/pricing`, "en": `${SITE_URL}/en/pricing`, "x-default": `${SITE_URL}/pricing` },
+  "hreflang('/pricing') 翻旗后应含 zh-Hans + en + x-default（/pricing 属 localizedRoute）"
 )
 
 // legal 路由（/terms）未翻旗（不在 localizedRoutes）→ 只挂 zh-Hans + x-default，无 en。

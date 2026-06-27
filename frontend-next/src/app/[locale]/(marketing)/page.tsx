@@ -13,7 +13,7 @@ import { PricingPreview } from "@/components/marketing/pricing-preview"
 import { Faq } from "@/components/marketing/faq"
 import { FinalCta } from "@/components/marketing/final-cta"
 import { SiteJsonLd } from "@/components/seo/site-json-ld"
-import { absoluteUrl, hreflangLanguages, localeSeo } from "@/lib/seo/site"
+import { absoluteUrl, hreflangLanguages, localeSeo, localizedRoutes } from "@/lib/seo/site"
 
 /**
  * Homepage metadata（UI-03d-1 翻旗）。static `metadata` → `generateMetadata` 后按
@@ -24,7 +24,9 @@ import { absoluteUrl, hreflangLanguages, localeSeo } from "@/lib/seo/site"
  *     en 分支才用 `absoluteUrl("/", "en")` 绝对形。
  *   - OG title/description/url 用 `localeSeo[locale]`（zh 镜像顶层 defaultTitle/Description）
  *     与 `absoluteUrl("/", locale)`（zh → siteUrl，与旧 `absoluteUrl("/")` 同值）。
- *   - `hreflangLanguages("/")` 现含 zh-Hans + en + x-default（home 属 localizedRoutes）。
+ *   - **home `/` 暂移出 localizedRoutes**（待 UI-03g 本地化 AnonymousTrialPanel；@codex #67 P2 +
+ *     项目主决策）→ **不挂 `languages`**：否则 /en home 自指 canonical 却挂只指 zh 的 hreflang =
+ *     broken alternate set（@codex 指出）。UI-03g 把 `/` 加回 localizedRoutes 后本分支自动恢复互惠。
  */
 export async function generateMetadata({
   params,
@@ -33,10 +35,13 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { locale } = await params
   const seo = localeSeo[locale]
+  // 仅当 home 在 localizedRoutes（已翻旗）时才挂 hreflang languages；当前 `/` 暂移出 → 省略，
+  // 避免在未翻旗的 /en home 上产出只含 zh 的 broken alternate set。
+  const homeLocalized = (localizedRoutes as readonly string[]).includes("/")
   return {
     alternates: {
       canonical: locale === "zh" ? "/" : absoluteUrl("/", locale),
-      languages: hreflangLanguages("/"),
+      ...(homeLocalized ? { languages: hreflangLanguages("/") } : {}),
     },
     openGraph: {
       title: seo.defaultTitle,
