@@ -474,37 +474,6 @@ export default function PrivacyPage() {
           Before using a third-party service, you should review its applicable
           terms and privacy policy yourself.
         </p>
-
-        <div className="mt-4">
-          <h3 className="text-base font-semibold text-foreground">
-            10.1 第三方云存储归档（运营方侧）/ Third-Party Cloud Storage Archiving (Operator Side)
-          </h3>
-          <p className="mt-2">
-            为支持长期归档与跨地域容灾，运营方可能使用第三方云存储服务，对已完成任务的相关材料进行归档或备份。该归档由运营方在管理侧发起，普通用户不会接触到该流程，运营方也不会因此向第三方传输您的登录身份或账户资料。
-          </p>
-          <p className="mt-2 text-muted-foreground">
-            To support long-term archiving and cross-region disaster recovery,
-            the operator may use third-party cloud storage services to archive or
-            back up materials relating to completed tasks. Such archiving is
-            initiated by the operator on the administrative side; ordinary users
-            do not come into contact with this process, and the operator does not
-            thereby transmit your login identity or account information to any
-            third party.
-          </p>
-          <p className="mt-2">
-            需要说明的是，被归档的「已完成任务工程包」可能包含您上传的媒体、生成的文件、字幕或项目素材等任务内容。我们会按本政策约定的安全措施处理该等归档，并仅在确有归档或恢复需要时发起相应调用；第三方云存储服务对其自身的数据处理规则，由该服务的条款与隐私政策约束。
-          </p>
-          <p className="mt-2 text-muted-foreground">
-            Please note that an archived &ldquo;completed-task project
-            package&rdquo; may contain task content such as the media you
-            uploaded, generated files, subtitles or project materials. We handle
-            such archives in accordance with the security measures set out in
-            this Policy, and only initiate the relevant calls where there is a
-            genuine archiving or recovery need; the third-party cloud storage
-            service&rsquo;s own data processing rules are governed by that
-            service&rsquo;s terms and privacy policy.
-          </p>
-        </div>
       </LegalSection>
 
       <LegalSection number="11" title="隐私政策的更新 / Updates to This Privacy Policy">
