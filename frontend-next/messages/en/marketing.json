@@ -215,6 +215,140 @@
     "registerCta": "Sign up to be first in line when it opens",
     "comingSoon": "Upload and live preview are launching soon — stay tuned."
   },
+  "anonymousTrial": {
+    "dialogTrigger": "Try it now",
+    "dialogTitle": "No-signup upload trial",
+    "minimizeAria": "Minimize upload window",
+    "minimizeTitle": "Minimize",
+    "closeAria": "Close upload window",
+    "closeTitle": "Close",
+    "footer": "Local video · First {duration} preview · Watermarked{expressSuffix}",
+    "footerExpressSuffix": " · Real Express pipeline",
+    "uploadZone": {
+      "aria": "Click or drop a video file here to upload",
+      "title": "Click to select or drop a video",
+      "hint": "MP4 · MOV · M4V · WebM · Up to {maxUploadMb}MB"
+    },
+    "retryUpload": "Upload again",
+    "confirmClose": {
+      "title": "Close the upload window?",
+      "description": "The video is still uploading or processing. Closing will clear this window's progress, and you may need to re-upload or restart the preview.",
+      "confirmLabel": "Confirm close",
+      "cancelLabel": "Keep waiting"
+    },
+    "uploadStage": {
+      "hashing": "Checking file…",
+      "merging": "Verifying merge…",
+      "uploading": "Uploading…"
+    },
+    "largeFileUnavailable": "The large-file upload channel isn't open yet. Please compress the video to under 95MB and try again.",
+    "validate": {
+      "unsupportedFormat": "Unsupported format \"{ext}\". Please upload MP4, MOV, M4V or WebM.",
+      "tooLarge": "File size {mb}MB exceeds the {maxUploadMb}MB limit"
+    },
+    "uploadFailedFallback": "Upload failed, please try again",
+    "uploadDeniedFallback": "Upload was rejected, please try again later",
+    "masterClosed": {
+      "title": "The no-signup trial isn't open yet",
+      "before": "You can first",
+      "registerLink": "create an account",
+      "after": "to experience the full video translation and dubbing"
+    },
+    "consent": {
+      "uploadSuccess": "Video uploaded successfully",
+      "introExpress": "We'll use the full Express pipeline (including speaker voice matching) to generate a watermarked Chinese-dubbed preview of the first {duration}. Before continuing, please confirm the statement below:",
+      "introDefault": "We'll generate a watermarked Chinese-dubbed preview of the first {duration}. Before continuing, please confirm the statement below:",
+      "rightsLabel": "I confirm that I hold the necessary rights to this video's content and the voices in it, and agree to use it for this preview synthesis.",
+      "cloneOptInTitle": "(Optional) Clone my original voice",
+      "cloneOptInDetail": "When checked, the main speaker's voice from your video is used to generate dubbing closer to the original (free, for this preview only). If unchecked, a preset voice is used.",
+      "submit": "Generate dubbed preview"
+    },
+    "processing": {
+      "hint": "Generating the dubbed preview, this usually takes 2–5 minutes, please wait"
+    },
+    "ready": {
+      "title": "Dubbed preview is ready",
+      "stageLabel": "Preview ready",
+      "watermarkNote": "(watermarked, first {duration})",
+      "videoFallback": "Your browser does not support the video tag.",
+      "ctaLead": "Happy with the preview?",
+      "ctaRegisterLink": "Sign up for the full translation",
+      "ctaMiddle": ", and once signed in you can also use",
+      "ctaStudioLink": "Studio",
+      "ctaTail": "for higher-quality fully automatic translation",
+      "uploadAnother": "Upload another video"
+    },
+    "failed": {
+      "fallback": "Preview generation failed",
+      "keepNote": "Your uploaded video is kept — click \"Retry\" without re-uploading.",
+      "retry": "Retry",
+      "reupload": "Upload again"
+    },
+    "previewDuration": "{unit, select, minutes {{value} min} other {{value} sec}}",
+    "stage": {
+      "queued": "Waiting to process…",
+      "probing": "Analyzing video…",
+      "transcribing": "Transcribing audio…",
+      "translating": "Translating…",
+      "synthesizing": "Synthesizing dubbing…",
+      "mixing": "Mixing audio…",
+      "publishing": "Generating preview…",
+      "fallback": "Processing…"
+    },
+    "statusReason": {
+      "rate_limited": "You've used up today's previews, please come back tomorrow",
+      "content_blocked": "The content didn't pass the compliance check and can't be previewed",
+      "file_too_large": "The file exceeds the size limit, please compress it and try again",
+      "unsupported_format": "Unsupported video format, please upload mp4, mov, m4v or webm",
+      "duration_exceeded": "The video is too long, please use a different video and re-upload",
+      "quota_exceeded": "The preview quota is full, please try again later",
+      "service_unavailable": "The preview service is temporarily unavailable, please try again later",
+      "fallback": "Upload was rejected ({reason})"
+    },
+    "uploadError": {
+      "rate_limited": "You've used up today's free previews, please come back tomorrow",
+      "preview_queue_full": "The preview channel is busy, please try again later",
+      "file_too_large": "The file exceeds the size limit, please compress it and try again",
+      "unsupported_media_type": "Unsupported video format, please upload mp4, mov, m4v or webm",
+      "gate_unavailable": "The preview service is temporarily unavailable, please try again later",
+      "storage_error": "Server storage is busy, please try again later",
+      "csrf_origin_rejected": "Request origin check failed, please refresh the page and try again",
+      "feature_not_available": "The no-signup trial isn't open yet",
+      "anonymous_preview_disabled": "The no-signup trial isn't open yet"
+    },
+    "createError": {
+      "retry_exhausted": "You've run out of retries, please upload a new video",
+      "need_consent": "Please confirm the copyright statement first to continue",
+      "already_processing": "This preview is already processing or can't be retried, please wait or re-upload",
+      "channel_busy": "The preview channel is busy, please try again later",
+      "generic": "Failed to create the preview, please try again"
+    },
+    "errors": {
+      "createFailed": "Failed to create the preview, please try again",
+      "retryFailed": "Retry failed, please try again later",
+      "uploadFailed": "Upload failed, please try again",
+      "sessionExpired": "Your session has expired, please refresh the page and try again",
+      "pollFailed": "The network is unstable and the preview status check failed repeatedly, please try again later",
+      "network_error": "Network error, please check your connection and try again",
+      "invalid_response": "The server returned an invalid response format",
+      "upload_http": "Upload failed, please try again",
+      "status_http": "Status check failed, please try again later"
+    },
+    "minimized": {
+      "titleUpload": "Uploading video",
+      "titleProcessing": "Generating preview",
+      "titleConsent": "Upload complete",
+      "titleReady": "Preview complete",
+      "titleFailed": "Preview generation failed",
+      "titleDefault": "Upload trial",
+      "detailProcessingFallback": "Processing",
+      "detailConsent": "Tap to confirm authorization and generate the preview",
+      "detailReady": "Tap to view the preview result",
+      "detailDefault": "Tap to expand the window",
+      "expandAria": "Expand the upload trial window",
+      "expandLabel": "Expand"
+    }
+  },
   "heroSamplePlayer": {
     "videoFallback": "Your browser does not support the video tag.",
     "ariaTablist": "Dubbed / original toggle",

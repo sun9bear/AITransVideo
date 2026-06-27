@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { UploadCloud, CheckCircle2, AlertCircle, Loader2, Film, Minus, X } from "lucide-react"
 import {
@@ -19,7 +20,7 @@ import {
   getPreviewStatus,
   getPreviewStreamUrl,
   getPreviewLimits,
-  formatPreviewDuration,
+  previewDurationParts,
   mapStatusReason,
   mapUploadError,
   mapStageLabel,
@@ -29,6 +30,17 @@ import {
   type UploadResponse,
   type PreviewStatus,
 } from "@/lib/api/anonymousPreview"
+
+// next-intl t function type alias for passing the translator into module-level
+// helpers (the namespace is "marketing.anonymousTrial").
+type Translator = ReturnType<typeof useTranslations>
+
+/** 把预览秒数渲染成本地化时长（"3 分钟" / "90 秒" 或 en "3 min" / "90 sec"）。
+ *  调用方传入已绑定 "marketing.anonymousTrial" 的 t。 */
+function previewDuration(t: Translator, seconds: number): string {
+  const parts = previewDurationParts(seconds)
+  return t("previewDuration", { value: parts.value, unit: parts.unit })
+}
 import { setAnonClaimHint } from "@/lib/api/claim"
 import {
   getChunkedUploadLimits,
@@ -85,7 +97,8 @@ interface PanelState {
 const INITIAL_STATE: PanelState = {
   step: 'idle',
   uploadPct: 0,
-  uploadStageLabel: '上传中…',
+  // 恒在 step:'uploading' 进入前被显式覆盖（uploadStage.*）；置空串移除模块级 CJK，行为安全。
+  uploadStageLabel: '',
   uploadSpeed: '',
   deniedReason: '',
   errorMsg: '',
@@ -105,13 +118,17 @@ function formatSpeed(bytesPerSecond: number): string {
   return `${Math.max(1, Math.round(bytesPerSecond / 1024))} KB/s`
 }
 
-function validateFile(file: File, maxUploadMb: number): string | null {
+/** 本地文件校验结果（语言中立）：null = 通过；否则带 code + ICU 参数，由 handleFile 经 t 渲染。 */
+type ValidationFailure =
+  | { code: 'unsupportedFormat'; ext: string }
+  | { code: 'tooLarge'; mb: string; maxUploadMb: number }
+
+function validateFile(file: File, maxUploadMb: number): ValidationFailure | null {
   if (!ACCEPTED_TYPES.includes(file.type) && !ACCEPTED_EXTENSIONS.some((ext) => file.name.toLowerCase().endsWith(ext))) {
-    return `不支持的格式"${file.name.split('.').pop()?.toUpperCase() ?? '?'}"，请上传 MP4、MOV、M4V 或 WebM`
+    return { code: 'unsupportedFormat', ext: file.name.split('.').pop()?.toUpperCase() ?? '?' }
   }
   if (file.size > maxUploadMb * 1024 * 1024) {
-    const mb = (file.size / 1024 / 1024).toFixed(1)
-    return `文件大小 ${mb}MB 超过 ${maxUploadMb}MB 限制`
+    return { code: 'tooLarge', mb: (file.size / 1024 / 1024).toFixed(1), maxUploadMb }
   }
   return null
 }
@@ -127,6 +144,7 @@ function UploadZone({
   disabled: boolean
   maxUploadMb: number
 }) {
+  const t = useTranslations("marketing.anonymousTrial")
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -145,7 +163,7 @@ function UploadZone({
     <div
       role="button"
       tabIndex={disabled ? -1 : 0}
-      aria-label="点击或拖放视频文件到此处上传"
+      aria-label={t("uploadZone.aria")}
       aria-disabled={disabled}
       className={cn(
         "flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors cursor-pointer select-none",
@@ -167,8 +185,8 @@ function UploadZone({
     >
       <UploadCloud className="h-9 w-9 text-primary/70" aria-hidden="true" />
       <div>
-        <p className="text-sm font-semibold text-foreground">点击选择或拖放视频</p>
-        <p className="text-xs text-muted-foreground mt-1">MP4 · MOV · M4V · WebM · 最大 {maxUploadMb}MB</p>
+        <p className="text-sm font-semibold text-foreground">{t("uploadZone.title")}</p>
+        <p className="text-xs text-muted-foreground mt-1">{t("uploadZone.hint", { maxUploadMb })}</p>
       </div>
       <input
         ref={inputRef}
@@ -199,6 +217,7 @@ function ProgressBar({ pct }: { pct: number }) {
 }
 
 function ErrorBlock({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const t = useTranslations("marketing.anonymousTrial")
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-start gap-3 rounded-xl border border-destructive/20 bg-destructive/5 p-4">
@@ -210,7 +229,7 @@ function ErrorBlock({ message, onRetry }: { message: string; onRetry: () => void
         className={cn(buttonVariants({ variant: "outline", size: "sm" }), "self-start")}
         onClick={onRetry}
       >
-        重新上传
+        {t("retryUpload")}
       </button>
     </div>
   )
@@ -219,10 +238,46 @@ function ErrorBlock({ message, onRetry }: { message: string; onRetry: () => void
 // ── Main component ────────────────────────────────────────────────────────
 
 export function AnonymousTrialPanel({ className }: { className?: string }) {
+  const t = useTranslations("marketing.anonymousTrial")
   const [open, setOpen] = useState(false)
   const [minimized, setMinimized] = useState(false)
   const [state, setState] = useState<PanelState>(INITIAL_STATE)
   const { confirm, confirmDialog } = useConfirmDialog()
+
+  // ── lib code → 文案桥（UI-03g）：lib mapper/throw 返回稳定 code/token，下面用
+  //    t.has 守卫后映射成本地化文案，未命中回落到对应 fallback。
+  //    next-intl v4 的 t/t.has 接受字面量 message key；运行时拼接的 key 是受控集合
+  //    （字典已声明全部 code/token + fallback），故用 dynKey 旁路字面量类型约束。 ──
+  type MsgKey = Parameters<typeof t>[0]
+  const dynKey = (k: string): MsgKey => k as MsgKey
+  const hasKey = (k: string): boolean => t.has(dynKey(k))
+
+  /** 处理阶段 code（mapStageLabel 已规范成 KNOWN_STAGES ∪ {'fallback'}）→ 文案。 */
+  function resolveStage(code: string): string {
+    const key = `stage.${code}`
+    return hasKey(key) ? t(dynKey(key)) : t("stage.fallback")
+  }
+  /** upload status_reason code → 文案；未知 code 回落 statusReason.fallback（带 reason）。 */
+  function resolveStatusReason(reason: string | null): string {
+    const code = mapStatusReason(reason)
+    if (!code) return ''
+    const key = `statusReason.${code}`
+    return hasKey(key) ? t(dynKey(key)) : t("statusReason.fallback", { reason: code })
+  }
+  /** upload-time error code/原始字符串 → 文案；未知则原样回显（保留旧 `|| raw` 语义）。 */
+  function resolveUploadError(raw: string): string {
+    const code = mapUploadError(raw)
+    if (!code) return t("uploadFailedFallback")
+    const key = `uploadError.${code}`
+    if (hasKey(key)) return t(dynKey(key))
+    // 后端真实 error 字符串未命中字典 → 原样回显（与旧 `mapUploadError(raw) || raw` 一致）。
+    return code
+  }
+  /** createPreview 抛出的 token（createError.<token>）→ 文案。 */
+  function resolveCreateError(token: string): string {
+    const key = `createError.${token}`
+    return hasKey(key) ? t(dynKey(key)) : t("createError.generic")
+  }
   // 服务端热配置的大小/时长限制；拉取失败保持出厂默认（200MB / 180s）。
   const [limits, setLimits] = useState<PreviewLimits>(DEFAULT_PREVIEW_LIMITS)
   // 匿名分片通道（plan §9.5）：A6 limits 拉不到/enabled=false → null，
@@ -310,10 +365,10 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   async function requestClose() {
     if (panelBusy) {
       const confirmed = await confirm({
-        title: "确认关闭上传窗口？",
-        description: "当前视频仍在上传或处理中。关闭后会清空这个窗口的进度，可能需要重新上传或重新发起预览。",
-        confirmLabel: "确认关闭",
-        cancelLabel: "继续等待",
+        title: t("confirmClose.title"),
+        description: t("confirmClose.description"),
+        confirmLabel: t("confirmClose.confirmLabel"),
+        cancelLabel: t("confirmClose.cancelLabel"),
         destructive: true,
       })
       if (!confirmed) return
@@ -339,7 +394,11 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
   async function handleFile(file: File) {
     const validationError = validateFile(file, limits.max_upload_mb)
     if (validationError) {
-      setState((s) => ({ ...s, step: 'error', errorMsg: validationError }))
+      const errorMsg =
+        validationError.code === 'unsupportedFormat'
+          ? t("validate.unsupportedFormat", { ext: validationError.ext })
+          : t("validate.tooLarge", { mb: validationError.mb, maxUploadMb: validationError.maxUploadMb })
+      setState((s) => ({ ...s, step: 'error', errorMsg }))
       return
     }
 
@@ -367,7 +426,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       setState((s) => ({
         ...s,
         step: 'error',
-        errorMsg: '大文件上传通道暂未开放，请将视频压缩到 95MB 以内后重试',
+        errorMsg: t("largeFileUnavailable"),
       }))
       return
     }
@@ -378,15 +437,15 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       speedRef.current = null
       setState((s) => ({
         ...s, step: 'uploading', uploadPct: 0, errorMsg: '', uploadSpeed: '',
-        uploadStageLabel: '校验文件…',
+        uploadStageLabel: t("uploadStage.hashing"),
       }))
       try {
         const body = await uploadFileInChunksAnonymous(file, activeChunked, (p) => {
           if (gen !== pollGenRef.current) return
           const label =
-            p.phase === 'hashing' ? '校验文件…'
-            : p.phase === 'merging' ? '合并校验中…'
-            : '上传中…'
+            p.phase === 'hashing' ? t("uploadStage.hashing")
+            : p.phase === 'merging' ? t("uploadStage.merging")
+            : t("uploadStage.uploading")
           let speed: string | null = null
           if (p.phase === 'uploading' && typeof p.bytesDone === 'number') {
             speed = trackSpeed(p.bytesDone)
@@ -404,8 +463,8 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         uploadResp = body as unknown as UploadResponse
       } catch (err) {
         if (gen !== pollGenRef.current) return
-        const raw = err instanceof Error ? err.message : '上传失败，请重试'
-        setState((s) => ({ ...s, step: 'error', errorMsg: mapUploadError(raw) || raw }))
+        const raw = err instanceof Error ? err.message : ''
+        setState((s) => ({ ...s, step: 'error', errorMsg: resolveUploadError(raw) }))
         return
       }
     } else {
@@ -415,7 +474,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       speedRef.current = null
       setState((s) => ({
         ...s, step: 'uploading', uploadPct: 0, errorMsg: '', uploadSpeed: '',
-        uploadStageLabel: '上传中…',
+        uploadStageLabel: t("uploadStage.uploading"),
       }))
 
       try {
@@ -432,18 +491,18 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         )
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
-        const raw = err instanceof Error ? err.message : '上传失败，请重试'
-        setState((s) => ({ ...s, step: 'error', errorMsg: mapUploadError(raw) || raw }))
+        const raw = err instanceof Error ? err.message : ''
+        setState((s) => ({ ...s, step: 'error', errorMsg: resolveUploadError(raw) }))
         return
       }
     }
 
     if (uploadResp.admission_decision !== 'admitted' || uploadResp.status !== 'ready_for_mode') {
-      const reason = mapStatusReason(uploadResp.status_reason)
+      const reason = resolveStatusReason(uploadResp.status_reason)
       setState((s) => ({
         ...s,
         step: 'upload_denied',
-        deniedReason: reason || '上传被拒绝，请稍后重试',
+        deniedReason: reason || t("uploadDeniedFallback"),
       }))
       return
     }
@@ -473,14 +532,14 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       limits.active_lane === 'express' &&
       limits.express_clone_available &&
       state.expressAutoVoiceClone
-    setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null }))
+    setState((s) => ({ ...s, step: 'processing', stageLabel: t("stage.queued"), progress: null }))
 
     try {
       await createPreview(previewId, new Date().toISOString(), { autoVoiceClone })
     } catch (err) {
       if (gen !== pollGenRef.current) return
-      const msg = err instanceof Error ? err.message : '创建预览失败，请重试'
-      setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
+      const token = err instanceof Error ? err.message : 'generic'
+      setState((s) => ({ ...s, step: 'error', errorMsg: resolveCreateError(token) }))
       return
     }
 
@@ -498,14 +557,17 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       limits.active_lane === 'express' &&
       limits.express_clone_available &&
       state.expressAutoVoiceClone
-    setState((s) => ({ ...s, step: 'processing', stageLabel: '等待处理…', progress: null, errorMsg: '' }))
+    setState((s) => ({ ...s, step: 'processing', stageLabel: t("stage.queued"), progress: null, errorMsg: '' }))
     try {
       // create 端仅 failed 终态可重入（服务端原子抢占防并发双重试）；
       // 重试仍走全部闸判定（in-flight / lane 开关 / admission）。
       await createPreview(previewId, new Date().toISOString(), { autoVoiceClone })
     } catch (err) {
       if (gen !== pollGenRef.current) return
-      const msg = err instanceof Error ? err.message : '重试失败，请稍后再试'
+      // createPreview 抛 createError token；retry 路径未命中时回落「重试失败」。
+      const token = err instanceof Error ? err.message : ''
+      const key = `createError.${token}`
+      const msg = hasKey(key) ? t(dynKey(key)) : t("errors.retryFailed")
       setState((s) => ({ ...s, step: 'error', errorMsg: msg }))
       return
     }
@@ -538,13 +600,13 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       // 401 = session expired → stop and tell the user; never silently spin.
       const httpStatus = err instanceof PreviewStatusError ? err.status : 0
       if (httpStatus === 401) {
-        setState((s) => ({ ...s, step: 'error', errorMsg: '会话已过期，请刷新页面后重试' }))
+        setState((s) => ({ ...s, step: 'error', errorMsg: t("errors.sessionExpired") }))
         return
       }
       // 429 / 5xx / network — bounded retries with backoff, then surface.
       pollErrorsRef.current += 1
       if (pollErrorsRef.current >= MAX_POLL_ERRORS) {
-        setState((s) => ({ ...s, step: 'error', errorMsg: '网络不稳定，预览状态查询多次失败，请稍后重试' }))
+        setState((s) => ({ ...s, step: 'error', errorMsg: t("errors.pollFailed") }))
         return
       }
       const backoff = Math.min(
@@ -562,14 +624,14 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       // 可认领预览」（localStorage，跨 /auth 导航与弹窗关闭存活）。登录成功后
       // post-auth-redirect 据此触发 /claim。非敏感——真凭证是 HttpOnly avt_anon。
       setAnonClaimHint(previewId)
-      setState((s) => ({ ...s, step: 'ready', stageLabel: '预览就绪', progress: 100 }))
+      setState((s) => ({ ...s, step: 'ready', stageLabel: t("ready.stageLabel"), progress: 100 }))
       return
     }
 
     if (ps === 'failed') {
       // §E 诚实失败：record 与已上传文件保留（沿用 TTL），展示「重试」
       // 按钮——复用同一 preview_id 重新 create，无需重新上传。
-      setState((s) => ({ ...s, step: 'failed', errorMsg: '预览生成失败' }))
+      setState((s) => ({ ...s, step: 'failed', errorMsg: t("failed.fallback") }))
       return
     }
 
@@ -577,7 +639,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     setState((s) => ({
       ...s,
       step: 'processing',
-      stageLabel: mapStageLabel(statusResp.stage),
+      stageLabel: resolveStage(mapStageLabel(statusResp.stage)),
       progress: statusResp.progress,
     }))
     schedulePoll(previewId)
@@ -595,13 +657,13 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
       return (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-border bg-muted/30 px-6 py-10 text-center">
           <AlertCircle className="h-8 w-8 text-muted-foreground" aria-hidden="true" />
-          <p className="text-sm font-medium text-foreground">免注册试用暂未开放</p>
+          <p className="text-sm font-medium text-foreground">{t("masterClosed.title")}</p>
           <p className="text-xs text-muted-foreground">
-            可以先
+            {t("masterClosed.before")}
             <Link href="/auth" className="mx-1 text-primary hover:underline font-medium">
-              注册账号
+              {t("masterClosed.registerLink")}
             </Link>
-            体验完整的视频翻译配音
+            {t("masterClosed.after")}
           </p>
         </div>
       )
@@ -644,7 +706,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
             className={cn(buttonVariants({ variant: "outline", size: "sm" }), "self-start")}
             onClick={resetPanel}
           >
-            重新上传
+            {t("retryUpload")}
           </button>
         </div>
       )
@@ -656,13 +718,12 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           <div className="rounded-xl border border-border bg-muted/30 p-4">
             <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
               <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" aria-hidden="true" />
-              <span className="font-medium text-foreground">视频上传成功</span>
+              <span className="font-medium text-foreground">{t("consent.uploadSuccess")}</span>
             </div>
             <p className="text-xs text-muted-foreground">
               {limits.active_lane === 'express'
-                ? `我们将用快捷版完整管线（含说话人音色匹配）为您生成带水印的前 ${formatPreviewDuration(limits.preview_seconds)}中文配音预览。`
-                : `我们将为您生成带水印的前 ${formatPreviewDuration(limits.preview_seconds)}中文配音预览。`}
-              继续前请确认以下声明：
+                ? t("consent.introExpress", { duration: previewDuration(t, limits.preview_seconds) })
+                : t("consent.introDefault", { duration: previewDuration(t, limits.preview_seconds) })}
             </p>
           </div>
 
@@ -676,7 +737,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
               className="mt-0.5 h-4 w-4 shrink-0 rounded border-border"
             />
             <span className="text-sm text-foreground leading-relaxed">
-              我确认对该视频内容及其中人声拥有必要权利，同意将其用于本次预览合成。
+              {t("consent.rightsLabel")}
             </span>
           </label>
 
@@ -694,9 +755,9 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
                 className="mt-0.5 h-4 w-4 shrink-0 rounded border-border"
               />
               <span className="text-sm text-foreground leading-relaxed">
-                <span className="font-medium">（可选）克隆我的原声音色</span>
+                <span className="font-medium">{t("consent.cloneOptInTitle")}</span>
                 <span className="mt-1 block text-xs text-muted-foreground">
-                  勾选后将用视频中主说话人的声音生成更接近原声的配音（免费，仅用于本次预览）。不勾选则使用预设音色。
+                  {t("consent.cloneOptInDetail")}
                 </span>
               </span>
             </label>
@@ -712,7 +773,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
             )}
             onClick={() => void handleCreate()}
           >
-            生成配音预览
+            {t("consent.submit")}
           </button>
         </div>
       )
@@ -734,7 +795,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
             {state.progress !== null && <ProgressBar pct={pct} />}
           </div>
           <p className="text-xs text-muted-foreground text-center">
-            配音预览生成中，通常需要 2–5 分钟，请稍候
+            {t("processing.hint")}
           </p>
         </div>
       )
@@ -746,8 +807,8 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-2 text-sm">
             <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" aria-hidden="true" />
-            <span className="font-medium text-foreground">配音预览已就绪</span>
-            <span className="text-xs text-muted-foreground">（带水印，前 {formatPreviewDuration(limits.preview_seconds)}）</span>
+            <span className="font-medium text-foreground">{t("ready.title")}</span>
+            <span className="text-xs text-muted-foreground">{t("ready.watermarkNote", { duration: previewDuration(t, limits.preview_seconds) })}</span>
           </div>
           <div className="overflow-hidden rounded-xl border border-border bg-black">
             {/* No download attribute, no download button, controlsList nodownload */}
@@ -761,32 +822,32 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
               onContextMenu={(e) => e.preventDefault()}
               className="w-full"
             >
-              您的浏览器不支持 video 标签。
+              {t("ready.videoFallback")}
             </video>
           </div>
           <p className="text-xs text-muted-foreground">
-            预览效果满意？
+            {t("ready.ctaLead")}
             <a
               href={`/auth?from=${encodeURIComponent('/translations/new')}`}
               className="ml-1 text-primary hover:underline font-medium"
             >
-              注册账号体验完整翻译
+              {t("ready.ctaRegisterLink")}
             </a>
-            ，登录后还可使用
+            {t("ready.ctaMiddle")}
             <a
               href={`/auth?from=${encodeURIComponent('/translations/new')}`}
               className="mx-1 text-primary hover:underline font-medium"
             >
-              智能版
+              {t("ready.ctaStudioLink")}
             </a>
-            获得更高质量的全自动翻译
+            {t("ready.ctaTail")}
           </p>
           <button
             type="button"
             className={cn(buttonVariants({ variant: "outline", size: "sm" }), "self-start")}
             onClick={resetPanel}
           >
-            上传另一个视频
+            {t("ready.uploadAnother")}
           </button>
         </div>
       )
@@ -800,9 +861,9 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           <div className="flex items-start gap-3 rounded-xl border border-destructive/20 bg-destructive/5 p-4">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" aria-hidden="true" />
             <div>
-              <p className="text-sm text-destructive font-medium">{state.errorMsg || '预览生成失败'}</p>
+              <p className="text-sm text-destructive font-medium">{state.errorMsg || t("failed.fallback")}</p>
               <p className="text-xs text-muted-foreground mt-1">
-                已上传的视频仍然保留，点击「重试」无需重新上传。
+                {t("failed.keepNote")}
               </p>
             </div>
           </div>
@@ -812,14 +873,14 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
               className={cn(buttonVariants({ variant: "default", size: "sm" }))}
               onClick={() => void handleRetry()}
             >
-              重试
+              {t("failed.retry")}
             </button>
             <button
               type="button"
               className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
               onClick={resetPanel}
             >
-              重新上传
+              {t("failed.reupload")}
             </button>
           </div>
         </div>
@@ -842,25 +903,25 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     const isReady = state.step === 'ready'
     const pct = isUpload ? state.uploadPct : (state.progress ?? (isConsent || isReady ? 100 : null))
     const title = isUpload
-      ? '视频上传中'
+      ? t("minimized.titleUpload")
       : isProcessing
-        ? '预览生成中'
+        ? t("minimized.titleProcessing")
         : isConsent
-          ? '上传已完成'
+          ? t("minimized.titleConsent")
           : isReady
-            ? '预览已完成'
+            ? t("minimized.titleReady")
             : state.step === 'failed'
-              ? '预览生成失败'
-              : '上传试用'
+              ? t("minimized.titleFailed")
+              : t("minimized.titleDefault")
     const detail = isUpload
       ? `${state.uploadSpeed ? `${state.uploadSpeed} · ` : ''}${state.uploadPct}%`
       : isProcessing
-        ? (state.stageLabel || '处理中')
+        ? (state.stageLabel || t("minimized.detailProcessingFallback"))
         : isConsent
-          ? '点击确认授权并生成预览'
+          ? t("minimized.detailConsent")
           : isReady
-            ? '点击查看预览结果'
-            : '点击展开窗口'
+            ? t("minimized.detailReady")
+            : t("minimized.detailDefault")
 
     const Icon = isConsent || isReady ? CheckCircle2 : state.step === 'failed' || state.step === 'error' ? AlertCircle : Loader2
 
@@ -869,7 +930,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         type="button"
         className="fixed bottom-5 right-5 z-[70] w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border bg-background p-3 text-left text-sm shadow-xl ring-1 ring-foreground/10 transition hover:border-primary/40 hover:shadow-2xl"
         onClick={restorePanel}
-        aria-label="展开上传试用窗口"
+        aria-label={t("minimized.expandAria")}
       >
         <div className="flex items-start gap-3">
           <Icon
@@ -882,7 +943,7 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-3">
               <span className="font-medium text-foreground">{title}</span>
-              <span className="text-xs text-primary">展开</span>
+              <span className="text-xs text-primary">{t("minimized.expandLabel")}</span>
             </div>
             <p className="mt-0.5 truncate text-xs text-muted-foreground">{detail}</p>
             {pct !== null && (
@@ -906,20 +967,20 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
             className,
           )}
         >
-          立即试用
+          {t("dialogTrigger")}
         </DialogTrigger>
         <DialogContent className="sm:max-w-lg" showCloseButton={false}>
           <DialogHeader>
             <div className="flex items-center justify-between gap-3">
-              <DialogTitle className="text-lg">免注册上传试用</DialogTitle>
+              <DialogTitle className="text-lg">{t("dialogTitle")}</DialogTitle>
               <div className="flex items-center gap-1">
                 {canMinimize && (
                   <button
                     type="button"
                     className={cn(buttonVariants({ variant: "ghost", size: "icon-sm" }))}
                     onClick={minimizePanel}
-                    aria-label="最小化上传窗口"
-                    title="最小化"
+                    aria-label={t("minimizeAria")}
+                    title={t("minimizeTitle")}
                   >
                     <Minus className="h-4 w-4" aria-hidden="true" />
                   </button>
@@ -928,8 +989,8 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
                   type="button"
                   className={cn(buttonVariants({ variant: "ghost", size: "icon-sm" }))}
                   onClick={() => void requestClose()}
-                  aria-label="关闭上传窗口"
-                  title="关闭"
+                  aria-label={t("closeAria")}
+                  title={t("closeTitle")}
                 >
                   <X className="h-4 w-4" aria-hidden="true" />
                 </button>
@@ -942,8 +1003,10 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
           </div>
 
           <p className="text-center text-xs text-muted-foreground">
-            本地视频 · 前 {formatPreviewDuration(limits.preview_seconds)}预览 · 带水印
-            {limits.active_lane === 'express' ? ' · 快捷版真实管线' : ''}
+            {t("footer", {
+              duration: previewDuration(t, limits.preview_seconds),
+              expressSuffix: limits.active_lane === 'express' ? t("footerExpressSuffix") : '',
+            })}
           </p>
         </DialogContent>
       </Dialog>

@@ -67,17 +67,21 @@ export const DEFAULT_PREVIEW_LIMITS: PreviewLimits = {
   express_clone_available: false,
 }
 
-/** Fetch the currently effective anonymous-preview limits（只读，无需会话）. */
+/** Fetch the currently effective anonymous-preview limits（只读，无需会话）.
+ *
+ *  失败抛 Error，其 `.message` 为稳定 token（`limits_http` / `invalid_response`）。
+ *  调用方（面板 mount effect）目前静默吞掉该异常并回落默认限制，故 token 不直接面向用户；
+ *  保持 token 化是为了与本模块「lib 语言中立」约定一致（UI-03g）。 */
 export async function getPreviewLimits(): Promise<PreviewLimits> {
   const resp = await fetch('/gateway/anonymous-preview/limits', { credentials: 'include' })
   if (!resp.ok) {
-    throw new Error(`限制查询失败（HTTP ${resp.status}）`)
+    throw new Error('limits_http')
   }
   const body = (await resp.json()) as Record<string, unknown>
   const maxUploadMb = Number(body.max_upload_mb)
   const previewSeconds = Number(body.preview_seconds)
   if (!Number.isFinite(maxUploadMb) || maxUploadMb <= 0 || !Number.isFinite(previewSeconds) || previewSeconds <= 0) {
-    throw new Error('限制响应格式无效')
+    throw new Error('invalid_response')
   }
   // lane 三态解析：旧网关（无字段）按 free/开兼容；显式 null/未知值 = 关闭。
   const rawLane = body.active_lane
@@ -98,12 +102,18 @@ export async function getPreviewLimits(): Promise<PreviewLimits> {
   }
 }
 
-/** 把预览秒数格式化成提示文案用的时长（180 → "3 分钟"，90 → "90 秒"）. */
-export function formatPreviewDuration(seconds: number): string {
+/** 把预览秒数拆成语言中立的时长描述（180 → {value:3,unit:'minutes'}，
+ *  90 → {value:90,unit:'seconds'}）。文案本地化在消费方（面板）经 ICU 完成，
+ *  本模块不再产出任何语言相关字符串（UI-03g）。 */
+export type PreviewDuration =
+  | { value: number; unit: 'minutes' }
+  | { value: number; unit: 'seconds' }
+
+export function previewDurationParts(seconds: number): PreviewDuration {
   if (seconds > 0 && seconds % 60 === 0) {
-    return `${seconds / 60} 分钟`
+    return { value: seconds / 60, unit: 'minutes' }
   }
-  return `${seconds} 秒`
+  return { value: seconds, unit: 'seconds' }
 }
 
 /** Upload a raw video file. Returns the upload response with admission info.
@@ -129,22 +139,25 @@ export async function uploadPreviewVideo(
         try {
           resolve(JSON.parse(xhr.responseText) as UploadResponse)
         } catch {
-          reject(new Error('服务器返回了无效的响应格式'))
+          reject(new Error('invalid_response'))
         }
       } else {
-        let msg = `上传失败（HTTP ${xhr.status}）`
+        // 后端若回了真实 error code（如 "rate_limited"），原样透传 —— 面板会先
+        // 经 mapUploadError 映射成文案，未命中再回落 errors.upload_http。
+        let msg = 'upload_http'
         try {
           const body = JSON.parse(xhr.responseText) as { error?: string; detail?: string }
           msg = body.error ?? body.detail ?? msg
         } catch {
-          // keep default message
+          // keep default token
         }
         reject(new Error(msg))
       }
     }
 
-    xhr.onerror = () => reject(new Error('网络错误，请检查连接后重试'))
-    xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'))
+    xhr.onerror = () => reject(new Error('network_error'))
+    // abort 由面板显式吞掉（err.name === 'AbortError' → return）；message 不面向用户。
+    xhr.onabort = () => reject(new DOMException('upload_aborted', 'AbortError'))
 
     if (signal) {
       signal.addEventListener('abort', () => xhr.abort(), { once: true })
@@ -218,7 +231,9 @@ export async function getPreviewStatus(previewId: string): Promise<StatusRespons
     credentials: 'include',
   })
   if (!resp.ok) {
-    throw new PreviewStatusError(resp.status, `状态查询失败（HTTP ${resp.status}）`)
+    // message 为稳定 token；面板按 PreviewStatusError.status 分流（401 → 会话过期；
+    // 其余 → 有界重试），token 文案兜底走 errors.status_http。
+    throw new PreviewStatusError(resp.status, 'status_http')
   }
   return resp.json() as Promise<StatusResponse>
 }
@@ -228,68 +243,64 @@ export function getPreviewStreamUrl(previewId: string): string {
   return `/gateway/anonymous-preview/${previewId}/stream`
 }
 
-// ── Chinese error message mapping ─────────────────────────────────────────
+// ── Language-neutral code mapping ─────────────────────────────────────────
+//
+// UI-03g：本模块不再产出任何中文/英文文案。各 mapper 只返回稳定 CODE/TOKEN，
+// 由面板经 next-intl `t("<group>." + code)` 渲染，未知 code 用 `t.has` 守卫回落。
+// 后端契约 code 列表（gateway anonymous_preview_api._redact_reason / admission）
+// 与字典 key 一一对应；新增 code 须同步加字典 key + 此处文档。
 
-/** Map upload status_reason codes to user-facing Chinese text. */
+/** 已知的 upload status_reason code 集合（仅用于文档/类型参考，运行时不做白名单过滤——
+ *  面板对未知 code 用 `t.has` 守卫，回落 statusReason.fallback）。 */
+export const KNOWN_STATUS_REASONS = [
+  'rate_limited',
+  'content_blocked',
+  'file_too_large',
+  'unsupported_format',
+  'duration_exceeded',
+  'quota_exceeded',
+  'service_unavailable',
+] as const
+
+/** Return the stable status_reason CODE as-is（null → ''）. 面板映射 code→文案。 */
 export function mapStatusReason(reason: string | null): string {
-  if (!reason) return ''
-  const MAP: Record<string, string> = {
-    rate_limited: '今日预览次数已用完，请明天再来',
-    content_blocked: '内容未通过合规检查，无法预览',
-    // 上限是 admin 热配置（limits 端点），此处不硬编码具体数值
-    file_too_large: '文件超过大小限制，请压缩后重试',
-    unsupported_format: '不支持的视频格式，请上传 mp4、mov、m4v 或 webm',
-    // 源视频时长超过匿名预览上限（gateway _redact_reason 细分出的 code）→ 引导换更短视频。
-    duration_exceeded: '视频时长超限，请更换视频再上传',
-    quota_exceeded: '系统预览配额已满，请稍后再试',
-    service_unavailable: '预览服务暂不可用，请稍后再试',
-  }
-  return MAP[reason] ?? `上传被拒绝（${reason}）`
+  return reason ?? ''
 }
 
-/** Map upload-time HTTP error codes (429/403/413/…) to friendly Chinese.
+/** Return the stable upload-error CODE as-is（null/undefined → ''）.
  *
- *  2026-06-13：上传 XHR 失败时原本把后端原始 error code（如 "rate_limited"）
- *  直接抛给用户，绕过了 mapStatusReason，UI 显示生硬英文。本函数覆盖
- *  AD-8 peek / 上传预检会返回的 code；未知 code 原样返回（调用方再兜底）。
+ *  曾覆盖 AD-8 peek / 上传预检 code（rate_limited / preview_queue_full / …）的中文
+ *  映射已移到面板字典（uploadError.*）；本函数现仅透传 code，面板 `t.has` 守卫后渲染。
  */
 export function mapUploadError(code: string | null | undefined): string {
-  if (!code) return ''
-  const MAP: Record<string, string> = {
-    rate_limited: '今日免费预览次数已用完，请明天再来',
-    preview_queue_full: '预览通道繁忙，请稍后再试',
-    file_too_large: '文件超过大小限制，请压缩后重试',
-    unsupported_media_type: '不支持的视频格式，请上传 mp4、mov、m4v 或 webm',
-    gate_unavailable: '预览服务暂时不可用，请稍后再试',
-    storage_error: '服务器存储繁忙，请稍后再试',
-    csrf_origin_rejected: '请求来源校验失败，请刷新页面后重试',
-    feature_not_available: '免注册试用暂未开放',
-    anonymous_preview_disabled: '免注册试用暂未开放',
-  }
-  return MAP[code] ?? code
+  return code ?? ''
 }
 
+/** Map create-preview failure to a stable token（面板映射 createError.<token>）.
+ *  保留 status/raw 分流逻辑，只把返回值从中文文案改成稳定 token。 */
 function mapCreateError(status: number, raw: string): string {
   // CodeX 外审 2026-06-12 P1/P2 配套：重试重入被服务端收紧后，409 不再
   // 恒等于"处理中"——区分重试次数耗尽 / 不可重试失败，引导重新上传。
-  if (raw === 'retry_exhausted') return '重试次数已用完，请重新上传一个视频'
-  if (status === 403) return '需要先确认版权声明才能继续'
-  if (status === 409) return '该预览已在处理中或无法重试，请稍候或重新上传'
-  if (status === 429) return '预览通道繁忙，请稍后再试'
-  return raw || `创建预览失败（HTTP ${status}）`
+  if (raw === 'retry_exhausted') return 'retry_exhausted'
+  if (status === 403) return 'need_consent'
+  if (status === 409) return 'already_processing'
+  if (status === 429) return 'channel_busy'
+  return 'generic'
 }
 
-/** Map processing stage codes to readable progress descriptions. */
+/** 已知的处理阶段 code（参考；未知/ null 由面板回落 stage.fallback）。 */
+export const KNOWN_STAGES = [
+  'queued',
+  'probing',
+  'transcribing',
+  'translating',
+  'synthesizing',
+  'mixing',
+  'publishing',
+] as const
+
+/** Return the stable stage CODE（null/未知 → 'fallback' 哨兵）. 面板映射 stage.<code>. */
 export function mapStageLabel(stage: string | null): string {
-  if (!stage) return '处理中…'
-  const MAP: Record<string, string> = {
-    queued: '等待处理…',
-    probing: '分析视频…',
-    transcribing: '转录音频…',
-    translating: '翻译中…',
-    synthesizing: '合成配音…',
-    mixing: '混音合成…',
-    publishing: '生成预览…',
-  }
-  return MAP[stage] ?? '处理中…'
+  if (!stage) return 'fallback'
+  return (KNOWN_STAGES as readonly string[]).includes(stage) ? stage : 'fallback'
 }
