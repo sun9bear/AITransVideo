@@ -50,20 +50,12 @@ services:
       # TTSGenerator + GeminiTranslator; do NOT just bump the env.
       AVT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY: "${AVT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY:-1}"
     volumes:
-      # --- 开发期代码热更新 bind mount ---
-      # 主机代码目录直接映射到容器内，修改后 docker restart 即可生效。
-      # ⚠️ 项目接近完成时切回镜像不可变模式：删除下面 3 个 code mount，
-      #    改为 docker-compose build app + docker-compose up -d app。
-      #    参见 docs/FREE_VS_PAID_TTS_ROUTING_STATUS_AND_RECOVERY_PLAN.md
-      - type: bind
-        source: ${AIVIDEOTRANS_ROOT}/app/src
-        target: /opt/aivideotrans/app/src
-      - type: bind
-        source: ${AIVIDEOTRANS_ROOT}/app/main.py
-        target: /opt/aivideotrans/app/main.py
-      - type: bind
-        source: ${AIVIDEOTRANS_ROOT}/app/scripts
-        target: /opt/aivideotrans/app/scripts
+      # --- 镜像不可变模式（TU-02, 2026-06-27）---
+      # app 代码（src/ main.py scripts/）已在构建期由 Dockerfile `COPY .` 烘进镜像，
+      # 不再 bind-mount 主机代码，切回镜像不可变。部署改用
+      #   docker compose --env-file /opt/aivideotrans/config/.env up -d --build app
+      # （不再用 `docker restart` 热更新主机代码）。下方 config/data/jobs/model_cache
+      # 等数据/配置挂载仍保留。
       # --- 数据持久化 bind mount（始终保留） ---
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/config
