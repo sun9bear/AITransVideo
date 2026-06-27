@@ -434,7 +434,7 @@ class TestReserveCreditsOrRaise:
         uid = uuid.uuid4()
         db = AsyncMock()
         select_result = MagicMock()
-        select_result.scalar_one_or_none.return_value = None
+        select_result.scalars.return_value.first.return_value = None
         db.execute = AsyncMock(return_value=select_result)
         db.flush = AsyncMock()
         added = []
