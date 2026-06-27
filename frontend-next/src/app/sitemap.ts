@@ -1,5 +1,5 @@
 import type { MetadataRoute } from "next"
-import { absoluteUrl, hreflangLanguages, publicRoutes } from "@/lib/seo/site"
+import { absoluteUrl, hreflangLanguages, localizedRoutes, publicRoutes } from "@/lib/seo/site"
 
 /**
  * Generates `/sitemap.xml`.
@@ -23,14 +23,15 @@ import { absoluteUrl, hreflangLanguages, publicRoutes } from "@/lib/seo/site"
  * return 200 instead of redirecting to `/auth/login`.
  */
 export default function sitemap(): MetadataRoute.Sitemap {
-  return publicRoutes.map((path) => ({
-    url: absoluteUrl(path),
-    // UI-03d-1：locale-aware alternates 由 hreflangLanguages 单点产出。已翻旗路由
-    // （/、/pricing、/trial）自动获得 `en` 备选；legal 路由（不在 localizedRoutes）
-    // 只挂 `zh-Hans` + `x-default`（无 en），待 UI-03c 翻译后再纳入。`url` 主条目仍为
-    // 默认 zh 裸路径，对当前抓取的主 URL 集合零变化。
-    alternates: {
-      languages: hreflangLanguages(path),
-    },
-  }))
+  return publicRoutes.map((path) => {
+    // 仅**已翻旗**路由（/pricing /trial）挂 locale-aware alternates（含 en，由 hreflangLanguages
+    // 单点产出）；未翻旗路由（home `/` 待 UI-03g、legal 待 UI-03c）**不挂 languages** —— 避免无意义
+    // 的 zh-only 自指备选集，与 page 级 metadata 一致（@codex #67 P2）。`url` 主条目仍为默认 zh
+    // 裸路径，对当前抓取的主 URL 集合零变化。
+    const localized = (localizedRoutes as readonly string[]).includes(path)
+    return {
+      url: absoluteUrl(path),
+      ...(localized ? { alternates: { languages: hreflangLanguages(path) } } : {}),
+    }
+  })
 }
