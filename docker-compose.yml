@@ -148,6 +148,8 @@ services:
         # APF 匿名 Free 预览 (plan 2026-06-10 T1) — 构建期烘焙到 client bundle
         NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW: "${NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW:-0}"
         NEXT_PUBLIC_ENABLE_SMART_PREVIEW_CLONE: "${NEXT_PUBLIC_ENABLE_SMART_PREVIEW_CLONE:-0}"
+        # 界面语言切换器（UI page locale）— 默认关，uiloc en 内容补齐前 ship dark
+        NEXT_PUBLIC_ENABLE_LOCALE_SWITCHER: "${NEXT_PUBLIC_ENABLE_LOCALE_SWITCHER:-0}"
     image: aivideotrans-next:latest
     container_name: aivideotrans-next
     network_mode: host

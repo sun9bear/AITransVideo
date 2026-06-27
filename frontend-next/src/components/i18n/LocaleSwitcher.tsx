@@ -30,6 +30,14 @@ export function LocaleSwitcher({ className }: { className?: string }) {
   const searchParams = useSearchParams()
   const [isPending, startTransition] = useTransition()
 
+  // Ship-dark gate（默认隐藏切换器）：uiloc Phase 1 的 en 内容尚未完整——/en 首页约 40%
+  // 英文、pricing/trial 有中文 CTA 泄漏、/en 工作台未做——先用构建期 flag 隐藏切换器，
+  // 避免对外暴露半成品 EN 开关。en 补齐后构建 next 传 NEXT_PUBLIC_ENABLE_LOCALE_SWITCHER=1
+  // 即可激活。gate 放在所有 hook 之后以守 rules-of-hooks。
+  if (process.env.NEXT_PUBLIC_ENABLE_LOCALE_SWITCHER !== "1") {
+    return null
+  }
+
   function switchTo(nextLocale: (typeof routing.locales)[number]) {
     if (nextLocale === activeLocale || isPending) return
     // usePathname (next-intl) 返回去 locale 前缀的路径；query 不在其内，显式保留。
