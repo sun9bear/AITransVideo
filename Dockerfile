@@ -36,7 +36,6 @@ RUN apt-get update \
 COPY . /opt/aivideotrans/app
 
 RUN pip install --no-cache-dir . \
-    && pip install --no-cache-dir pyJianYingDraft \
     && if [ "$INSTALL_WHISPER" = "1" ]; then \
          echo "[Dockerfile] Installing optional Whisper extra (.[whisper])" \
          && pip install --no-cache-dir ".[whisper]"; \
