@@ -6,22 +6,38 @@ import { PrimaryCta } from "@/components/marketing/primary-cta"
 import { LinkButton } from "@/components/marketing/link-button"
 import { getPlansSafeServer } from "@/lib/billing/get-plans"
 import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
-import { absoluteUrl } from "@/lib/seo/site"
+import { absoluteUrl, hreflangLanguages, type Locale } from "@/lib/seo/site"
 
-const PAGE_DESCRIPTION =
-  "免费试用 AITrans.Video 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。"
-
-export const metadata: Metadata = {
-  // Short title — root layout template adds " · 爱译视频 AITrans.Video".
-  title: "免费试用",
-  description: PAGE_DESCRIPTION,
-  alternates: { canonical: "/trial" },
-  openGraph: {
-    title: "免费试用 · 爱译视频",
-    description: PAGE_DESCRIPTION,
-    url: absoluteUrl("/trial"),
-    type: "website",
-  },
+/**
+ * `/trial` metadata（UI-03d-1 翻旗）。title/description/OG 从 `seo` 字典取 localized 值，
+ * canonical/hreflang 路由感知。
+ *
+ * **红线 R1（默认 zh 字节一致）**：zh 字典值逐字节复刻改造前内联字面量 ——
+ * title "免费试用"、description 旧 PAGE_DESCRIPTION、ogTitle "免费试用 · 爱译视频"；canonical
+ * 保留相对 `"/trial"`（en 才用绝对 `/en/trial`）。title 仍为短串，root layout template 加后缀。
+ */
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ locale: Locale }>
+}): Promise<Metadata> {
+  const { locale } = await params
+  const t = await getTranslations("seo.trial")
+  return {
+    title: t("title"),
+    description: t("description"),
+    alternates: {
+      canonical: locale === "zh" ? "/trial" : absoluteUrl("/trial", locale),
+      languages: hreflangLanguages("/trial"),
+    },
+    openGraph: {
+      title: t("ogTitle"),
+      description: t("description"),
+      url: absoluteUrl("/trial", locale),
+      locale: locale === "en" ? "en_US" : "zh_CN",
+      type: "website",
+    },
+  }
 }
 
 /**
@@ -38,8 +54,14 @@ export const metadata: Metadata = {
  *
  * See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §1.1 issue 4
  */
-export default async function TrialPage() {
+export default async function TrialPage({
+  params,
+}: {
+  params: Promise<{ locale: Locale }>
+}) {
+  const { locale } = await params
   const t = await getTranslations("marketing.trial")
+  const tSeo = await getTranslations("seo")
   const data = await getPlansSafeServer()
   const trial = data.trial
   const hasNumbers = Boolean(
@@ -59,9 +81,10 @@ export default async function TrialPage() {
   return (
     <>
       <BreadcrumbJsonLd
+        locale={locale}
         items={[
-          { name: "首页", path: "/" },
-          { name: "免费试用", path: "/trial" },
+          { name: tSeo("breadcrumb.home"), path: "/" },
+          { name: tSeo("breadcrumb.trial"), path: "/trial" },
         ]}
       />
       <section className="marketing-reading-surface pt-16 pb-8 sm:pt-20">

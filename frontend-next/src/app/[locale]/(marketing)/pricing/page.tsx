@@ -5,24 +5,38 @@ import { PricingAssurance } from "@/components/marketing/pricing-assurance"
 import { TrialBanner } from "@/components/marketing/trial-banner"
 import { Faq } from "@/components/marketing/faq"
 import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
-import { absoluteUrl } from "@/lib/seo/site"
+import { absoluteUrl, hreflangLanguages, type Locale } from "@/lib/seo/site"
 
-const PAGE_DESCRIPTION =
-  "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。"
-
-export const metadata: Metadata = {
-  // Short title — root layout `template: "%s · 爱译视频 AITrans.Video"` adds
-  // the brand suffix automatically. Setting the full string here would
-  // double-suffix to "定价 · 爱译视频 AITrans.Video · 爱译视频 AITrans.Video".
-  title: "定价",
-  description: PAGE_DESCRIPTION,
-  alternates: { canonical: "/pricing" },
-  openGraph: {
-    title: "定价 · 爱译视频",
-    description: PAGE_DESCRIPTION,
-    url: absoluteUrl("/pricing"),
-    type: "website",
-  },
+/**
+ * `/pricing` metadata（UI-03d-1 翻旗）。title/description/OG 从 `seo` 字典取 localized 值，
+ * canonical/hreflang 路由感知。
+ *
+ * **红线 R1（默认 zh 字节一致）**：zh 字典值逐字节复刻改造前内联字面量 ——
+ * title "定价"、description 旧 PAGE_DESCRIPTION、ogTitle "定价 · 爱译视频"；canonical 保留相对
+ * `"/pricing"`（en 才用绝对 `/en/pricing`）。title 仍为短串，root layout template 加品牌后缀。
+ */
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ locale: Locale }>
+}): Promise<Metadata> {
+  const { locale } = await params
+  const t = await getTranslations("seo.pricing")
+  return {
+    title: t("title"),
+    description: t("description"),
+    alternates: {
+      canonical: locale === "zh" ? "/pricing" : absoluteUrl("/pricing", locale),
+      languages: hreflangLanguages("/pricing"),
+    },
+    openGraph: {
+      title: t("ogTitle"),
+      description: t("description"),
+      url: absoluteUrl("/pricing", locale),
+      locale: locale === "en" ? "en_US" : "zh_CN",
+      type: "website",
+    },
+  }
 }
 
 /**
@@ -38,14 +52,21 @@ export const metadata: Metadata = {
  * All numeric facts come from the gateway truth source. There are no hardcoded
  * prices, minutes, concurrency limits, or quotas in this file.
  */
-export default async function PricingPage() {
+export default async function PricingPage({
+  params,
+}: {
+  params: Promise<{ locale: Locale }>
+}) {
+  const { locale } = await params
   const t = await getTranslations("marketing.pricing")
+  const tSeo = await getTranslations("seo")
   return (
     <>
       <BreadcrumbJsonLd
+        locale={locale}
         items={[
-          { name: "首页", path: "/" },
-          { name: "定价", path: "/pricing" },
+          { name: tSeo("breadcrumb.home"), path: "/" },
+          { name: tSeo("breadcrumb.pricing"), path: "/pricing" },
         ]}
       />
       <section className="marketing-reading-surface pt-16 pb-10 sm:pt-20 sm:pb-12">

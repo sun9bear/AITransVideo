@@ -3,5 +3,20 @@
     "name": "AITrans.Video",
     "defaultTitle": "AITrans.Video · Make the world's videos speak Chinese",
     "defaultDescription": "Turn long English videos into publish-ready Chinese-dubbed versions. AI video translation, Chinese voiceover, AI subtitles, YouTube video translation, SRT subtitle export, and a long-form localization workbench. Supports videos up to 3 hours, with sentence-by-sentence editing and single-sentence regeneration."
+  },
+  "pricing": {
+    "title": "Pricing",
+    "description": "Affordable AI translation and dubbing even for long videos. Free / Plus / Pro plans, up to 180 minutes per video, no card required, no charge on failure, and editing a segment doesn't re-run the whole video.",
+    "ogTitle": "Pricing · AITrans.Video"
+  },
+  "trial": {
+    "title": "Free trial",
+    "description": "Try AITrans.Video's full video translation and dubbing workflow free — no card required, and no automatic charge when the trial ends.",
+    "ogTitle": "Free trial · AITrans.Video"
+  },
+  "breadcrumb": {
+    "home": "Home",
+    "pricing": "Pricing",
+    "trial": "Free trial"
   }
 }

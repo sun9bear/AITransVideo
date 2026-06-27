@@ -31,14 +31,24 @@ assert.equal(site.absoluteUrl("/pricing"), `${SITE_URL}/pricing`, "absoluteUrl('
 assert.equal(site.absoluteUrl("/pricing", "zh"), `${SITE_URL}/pricing`, "absoluteUrl(zh) ≠ 单参（zh 必须 inert）")
 assert.equal(site.absoluteUrl("pricing"), `${SITE_URL}/pricing`, "absoluteUrl 无前导斜杠 漂移")
 
+// UI-03d-1 翻旗：home 属 localizedRoutes → hreflangLanguages("/") 现含 en（互惠）。
 const hl = site.hreflangLanguages("/")
 assert.deepEqual(
   hl,
-  { "zh-Hans": SITE_URL, "x-default": SITE_URL },
-  "hreflang 非 inert（UI-01 应只含 zh-Hans + x-default，均指 zh）"
+  { "zh-Hans": SITE_URL, "en": `${SITE_URL}/en`, "x-default": SITE_URL },
+  "hreflang('/') 翻旗后应含 zh-Hans + en + x-default（home 已 localizedRoute）"
 )
 
-// en 分支声明可用（未被消费）：前缀正确，供 UI-03 翻旗
+// legal 路由（/terms）未翻旗（不在 localizedRoutes）→ 只挂 zh-Hans + x-default，无 en。
+// 防回归：03d-1 误把 legal 也挂 en 会在此 red（legal en 留待 UI-03c）。
+const hlTerms = site.hreflangLanguages("/terms")
+assert.deepEqual(
+  hlTerms,
+  { "zh-Hans": `${SITE_URL}/terms`, "x-default": `${SITE_URL}/terms` },
+  "hreflang('/terms') 应只含 zh-Hans + x-default（legal 未翻旗，无 en — UI-03c 才加）"
+)
+
+// en 分支声明可用：前缀正确，供翻旗页消费
 assert.equal(site.absoluteUrl("/pricing", "en"), `${SITE_URL}/en/pricing`, "absoluteUrl en 前缀错误")
 
 // 3) auth 默认 zh 字节一致（UI-04 红线 1）：/auth · /auth/login · /auth/register ·
@@ -291,6 +301,27 @@ assert.equal(
   site.defaultDescription,
   "localeSeo.zh.defaultDescription ≠ 顶层（zh 必须 inert）",
 )
+
+// 5b) UI-03d-1 翻旗：pricing/trial generateMetadata + breadcrumb 改读 seo 字典后，zh 值必须与
+//     改造前内联字面量【逐字节】相同（红线 R1）。任一漂移即 red = 默认 zh metadata/面包屑回归。
+//     钉死全角间隔号 ·（U+00B7）、Free/Plus/Pro 半角斜杠分隔、PAGE_DESCRIPTION 整串。
+assert.equal(zhSeo.pricing.title, "定价", "seo.pricing.title 漂移（红线 R1）")
+assert.equal(zhSeo.pricing.ogTitle, "定价 · 爱译视频", "seo.pricing.ogTitle 间隔号/漂移（红线 R1）")
+assert.equal(
+  zhSeo.pricing.description,
+  "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。",
+  "seo.pricing.description ≠ 改造前 PAGE_DESCRIPTION（红线 R1）",
+)
+assert.equal(zhSeo.trial.title, "免费试用", "seo.trial.title 漂移（红线 R1）")
+assert.equal(zhSeo.trial.ogTitle, "免费试用 · 爱译视频", "seo.trial.ogTitle 间隔号/漂移（红线 R1）")
+assert.equal(
+  zhSeo.trial.description,
+  "免费试用 AITrans.Video 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。",
+  "seo.trial.description ≠ 改造前 PAGE_DESCRIPTION（红线 R1）",
+)
+assert.equal(zhSeo.breadcrumb.home, "首页", "seo.breadcrumb.home 漂移（红线 R1）")
+assert.equal(zhSeo.breadcrumb.pricing, "定价", "seo.breadcrumb.pricing 漂移（红线 R1）")
+assert.equal(zhSeo.breadcrumb.trial, "免费试用", "seo.breadcrumb.trial 漂移（红线 R1）")
 
 // 6) en seo 双源同步守卫（UI-03a 多 lens：messages/en/seo.json 与 site.ts localeSeo.en
 //    各存一份 en SEO 标题/描述，当前靠手工保持一致。把『同源同值』从注释承诺升级为机器守卫，
