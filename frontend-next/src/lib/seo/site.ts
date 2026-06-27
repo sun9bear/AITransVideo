@@ -122,13 +122,26 @@ export function absoluteUrl(path: string, locale?: Locale): string {
 }
 
 /**
+ * 已翻旗（body 100% 英文、可对爬虫宣告 en）的路由白名单（UI-03d-1）。
+ * 仅 `/`、`/pricing`、`/trial` 三页在 03a/b/e/f 后整页英文就绪 → 互惠挂 en hreflang +
+ * sitemap en 条目。legal 页（/contact /terms /privacy /refund）正文仍中文，待 UI-03c 翻译后
+ * 才加入本列表（彼时它们的 en hreflang 一并落地）；当前 legal 路由不在此列 → 自动只挂 zh。
+ */
+export const localizedRoutes = ["/", "/pricing", "/trial"] as const
+
+/**
  * hreflang `languages` map for a path（方案 §1.8）。
- * **INERT in UI-01**：只产 `zh-Hans` + `x-default`（均指 zh）；`en` 条目由 UI-03 翻旗时加入。
+ * 路由感知（UI-03d-1）：始终产 `zh-Hans` + `x-default`（均指 zh 自指主市场）；**仅当 path 属于
+ * `localizedRoutes`** 时追加 `en`（指 `/en` 前缀的英文版）。未翻旗路由（legal）只挂 zh，无 en。
  * hreflang 必须互惠 + 自指 + 恰好一个 x-default（指 zh 主市场）。
  */
 export function hreflangLanguages(path: string): Record<string, string> {
-  return {
+  const languages: Record<string, string> = {
     "zh-Hans": absoluteUrl(path, "zh"),
     "x-default": absoluteUrl(path, "zh"),
   }
+  if ((localizedRoutes as readonly string[]).includes(path)) {
+    languages["en"] = absoluteUrl(path, "en")
+  }
+  return languages
 }

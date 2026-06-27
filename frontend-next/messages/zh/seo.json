@@ -3,5 +3,20 @@
     "name": "爱译视频",
     "defaultTitle": "爱译视频 · 让世界视频，开口说中文",
     "defaultDescription": "把英文长视频变成可发布的中文配音版。AI 视频翻译、中文配音、AI 字幕、YouTube 视频翻译、SRT 字幕导出、长视频本地化工作台。支持最长 3 小时视频，逐句修改、单句重生成。"
+  },
+  "pricing": {
+    "title": "定价",
+    "description": "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。",
+    "ogTitle": "定价 · 爱译视频"
+  },
+  "trial": {
+    "title": "免费试用",
+    "description": "免费试用 AITrans.Video 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。",
+    "ogTitle": "免费试用 · 爱译视频"
+  },
+  "breadcrumb": {
+    "home": "首页",
+    "pricing": "定价",
+    "trial": "免费试用"
   }
 }

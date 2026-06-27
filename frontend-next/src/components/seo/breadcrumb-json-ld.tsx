@@ -1,4 +1,4 @@
-import { absoluteUrl } from "@/lib/seo/site"
+import { absoluteUrl, type Locale } from "@/lib/seo/site"
 import { JsonLd } from "./json-ld"
 
 export type BreadcrumbItem = {
@@ -16,7 +16,19 @@ export type BreadcrumbItem = {
  * `items` order is root → leaf. Schema rejects single-item lists, so
  * callers must pass at least 2 entries (typically Home + current page).
  */
-export function BreadcrumbJsonLd({ items, id }: { items: BreadcrumbItem[]; id?: string }) {
+export function BreadcrumbJsonLd({
+  items,
+  id,
+  locale,
+}: {
+  items: BreadcrumbItem[]
+  id?: string
+  /**
+   * UI page locale。省略 → 当前 zh 行为（裸路径绝对 URL），legacy/legal 调用点不变。
+   * 翻旗页（pricing/trial）传入 locale，使 `item` URL 在 en 下带 `/en` 前缀。
+   */
+  locale?: Locale
+}) {
   if (items.length < 2) return null
 
   const data = {
@@ -26,7 +38,7 @@ export function BreadcrumbJsonLd({ items, id }: { items: BreadcrumbItem[]; id?: 
       "@type": "ListItem",
       position: idx + 1,
       name: item.name,
-      item: absoluteUrl(item.path),
+      item: absoluteUrl(item.path, locale),
     })),
   }
 

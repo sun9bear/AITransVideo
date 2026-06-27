@@ -1,5 +1,5 @@
 import type { MetadataRoute } from "next"
-import { absoluteUrl, publicRoutes } from "@/lib/seo/site"
+import { absoluteUrl, hreflangLanguages, publicRoutes } from "@/lib/seo/site"
 
 /**
  * Generates `/sitemap.xml`.
@@ -25,13 +25,12 @@ import { absoluteUrl, publicRoutes } from "@/lib/seo/site"
 export default function sitemap(): MetadataRoute.Sitemap {
   return publicRoutes.map((path) => ({
     url: absoluteUrl(path),
-    // UI-02：locale-aware alternates 结构（INERT，仅 zh 自指，0 个 en URL）。
-    // `en` alternates 留给 UI-03 翻旗（Phase 1 Task 1.3）；此处只铺管线骨架，
-    // 让默认 zh sitemap 结构与未来 en 扩展兼容，对当前抓取零行为变化。
+    // UI-03d-1：locale-aware alternates 由 hreflangLanguages 单点产出。已翻旗路由
+    // （/、/pricing、/trial）自动获得 `en` 备选；legal 路由（不在 localizedRoutes）
+    // 只挂 `zh-Hans` + `x-default`（无 en），待 UI-03c 翻译后再纳入。`url` 主条目仍为
+    // 默认 zh 裸路径，对当前抓取的主 URL 集合零变化。
     alternates: {
-      languages: {
-        "zh-Hans": absoluteUrl(path, "zh"),
-      },
+      languages: hreflangLanguages(path),
     },
   }))
 }
