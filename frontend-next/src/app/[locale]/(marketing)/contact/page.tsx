@@ -51,37 +51,58 @@ export default function ContactPage() {
             感谢您关注 AITrans.Video。如果您在使用过程中遇到技术问题、付款问题、退款申请、隐私请求、版权投诉或商务合作需求，
             欢迎通过以下方式与我们联系。
           </p>
+          <p className="mt-2 text-muted-foreground">
+            Thank you for your interest in AITrans.Video. If you encounter
+            technical issues, payment issues, refund requests, privacy requests,
+            copyright complaints or business-cooperation needs while using the
+            Service, you are welcome to contact us through the channels below.
+          </p>
           <p className="mt-4">
             目前所有类别的来信均统一发送至 <Mail address={SUPPORT_EMAIL} />
             ，并在邮件标题中注明对应类别，例如“账单/退款申请”“隐私请求”“商务合作”，我们会按类别分流处理。
           </p>
+          <p className="mt-2 text-muted-foreground">
+            For now, messages of all categories are sent to the same address,{" "}
+            <Mail address={SUPPORT_EMAIL} />. Please note the relevant category
+            in the email subject — for example &ldquo;Billing / Refund
+            request&rdquo;, &ldquo;Privacy request&rdquo; or &ldquo;Business
+            cooperation&rdquo; — and we will route it accordingly.
+          </p>
         </>
       }
     >
-      <LegalSection number="1" title="客服支持">
+      <LegalSection number="1" title="客服支持 / Customer Support">
         <p>如您遇到账户登录、任务失败、字幕异常、配音异常、文件导出、功能使用等问题，请联系：</p>
+        <p className="mt-1 text-muted-foreground">
+          For issues such as account sign-in, failed jobs, subtitle problems,
+          dubbing problems, file export, or general feature use, please contact:
+        </p>
         <p>
-          <span className="text-foreground">客服邮箱：</span>
+          <span className="text-foreground">客服邮箱 / Customer support email：</span>
           <Mail address={SUPPORT_EMAIL} />
         </p>
         <p>建议您在来信中提供以下信息，以便我们更快处理：</p>
+        <p className="mt-1 text-muted-foreground">
+          To help us respond faster, please include the following where possible:
+        </p>
         <ul className="ml-5 list-disc space-y-1">
-          <li>您的账户邮箱</li>
-          <li>问题发生时间</li>
-          <li>相关任务名称或订单编号</li>
-          <li>具体问题描述</li>
-          <li>截图、报错信息或相关链接</li>
+          <li>您的账户邮箱 / your account email</li>
+          <li>问题发生时间 / when the issue occurred</li>
+          <li>相关任务名称或订单编号 / the relevant job name or order number</li>
+          <li>具体问题描述 / a specific description of the issue</li>
+          <li>截图、报错信息或相关链接 / screenshots, error messages or related links</li>
         </ul>
       </LegalSection>
 
-      <LegalSection number="2" title="账单与退款">
+      <LegalSection number="2" title="账单与退款 / Billing &amp; Refunds">
         <p>如您遇到以下问题：</p>
+        <p className="mt-1 text-muted-foreground">For issues such as:</p>
         <ul className="ml-5 list-disc space-y-1">
-          <li>付款失败</li>
-          <li>重复扣费</li>
-          <li>套餐未到账</li>
-          <li>退款申请</li>
-          <li>发票或账单问题</li>
+          <li>付款失败 / failed payment</li>
+          <li>重复扣费 / duplicate charge</li>
+          <li>套餐未到账 / plan not delivered</li>
+          <li>退款申请 / refund request</li>
+          <li>发票或账单问题 / invoice or billing questions</li>
         </ul>
         <p>
           请发送邮件至 <Mail address={SUPPORT_EMAIL} />
@@ -91,15 +112,25 @@ export default function ContactPage() {
           </Link>
           。
         </p>
+        <p className="mt-2 text-muted-foreground">
+          Please email <Mail address={SUPPORT_EMAIL} /> with &ldquo;Billing /
+          Refund request&rdquo; in the subject. For the detailed refund rules,
+          see our{" "}
+          <Link href="/refund" className="text-foreground underline-offset-4 hover:underline">
+            Refund Policy
+          </Link>
+          .
+        </p>
       </LegalSection>
 
-      <LegalSection number="3" title="隐私与数据请求">
+      <LegalSection number="3" title="隐私与数据请求 / Privacy &amp; Data Requests">
         <p>如您需要：</p>
+        <p className="mt-1 text-muted-foreground">If you need to:</p>
         <ul className="ml-5 list-disc space-y-1">
-          <li>查询个人信息处理情况</li>
-          <li>申请删除账户或数据</li>
-          <li>提出隐私投诉</li>
-          <li>提交数据权利请求</li>
+          <li>查询个人信息处理情况 / ask how your personal information is processed</li>
+          <li>申请删除账户或数据 / request deletion of your account or data</li>
+          <li>提出隐私投诉 / raise a privacy complaint</li>
+          <li>提交数据权利请求 / submit a data-rights request</li>
         </ul>
         <p>
           请发送邮件至 <Mail address={SUPPORT_EMAIL} />
@@ -109,57 +140,90 @@ export default function ContactPage() {
           </Link>
           。
         </p>
+        <p className="mt-2 text-muted-foreground">
+          Please email <Mail address={SUPPORT_EMAIL} /> with &ldquo;Privacy
+          request&rdquo; in the subject. For the detailed privacy rules, see our{" "}
+          <Link href="/privacy" className="text-foreground underline-offset-4 hover:underline">
+            Privacy Policy
+          </Link>
+          .
+        </p>
       </LegalSection>
 
-      <LegalSection number="4" title="知识产权与侵权投诉">
+      <LegalSection number="4" title="知识产权与侵权投诉 / IP &amp; Infringement Complaints">
         <p>
           如您认为本平台上的相关内容侵犯了您的著作权、商标权、肖像权、声音权益或其他合法权利，请发送投诉材料至{" "}
           <Mail address={SUPPORT_EMAIL} />
           ，并在邮件标题中注明“侵权投诉”。
         </p>
+        <p className="mt-2 text-muted-foreground">
+          If you believe content on this platform infringes your copyright,
+          trademark, portrait rights, voice rights or other lawful rights,
+          please send your complaint materials to <Mail address={SUPPORT_EMAIL} />{" "}
+          with &ldquo;Infringement complaint&rdquo; in the subject.
+        </p>
         <p>请尽量提供以下内容：</p>
+        <p className="mt-1 text-muted-foreground">
+          Please include the following where possible:
+        </p>
         <ul className="ml-5 list-disc space-y-1">
-          <li>权利人姓名 / 名称</li>
-          <li>联系方式</li>
-          <li>权利证明材料</li>
-          <li>涉嫌侵权内容的具体链接或说明</li>
-          <li>投诉理由及声明</li>
+          <li>权利人姓名 / 名称 / the rights holder&rsquo;s name</li>
+          <li>联系方式 / contact details</li>
+          <li>权利证明材料 / proof of rights</li>
+          <li>涉嫌侵权内容的具体链接或说明 / the specific link to, or description of, the allegedly infringing content</li>
+          <li>投诉理由及声明 / the grounds for the complaint and a statement</li>
         </ul>
         <p>我们将在收到完整材料后依法依规处理。</p>
+        <p className="mt-2 text-muted-foreground">
+          We will handle the matter in accordance with applicable laws and
+          regulations after receiving complete materials.
+        </p>
       </LegalSection>
 
-      <LegalSection number="5" title="商务合作">
+      <LegalSection number="5" title="商务合作 / Business Cooperation">
         <p>如您有以下合作需求：</p>
+        <p className="mt-1 text-muted-foreground">For cooperation needs such as:</p>
         <ul className="ml-5 list-disc space-y-1">
-          <li>API 接入</li>
-          <li>企业合作</li>
-          <li>渠道合作</li>
-          <li>定制化服务</li>
-          <li>品牌合作</li>
+          <li>API 接入 / API integration</li>
+          <li>企业合作 / enterprise cooperation</li>
+          <li>渠道合作 / channel partnerships</li>
+          <li>定制化服务 / customized services</li>
+          <li>品牌合作 / brand cooperation</li>
         </ul>
         <p>
           请发送邮件至 <Mail address={SUPPORT_EMAIL} />
           ，并在邮件标题中注明“商务合作”。
         </p>
+        <p className="mt-2 text-muted-foreground">
+          Please email <Mail address={SUPPORT_EMAIL} /> with &ldquo;Business
+          cooperation&rdquo; in the subject.
+        </p>
       </LegalSection>
 
-      <LegalSection number="6" title="响应时间">
+      <LegalSection number="6" title="响应时间 / Response Time">
         <p>我们通常会在 2-5 个工作日内回复大多数咨询。</p>
+        <p className="mt-1 text-muted-foreground">
+          We typically reply to most inquiries within 2–5 business days.
+        </p>
         <p>如遇节假日、高峰期、复杂技术问题或需要进一步核实的情况，处理时间可能有所延长。</p>
+        <p className="mt-1 text-muted-foreground">
+          During holidays, peak periods, complex technical issues, or where
+          further verification is needed, processing may take longer.
+        </p>
       </LegalSection>
 
-      <LegalSection number="7" title="运营主体信息">
+      <LegalSection number="7" title="运营主体信息 / Operating Entity">
         <p>
-          <span className="text-foreground">主体名称：</span>
+          <span className="text-foreground">主体名称 / Entity name：</span>
           {COMPANY_NAME}
         </p>
         <p>
-          <span className="text-foreground">联系邮箱：</span>
+          <span className="text-foreground">联系邮箱 / Email：</span>
           <Mail address={SUPPORT_EMAIL} />
         </p>
         {COMPANY_ADDRESS ? (
           <p>
-            <span className="text-foreground">联系地址：</span>
+            <span className="text-foreground">联系地址 / Address：</span>
             {COMPANY_ADDRESS}
           </p>
         ) : null}

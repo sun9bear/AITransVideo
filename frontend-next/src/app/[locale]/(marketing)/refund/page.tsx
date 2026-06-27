@@ -301,15 +301,16 @@ export default function RefundPage() {
             receiving a complete request.
           </p>
           <p className="mt-4">
-            9.2 若退款申请通过，退款将<strong className="text-foreground">原路返回</strong>至您的原支付方式。国际信用卡及海外支付方式由我们的记录商户（Merchant of Record）Paddle.com 处理并退款；中国大陆扫码支付经微信支付原路退回。到账时间取决于支付机构、银行或第三方支付渠道，通常需要额外 3-15 个工作日。
+            9.2 若退款申请通过，退款将<strong className="text-foreground">原路返回</strong>至您的原支付方式/原支付渠道。其中，由我们的记录商户（Merchant of Record）Paddle.com 处理的支付，由 Paddle 退款；其他支付渠道（如微信支付等）则经相应的原支付渠道退回。到账时间取决于支付机构、银行或第三方支付渠道，通常需要额外 3-15 个工作日。
           </p>
           <p className="mt-2 text-muted-foreground">
             9.2 If approved, refunds are returned to your{" "}
-            <strong className="text-foreground">original payment method</strong>.
-            International card and overseas payments are processed and refunded
-            by our Merchant of Record, Paddle.com; mainland China QR payments are
-            returned via WeChat Pay. The time to appear depends on the payment
-            provider, bank or channel, usually an additional 3–15 business days.
+            <strong className="text-foreground">original payment method</strong>{" "}
+            via the original payment channel. Payments processed by our Merchant
+            of Record, Paddle.com, are refunded by Paddle; payments made through
+            other channels (such as WeChat Pay) are returned via the same
+            original channel. The time to appear depends on the payment provider,
+            bank or channel, usually an additional 3–15 business days.
           </p>
           <p className="mt-4">9.3 实际到账时间以支付机构处理结果为准。</p>
           <p className="mt-2 text-muted-foreground">
