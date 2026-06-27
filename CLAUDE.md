@@ -235,6 +235,13 @@ docker compose --env-file /opt/aivideotrans/config/.env up -d --build app
 临时热补丁仍可走上文 `docker cp` + `docker restart`（写入运行容器层，下次 `up -d --build`
 或容器重建后丢失）。
 
+⚠️ **gateway 与 app 不对称**：gateway 仍 bind-mount 主机 `app/src`（只读）+ `PYTHONPATH`
+导入共享后端。部署后端代码时：app 走 `up -d --build`（烘进新镜像），gateway 走
+`restart` / `up -d gateway`（重新 import 主机 `app/src`）。两者都基于**同一份主机
+`app/src`**——务必先更新主机源码，再**同时**重建 app + 重启 gateway，避免 app（镜像）与
+gateway（挂载）跑不同版本。切忌用旧习惯 `docker restart app` 热更 app（镜像不可变后对
+app 无效）。
+
 ## 2026-04-17 Legacy Migration Cleanup 遗产
 
 见 `docs/plans/2026-04-17-legacy-migration-cleanup.md`（方案）+ `tests/test_legacy_cleanup_guards.py`（契约级守卫）。4 Phase 12 commits 一次性收尾单机→Web 迁移，新增的运行时模块和约定：
