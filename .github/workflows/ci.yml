@@ -101,13 +101,15 @@ jobs:
       - run: npm run lint
       - run: npx tsc --noEmit
       # UI-locale (uiloc) 守卫（append，与 TU-03 脚手架并存）：key 对齐 / 默认 zh
-      # 字节一致 / 禁新增内联 CJK。cjk-guard 读已提交的 scripts/cjk-baseline.json（只阻断
-      # 新增、不需 git 浅 fetch），故无 shallow-repo footgun。见 uiloc 方案 §5 / UI-01。
-      - name: UI-locale guards (key-parity / zh-snapshot / cjk-guard)
+      # 字节一致 / 禁新增内联 CJK / hreflang 互惠正确性（SEO de-index 防护）。cjk-guard 读已
+      # 提交的 scripts/cjk-baseline.json、hreflang-check 纯 import site.ts（确定性 fallback），
+      # 二者均不需 git 浅 fetch，故无 shallow-repo footgun。见 uiloc 方案 §5 / UI-01 / UI-03d-1。
+      - name: UI-locale guards (key-parity / zh-snapshot / cjk-guard / hreflang-check)
         run: |
           npm run uiloc:key-parity
           npm run uiloc:zh-snapshot
           npm run uiloc:cjk-guard
+          npm run uiloc:hreflang-check
 
   # ---------------------------------------------------------------------------
   # TU-03 质量护栏脚手架（2026-06-25）。首周一律不把历史 lint/type 债或全量
