@@ -502,19 +502,6 @@ export default function TermsPage() {
           assist within a reasonable scope, but we do not thereby assume liability
           beyond our statutory obligations.
         </p>
-        <p className="mt-4">
-          10.4
-          管理后台提供的「归档备份」功能可能依赖第三方云存储服务的授权与接口能力，且仅向管理员账号开放。我们不对该第三方云存储服务的存储容量、速率、单文件大小、风控、限流或其他运营策略负责；相关第三方服务的使用须遵循其自身的服务条款与政策。
-        </p>
-        <p className="mt-2 text-muted-foreground">
-          10.4 The &ldquo;archive backup&rdquo; feature in the admin console may
-          rely on the authorization and interface capabilities of third-party
-          cloud storage services and is available only to administrator accounts.
-          We are not responsible for the storage capacity, speed, single-file
-          size, risk controls, rate limits or other operating policies of such
-          third-party cloud storage services; the use of the relevant third-party
-          services is subject to their own terms of service and policies.
-        </p>
       </LegalSection>
 
       <LegalSection number="11" title="服务中断、变更与终止 / Interruption, Change &amp; Termination">
