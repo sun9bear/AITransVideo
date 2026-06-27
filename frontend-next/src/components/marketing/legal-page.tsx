@@ -39,8 +39,8 @@ export function LegalPage({
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">{titleEn}</p>
           <div className="mt-5 flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
-            <span>最后更新：{updatedAt}</span>
-            <span>生效日期：{updatedAt}</span>
+            <span>最后更新 / Last updated：{updatedAt}</span>
+            <span>生效日期 / Effective date：{updatedAt}</span>
           </div>
           {intro ? (
             <div className="mt-8 zh-body text-muted-foreground">{intro}</div>
@@ -106,11 +106,11 @@ export function LegalClauseList({ items }: { items: ReactNode[] }) {
 export function ContactBlock() {
   return (
     <div className="mt-12 rounded-xl border border-border/70 bg-muted/40 p-6 sm:p-8">
-      <p className="ink-heading text-sm font-semibold text-foreground">运营主体信息</p>
+      <p className="ink-heading text-sm font-semibold text-foreground">运营主体信息 / Operating Entity</p>
       <dl className="mt-4 grid gap-y-2 text-sm text-muted-foreground sm:grid-cols-[auto_1fr] sm:gap-x-6">
-        <dt>主体名称</dt>
+        <dt>主体名称 / Entity name</dt>
         <dd className="text-foreground/90">{COMPANY_NAME}</dd>
-        <dt>联系邮箱</dt>
+        <dt>联系邮箱 / Email</dt>
         <dd className="text-foreground/90">
           <a href={SUPPORT_EMAIL_HREF} className="underline-offset-4 hover:underline">
             {SUPPORT_EMAIL}
@@ -118,7 +118,7 @@ export function ContactBlock() {
         </dd>
         {COMPANY_ADDRESS ? (
           <>
-            <dt>联系地址</dt>
+            <dt>联系地址 / Address</dt>
             <dd className="text-foreground/90">{COMPANY_ADDRESS}</dd>
           </>
         ) : null}
