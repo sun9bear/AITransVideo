@@ -236,6 +236,44 @@ assert.equal(
 )
 assert.equal(zhMkt.featuredDemos.tabDubbed, "中文配音版", "marketing.featuredDemos.tabDubbed 漂移")
 
+// 4e) UI-03f：5 个下半区营销组件（features / suitedScenarios / trustBanner /
+//     pricingPreview / finalCta）的内联中文迁入字典后，默认 zh 值必须与改造前组件源
+//     【逐字节】相同（红线 R1）。下面钉死每个子 namespace 的代表性串，重点覆盖标点/全半角
+//     /破折号/间隔号/rich 敏感处：
+//     - features.heading 钉死全角弯引号 “翻译” / “能发布”（U+201C/U+201D）
+//     - features.items[0].body 钉死 en-dash 1–3（U+2013）—— 全等断言
+//     - suitedScenarios.scenarios[1].tag 钉死【半角空格 + 半角斜杠 + 半角空格】
+//     - finalCta.heading 钉死 rich <br></br> 标签 + 全角逗号在 <br> 之前
+//     - finalCta.trustLine 钉死间隔号 ·（U+00B7）分隔
+//     任一漂移即 red = 默认 zh 渲染回归。ICU/纯结构串走 key-parity 即可。
+assert.equal(
+  zhMkt.features.heading,
+  "把“翻译”做完，把“能发布”做对",
+  "marketing.features.heading 全角弯引号漂移",
+)
+assert.equal(
+  zhMkt.features.items[0].body,
+  "最长支持 180 分钟单条视频，适合 1–3 小时的访谈、课程、播客、演讲、纪录片解读，不只适合几十秒短视频试水。",
+  "marketing.features.items[0].body en-dash 1–3 漂移",
+)
+assert.equal(
+  zhMkt.suitedScenarios.scenarios[1].tag,
+  "视频号 / 抖音创作者",
+  "marketing.suitedScenarios.scenarios[1].tag 空格+斜杠漂移",
+)
+assert.equal(zhMkt.trustBanner.promises[3].title, "项目保留 7 天", "marketing.trustBanner.promises[3].title 漂移")
+assert.equal(zhMkt.pricingPreview.fullComparisonCta, "查看完整套餐对比", "marketing.pricingPreview.fullComparisonCta 漂移")
+assert.equal(
+  zhMkt.finalCta.heading,
+  "把下一支海外英文视频，<br></br>变成中文配音版",
+  "marketing.finalCta.heading rich <br> 标签/逗号位置漂移",
+)
+assert.equal(
+  zhMkt.finalCta.trustLine,
+  "英文转中文 · 无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频",
+  "marketing.finalCta.trustLine 间隔号漂移",
+)
+
 // 5) seo 默认 zh 字节一致：site 级标题/描述与 site.ts 顶层常量同源同值（红线 1）
 const zhSeo = JSON.parse(readFileSync(path.join(root, "messages/zh/seo.json"), "utf8"))
 assert.equal(zhSeo.site.name, "爱译视频", "seo.site.name 漂移")

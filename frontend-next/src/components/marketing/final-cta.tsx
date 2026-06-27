@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server"
 import { PrimaryCta } from "./primary-cta"
 import { LinkButton } from "./link-button"
 import { InkDivider } from "./ink-divider"
@@ -25,7 +26,9 @@ import { SealStamp } from "./seal-stamp"
  * The whole composition is centered, narrower than the global max-w to read as
  * "落款" (the calligrapher's signature/seal at the end of a scroll).
  */
-export function FinalCta() {
+export async function FinalCta() {
+  const t = await getTranslations("marketing.finalCta")
+
   return (
     <section className="relative overflow-hidden bg-[color:var(--ink-paper,#F5F0E6)]">
       {/* Soft cinnabar wash at top edge — picks up the section above without
@@ -47,26 +50,24 @@ export function FinalCta() {
 
         <div className="mt-10 text-center">
           <p className="ink-heading text-xs uppercase tracking-[0.25em] text-[color:var(--cinnabar,#C73E3A)]">
-            开始本地化
+            {t("eyebrow")}
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl lg:text-5xl">
-            把下一支海外英文视频，
-            <br className="hidden sm:block" />
-            变成中文配音版
+            {t.rich("heading", { br: () => <br className="hidden sm:block" /> })}
           </h2>
           <p className="zh-body-lg mt-6 text-muted-foreground max-w-xl mx-auto">
-            上传视频，先生成一版，再逐句修改到适合发布。爱译视频，让世界视频开口说中文。
+            {t("lead")}
           </p>
 
           <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <PrimaryCta className="min-w-[12rem]" />
             <LinkButton href="/pricing" variant="outline" className="min-w-[10rem]">
-              查看定价
+              {t("pricingCta")}
             </LinkButton>
           </div>
 
           <p className="mt-5 text-xs text-foreground/55">
-            英文转中文 · 无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
+            {t("trustLine")}
           </p>
         </div>
 

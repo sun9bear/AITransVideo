@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server"
 import { PricingGrid } from "./pricing-grid"
 import { TrialBanner } from "./trial-banner"
 import { LinkButton } from "./link-button"
@@ -7,7 +8,9 @@ import { LinkButton } from "./link-button"
  * preview with a link to the full pricing page. DESIGN.md §3.5 — Trial is a
  * banner / conversion entry above the grid, not a fourth card.
  */
-export function PricingPreview() {
+export async function PricingPreview() {
+  const t = await getTranslations("marketing.pricingPreview")
+
   return (
     <section
       id="pricing"
@@ -16,13 +19,13 @@ export function PricingPreview() {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-            简单透明的定价
+            {t("eyebrow")}
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            长视频也用得起的 AI 翻译配音
+            {t("heading")}
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            从个人试用到团队高频生产，按你真正需要的处理能力选择套餐。试用无需绑卡，任务失败不计费，修改片段不必重跑全片。
+            {t("lead")}
           </p>
         </div>
 
@@ -36,7 +39,7 @@ export function PricingPreview() {
 
         <div className="mt-10 text-center">
           <LinkButton href="/pricing" variant="outline">
-            查看完整套餐对比
+            {t("fullComparisonCta")}
           </LinkButton>
         </div>
       </div>

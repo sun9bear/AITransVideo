@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server"
 import { InkDivider } from "./ink-divider"
 
 /**
@@ -14,42 +15,22 @@ import { InkDivider } from "./ink-divider"
  * No icons — the typographic tag style keeps the section airy and aligned
  * with the ink-aesthetic. Each card is plain border + cinnabar tag + body.
  */
-const SCENARIOS: Array<{ tag: string; body: string }> = [
-  {
-    tag: "知识博主",
-    body: "把海外访谈、播客、课程翻译成中文配音版本，让长内容跨过语言门槛继续传播。",
-  },
-  {
-    tag: "视频号 / 抖音创作者",
-    body: "快速本地化海外英文长视频素材，保留原片节奏、人物语气和讲解结构。",
-  },
-  {
-    tag: "教育培训团队",
-    body: "把英文课程、讲座、公开课转成中文学习内容，配齐字幕和讲师配音。",
-  },
-  {
-    tag: "MCN / 内容工作室",
-    body: "批量处理长视频，降低翻译和配音成本，统一团队的中文化交付标准。",
-  },
-  {
-    tag: "企业内容团队",
-    body: "处理海外发布会、产品演示、客户案例视频，输出可发布的中文版本。",
-  },
-]
+export async function SuitedScenarios() {
+  const t = await getTranslations("marketing.suitedScenarios")
+  const scenarios = t.raw("scenarios") as Array<{ tag: string; body: string }>
 
-export function SuitedScenarios() {
   return (
     <section className="marketing-reading-surface py-14 sm:py-16">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-            适合这些场景
+            {t("eyebrow")}
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            谁在用爱译视频做长视频本地化
+            {t("heading")}
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            如果你的工作流里有海外英文长视频要持续翻译配音、还要逐条复核交付，下面这些场景多半也是你的日常。
+            {t("lead")}
           </p>
         </div>
 
@@ -61,9 +42,9 @@ export function SuitedScenarios() {
           className="mt-12 grid gap-5 md:grid-cols-2 lg:grid-cols-3"
           role="list"
         >
-          {SCENARIOS.map((s) => (
+          {scenarios.map((s, i) => (
             <li
-              key={s.tag}
+              key={i}
               className="rounded-xl border border-border bg-card p-6 transition-shadow hover:shadow-md"
             >
               <span
