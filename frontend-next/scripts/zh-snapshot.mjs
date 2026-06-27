@@ -189,6 +189,20 @@ assert.equal(
   "marketing.pricingAssurance.paymentChannelNote 漂移（company-info 移交值）",
 )
 
+// 4c) UI-03b 收尾：6 个 rendering-CJK leak 组件（primaryCta / planCardCta /
+//     anonymousTrialLauncher / heroSamplePlayer / sealStamp / trialDetails）的内联中文
+//     迁入字典后，默认 zh 值必须与改造前组件源【逐字节】相同（红线 R1）。下面钉死每个
+//     子 namespace 的代表性【非 ICU】串（含半/全角标点、间隔号 · U+00B7 敏感处）；任一漂移
+//     即 red = 默认 zh 渲染回归。ICU 占位串（allowanceDays/upgrade 等）走 key-parity 即可。
+assert.equal(zhMkt.primaryCta.guest, "免费开始试用", "marketing.primaryCta.guest 漂移")
+assert.equal(zhMkt.planCardCta.contact, "联系我们", "marketing.planCardCta.contact 漂移")
+assert.equal(zhMkt.anonymousTrialLauncher.cta, "立即试用", "marketing.anonymousTrialLauncher.cta 漂移")
+assert.equal(zhMkt.heroSamplePlayer.tabDubbed, "中文配音", "marketing.heroSamplePlayer.tabDubbed 漂移")
+assert.equal(zhMkt.heroSamplePlayer.tabOriginal, "英文原片", "marketing.heroSamplePlayer.tabOriginal 漂移")
+assert.equal(zhMkt.sealStamp.ariaLabel, "AITrans.Video 章印", "marketing.sealStamp.ariaLabel 漂移")
+assert.equal(zhMkt.trialDetails.benefit1Title, "体验完整工作流", "marketing.trialDetails.benefit1Title 漂移")
+assert.equal(zhMkt.trialDetails.allowanceTitle, "试用权益", "marketing.trialDetails.allowanceTitle 漂移")
+
 // 5) seo 默认 zh 字节一致：site 级标题/描述与 site.ts 顶层常量同源同值（红线 1）
 const zhSeo = JSON.parse(readFileSync(path.join(root, "messages/zh/seo.json"), "utf8"))
 assert.equal(zhSeo.site.name, "爱译视频", "seo.site.name 漂移")

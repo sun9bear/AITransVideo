@@ -1,3 +1,6 @@
+"use client"
+
+import { useTranslations } from "next-intl"
 import { cn } from "@/lib/utils"
 
 /**
@@ -55,12 +58,14 @@ export function SealStamp({
   size = 64,
   rotation = -3,
   className,
-  ariaLabel = "AITrans.Video 章印",
+  ariaLabel,
 }: SealStampProps) {
+  const t = useTranslations("marketing.sealStamp")
+  const label = ariaLabel ?? t("ariaLabel")
   return (
     <span
       role="img"
-      aria-label={ariaLabel}
+      aria-label={label}
       className={cn(
         "inline-block select-none align-middle",
         className,

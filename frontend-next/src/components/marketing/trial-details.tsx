@@ -1,5 +1,6 @@
 "use client"
 
+import { useTranslations } from "next-intl"
 import { Check, Lock, CreditCard, HelpCircle } from "lucide-react"
 import { usePlans } from "./use-plans"
 
@@ -16,30 +17,19 @@ import { usePlans } from "./use-plans"
  *   `source_minutes` / `phone_required`, extend this file to render those
  *   fields from the API response. Never hardcode fallback numbers here.
  */
-const QUALITATIVE_BENEFITS: Array<{ icon: typeof Check; title: string; body: string }> = [
-  {
-    icon: Check,
-    title: "体验完整工作流",
-    body: "从导入、翻译、配音、复核到导出剪映草稿,每一步都可以亲手走一遍。",
-  },
-  {
-    icon: Lock,
-    title: "账户与点数保留",
-    body: "试用结束后账户信息和已购点数会一直保留；项目文件默认保留 7 天，到期前可随时下载或继续修改。",
-  },
-  {
-    icon: CreditCard,
-    title: "无需绑卡",
-    body: "不需要提前绑定支付方式,也不会有任何隐藏扣费。",
-  },
-  {
-    icon: HelpCircle,
-    title: "结束后会怎样?",
-    body: "试用到期后不会自动扣费。你可以继续使用账户中的免费额度,或在需要时主动升级。",
-  },
+const QUALITATIVE_BENEFITS: Array<{
+  icon: typeof Check
+  titleKey: "benefit1Title" | "benefit2Title" | "benefit3Title" | "benefit4Title"
+  bodyKey: "benefit1Body" | "benefit2Body" | "benefit3Body" | "benefit4Body"
+}> = [
+  { icon: Check, titleKey: "benefit1Title", bodyKey: "benefit1Body" },
+  { icon: Lock, titleKey: "benefit2Title", bodyKey: "benefit2Body" },
+  { icon: CreditCard, titleKey: "benefit3Title", bodyKey: "benefit3Body" },
+  { icon: HelpCircle, titleKey: "benefit4Title", bodyKey: "benefit4Body" },
 ]
 
 export function TrialDetails() {
+  const t = useTranslations("marketing.trialDetails")
   const state = usePlans()
   const trial = state.status === "ready" ? state.data.trial : null
   const frozen = trial?.frozen === true
@@ -50,13 +40,13 @@ export function TrialDetails() {
         {QUALITATIVE_BENEFITS.map((b) => {
           const Icon = b.icon
           return (
-            <li key={b.title} className="flex gap-4">
+            <li key={b.titleKey} className="flex gap-4">
               <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                 <Icon className="h-4 w-4" aria-hidden="true" />
               </div>
               <div>
-                <h3 className="text-base font-semibold text-foreground">{b.title}</h3>
-                <p className="mt-1 zh-body text-muted-foreground text-[0.95rem]">{b.body}</p>
+                <h3 className="text-base font-semibold text-foreground">{t(b.titleKey)}</h3>
+                <p className="mt-1 zh-body text-muted-foreground text-[0.95rem]">{t(b.bodyKey)}</p>
               </div>
             </li>
           )
@@ -66,20 +56,20 @@ export function TrialDetails() {
       {/* Trial allowance — renders frozen numeric facts from the API. */}
       {state.status === "ready" && frozen && trial && (
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
-          <p className="text-sm font-medium text-foreground">试用权益</p>
+          <p className="text-sm font-medium text-foreground">{t("allowanceTitle")}</p>
           <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
-            {trial.days && <li>· 试用时长：{trial.days} 天</li>}
-            {trial.source_minutes && <li>· 源视频额度：{trial.source_minutes} 分钟</li>}
-            {trial.includes_studio && <li>· 包含 Studio 精校模式</li>}
-            <li>· 试用结束不会自动扣费</li>
+            {trial.days && <li>{t("allowanceDays", { days: trial.days })}</li>}
+            {trial.source_minutes && (
+              <li>{t("allowanceMinutes", { minutes: trial.source_minutes })}</li>
+            )}
+            {trial.includes_studio && <li>{t("allowanceStudio")}</li>}
+            <li>{t("allowanceNoCharge")}</li>
           </ul>
         </div>
       )}
       {state.status === "ready" && !frozen && (
         <div className="rounded-lg border border-border bg-card p-4">
-          <p className="text-sm text-muted-foreground">
-            注册后即可查看并领取你的试用额度。
-          </p>
+          <p className="text-sm text-muted-foreground">{t("unfrozenNote")}</p>
         </div>
       )}
     </div>

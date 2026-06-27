@@ -194,5 +194,55 @@
         "a": "如果任务因系统处理失败未生成可下载结果，不扣除对应处理额度；用户主动取消未完成的任务也不计费。注意「不满意」不属于此情形——已完成并交付的结果按时长正常计费，但你可以在工作台里逐句修改并单段重生成，避免重复付费跑全片。"
       }
     ]
+  },
+  "primaryCta": {
+    "guest": "免费开始试用",
+    "loggedIn": "进入工作台"
+  },
+  "planCardCta": {
+    "enterWorkspace": "进入工作台",
+    "freeStart": "免费开始",
+    "upgrade": "升级到 {name}",
+    "select": "选择 {name}",
+    "contact": "联系我们"
+  },
+  "anonymousTrialLauncher": {
+    "cta": "立即试用",
+    "dialogTitle": "免注册上传试用 · 即将开放",
+    "dialogDescription": "上传本地视频、看前 3 分钟中文配音预览的免注册流程正在开放中。现在可以先看上方的真实译制样本感受效果。",
+    "uploadZone": "上传你的视频（即将开放）",
+    "uploadHint": "本地视频 · 前 3 分钟预览 · 带水印",
+    "registerCta": "注册账号，开放后第一时间体验",
+    "comingSoon": "上传与实时预览即将上线，敬请期待。"
+  },
+  "heroSamplePlayer": {
+    "videoFallback": "您的浏览器不支持 video 标签。",
+    "ariaTablist": "配音版 / 原片切换",
+    "tabDubbed": "中文配音",
+    "tabOriginal": "英文原片",
+    "ariaMute": "静音",
+    "ariaSoundOn": "开启声音试听",
+    "soundOn": "开启声音",
+    "ariaPrev": "上一段样本",
+    "ariaNext": "下一段样本"
+  },
+  "sealStamp": {
+    "ariaLabel": "AITrans.Video 章印"
+  },
+  "trialDetails": {
+    "benefit1Title": "体验完整工作流",
+    "benefit1Body": "从导入、翻译、配音、复核到导出剪映草稿,每一步都可以亲手走一遍。",
+    "benefit2Title": "账户与点数保留",
+    "benefit2Body": "试用结束后账户信息和已购点数会一直保留；项目文件默认保留 7 天，到期前可随时下载或继续修改。",
+    "benefit3Title": "无需绑卡",
+    "benefit3Body": "不需要提前绑定支付方式,也不会有任何隐藏扣费。",
+    "benefit4Title": "结束后会怎样?",
+    "benefit4Body": "试用到期后不会自动扣费。你可以继续使用账户中的免费额度,或在需要时主动升级。",
+    "allowanceTitle": "试用权益",
+    "allowanceDays": "· 试用时长：{days} 天",
+    "allowanceMinutes": "· 源视频额度：{minutes} 分钟",
+    "allowanceStudio": "· 包含 Studio 精校模式",
+    "allowanceNoCharge": "· 试用结束不会自动扣费",
+    "unfrozenNote": "注册后即可查看并领取你的试用额度。"
   }
 }
