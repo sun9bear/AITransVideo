@@ -573,6 +573,26 @@
   font-family: var(--font-eb-garamond), "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
 }
 
+/* EN display + body typography track (UI-03d-2). On /en the marketing layout
+   appends `.locale-en` to .marketing-root, so these rules apply ONLY to the EN
+   UI locale; default zh is untouched (red line R1). Same single-class +
+   :not(.__never__) (0,3,0) scoping the .ink-heading rule above uses, to beat the
+   shared [data-theme="ink"] (0,2,0) rules without relying on source order
+   (Tailwind v4 strips class+attribute compounds — see the .ink-heading note). */
+.locale-en .ink-display:not(.__never__) {
+  /* EN headings: EB Garamond display serif at 800 (its max weight — 900 would
+     faux-bold) instead of the CJK Noto Serif SC stack falling back to Georgia. */
+  font-family: var(--font-eb-garamond), "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
+  font-weight: 800;
+}
+.locale-en .zh-body:not(.__never__),
+.locale-en .zh-body-lg:not(.__never__) {
+  /* EN long-form: tighten line-height/tracking — zh-body's 1.75 / 0.005em is
+     tuned for CJK and reads loose in English. */
+  line-height: 1.6;
+  letter-spacing: 0;
+}
+
 /* Linen canvas weave for "oil painting" surfaces (plan 2026-06-11 Task 5).
    ::after (not ::before) so it composes with the ink-dark root noise overlay,
    which owns ::before. Sub-5% opacity + overlay blend adds tooth without
