@@ -225,13 +225,22 @@ docker restart aivideotrans-app
 docker exec aivideotrans-app python -c "import inspect; from <module> import <cls>; print(inspect.getsource(<cls>.<method>))"
 ```
 
-**开发期代码热更新模式（2026-03-30 启用）：**
-docker-compose.yml 已配置 `src/`、`main.py`、`scripts/` 的 bind mount。
-主机修改代码后只需 `docker restart aivideotrans-app`。
+**镜像不可变模式（2026-06-27 起，TU-02 已切回）：**
+开发期的 `src/`、`main.py`、`scripts/` bind mount 已从 docker-compose.yml 删除——app
+代码在构建期由 Dockerfile `COPY .` 烘进镜像，主机改代码对容器不可见（与上文「容器代码
+部署注意」一致）。部署应用代码改为重建镜像：
+```bash
+docker compose --env-file /opt/aivideotrans/config/.env up -d --build app
+```
+临时热补丁仍可走上文 `docker cp` + `docker restart`（写入运行容器层，下次 `up -d --build`
+或容器重建后丢失）。
 
-**⚠️ 项目接近完成时，必须切回镜像不可变模式：**
-删除 docker-compose.yml 中标注"开发期代码热更新 bind mount"的 3 个 volume 条目，
-改为 `docker-compose build app` + `docker-compose up -d app`。
+⚠️ **gateway 与 app 不对称**：gateway 仍 bind-mount 主机 `app/src`（只读）+ `PYTHONPATH`
+导入共享后端。部署后端代码时：app 走 `up -d --build`（烘进新镜像），gateway 走
+`restart` / `up -d gateway`（重新 import 主机 `app/src`）。两者都基于**同一份主机
+`app/src`**——务必先更新主机源码，再**同时**重建 app + 重启 gateway，避免 app（镜像）与
+gateway（挂载）跑不同版本。切忌用旧习惯 `docker restart app` 热更 app（镜像不可变后对
+app 无效）。
 
 ## 2026-04-17 Legacy Migration Cleanup 遗产
 

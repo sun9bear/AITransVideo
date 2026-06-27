@@ -8,6 +8,9 @@ dependencies = [
     "dashscope>=1.25.2",
     "google-genai",
     "pydub",
+    # pyJianYingDraft — 剪映 draft 生成依赖（TU-02：从 Dockerfile 旁路 `pip install` 收编进项目依赖）。
+    # 沿用本文件惯例不 pin 版本（生产已装版本未知）；首次依赖锁定（uv sync --frozen，DEP-01）时再定下界。
+    "pyJianYingDraft",
     "requests",
     "cryptography",
     "websocket-client",

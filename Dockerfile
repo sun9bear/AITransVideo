@@ -36,15 +36,12 @@ RUN apt-get update \
 COPY . /opt/aivideotrans/app
 
 RUN pip install --no-cache-dir . \
-    && pip install --no-cache-dir pyJianYingDraft \
     && if [ "$INSTALL_WHISPER" = "1" ]; then \
          echo "[Dockerfile] Installing optional Whisper extra (.[whisper])" \
          && pip install --no-cache-dir ".[whisper]"; \
        else \
          echo "[Dockerfile] Skipping Whisper extra (INSTALL_WHISPER=$INSTALL_WHISPER)"; \
        fi \
-    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
-    && /usr/local/bin/deno --version \
     && chmod +x \
         scripts/linux_app_service.sh \
         scripts/linux_compose_preflight.sh \
