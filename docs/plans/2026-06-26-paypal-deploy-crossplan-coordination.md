@@ -51,7 +51,7 @@ PayPal（第四条收款轨，海外 USD 专轨）已**合并 main 并部署 pro
 
 - 新文件 `gateway/payment_provider_paypal.py`（自包含 provider，<800 行门）+ `billing.py` 增长 → **file-size-guard 基线（TU-03）须从最新 main 重算**。
 - `billing.py` 是金融模块；PayPal 已带 `tests/test_paypal_*`（366+ 测试绿）。
-- 关联：`gateway/credits_service.py` 的 `ensure_subscription_bucket_from_v2`（line 1655，`scalar_one_or_none()` 遇**重复 subscription bucket** 抛 `MultipleResultsFound`，**非致命** shadow 路径、不阻断支付/升级/积分）正由独立 worktree 修复中（Claude spawned task，未合并）——与本方案 EH/健壮性主题同类，可纳入跟踪（含审计其它 `scalar_one_or_none` 脆弱点）。
+- 关联（**已完整修复并落本地 main，未 push**）：`gateway/credits_service.py` 的 `ensure_subscription_bucket_from_v2`（line 1655，`scalar_one_or_none()` 遇**重复 subscription bucket** 抛 `MultipleResultsFound`，**非致命** shadow 路径、不阻断支付/升级/积分）。三 commit 闭合：① 代码容忍多行 `6df6c68e` ② 去重诊断脚本（默认 dry-run）`973dc6e6` ③ **alembic 044** 三个 partial unique index 根治并发 dup（per-order / free·trial / no-order backfill）+ 模型 `__table_args__` 同步 + 契约测试 `ffa65a0d`（CodeX 复核补上第三个 backfill 并发 index）。生产 2026-06-27 全量巡检干净（0 幻影）→ 可直接 `alembic upgrade head`，**待合并 + 维护窗口**。与本方案 EH/健壮性主题同类，已审计其它 `scalar_one_or_none`（line 1643 由 partial unique index 兜底；line 499 CloneBillingEvent 是 smart-clone 另一类、未改）。
 
 ## 6. 一句话
 
