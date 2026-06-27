@@ -1,5 +1,6 @@
 "use client"
 
+import { useTranslations } from "next-intl"
 import { FeaturedDemosProvider } from "./featured-demos-context"
 import { FeaturedDemoCard, type Demo } from "./featured-demo-card"
 
@@ -24,6 +25,7 @@ import { FeaturedDemoCard, type Demo } from "./featured-demo-card"
  */
 
 export function FeaturedDemosClient({ demos }: { demos: Demo[] }) {
+  const t = useTranslations("marketing.featuredDemos")
   // Render demos twice for seamless infinite-loop. The second copy is a
   // visual repeat used only for the keyframe loop point — it's hidden from
   // assistive tech via `aria-hidden` + `inert` set inside the card.
@@ -37,13 +39,13 @@ export function FeaturedDemosClient({ demos }: { demos: Demo[] }) {
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-            真实成片样例
+            {t("eyebrow")}
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            听一段实际配音，比看十张截图更有说服力
+            {t("heading")}
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            直接听一段——译文是否像人话、配音是否自然、节奏是否对得上原片。
+            {t("lead")}
           </p>
         </div>
       </div>

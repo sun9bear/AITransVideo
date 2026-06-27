@@ -244,5 +244,63 @@
     "allowanceStudio": "· Includes Studio fine-tuning mode",
     "allowanceNoCharge": "· No automatic charge when the trial ends",
     "unfrozenNote": "Sign up to view and claim your trial allowance."
+  },
+  "painPoints": {
+    "eyebrow": "Why a dedicated workbench",
+    "heading": "With overseas long videos, the real work is the last 80%",
+    "lead": "Built for English source, Chinese output. Getting an AI first pass is easy; the hard part is editing it until it's truly ready to publish.",
+    "closing": "AITrans.Video isn't just \"one-click generation\" — it puts <strong>long-video translation, AI dubbing, multi-format delivery, and line-by-line editing</strong> into one workbench.",
+    "points": [
+      { "title": "Videos run long", "body": "Many tools are built for testing the waters with clips of a few seconds to a few minutes. Once you hit a 30-minute, 1-hour, or even 3-hour interview, course, or podcast, both processing cost and wait time climb fast." },
+      { "title": "Results are hard to fix", "body": "An AI first pass always has issues with names, terminology, sentence breaks, and tone. Fixing one line often means re-running the whole video — wasting both time and money." },
+      { "title": "Too few deliverables", "body": "A single finished cut isn't enough. Creators also need Chinese subtitles, dubbed audio, and the raw materials pack to keep editing, republish, or send to clients for review." },
+      { "title": "Cost is hard to control", "body": "Overseas tools work well, but minutes, revisions, and added segments pile up the bill fast. When you ship often, a month's invoice routinely runs over budget." }
+    ]
+  },
+  "productProof": {
+    "eyebrow": "Real product proof",
+    "heading": "Not a one-shot generator, but a workbench you can review, edit, and download from",
+    "lead": "AITrans.Video runs the full video translation and dubbing flow on-site: create a task, track progress, review line by line, edit and regenerate, then download the dubbed video, dubbed audio, subtitles, and materials pack. The screenshots below are from the product UI running right now.",
+    "realUi": "Live UI {n}",
+    "card1Title": "Create a translation task",
+    "card1Badge": "Task creation page",
+    "card1Alt": "New translation task page: YouTube link / video upload toggle + Express / Studio dual-plan choice + create-task button",
+    "card2Title": "Project results and downloadable deliverables",
+    "card2Badge": "Results list page",
+    "card2Alt": "Project results list page: each task card shows the title, expiry time, download buttons for dubbed video / audio / materials pack, and an edit entry",
+    "card3Title": "Review the translation line by line on the timeline",
+    "card3Alt": "Studio translation review screen: nine-step progress bar + speaker confirmation + line-by-line Chinese–English editing",
+    "card4Title": "Three-engine voice selection",
+    "card4Alt": "Studio voice selection screen: MiniMax / CosyVoice / Doubao three-engine switch + preview / check against original / voice clone",
+    "taskFlow": [
+      "Supports both YouTube links and video uploads — fit for real production inputs.",
+      "Express suits automated flows; Studio suits human review and fine-tuning.",
+      "Choose the transcription option, speaker count, and processing mode — not a template placeholder form."
+    ],
+    "resultFlow": [
+      "After a task finishes, the project list, expiry time, processing status, and history are all kept.",
+      "Every project lets you download the dubbed video, dubbed audio, and materials pack.",
+      "A results page like this is direct proof that the site delivers a real digital service."
+    ]
+  },
+  "workflowShowcase": {
+    "eyebrow": "Workflow",
+    "heading": "From English video to finished Chinese cut, in four steps",
+    "lead": "Every step can be paused, checked, and edited. AI produces the first pass; you decide which segments need another round.",
+    "steps": [
+      { "title": "Import the video", "body": "Upload a local video, or paste a link you have the right to process. Great for interviews, courses, podcasts, talks, and educational long videos." },
+      { "title": "Generate the first pass", "body": "The system automatically handles speech recognition, translation, subtitle generation, and Chinese dubbing. Get a previewable version quickly." },
+      { "title": "Refine in the workbench", "body": "Check the translation, subtitles, and dubbing line by line. Unhappy with a name, term, tone, or sentence break? Edit it and regenerate just that segment." },
+      { "title": "Download the results", "body": "Download the Chinese dubbed video, audio, subtitles, and materials pack — or export a Jianying draft and keep fine-cutting in Jianying without building the timeline from scratch." }
+    ]
+  },
+  "featuredDemos": {
+    "eyebrow": "Real finished samples",
+    "heading": "One real dub says more than ten screenshots",
+    "lead": "Just listen — whether the translation sounds human, the dubbing sounds natural, and the pacing matches the original.",
+    "tablistAria": "Original / dubbed",
+    "tabDubbed": "Chinese dub",
+    "tabOriginal": "English original",
+    "videoFallback": "Your browser does not support the video tag."
   }
 }
