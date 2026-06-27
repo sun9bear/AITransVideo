@@ -1,4 +1,4 @@
-# 代码质量优化方案 — 准确进度快照
+﻿# 代码质量优化方案 — 准确进度快照
 
 > 日期：2026-06-27
 > 基准：`origin/main`（commit `0212ed16`，已逐条 `git show origin/main:<file>` 实测）
@@ -36,7 +36,7 @@
 
 ## 3. 护栏（CI）实际状态：**已激活并阻断**（纠正审计 §3.2/§7/§9.1）
 
-实测 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) = **220 行，7 个 job**（非审计所称"212 行、无 lint job"）：
+实测 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) = **220 行，6 个 job**（非审计所称"212 行、无 lint job"）：
 
 | job | 行 | 作用 | 阻断? |
 |---|---|---|---|
