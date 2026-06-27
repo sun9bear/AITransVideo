@@ -302,5 +302,55 @@
     "tabDubbed": "Chinese dub",
     "tabOriginal": "English original",
     "videoFallback": "Your browser does not support the video tag."
+  },
+  "features": {
+    "eyebrow": "Why choose AITrans.Video",
+    "heading": "Finish the \"translation\" — and get \"ready to publish\" right",
+    "lead": "The AI first pass is only the start. We get long-video processing, multi-format delivery, line-by-line editing, and incremental regeneration right — together.",
+    "items": [
+      { "title": "Built for genuinely long videos", "body": "Supports up to 180 minutes in a single video — fit for 1–3 hour interviews, courses, podcasts, talks, and documentary breakdowns, not just testing the waters with short clips." },
+      { "title": "Multiple deliverables from one run", "body": "Download the Chinese dubbed video, dubbed audio, Chinese subtitles, translated text, and the raw materials pack. Publish directly or keep editing in post — choose by use case." },
+      { "title": "Review line by line in the workbench", "body": "What the AI produces is a first pass, not the final cut. Review the translation, subtitles, and dubbing line by line in the workbench; fix any name, term, tone, or sentence break you're not happy with." },
+      { "title": "Regenerate just the part you don't like", "body": "Change one line without re-running the whole video. Whichever line reads off, fix that line and regenerate just that segment — saving both time and cost." },
+      { "title": "Pricing that fits Chinese creators better", "body": "At a price domestic creators find easier to accept, covering the whole flow of long-video translation, AI dubbing, and post-editing — affordable even when you ship often." },
+      { "title": "Import into Jianying for fine-cutting", "body": "Export a Jianying draft project: open the finished cut's subtitle, dubbing, and material tracks directly in Jianying to keep working on transitions, effects, and audio-video details — no need to build the timeline from scratch." }
+    ]
+  },
+  "suitedScenarios": {
+    "eyebrow": "Suited for these scenarios",
+    "heading": "Who uses AITrans.Video for long-video localization",
+    "lead": "If your workflow has overseas English long videos to keep translating and dubbing — and reviewing line by line before delivery — these scenarios are probably your everyday.",
+    "scenarios": [
+      { "tag": "Knowledge creators", "body": "Translate overseas interviews, podcasts, and courses into Chinese dubbed versions, so long-form content keeps spreading across the language barrier." },
+      { "tag": "WeChat Channels / Douyin creators", "body": "Quickly localize overseas English long-video footage while keeping the original's pacing, character tone, and explanatory structure." },
+      { "tag": "Education & training teams", "body": "Turn English courses, lectures, and open classes into Chinese learning content, complete with subtitles and instructor dubbing." },
+      { "tag": "MCNs / content studios", "body": "Process long videos in bulk, lower translation and dubbing costs, and standardize your team's Chinese-localization delivery." },
+      { "tag": "Enterprise content teams", "body": "Handle overseas launches, product demos, and customer-case videos, producing publish-ready Chinese versions." }
+    ]
+  },
+  "trustBanner": {
+    "eyebrow": "Why it's safe to use",
+    "heading": "Six things spelled out — not buried in the terms",
+    "promises": [
+      { "title": "No card required", "detail": "No automatic charge when the trial ends" },
+      { "title": "No charge on failure", "detail": "Zero cost if a task fails or is canceled" },
+      { "title": "Incremental regeneration", "detail": "Change one line, pay for just that line" },
+      { "title": "Projects kept for 7 days", "detail": "Download any time before they expire" },
+      { "title": "Authorized content", "detail": "We only process videos you're legally authorized to use" },
+      { "title": "Refund policy", "detail": "Terms public, the entry is reachable" }
+    ]
+  },
+  "pricingPreview": {
+    "eyebrow": "Simple, transparent pricing",
+    "heading": "AI translation and dubbing you can afford, even for long videos",
+    "lead": "From a solo trial to high-volume team production, pick the plan with the processing power you actually need. The trial needs no card, failed tasks aren't charged, and editing a segment doesn't re-run the whole video.",
+    "fullComparisonCta": "See the full plan comparison"
+  },
+  "finalCta": {
+    "eyebrow": "Start localizing",
+    "heading": "Turn your next overseas English video<br></br>into a Chinese dub",
+    "lead": "Upload a video, generate a first pass, then edit it line by line until it's ready to publish. AITrans.Video — making the world's videos speak Chinese.",
+    "pricingCta": "See pricing",
+    "trustLine": "English to Chinese · No card required · 7-day trial · No charge on failure · Long videos supported"
   }
 }

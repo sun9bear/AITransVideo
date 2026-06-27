@@ -6,6 +6,7 @@ import {
   FileBadge,
   Receipt,
 } from "lucide-react"
+import { getTranslations } from "next-intl/server"
 import { InkDivider } from "./ink-divider"
 
 /**
@@ -26,49 +27,21 @@ import { InkDivider } from "./ink-divider"
  *     they're qualitative trust phrasing, not contract values. The actual
  *     Gateway-driven number lives in TrialBanner just below.
  */
-const PROMISES = [
-  {
-    icon: ShieldCheck,
-    title: "无需绑卡",
-    detail: "试用结束不会自动扣费",
-  },
-  {
-    icon: CircleSlash,
-    title: "失败不计费",
-    detail: "任务失败或取消零成本",
-  },
-  {
-    icon: Repeat,
-    title: "增量重生成",
-    detail: "改一句只算一句的钱",
-  },
-  {
-    icon: CalendarClock,
-    title: "项目保留 7 天",
-    detail: "到期前可随时下载",
-  },
-  {
-    icon: FileBadge,
-    title: "授权内容",
-    detail: "仅处理您拥有合法授权的视频",
-  },
-  {
-    icon: Receipt,
-    title: "退款政策",
-    detail: "条款公开，入口可达",
-  },
-] as const
+const PROMISE_ICONS = [ShieldCheck, CircleSlash, Repeat, CalendarClock, FileBadge, Receipt]
 
-export function TrustBanner() {
+export async function TrustBanner() {
+  const t = await getTranslations("marketing.trustBanner")
+  const promises = t.raw("promises") as Array<{ title: string; detail: string }>
+
   return (
     <section className="marketing-reading-surface py-12 sm:py-14">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-            为什么放心用
+            {t("eyebrow")}
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            把六件事说清楚，不藏在条款里
+            {t("heading")}
           </h2>
         </div>
 
@@ -80,8 +53,10 @@ export function TrustBanner() {
           className="mt-12 grid grid-cols-1 gap-x-8 gap-y-10 sm:grid-cols-2 lg:grid-cols-3"
           role="list"
         >
-          {PROMISES.map(({ icon: Icon, title, detail }) => (
-            <li key={title} className="flex items-start gap-4">
+          {promises.map(({ title, detail }, i) => {
+            const Icon = PROMISE_ICONS[i]
+            return (
+            <li key={i} className="flex items-start gap-4">
               <span
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md"
                 style={{
@@ -101,7 +76,8 @@ export function TrustBanner() {
                 </p>
               </div>
             </li>
-          ))}
+            )
+          })}
         </ul>
       </div>
     </section>
