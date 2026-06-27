@@ -29,10 +29,22 @@
 | UI-01 | [i18n 基础设施](UI-01-i18n-foundation.md) | ✅ | P0a | M | 否（先行） | [PR #46](https://github.com/sun9bear/AITransVideo/pull/46) 已合并 |
 | UI-02 | [路由迁移 + proxy + 切换器](UI-02-locale-routing-migration.md) | ✅ | P0b | L | 否（依 UI-01，spike 先行） | [PR #48](https://github.com/sun9bear/AITransVideo/pull/48) 已合并（squash `56404a55`） |
 | UI-03a | [营销·结构化文案抽取](UI-03-marketing-en-seo.md)（§子单元拆分） | ✅ | Phase 1·T1.1 | M | 是（依 UI-02） | [PR #50](https://github.com/sun9bear/AITransVideo/pull/50) 已合并（squash `f30c1506`） |
-| UI-03b | [营销·内联重文案 hero/pricing/trial](UI-03-marketing-en-seo.md) | ◐ | Phase 1·T1.2 | M | 是（依 UI-03a） | `uiloc/marketing-en-seo-b`（已推 `9c02c4f0`：**实现完成+gate 全绿**，待多 lens 评审+ship） |
-| UI-03c | [营销·legal 人审](UI-03-marketing-en-seo.md)（HARD 人审） | ☐ | Phase 1·T1.2 | M | 是（**并行，不阻塞 3a/b/d**） | `uiloc/marketing-en-seo-c` |
-| UI-03d | [营销·EN 排版 + SEO 翻旗](UI-03-marketing-en-seo.md) | ☐ | Phase 1·T1.3 | M | 否（依 UI-03a+b 合并） | `uiloc/marketing-en-seo-d` |
+| UI-03b | [营销·内联重文案 hero/pricing/trial](UI-03-marketing-en-seo.md) | ◐ **草稿，未达完成** | Phase 1·T1.2 | M | 是（依 UI-03a） | `uiloc/marketing-en-seo-b`（已推 `9c02c4f0`：**自身 diff gate 绿，但其页面仍渲染中文子组件 `TrialDetails`/`primary-cta`/`plan-card-cta`/`anonymous-trial-launcher` → /en 页半中半英**；且**落后 main**(TU-08/#51)。**开 PR 前必须**：补完页内泄漏组件 + rebase main + 重跑 gate + 多 lens 评审。CodeX 2026-06-26 P1 确认） |
+| UI-03c | [营销·legal 人审](UI-03c-legal-human-review.md)（HARD 人审） | ◐ **第一轮人审完成：拒签** | Phase 1·T1.2 | M | 是（**并行，不阻塞 3a/b/d**） | `uiloc/marketing-en-seo-c`；项目主第一轮人审记录 [UI-03c-legal-human-review.md](UI-03c-legal-human-review.md)：**3 hard blocker**（terms 7.2 自动续费↔实际不续费；privacy 百度网盘断开/披露↔代码软断开）→ **先修中文源再做英文**。决策：**百度网盘从条款删除**（见范围修正 §） |
+| UI-03d | [营销·EN 排版 + SEO 翻旗](UI-03-marketing-en-seo.md) | ☐ | Phase 1·T1.3 | M | 否（依 UI-03a+b+**e/f** 合并） | `uiloc/marketing-en-seo-d` |
+| **UI-03e** | **首页区块英文化（上半）**：PainPoints/FeaturedDemos/ProductProof/WorkflowShowcase | ☐ **新增（范围修正）** | Phase 1·T1.2' | M | 是（依 UI-03a） | `uiloc/marketing-en-seo-e` |
+| **UI-03f** | **首页区块英文化（下半）+ CTA**：Features/SuitedScenarios/TrustBanner/PricingPreview/FinalCta + primary-cta/plan-card-cta/link-button | ☐ **新增（范围修正）** | Phase 1·T1.2' | M | 是（依 UI-03a，与 03e 并行须串行 cjk-baseline） | `uiloc/marketing-en-seo-f` |
 | UI-04 | [最小 Auth 英文化](UI-04-min-auth-en.md) | ✅ | Phase 1.5 | M | 是（依 UI-02） | [PR #49](https://github.com/sun9bear/AITransVideo/pull/49) 已合并（squash `85f2e7c3`） |
+
+### ⚠️ 范围修正（2026-06-26 CodeX 审核 + 项目主决策）
+
+**起因**：CodeX 审核指出 UI-03b「实现完成」是高估；核查发现**原 UI-03 方案卡的组件清单漏列了首页 ~9 个区块组件 + 几个 CTA + trial-details**。`/en` 首页实际渲染链 = Hero(英)→PainPoints(中)→FeaturedDemos(中)→ProductProof(中)→WorkflowShowcase(中)→Features(中)→SuitedScenarios(中)→ToolComparison(英)→TrustBanner(中)→PricingPreview(中)→Faq(英)→FinalCta(中)。**UI-03a+b 只英文化了 ~40% 营销表面**；`/en` 首页主体仍中文。
+
+**项目主决策（AskUserQuestion 2026-06-26）**：
+1. **范围 = 补全整个 /en 营销**（Q1）→ 新增 **UI-03e/UI-03f**（首页区块 + CTA 全英文化）；**UI-03b 必须先补完页内泄漏组件**（TrialDetails/CTA，否则其 hero/pricing/trial 页半中半英）再 PR。M1 体量随之增大（marketing 工作量约翻倍）。
+2. **百度网盘从条款删除**（Q2）→ UI-03c legal 中文源：privacy 删除百度网盘专条；但**因管理员归档确会把用户上传/生成内容外流到运营方百度网盘（真实数据流），删除时须以「运营方可能使用第三方云存储归档已完成任务材料」的通用措辞兜底，避免少披露**（实施者注意，非纯删）。
+
+**M1 真实剩余工作**：UI-03b 补完+rebase+评审 ship → UI-03e + UI-03f（首页区块）→ UI-03c legal 中文源修正(3 blocker)→ en legal → UI-03d(SEO 翻旗，依全部 en 内容)。**M1 远未完成**（已合 UI-01/02/03a/04，剩 03b 收尾 + 03e/f 新增 + 03c/03d）。
 
 ### Wave U-B — Phase 2 工作台（**枚举占位，§9.2 决策门**）
 
@@ -135,4 +147,5 @@ UI-05 ──→ UI-06            UI-07（独立，依 UI-02）
 | 2026-06-25 | UI-04 最小 Auth 英文化 | [#49](https://github.com/sun9bear/AITransVideo/pull/49) squash `85f2e7c3` | 实现委派子 agent（4 commit）+ 我独立复跑全 gate。多 lens 6-agent 对抗评审 **0 critical/high/medium，7 low**（均聚 post-auth-redirect.ts）→ 收敛：回环守卫 locale-aware（`/en/auth/login` 漏 `startsWith('/auth')`→en 漏斗登录回环；deLocalizePath 剥前缀后判，from verbatim，7-case 逻辑测过）+ 中文 throw/zh-snapshot 值级局限标注转 UI-09。@codex bot **0 findings**（tsc⚠=其 sandbox next-intl 解析失败=false neg，本地+CI tsc 绿）。gate 全绿：lint(0err)/tsc/build(8 路由 SSG)/key-parity(152)/cjk-guard(net-new=0,移除182occ)/zh-snapshot(含 auth 字节一致) | ✅ 合并 main |
 | 2026-06-25 | UI-03a 营销结构化文案抽取 | [#50](https://github.com/sun9bear/AITransVideo/pull/50) squash `f30c1506` | 委派子 agent 实现（FAQ/对比表/nav/footer/SEO chrome 入 marketing+seo namespace；FAQ items 单源同喂 DOM+JsonLd；site-json-ld locale 驱动 zh 保 zh-only）。我独立复跑全 gate + 多 lens 4-agent 对抗评审 **0 critical/high/medium，5 low** → 收敛 en seo 双源同步守卫（messages/en/seo.json↔localeSeo.en）。@codex 0 findings。**移交/待确认**：company-info 常量随消费点 03b/03c 抽；seo namespace inert→03d 收敛单源；🔶 en JSON-LD availableLanguage=en-US 待项目主确认是否真有英文客服（03d go-live 前，否则去 en-US 保 ['zh-CN']） | ✅ 合并 main |
 | 2026-06-25 | UI-03b hero/pricing/trial 内联重文案 | 分支 `uiloc/marketing-en-seo-b` 已推 `9c02c4f0`（未开 PR） | 委派子 agent 实现（hero rich-text/pricing 链路 ICU/trial + company-info 在 pricing-assurance 消费点字典化）。**我已独立复跑全 gate 全绿**：tsc 0 / lint 0err / build(pricing·trial SSG) / key-parity / cjk-guard(net-new=0，多集 2192→2120 移除72) / zh-snapshot(+14 串)。**未做：多 lens 对抗评审 + push-PR + @codex + merge** —— 本会话上下文已很深，按既定纪律停在干净检查点交新会话续（不降质硬推）。子 agent 2 裁定待评审核：①company-info 常量保留(仍被 03c legal/contact 消费)②trial-details.tsx 判 out-of-scope(卡只列 trial/page，需核是否致 trial 页半中半英) | ◐ 实现完成待评审 ship |
-| — | **续接指引（新会话）**：cd `D:/Claude/avt-worktrees/uiloc-locale-routing`(在 `uiloc/marketing-en-seo-b`)；跑 4-lens 对抗评审(重点核 trial-details out-of-scope 是否致半中半英 + hero rich-text/¥/zh 字节)；收敛→push 已在→开 PR→CI+@codex→squash-merge→标本 INDEX。之后 UI-03d(依 03a+03b，收敛 seo 单源+SEO 翻旗)；UI-03c legal HARD 人审 | — | — | ⏭ 下一步 |
+| 2026-06-26 | **CodeX 审核 + 范围修正**（见上「⚠️ 范围修正」§） | — | CodeX [P1]：UI-03b 非「实现完成」——`/en` 页仍露中文(TrialDetails/CTA)，应作 PR 前阻塞项。核查发现**原方案卡漏列首页 ~9 区块 + CTA + trial-details**，`/en` 首页主体仍中文(UI-03a+b 仅 ~40% 营销)。[P2] UI-03b 落后 main(TU-08/#51)，PR 前须 rebase。项目主决策：①补全整个 /en 营销→新增 UI-03e/f ②百度网盘从条款删除(通用第三方存储措辞兜底)。**纠正前述「M1 实现完成 4/4」高估** | 🔧 范围扩大，replan |
+| — | **续接指引（新会话，按序）**：(1) **UI-03b 收尾**：cd worktree(`uiloc/marketing-en-seo-b`)→**先补完页内泄漏组件**(TrialDetails + primary-cta/plan-card-cta/anonymous-trial-launcher 字典化，使其 hero/pricing/trial 页全英)→**rebase 最新 main**(TU-08/#51)→重跑 gate→4-lens 评审→PR→@codex→merge。(2) **UI-03e/f**：首页区块组件英文化(上/下半，见表)，各从更新 main 起分支(串行 cjk-baseline)。(3) **UI-03c legal 中文源修正**：按 [UI-03c-legal-human-review.md](UI-03c-legal-human-review.md) 修 3 blocker(terms 7.2 非续费 / privacy 删百度网盘+通用第三方存储兜底 / refund 9.2 原路退回)；terms 15.2 管辖 + 自动续费措辞留项目主/律师确认；改后 cjk-baseline 重生成；再做 en legal + 二轮人审。(4) **UI-03d**：依全部 en 内容做 SEO 翻旗 + 收敛 seo 单源。**🔶 en JSON-LD availableLanguage=en-US 待项目主确认英文客服** | — | — | ⏭ 下一步 |
