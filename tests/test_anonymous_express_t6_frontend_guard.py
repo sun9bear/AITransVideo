@@ -21,6 +21,9 @@ PANEL_TSX = (
     REPO_ROOT / "frontend-next" / "src" / "components" / "marketing"
     / "anonymous-trial-panel.tsx"
 )
+# UI-03g：面板可见文案迁入 next-intl 字典（marketing.anonymousTrial.*）。原先钉在
+# panel 源里的 zh 文案断言改钉字典（zh 值的字节一致另由 zh-snapshot.mjs 守卫）。
+MARKETING_ZH = REPO_ROOT / "frontend-next" / "messages" / "zh" / "marketing.json"
 
 
 def _api_src() -> str:
@@ -29,6 +32,10 @@ def _api_src() -> str:
 
 def _panel_src() -> str:
     return PANEL_TSX.read_text(encoding="utf-8")
+
+
+def _marketing_zh() -> str:
+    return MARKETING_ZH.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +76,8 @@ def test_panel_renders_closed_state():
 def test_panel_renders_express_lane_copy():
     src = _panel_src()
     assert "active_lane === 'express'" in src
-    assert "快捷版真实管线" in src
+    # UI-03g：文案迁入字典（marketing.anonymousTrial.footerExpressSuffix）。
+    assert "快捷版真实管线" in _marketing_zh()
 
 
 def test_panel_gates_clone_opt_in_on_backend_availability():
@@ -110,7 +118,8 @@ def test_panel_cta_carries_return_to():
     """注册/智能版 CTA 带 returnTo（repo 约定 /auth?from=<path>）。"""
     src = _panel_src()
     assert "/auth?from=" in src
-    assert "智能版" in src
+    # UI-03g：智能版 CTA 文案迁入字典（marketing.anonymousTrial.*）。
+    assert "智能版" in _marketing_zh()
 
 
 def test_panel_lifecycle_not_blocked_by_closed_lane():

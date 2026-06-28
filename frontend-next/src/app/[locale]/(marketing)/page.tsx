@@ -35,8 +35,9 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { locale } = await params
   const seo = localeSeo[locale]
-  // 仅当 home 在 localizedRoutes（已翻旗）时才挂 hreflang languages；当前 `/` 暂移出 → 省略，
-  // 避免在未翻旗的 /en home 上产出只含 zh 的 broken alternate set。
+  // home `/` 已加回 localizedRoutes（UI-03g）→ homeLocalized 为真 → 对 zh + /en 双语 home 挂互惠
+  // hreflang languages（zh-Hans+en+x-default）。未翻旗路由（legal）不在表内 → 自动省略 en，避免
+  // 只含 zh 的 broken alternate set。
   const homeLocalized = (localizedRoutes as readonly string[]).includes("/")
   return {
     alternates: {

@@ -270,6 +270,11 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     if (!code) return t("uploadFailedFallback")
     const key = `uploadError.${code}`
     if (hasKey(key)) return t(dynKey(key))
+    // lib 抛出的传输失败 token（network_error / upload_http / invalid_response）登记在
+    // errors.* 组——必须在原样回显前查它。否则裸 token 漏给用户，且 zh 从
+    // 「网络错误，请检查连接后重试」退化成「network_error」，破红线 1（@codex 审查 #1）。
+    const errKey = `errors.${code}`
+    if (hasKey(errKey)) return t(dynKey(errKey))
     // 后端真实 error 字符串未命中字典 → 原样回显（与旧 `mapUploadError(raw) || raw` 一致）。
     return code
   }
