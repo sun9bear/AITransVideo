@@ -163,7 +163,20 @@ services:
       # Phase 1.5 硬化（2026-04-22）：Next standalone 只监听 loopback。
       # Caddy 从 127.0.0.1:3000 反代，network_mode: host 下容器内 = 宿主
       # loopback。ufw 失效时公网依然 refused。
-      HOSTNAME: "127.0.0.1"
+      #
+      # 2026-06-28（M1 i18n 部署）：HOSTNAME 必须是 "localhost"（不是 "127.0.0.1"）。
+      # 原因：next-intl(v4) 在 output:standalone + 反代下把默认 locale `/`→内部 `/zh`
+      # 的重写发成绝对 `https://localhost:3000/zh`（standalone server.js 硬编码
+      # host=localhost，vercel/next.js #37536/#44043，中间件层改不动）。Next 用
+      # getRelativeURL(rewrite, initURL) 字符串比 origin 判内部重写 vs 外部代理，
+      # 而 initURL host = 此 HOSTNAME。设 "127.0.0.1" 时 initURL≠rewrite(localhost)
+      # → Next 把 /zh 当外部代理 fetch → 307/EPROTO 循环 → 默认 locale 路由全 500。
+      # 设 "localhost" 让 initURL 字符串 == 重写字符串 → relativize 成内部路径 → 200。
+      # 配套 NODE_OPTIONS dns ipv4first：让 Node 把 "localhost" 仍绑到 127.0.0.1，
+      # 这样 Caddy(127.0.0.1:3000) 与下方 healthcheck(127.0.0.1) 无需改动仍能连到。
+      # 详见 2026-06-28 部署排障（Claude session）。
+      HOSTNAME: "localhost"
+      NODE_OPTIONS: "--dns-result-order=ipv4first"
       # Mirror the build arg for SSR runtime reads (sitemap.ts / robots.ts
       # generate at request time, not build time).
       NEXT_PUBLIC_SITE_URL: "${NEXT_PUBLIC_SITE_URL:-https://aitrans.video}"
