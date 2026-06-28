@@ -121,15 +121,36 @@ function hashFileInWorker(
   })
 }
 
-async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+/**
+ * 读一次错误响应体，组装 ChunkedUploadError（@codex 审查 #1）：
+ *  - `code`：服务端结构化错误码（`body.error`，如 rate_limited / preview_queue_full /
+ *    gate_unavailable / csrf_origin_rejected）存在时优先用它——面板映射到已有 uploadError.* 文案，
+ *    保留可执行指引（固定 genericCode 会把 quota/queue/origin 拒绝退化成笼统"初始化失败"）；
+ *    否则回落 `genericCode`（+ `params` 渲染模板）。
+ *  - `message`：`body.message ?? body.error ?? fallback`（人读串，与旧 readErrorMessage 取值一致 →
+ *    登录态工作台读 `.message` 字节不变）。
+ *
+ * 约定：`body.error` 是后端契约里的 ASCII snake_case 码（非中文），故拿它当 `.code` 不会把中文漏给
+ * /en（与单请求 uploadPreviewVideo 透传 body.error 的既有行为一致）。
+ */
+async function readChunkedError(
+  res: Response,
+  genericCode: string,
+  fallback: string,
+  params: Record<string, string> = {},
+): Promise<ChunkedUploadError> {
+  let serverCode: string | null = null
+  let message = fallback
   try {
     const body = await res.json()
-    if (typeof body?.message === 'string' && body.message) return body.message
-    if (typeof body?.error === 'string' && body.error) return body.error
+    const m = typeof body?.message === 'string' && body.message ? body.message : null
+    const e = typeof body?.error === 'string' && body.error ? body.error : null
+    message = m ?? e ?? fallback
+    serverCode = e
   } catch {
     // ignore — 非 JSON 错误体
   }
-  return fallback
+  return new ChunkedUploadError(serverCode ?? genericCode, message, params)
 }
 
 interface InitResponse {
@@ -158,11 +179,9 @@ async function initUpload(
     }),
   })
   if (!res.ok) {
-    throw new ChunkedUploadError(
-      'chunk_init_failed',
-      await readErrorMessage(res, `上传初始化失败（${res.status}）`),
-      { status: String(res.status) },
-    )
+    throw await readChunkedError(res, 'chunk_init_failed', `上传初始化失败（${res.status}）`, {
+      status: String(res.status),
+    })
   }
   return (await res.json()) as InitResponse
 }
@@ -196,18 +215,16 @@ async function uploadPartWithRetry(
       if (res.ok) return
       // 429 / 5xx 可重试；4xx 协议错误（404/409/413/422）重试无意义，立即失败
       if (res.status === 429 || res.status >= 500) {
-        lastError = new ChunkedUploadError(
-          'part_upload_failed',
-          await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`),
-          { partIndex: String(partIndex), status: String(res.status) },
-        )
+        lastError = await readChunkedError(res, 'part_upload_failed', `分片 ${partIndex} 上传失败（${res.status}）`, {
+          partIndex: String(partIndex),
+          status: String(res.status),
+        })
         continue
       }
-      throw new ChunkedUploadError(
-        'part_upload_failed',
-        await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`),
-        { partIndex: String(partIndex), status: String(res.status) },
-      )
+      throw await readChunkedError(res, 'part_upload_failed', `分片 ${partIndex} 上传失败（${res.status}）`, {
+        partIndex: String(partIndex),
+        status: String(res.status),
+      })
     } catch (err) {
       if (err instanceof TypeError) {
         // 网络层失败（断网 / CF 瞬断）→ 重试
@@ -238,11 +255,9 @@ async function completeAndWaitReady(
   })
   if (res.status === 200) return
   if (res.status !== 202) {
-    throw new ChunkedUploadError(
-      'merge_verify_failed',
-      await readErrorMessage(res, `合并校验失败（${res.status}）`),
-      { detail: String(res.status) },
-    )
+    throw await readChunkedError(res, 'merge_verify_failed', `合并校验失败（${res.status}）`, {
+      detail: String(res.status),
+    })
   }
   // 202 in_progress：轮询 R4 至 ready（completing 期间 UI 显示"正在合并校验…"）
   const deadline = Date.now() + MERGE_POLL_TIMEOUT_MS
@@ -253,7 +268,7 @@ async function completeAndWaitReady(
       credentials: 'include',
     })
     if (!statusRes.ok) {
-      throw new ChunkedUploadError('merge_status_failed', await readErrorMessage(statusRes, '查询合并状态失败'))
+      throw await readChunkedError(statusRes, 'merge_status_failed', '查询合并状态失败')
     }
     const body = await statusRes.json()
     if (body.state === 'ready') return
@@ -288,11 +303,9 @@ async function completeAnonymousAndWait(
       return (await res.json()) as Record<string, unknown>
     }
     if (res.status !== 202) {
-      throw new ChunkedUploadError(
-        'merge_verify_failed',
-        await readErrorMessage(res, `合并校验失败（${res.status}）`),
-        { detail: String(res.status) },
-      )
+      throw await readChunkedError(res, 'merge_verify_failed', `合并校验失败（${res.status}）`, {
+        detail: String(res.status),
+      })
     }
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, STATUS_POLL_INTERVAL_MS))
@@ -301,7 +314,7 @@ async function completeAnonymousAndWait(
         credentials: 'include',
       })
       if (!statusRes.ok) {
-        throw new ChunkedUploadError('merge_status_failed', await readErrorMessage(statusRes, '查询合并状态失败'))
+        throw await readChunkedError(statusRes, 'merge_status_failed', '查询合并状态失败')
       }
       const body = await statusRes.json()
       if (body.state !== 'completing') break // ready/consumed/receiving → 重发 complete 定夺
