@@ -45,6 +45,7 @@ import { setAnonClaimHint } from "@/lib/api/claim"
 import {
   getChunkedUploadLimits,
   uploadFileInChunksAnonymous,
+  ChunkedUploadError,
   ANONYMOUS_CHUNKED_PREFIX,
   type ChunkedUploadLimits,
 } from "@/lib/upload/chunkedUpload"
@@ -264,17 +265,28 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
     const key = `statusReason.${code}`
     return hasKey(key) ? t(dynKey(key)) : t("statusReason.fallback", { reason: code })
   }
-  /** upload-time error code/原始字符串 → 文案；未知则原样回显（保留旧 `|| raw` 语义）。 */
-  function resolveUploadError(raw: string): string {
+  /** 从上传异常取 (token, ICU 占位值)：ChunkedUploadError 用 `.code`/`.params`（分片上传错误，
+   *  携带 status/partIndex/maxMb/detail 让面板渲染出与原中文逐字节一致的 zh 文案）；其余 Error
+   *  用 `.message`（lib 已 token 化的传输失败串）。 */
+  function uploadErrorParts(err: unknown): {
+    raw: string
+    params: Record<string, string | number>
+  } {
+    if (err instanceof ChunkedUploadError) return { raw: err.code, params: err.params }
+    return { raw: err instanceof Error ? err.message : '', params: {} }
+  }
+  /** upload-time error code/原始字符串 → 文案；未知则原样回显（保留旧 `|| raw` 语义）。
+   *  params 是 ChunkedUploadError 的 ICU 占位值（无占位的 key 会忽略多余 params）。 */
+  function resolveUploadError(raw: string, params: Record<string, string | number> = {}): string {
     const code = mapUploadError(raw)
     if (!code) return t("uploadFailedFallback")
     const key = `uploadError.${code}`
-    if (hasKey(key)) return t(dynKey(key))
+    if (hasKey(key)) return t(dynKey(key), params)
     // lib 抛出的传输失败 token（network_error / upload_http / invalid_response）登记在
     // errors.* 组——必须在原样回显前查它。否则裸 token 漏给用户，且 zh 从
     // 「网络错误，请检查连接后重试」退化成「network_error」，破红线 1（@codex 审查 #1）。
     const errKey = `errors.${code}`
-    if (hasKey(errKey)) return t(dynKey(errKey))
+    if (hasKey(errKey)) return t(dynKey(errKey), params)
     // 后端真实 error 字符串未命中字典 → 原样回显（与旧 `mapUploadError(raw) || raw` 一致）。
     return code
   }
@@ -468,8 +480,8 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         uploadResp = body as unknown as UploadResponse
       } catch (err) {
         if (gen !== pollGenRef.current) return
-        const raw = err instanceof Error ? err.message : ''
-        setState((s) => ({ ...s, step: 'error', errorMsg: resolveUploadError(raw) }))
+        const { raw, params } = uploadErrorParts(err)
+        setState((s) => ({ ...s, step: 'error', errorMsg: resolveUploadError(raw, params) }))
         return
       }
     } else {
@@ -496,8 +508,8 @@ export function AnonymousTrialPanel({ className }: { className?: string }) {
         )
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
-        const raw = err instanceof Error ? err.message : ''
-        setState((s) => ({ ...s, step: 'error', errorMsg: resolveUploadError(raw) }))
+        const { raw, params } = uploadErrorParts(err)
+        setState((s) => ({ ...s, step: 'error', errorMsg: resolveUploadError(raw, params) }))
         return
       }
     }

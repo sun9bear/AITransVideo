@@ -314,7 +314,18 @@
       "storage_error": "Server storage is busy, please try again later",
       "csrf_origin_rejected": "Request origin check failed, please refresh the page and try again",
       "feature_not_available": "The no-signup trial isn't open yet",
-      "anonymous_preview_disabled": "The no-signup trial isn't open yet"
+      "anonymous_preview_disabled": "The no-signup trial isn't open yet",
+      "hash_failed": "File hashing failed",
+      "hash_worker_failed": "Failed to start the hashing worker",
+      "chunk_init_failed": "Upload initialization failed ({status})",
+      "part_upload_failed": "Chunk {partIndex} upload failed ({status})",
+      "part_network_retried": "Chunk {partIndex} network error, retried",
+      "part_upload_failed_final": "Chunk {partIndex} upload failed",
+      "merge_verify_failed": "Merge verification failed ({detail})",
+      "merge_status_failed": "Failed to query merge status",
+      "merge_verify_timeout": "Merge verification timed out, please retry later from the tasks page",
+      "merge_verify_timeout_anon": "Merge verification timed out, please try again later",
+      "file_too_large_chunked": "File exceeds the {maxMb}MB limit, please compress it and try again"
     },
     "createError": {
       "retry_exhausted": "You've run out of retries, please upload a new video",

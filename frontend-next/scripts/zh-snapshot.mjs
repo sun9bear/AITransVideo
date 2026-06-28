@@ -342,6 +342,24 @@ assert.equal(
   "anonymousTrial.ready.watermarkNote 全角括号/逗号/占位符漂移",
 )
 
+// 4g) chunkedUpload i18n（2026-06-28，UI-03g 5-lens LOW #2 收尾）：分片上传错误 token 的 zh 字典值
+//     必须与 src/lib/upload/chunkedUpload.ts 里原中文 throw 串【逐字节】相同（红线 R1）。chunkedUpload
+//     抛 ChunkedUploadError(code, 原中文, params)，面板读 .code → t("uploadError." + code, params)；
+//     登录态工作台仍读 .message → 原中文（双消费方各取所需）。下面钉死全角括号（）/全角逗号，/ICU
+//     占位符（{status}/{partIndex}/{maxMb}/{detail}，纯文本替换不加千分位）最敏感的串：
+const zhUe = zhAt.uploadError
+assert.equal(zhUe.hash_failed, "文件哈希计算失败", "anonymousTrial.uploadError.hash_failed 漂移")
+assert.equal(zhUe.hash_worker_failed, "哈希 Worker 启动失败", "anonymousTrial.uploadError.hash_worker_failed 漂移")
+assert.equal(zhUe.chunk_init_failed, "上传初始化失败（{status}）", "anonymousTrial.uploadError.chunk_init_failed 全角括号/占位符漂移")
+assert.equal(zhUe.part_upload_failed, "分片 {partIndex} 上传失败（{status}）", "anonymousTrial.uploadError.part_upload_failed 全角括号/占位符/空格漂移")
+assert.equal(zhUe.part_network_retried, "分片 {partIndex} 网络错误，已重试", "anonymousTrial.uploadError.part_network_retried 全角逗号/占位符漂移")
+assert.equal(zhUe.part_upload_failed_final, "分片 {partIndex} 上传失败", "anonymousTrial.uploadError.part_upload_failed_final 占位符/空格漂移")
+assert.equal(zhUe.merge_verify_failed, "合并校验失败（{detail}）", "anonymousTrial.uploadError.merge_verify_failed 全角括号/占位符漂移")
+assert.equal(zhUe.merge_status_failed, "查询合并状态失败", "anonymousTrial.uploadError.merge_status_failed 漂移")
+assert.equal(zhUe.merge_verify_timeout, "合并校验超时，请稍后在任务页重试", "anonymousTrial.uploadError.merge_verify_timeout 全角逗号漂移")
+assert.equal(zhUe.merge_verify_timeout_anon, "合并校验超时，请稍后重试", "anonymousTrial.uploadError.merge_verify_timeout_anon 全角逗号漂移")
+assert.equal(zhUe.file_too_large_chunked, "文件超过 {maxMb}MB 上限，请压缩后重试", "anonymousTrial.uploadError.file_too_large_chunked 占位符/全角逗号/空格漂移")
+
 // 5) seo 默认 zh 字节一致：site 级标题/描述与 site.ts 顶层常量同源同值（红线 1）
 const zhSeo = JSON.parse(readFileSync(path.join(root, "messages/zh/seo.json"), "utf8"))
 assert.equal(zhSeo.site.name, "爱译视频", "seo.site.name 漂移")

@@ -314,7 +314,18 @@
       "storage_error": "服务器存储繁忙，请稍后再试",
       "csrf_origin_rejected": "请求来源校验失败，请刷新页面后重试",
       "feature_not_available": "免注册试用暂未开放",
-      "anonymous_preview_disabled": "免注册试用暂未开放"
+      "anonymous_preview_disabled": "免注册试用暂未开放",
+      "hash_failed": "文件哈希计算失败",
+      "hash_worker_failed": "哈希 Worker 启动失败",
+      "chunk_init_failed": "上传初始化失败（{status}）",
+      "part_upload_failed": "分片 {partIndex} 上传失败（{status}）",
+      "part_network_retried": "分片 {partIndex} 网络错误，已重试",
+      "part_upload_failed_final": "分片 {partIndex} 上传失败",
+      "merge_verify_failed": "合并校验失败（{detail}）",
+      "merge_status_failed": "查询合并状态失败",
+      "merge_verify_timeout": "合并校验超时，请稍后在任务页重试",
+      "merge_verify_timeout_anon": "合并校验超时，请稍后重试",
+      "file_too_large_chunked": "文件超过 {maxMb}MB 上限，请压缩后重试"
     },
     "createError": {
       "retry_exhausted": "重试次数已用完，请重新上传一个视频",
