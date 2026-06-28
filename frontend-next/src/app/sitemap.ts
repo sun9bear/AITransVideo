@@ -24,10 +24,10 @@ import { absoluteUrl, hreflangLanguages, localizedRoutes, publicRoutes } from "@
  */
 export default function sitemap(): MetadataRoute.Sitemap {
   return publicRoutes.map((path) => {
-    // 仅**已翻旗**路由（/pricing /trial）挂 locale-aware alternates（含 en，由 hreflangLanguages
-    // 单点产出）；未翻旗路由（home `/` 待 UI-03g、legal 待 UI-03c）**不挂 languages** —— 避免无意义
-    // 的 zh-only 自指备选集，与 page 级 metadata 一致（@codex #67 P2）。`url` 主条目仍为默认 zh
-    // 裸路径，对当前抓取的主 URL 集合零变化。
+    // 仅**已翻旗**路由（home `/`、/pricing、/trial）挂 locale-aware alternates（含 en，由
+    // hreflangLanguages 单点产出）；未翻旗路由（legal 待 UI-03c）**不挂 languages** —— 避免无意义
+    // 的 zh-only 自指备选集，与 page 级 metadata 一致（@codex #67 P2）。home `/` 自 UI-03g 起加回
+    // localizedRoutes，本逻辑无需改动即自动挂 en alternate。`url` 主条目仍为默认 zh 裸路径。
     const localized = (localizedRoutes as readonly string[]).includes(path)
     return {
       url: absoluteUrl(path),

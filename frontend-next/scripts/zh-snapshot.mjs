@@ -31,14 +31,14 @@ assert.equal(site.absoluteUrl("/pricing"), `${SITE_URL}/pricing`, "absoluteUrl('
 assert.equal(site.absoluteUrl("/pricing", "zh"), `${SITE_URL}/pricing`, "absoluteUrl(zh) ≠ 单参（zh 必须 inert）")
 assert.equal(site.absoluteUrl("pricing"), `${SITE_URL}/pricing`, "absoluteUrl 无前导斜杠 漂移")
 
-// UI-03d-1-followup（@codex #66 P2，项目主决策）：home `/` 暂移出 localizedRoutes
-// （NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW=1 时 AnonymousTrialPanel /en 泄漏中文，待 UI-03g）
-// → hreflangLanguages("/") 回到只挂 zh-Hans + x-default，无 en。
+// UI-03g（2026-06-28）：home `/` 已加回 localizedRoutes（AnonymousTrialPanel + anonymousPreview
+// 本地化完成、/en home 整页英文）→ hreflangLanguages("/") 互惠含 en（zh-Hans + en + x-default）。
+// 早先 UI-03d-1-followup 因半中文 panel 临时移出（@codex #66 P2）已收回。
 const hl = site.hreflangLanguages("/")
 assert.deepEqual(
   hl,
-  { "zh-Hans": SITE_URL, "x-default": SITE_URL },
-  "hreflang('/') 应只含 zh-Hans + x-default（home 暂未翻旗、无 en — 待 UI-03g 本地化 panel）"
+  { "zh-Hans": SITE_URL, "en": `${SITE_URL}/en`, "x-default": SITE_URL },
+  "hreflang('/') 翻旗后应含 zh-Hans + en + x-default（home 属 localizedRoute — UI-03g 本地化 panel 完成）"
 )
 
 // 已翻旗页（/pricing）互惠含 en：正向用例，防误把 localizedRoutes 清空导致全站无 en hreflang。
@@ -292,6 +292,54 @@ assert.equal(
   zhMkt.finalCta.trustLine,
   "英文转中文 · 无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频",
   "marketing.finalCta.trustLine 间隔号漂移",
+)
+
+// 4f) UI-03g：AnonymousTrialPanel + anonymousPreview.ts 内联中文迁入 marketing.anonymousTrial
+//     字典后，默认 zh 值必须与改造前组件源【逐字节】相同（红线 R1）。下面钉死标点/全半角/破折号/
+//     间隔号/直角引号最敏感的代表串（任一漂移即 red = 默认 zh 渲染回归）：
+//     - uploadStage.* / stage.* 用全角省略号 …（U+2026，不得退回半角三点 ...）
+//     - footer / uploadZone.hint 用间隔号 ·（U+00B7）分隔
+//     - failed.keepNote 用全角直角引号「」+ 全角句号。
+//     - processing.hint 用 en-dash 2–5（U+2013，不得改连字符）+ 全角逗号
+//     - consent.cloneOptInTitle 用全角括号（）（U+FF08/U+FF09）
+//     - previewDuration ICU：minutes 分支【{value} 分钟】、other 分支【{value} 秒】（值与空格 verbatim）
+const zhAt = zhMkt.anonymousTrial
+assert.equal(zhAt.uploadStage.hashing, "校验文件…", "anonymousTrial.uploadStage.hashing 必须用全角省略号 …")
+assert.equal(zhAt.uploadStage.merging, "合并校验中…", "anonymousTrial.uploadStage.merging 必须用全角省略号 …")
+assert.equal(zhAt.uploadStage.uploading, "上传中…", "anonymousTrial.uploadStage.uploading 必须用全角省略号 …")
+assert.equal(zhAt.stage.queued, "等待处理…", "anonymousTrial.stage.queued 全角省略号漂移")
+assert.equal(zhAt.stage.fallback, "处理中…", "anonymousTrial.stage.fallback 全角省略号漂移")
+assert.equal(
+  zhAt.footer,
+  "本地视频 · 前 {duration}预览 · 带水印{expressSuffix}",
+  "anonymousTrial.footer 间隔号/占位符漂移",
+)
+assert.equal(zhAt.footerExpressSuffix, " · 快捷版真实管线", "anonymousTrial.footerExpressSuffix 间隔号/前导空格漂移")
+assert.equal(
+  zhAt.uploadZone.hint,
+  "MP4 · MOV · M4V · WebM · 最大 {maxUploadMb}MB",
+  "anonymousTrial.uploadZone.hint 间隔号/占位符漂移",
+)
+assert.equal(
+  zhAt.failed.keepNote,
+  "已上传的视频仍然保留，点击「重试」无需重新上传。",
+  "anonymousTrial.failed.keepNote 全角直角引号「」/句号漂移",
+)
+assert.equal(
+  zhAt.processing.hint,
+  "配音预览生成中，通常需要 2–5 分钟，请稍候",
+  "anonymousTrial.processing.hint en-dash 2–5 / 全角逗号漂移",
+)
+assert.equal(zhAt.consent.cloneOptInTitle, "（可选）克隆我的原声音色", "anonymousTrial.consent.cloneOptInTitle 全角括号漂移")
+assert.equal(
+  zhAt.previewDuration,
+  "{unit, select, minutes {{value} 分钟} other {{value} 秒}}",
+  "anonymousTrial.previewDuration ICU select/分钟·秒 文案漂移",
+)
+assert.equal(
+  zhAt.ready.watermarkNote,
+  "（带水印，前 {duration}）",
+  "anonymousTrial.ready.watermarkNote 全角括号/逗号/占位符漂移",
 )
 
 // 5) seo 默认 zh 字节一致：site 级标题/描述与 site.ts 顶层常量同源同值（红线 1）

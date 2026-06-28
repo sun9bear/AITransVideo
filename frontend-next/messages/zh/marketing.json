@@ -215,6 +215,140 @@
     "registerCta": "注册账号，开放后第一时间体验",
     "comingSoon": "上传与实时预览即将上线，敬请期待。"
   },
+  "anonymousTrial": {
+    "dialogTrigger": "立即试用",
+    "dialogTitle": "免注册上传试用",
+    "minimizeAria": "最小化上传窗口",
+    "minimizeTitle": "最小化",
+    "closeAria": "关闭上传窗口",
+    "closeTitle": "关闭",
+    "footer": "本地视频 · 前 {duration}预览 · 带水印{expressSuffix}",
+    "footerExpressSuffix": " · 快捷版真实管线",
+    "uploadZone": {
+      "aria": "点击或拖放视频文件到此处上传",
+      "title": "点击选择或拖放视频",
+      "hint": "MP4 · MOV · M4V · WebM · 最大 {maxUploadMb}MB"
+    },
+    "retryUpload": "重新上传",
+    "confirmClose": {
+      "title": "确认关闭上传窗口？",
+      "description": "当前视频仍在上传或处理中。关闭后会清空这个窗口的进度，可能需要重新上传或重新发起预览。",
+      "confirmLabel": "确认关闭",
+      "cancelLabel": "继续等待"
+    },
+    "uploadStage": {
+      "hashing": "校验文件…",
+      "merging": "合并校验中…",
+      "uploading": "上传中…"
+    },
+    "largeFileUnavailable": "大文件上传通道暂未开放，请将视频压缩到 95MB 以内后重试",
+    "validate": {
+      "unsupportedFormat": "不支持的格式\"{ext}\"，请上传 MP4、MOV、M4V 或 WebM",
+      "tooLarge": "文件大小 {mb}MB 超过 {maxUploadMb}MB 限制"
+    },
+    "uploadFailedFallback": "上传失败，请重试",
+    "uploadDeniedFallback": "上传被拒绝，请稍后重试",
+    "masterClosed": {
+      "title": "免注册试用暂未开放",
+      "before": "可以先",
+      "registerLink": "注册账号",
+      "after": "体验完整的视频翻译配音"
+    },
+    "consent": {
+      "uploadSuccess": "视频上传成功",
+      "introExpress": "我们将用快捷版完整管线（含说话人音色匹配）为您生成带水印的前 {duration}中文配音预览。继续前请确认以下声明：",
+      "introDefault": "我们将为您生成带水印的前 {duration}中文配音预览。继续前请确认以下声明：",
+      "rightsLabel": "我确认对该视频内容及其中人声拥有必要权利，同意将其用于本次预览合成。",
+      "cloneOptInTitle": "（可选）克隆我的原声音色",
+      "cloneOptInDetail": "勾选后将用视频中主说话人的声音生成更接近原声的配音（免费，仅用于本次预览）。不勾选则使用预设音色。",
+      "submit": "生成配音预览"
+    },
+    "processing": {
+      "hint": "配音预览生成中，通常需要 2–5 分钟，请稍候"
+    },
+    "ready": {
+      "title": "配音预览已就绪",
+      "stageLabel": "预览就绪",
+      "watermarkNote": "（带水印，前 {duration}）",
+      "videoFallback": "您的浏览器不支持 video 标签。",
+      "ctaLead": "预览效果满意？",
+      "ctaRegisterLink": "注册账号体验完整翻译",
+      "ctaMiddle": "，登录后还可使用",
+      "ctaStudioLink": "智能版",
+      "ctaTail": "获得更高质量的全自动翻译",
+      "uploadAnother": "上传另一个视频"
+    },
+    "failed": {
+      "fallback": "预览生成失败",
+      "keepNote": "已上传的视频仍然保留，点击「重试」无需重新上传。",
+      "retry": "重试",
+      "reupload": "重新上传"
+    },
+    "previewDuration": "{unit, select, minutes {{value} 分钟} other {{value} 秒}}",
+    "stage": {
+      "queued": "等待处理…",
+      "probing": "分析视频…",
+      "transcribing": "转录音频…",
+      "translating": "翻译中…",
+      "synthesizing": "合成配音…",
+      "mixing": "混音合成…",
+      "publishing": "生成预览…",
+      "fallback": "处理中…"
+    },
+    "statusReason": {
+      "rate_limited": "今日预览次数已用完，请明天再来",
+      "content_blocked": "内容未通过合规检查，无法预览",
+      "file_too_large": "文件超过大小限制，请压缩后重试",
+      "unsupported_format": "不支持的视频格式，请上传 mp4、mov、m4v 或 webm",
+      "duration_exceeded": "视频时长超限，请更换视频再上传",
+      "quota_exceeded": "系统预览配额已满，请稍后再试",
+      "service_unavailable": "预览服务暂不可用，请稍后再试",
+      "fallback": "上传被拒绝（{reason}）"
+    },
+    "uploadError": {
+      "rate_limited": "今日免费预览次数已用完，请明天再来",
+      "preview_queue_full": "预览通道繁忙，请稍后再试",
+      "file_too_large": "文件超过大小限制，请压缩后重试",
+      "unsupported_media_type": "不支持的视频格式，请上传 mp4、mov、m4v 或 webm",
+      "gate_unavailable": "预览服务暂时不可用，请稍后再试",
+      "storage_error": "服务器存储繁忙，请稍后再试",
+      "csrf_origin_rejected": "请求来源校验失败，请刷新页面后重试",
+      "feature_not_available": "免注册试用暂未开放",
+      "anonymous_preview_disabled": "免注册试用暂未开放"
+    },
+    "createError": {
+      "retry_exhausted": "重试次数已用完，请重新上传一个视频",
+      "need_consent": "需要先确认版权声明才能继续",
+      "already_processing": "该预览已在处理中或无法重试，请稍候或重新上传",
+      "channel_busy": "预览通道繁忙，请稍后再试",
+      "generic": "创建预览失败，请重试"
+    },
+    "errors": {
+      "createFailed": "创建预览失败，请重试",
+      "retryFailed": "重试失败，请稍后再试",
+      "uploadFailed": "上传失败，请重试",
+      "sessionExpired": "会话已过期，请刷新页面后重试",
+      "pollFailed": "网络不稳定，预览状态查询多次失败，请稍后重试",
+      "network_error": "网络错误，请检查连接后重试",
+      "invalid_response": "服务器返回了无效的响应格式",
+      "upload_http": "上传失败，请重试",
+      "status_http": "状态查询失败，请稍后重试"
+    },
+    "minimized": {
+      "titleUpload": "视频上传中",
+      "titleProcessing": "预览生成中",
+      "titleConsent": "上传已完成",
+      "titleReady": "预览已完成",
+      "titleFailed": "预览生成失败",
+      "titleDefault": "上传试用",
+      "detailProcessingFallback": "处理中",
+      "detailConsent": "点击确认授权并生成预览",
+      "detailReady": "点击查看预览结果",
+      "detailDefault": "点击展开窗口",
+      "expandAria": "展开上传试用窗口",
+      "expandLabel": "展开"
+    }
+  },
   "heroSamplePlayer": {
     "videoFallback": "您的浏览器不支持 video 标签。",
     "ariaTablist": "配音版 / 原片切换",

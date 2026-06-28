@@ -125,15 +125,15 @@ export function absoluteUrl(path: string, locale?: Locale): string {
  * 已翻旗（body 100% 英文、可对爬虫宣告 en）的路由白名单。
  * `/pricing`、`/trial` 在 03a/b/e/f 后整页英文就绪 → 互惠挂 en hreflang + sitemap en 条目。
  *
- * **`/`（home）暂移出（UI-03d-1-followup，@codex #66 P2 + 项目主 2026-06-27 决策「先 drop /en home」）**：
- * 当 `NEXT_PUBLIC_ENABLE_ANONYMOUS_PREVIEW=1` 时 home 渲染 `AnonymousTrialPanel`（仍内联中文
- * consent/上传文案）；宣告 /en 会让爬虫/用户落到 `html lang="en"` 的半中文页。待 **UI-03g** 本地化
- * 该面板后再把 `/` 加回（届时同步更新 hreflang-check / zh-snapshot 的 home 断言）。home 仍走
- * 自指 canonical（en→/en，遵「en canonical 绝不指 zh」红线），只是不挂 en hreflang / 不进 sitemap en。
+ * **`/`（home）已加回（UI-03g 2026-06-28）**：UI-03g 已本地化 `AnonymousTrialPanel` +
+ * `anonymousPreview.ts`（上传/consent/错误文案全部走 message key），`/en` home 现整页英文。
+ * 因此 home 重新对爬虫宣告 en —— 互惠挂 en hreflang + sitemap en 条目恢复（home 早先在
+ * UI-03d-1-followup 因半中文 panel 被临时移出，@codex #66 P2 + 项目主 2026-06-27 决策；本单元收回）。
+ * home 自指 canonical（en→/en，遵「en canonical 绝不指 zh」红线）不变。
  *
  * legal 页（/contact /terms /privacy /refund）正文仍中文，待 UI-03c 翻译后才加入；不在列 → 自动只挂 zh。
  */
-export const localizedRoutes = ["/pricing", "/trial"] as const
+export const localizedRoutes = ["/", "/pricing", "/trial"] as const
 
 /**
  * hreflang `languages` map for a path（方案 §1.8）。

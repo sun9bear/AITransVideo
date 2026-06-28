@@ -16,6 +16,7 @@ admin 热配置；与预览长度 ``anonymous_preview_max_seconds`` 已于 2026-
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +31,13 @@ import anonymous_preview_api as api  # noqa: E402
 
 _ANON_PREVIEW_TS = (
     _REPO / "frontend-next" / "src" / "lib" / "api" / "anonymousPreview.ts"
+)
+# UI-03g：前端友好文案迁入 next-intl 字典；mapStatusReason 改为透传 code，
+# 面板 resolveStatusReason 经 t() 映射 statusReason.<code>。
+_MARKETING_ZH = _REPO / "frontend-next" / "messages" / "zh" / "marketing.json"
+_PANEL_TSX = (
+    _REPO / "frontend-next" / "src" / "components" / "marketing"
+    / "anonymous-trial-panel.tsx"
 )
 
 
@@ -80,8 +88,16 @@ def test_redact_reason_preserves_existing_codes():
 
 
 def test_frontend_maps_duration_exceeded_to_friendly_text():
-    assert _ANON_PREVIEW_TS.exists(), f"前端文件不存在: {_ANON_PREVIEW_TS}"
-    src = _ANON_PREVIEW_TS.read_text(encoding="utf-8")
-    # mapStatusReason 须把 duration_exceeded 映射为项目主裁定的友好提示。
-    assert "duration_exceeded:" in src, "mapStatusReason 缺 duration_exceeded 映射"
-    assert "视频时长超限，请更换视频再上传" in src, "缺友好提示文案（项目主裁定）"
+    # UI-03g：友好文案从 anonymousPreview.ts 的 mapStatusReason MAP 迁入 next-intl
+    # 字典（marketing.anonymousTrial.statusReason.duration_exceeded）；lib 现透传 code、
+    # 面板 resolveStatusReason 经 t() 映射 statusReason.<code>。锁字典值（字节一致，项目主裁定）
+    # + 面板确按 statusReason 字典映射（非把原始 code 直接显示给用户）。gateway 仍发
+    # duration_exceeded code（上面 4 例已锁）。
+    assert _MARKETING_ZH.exists(), f"字典文件不存在: {_MARKETING_ZH}"
+    catalog = json.loads(_MARKETING_ZH.read_text(encoding="utf-8"))
+    friendly = catalog["anonymousTrial"]["statusReason"]["duration_exceeded"]
+    assert friendly == "视频时长超限，请更换视频再上传", "缺/漂移友好提示文案（项目主裁定）"
+
+    assert _PANEL_TSX.exists(), f"面板文件不存在: {_PANEL_TSX}"
+    panel = _PANEL_TSX.read_text(encoding="utf-8")
+    assert "statusReason." in panel, "面板未经 statusReason 字典映射 duration_exceeded"

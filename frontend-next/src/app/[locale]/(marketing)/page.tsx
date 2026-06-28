@@ -24,9 +24,9 @@ import { absoluteUrl, hreflangLanguages, localeSeo, localizedRoutes } from "@/li
  *     en 分支才用 `absoluteUrl("/", "en")` 绝对形。
  *   - OG title/description/url 用 `localeSeo[locale]`（zh 镜像顶层 defaultTitle/Description）
  *     与 `absoluteUrl("/", locale)`（zh → siteUrl，与旧 `absoluteUrl("/")` 同值）。
- *   - **home `/` 暂移出 localizedRoutes**（待 UI-03g 本地化 AnonymousTrialPanel；@codex #67 P2 +
- *     项目主决策）→ **不挂 `languages`**：否则 /en home 自指 canonical 却挂只指 zh 的 hreflang =
- *     broken alternate set（@codex 指出）。UI-03g 把 `/` 加回 localizedRoutes 后本分支自动恢复互惠。
+ *   - **home `/` 已加回 localizedRoutes（UI-03g）**：AnonymousTrialPanel 本地化完成、/en home 整页
+ *     英文 → `homeLocalized` 自动为真 → 挂 `languages`（zh-Hans+en+x-default 互惠）。本分支无需改逻辑，
+ *     仅随 site.ts `localizedRoutes` 加回 `/` 后自动恢复互惠（早先 @codex #67 P2 临时移出已收回）。
  */
 export async function generateMetadata({
   params,
@@ -35,8 +35,9 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { locale } = await params
   const seo = localeSeo[locale]
-  // 仅当 home 在 localizedRoutes（已翻旗）时才挂 hreflang languages；当前 `/` 暂移出 → 省略，
-  // 避免在未翻旗的 /en home 上产出只含 zh 的 broken alternate set。
+  // home `/` 已加回 localizedRoutes（UI-03g）→ homeLocalized 为真 → 对 zh + /en 双语 home 挂互惠
+  // hreflang languages（zh-Hans+en+x-default）。未翻旗路由（legal）不在表内 → 自动省略 en，避免
+  // 只含 zh 的 broken alternate set。
   const homeLocalized = (localizedRoutes as readonly string[]).includes("/")
   return {
     alternates: {
