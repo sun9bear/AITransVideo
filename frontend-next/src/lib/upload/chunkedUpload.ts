@@ -37,6 +37,26 @@ export interface ChunkedUploadResult {
   fileName: string
 }
 
+/**
+ * 分片上传错误：同时携带稳定 `code`（token）与原始 `message`（中文）。两个消费方各取所需，
+ * 互不破坏（plan 2026-06-28 uiloc Phase 1 收尾 / UI-03g 5-lens LOW #2）：
+ *  - 匿名预览面板读 `.code` → `t("uploadError." + code, params)` 渲染本地化文案，消除 /en 中文泄漏；
+ *  - 尚未本地化的登录态工作台（TranslationForm）读 `.message` → 原中文，字节一致保留旧行为。
+ *
+ * `params` 是 code 对应字典模板的 ICU 占位值（status / partIndex / maxMb / detail），**一律传字符串**
+ * 以走 ICU 纯文本替换（避免 number 占位被 Intl.NumberFormat 加千分位，破坏与原中文 throw 串的字节一致）。
+ */
+export class ChunkedUploadError extends Error {
+  readonly code: string
+  readonly params: Record<string, string>
+  constructor(code: string, message: string, params: Record<string, string> = {}) {
+    super(message)
+    this.name = 'ChunkedUploadError'
+    this.code = code
+    this.params = params
+  }
+}
+
 const PART_CONCURRENCY = 3
 const PART_MAX_RETRIES = 3
 const STATUS_POLL_INTERVAL_MS = 2000
@@ -90,12 +110,12 @@ function hashFileInWorker(
         resolve({ fileHash: msg.fileHash, chunkHashes: msg.chunkHashes })
       } else {
         worker.terminate()
-        reject(new Error(msg.message))
+        reject(new ChunkedUploadError('hash_failed', msg.message))
       }
     }
     worker.onerror = (event) => {
       worker.terminate()
-      reject(new Error(event.message || '哈希 Worker 启动失败'))
+      reject(new ChunkedUploadError('hash_worker_failed', event.message || '哈希 Worker 启动失败'))
     }
     worker.postMessage({ file, chunkSize })
   })
@@ -138,7 +158,11 @@ async function initUpload(
     }),
   })
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res, `上传初始化失败（${res.status}）`))
+    throw new ChunkedUploadError(
+      'chunk_init_failed',
+      await readErrorMessage(res, `上传初始化失败（${res.status}）`),
+      { status: String(res.status) },
+    )
   }
   return (await res.json()) as InitResponse
 }
@@ -172,20 +196,36 @@ async function uploadPartWithRetry(
       if (res.ok) return
       // 429 / 5xx 可重试；4xx 协议错误（404/409/413/422）重试无意义，立即失败
       if (res.status === 429 || res.status >= 500) {
-        lastError = new Error(await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`))
+        lastError = new ChunkedUploadError(
+          'part_upload_failed',
+          await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`),
+          { partIndex: String(partIndex), status: String(res.status) },
+        )
         continue
       }
-      throw new Error(await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`))
+      throw new ChunkedUploadError(
+        'part_upload_failed',
+        await readErrorMessage(res, `分片 ${partIndex} 上传失败（${res.status}）`),
+        { partIndex: String(partIndex), status: String(res.status) },
+      )
     } catch (err) {
       if (err instanceof TypeError) {
         // 网络层失败（断网 / CF 瞬断）→ 重试
-        lastError = new Error(`分片 ${partIndex} 网络错误，已重试`)
+        lastError = new ChunkedUploadError(
+          'part_network_retried',
+          `分片 ${partIndex} 网络错误，已重试`,
+          { partIndex: String(partIndex) },
+        )
         continue
       }
       throw err
     }
   }
-  throw lastError ?? new Error(`分片 ${partIndex} 上传失败`)
+  throw lastError ?? new ChunkedUploadError(
+    'part_upload_failed_final',
+    `分片 ${partIndex} 上传失败`,
+    { partIndex: String(partIndex) },
+  )
 }
 
 async function completeAndWaitReady(
@@ -198,7 +238,11 @@ async function completeAndWaitReady(
   })
   if (res.status === 200) return
   if (res.status !== 202) {
-    throw new Error(await readErrorMessage(res, `合并校验失败（${res.status}）`))
+    throw new ChunkedUploadError(
+      'merge_verify_failed',
+      await readErrorMessage(res, `合并校验失败（${res.status}）`),
+      { detail: String(res.status) },
+    )
   }
   // 202 in_progress：轮询 R4 至 ready（completing 期间 UI 显示"正在合并校验…"）
   const deadline = Date.now() + MERGE_POLL_TIMEOUT_MS
@@ -209,15 +253,19 @@ async function completeAndWaitReady(
       credentials: 'include',
     })
     if (!statusRes.ok) {
-      throw new Error(await readErrorMessage(statusRes, '查询合并状态失败'))
+      throw new ChunkedUploadError('merge_status_failed', await readErrorMessage(statusRes, '查询合并状态失败'))
     }
     const body = await statusRes.json()
     if (body.state === 'ready') return
     if (body.state !== 'completing') {
-      throw new Error(`合并校验失败（${body.failure_reason ?? body.state}）`)
+      throw new ChunkedUploadError(
+        'merge_verify_failed',
+        `合并校验失败（${body.failure_reason ?? body.state}）`,
+        { detail: String(body.failure_reason ?? body.state) },
+      )
     }
   }
-  throw new Error('合并校验超时，请稍后在任务页重试')
+  throw new ChunkedUploadError('merge_verify_timeout', '合并校验超时，请稍后在任务页重试')
 }
 
 /**
@@ -240,7 +288,11 @@ async function completeAnonymousAndWait(
       return (await res.json()) as Record<string, unknown>
     }
     if (res.status !== 202) {
-      throw new Error(await readErrorMessage(res, `合并校验失败（${res.status}）`))
+      throw new ChunkedUploadError(
+        'merge_verify_failed',
+        await readErrorMessage(res, `合并校验失败（${res.status}）`),
+        { detail: String(res.status) },
+      )
     }
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, STATUS_POLL_INTERVAL_MS))
@@ -249,20 +301,21 @@ async function completeAnonymousAndWait(
         credentials: 'include',
       })
       if (!statusRes.ok) {
-        throw new Error(await readErrorMessage(statusRes, '查询合并状态失败'))
+        throw new ChunkedUploadError('merge_status_failed', await readErrorMessage(statusRes, '查询合并状态失败'))
       }
       const body = await statusRes.json()
       if (body.state !== 'completing') break // ready/consumed/receiving → 重发 complete 定夺
     }
     if (Date.now() >= deadline) {
-      throw new Error('合并校验超时，请稍后重试')
+      throw new ChunkedUploadError('merge_verify_timeout_anon', '合并校验超时，请稍后重试')
     }
   }
 }
 
 /**
  * 分片上传入口。返回 opaque upload ref（``chunked:{upload_id}``）。
- * 失败抛 Error（文案可直接展示）；**不**自动回退单请求路径。
+ * 失败抛 ChunkedUploadError（`.code` 给面板本地化，`.message` 中文给旧工作台）；
+ * **不**自动回退单请求路径。
  */
 export async function uploadFileInChunks(
   file: File,
@@ -271,7 +324,11 @@ export async function uploadFileInChunks(
 ): Promise<ChunkedUploadResult> {
   const chunkSize = limits.chunk_mb * 1024 * 1024
   if (file.size > limits.max_file_mb * 1024 * 1024) {
-    throw new Error(`文件超过 ${limits.max_file_mb}MB 上限，请压缩后重试`)
+    throw new ChunkedUploadError(
+      'file_too_large_chunked',
+      `文件超过 ${limits.max_file_mb}MB 上限，请压缩后重试`,
+      { maxMb: String(limits.max_file_mb) },
+    )
   }
 
   // 1. 哈希（Web Worker 增量，2GB 约 10-20s，单独显示进度）
@@ -343,7 +400,7 @@ async function hashlessInitAndUploadParts(
 /**
  * 匿名档分片上传入口（plan §9.5）。返回 complete 的 200 响应体——
  * /upload 同形 UploadResponse（调用方按 admission_decision/status 接现有
- * consent → create → 轮询流程）。失败抛 Error；不自动回退单请求路径。
+ * consent → create → 轮询流程）。失败抛 ChunkedUploadError；不自动回退单请求路径。
  */
 export async function uploadFileInChunksAnonymous(
   file: File,
@@ -352,7 +409,11 @@ export async function uploadFileInChunksAnonymous(
 ): Promise<Record<string, unknown>> {
   const chunkSize = limits.chunk_mb * 1024 * 1024
   if (file.size > limits.max_file_mb * 1024 * 1024) {
-    throw new Error(`文件超过 ${limits.max_file_mb}MB 上限，请压缩后重试`)
+    throw new ChunkedUploadError(
+      'file_too_large_chunked',
+      `文件超过 ${limits.max_file_mb}MB 上限，请压缩后重试`,
+      { maxMb: String(limits.max_file_mb) },
+    )
   }
 
   onProgress({ phase: 'hashing', percent: 0 })
