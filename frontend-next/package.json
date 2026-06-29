@@ -13,7 +13,8 @@
     "uiloc:cjk-guard": "node scripts/cjk-guard.mjs",
     "uiloc:key-parity": "node scripts/key-parity.mjs",
     "uiloc:zh-snapshot": "node scripts/zh-snapshot.mjs",
-    "uiloc:hreflang-check": "node scripts/hreflang-check.mjs"
+    "uiloc:hreflang-check": "node scripts/hreflang-check.mjs",
+    "uiloc:intl-guard": "node scripts/intl-guard.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

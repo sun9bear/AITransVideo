@@ -23,6 +23,7 @@ import {
   getBillingHistory,
   type BillingInvoice,
 } from "@/lib/billing/get-order-history"
+import { useIntlLocale } from "@/lib/intl-locale"
 
 type State =
   | { status: "loading" }
@@ -68,11 +69,11 @@ function formatInvoiceAmount(inv: BillingInvoice): string {
   return formatYuan(inv.amount_cny, inv.currency)
 }
 
-function formatDateTime(iso: string | null): string {
+function formatDateTime(iso: string | null, formatLocale: string): string {
   if (!iso) return "--"
   try {
     const d = new Date(iso)
-    return d.toLocaleDateString("zh-CN", {
+    return d.toLocaleDateString(formatLocale, {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -131,6 +132,7 @@ function LoadingState() {
 
 export function OrderHistory() {
   const [state, setState] = useState<State>({ status: "loading" })
+  const formatLocale = useIntlLocale()
 
   useEffect(() => {
     let cancelled = false
@@ -195,7 +197,7 @@ export function OrderHistory() {
                     className="border-b border-border/60 last:border-0"
                   >
                     <td className="py-3 pr-4 text-foreground">
-                      {formatDateTime(inv.paid_at ?? inv.created_at ?? inv.issued_at)}
+                      {formatDateTime(inv.paid_at ?? inv.created_at ?? inv.issued_at, formatLocale)}
                     </td>
                     <td className="py-3 pr-4 font-medium text-foreground">
                       {inv.plan_code.toUpperCase()}

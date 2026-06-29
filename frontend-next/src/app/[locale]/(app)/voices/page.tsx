@@ -12,6 +12,7 @@ import {
   type VoiceLibraryEntry,
   type VoiceLibrarySummary,
 } from "@/lib/api/voiceLibrary"
+import { useIntlLocale } from "@/lib/intl-locale"
 
 // ---------------------------------------------------------------------------
 // Page
@@ -30,6 +31,7 @@ export default function VoiceLibraryPage() {
   const [showAdd, setShowAdd] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
+  const formatLocale = useIntlLocale()
 
   useEffect(() => {
     getVoiceLibrary()
@@ -249,7 +251,7 @@ export default function VoiceLibraryPage() {
                   {/* Meta: date + cps (no speaker, no raw voice_id) */}
                   <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     {voice.createdAt ? (
-                      <span>{new Date(voice.createdAt).toLocaleDateString("zh-CN")}</span>
+                      <span>{new Date(voice.createdAt).toLocaleDateString(formatLocale)}</span>
                     ) : null}
                     <SpeedBadge cps={voice.charsPerSecond} calibratedAt={voice.speedCalibratedAt} />
                   </div>
