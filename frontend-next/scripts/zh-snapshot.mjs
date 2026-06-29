@@ -26,6 +26,35 @@ assert.equal(
 )
 assert.equal(zhCommon.notFound.actionLabel, "返回首页", "common.notFound.actionLabel 漂移（红线 R1）")
 
+// 1c) uiloc error-boundaries（2026-06-29）：(marketing)/error.tsx、[locale]/error.tsx、(app)/error.tsx
+//     三个错误边界组件的内联中文迁入 common.error 字典后，默认 zh 值与迁出前内联字面量
+//     【逐字节】相同（红线 R1）。retry 为三组件共享键。
+assert.equal(zhCommon.error.retry, "重试", "common.error.retry 漂移（红线 R1，三组件共享重试按钮）")
+assert.equal(zhCommon.error.marketing.eyebrow, "页面异常", "common.error.marketing.eyebrow 漂移（红线 R1）")
+assert.equal(zhCommon.error.marketing.title, "页面暂时无法加载", "common.error.marketing.title 漂移（红线 R1）")
+assert.equal(
+  zhCommon.error.marketing.description,
+  "请重试一次；如果仍然失败，可以返回首页重新进入。",
+  "common.error.marketing.description 漂移（红线 R1）",
+)
+assert.equal(zhCommon.error.marketing.actionLabel, "返回首页", "common.error.marketing.actionLabel 漂移（红线 R1）")
+assert.equal(zhCommon.error.global.eyebrow, "页面异常", "common.error.global.eyebrow 漂移（红线 R1）")
+assert.equal(zhCommon.error.global.title, "页面暂时无法打开", "common.error.global.title 漂移（红线 R1）")
+assert.equal(
+  zhCommon.error.global.description,
+  "请重试一次；如果仍然失败，可以先返回工作区。",
+  "common.error.global.description 漂移（红线 R1）",
+)
+assert.equal(zhCommon.error.global.actionLabel, "返回工作区", "common.error.global.actionLabel 漂移（红线 R1）")
+assert.equal(zhCommon.error.workspace.eyebrow, "工作区异常", "common.error.workspace.eyebrow 漂移（红线 R1）")
+assert.equal(zhCommon.error.workspace.title, "当前页面加载失败", "common.error.workspace.title 漂移（红线 R1）")
+assert.equal(
+  zhCommon.error.workspace.description,
+  "请重试一次；如果仍然失败，可以先回到项目列表。",
+  "common.error.workspace.description 漂移（红线 R1）",
+)
+assert.equal(zhCommon.error.workspace.actionLabel, "项目列表", "common.error.workspace.actionLabel 漂移（红线 R1）")
+
 // 2) site.ts inert：默认 zh / 单参 absoluteUrl 行为与旧实现等价（红线 1），hreflang 只 zh
 // site.ts 在 import 时即按 NEXT_PUBLIC_SITE_URL 求值 siteUrl；本守卫测的是 absoluteUrl/hreflang
 // 的【逻辑】（相对 siteUrl 的前缀拼接），与具体 origin 无关。故先清掉环境变量，让 siteUrl

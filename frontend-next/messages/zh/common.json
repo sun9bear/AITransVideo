@@ -11,6 +11,27 @@
     "description": "你访问的页面不存在或已移动，试试回到首页。",
     "actionLabel": "返回首页"
   },
+  "error": {
+    "retry": "重试",
+    "marketing": {
+      "eyebrow": "页面异常",
+      "title": "页面暂时无法加载",
+      "description": "请重试一次；如果仍然失败，可以返回首页重新进入。",
+      "actionLabel": "返回首页"
+    },
+    "global": {
+      "eyebrow": "页面异常",
+      "title": "页面暂时无法打开",
+      "description": "请重试一次；如果仍然失败，可以先返回工作区。",
+      "actionLabel": "返回工作区"
+    },
+    "workspace": {
+      "eyebrow": "工作区异常",
+      "title": "当前页面加载失败",
+      "description": "请重试一次；如果仍然失败，可以先回到项目列表。",
+      "actionLabel": "项目列表"
+    }
+  },
   "localeSwitcher": {
     "groupLabel": "切换界面语言",
     "ariaZh": "切换到中文界面",

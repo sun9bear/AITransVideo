@@ -11,6 +11,27 @@
     "description": "This page doesn't exist or has moved. Try heading back home.",
     "actionLabel": "Back to home"
   },
+  "error": {
+    "retry": "Retry",
+    "marketing": {
+      "eyebrow": "Page error",
+      "title": "This page can't load right now",
+      "description": "Please try again. If it still fails, you can head back to the home page and start over.",
+      "actionLabel": "Back to home"
+    },
+    "global": {
+      "eyebrow": "Page error",
+      "title": "This page can't open right now",
+      "description": "Please try again. If it still fails, you can head back to your workspace.",
+      "actionLabel": "Back to workspace"
+    },
+    "workspace": {
+      "eyebrow": "Workspace error",
+      "title": "This page failed to load",
+      "description": "Please try again. If it still fails, you can return to your project list.",
+      "actionLabel": "Project list"
+    }
+  },
   "localeSwitcher": {
     "groupLabel": "Switch interface language",
     "ariaZh": "Switch to Chinese",
