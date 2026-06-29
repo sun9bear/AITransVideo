@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { useTranslations } from "next-intl"
 import { useParams } from "next/navigation"
+import { useIntlLocale } from "@/lib/intl-locale"
 import { Link } from "@/i18n/navigation"
 import { EmptyState } from "@/components/empty-state"
 import { StatusBadge } from "@/components/status-badge"
@@ -16,6 +17,7 @@ import { ApiError } from "@/lib/api/client"
 
 export default function ProjectDetailPage() {
   const t = useTranslations("app")
+  const formatLocale = useIntlLocale()
   const params = useParams()
   const jobId = (params.jobId as string)?.trim() ?? ""
   const [detail, setDetail] = useState<ProjectDetailResource | null>(null)
@@ -49,7 +51,7 @@ export default function ProjectDetailPage() {
             <div className="flex gap-3 text-xs text-muted-foreground/60">
               <span>阶段：{getStageLabel(t, job.currentStage)}</span>
               <span>·</span>
-              <span>更新：{new Date(job.updatedAt).toLocaleString("zh-CN")}</span>
+              <span>更新：{new Date(job.updatedAt).toLocaleString(formatLocale)}</span>
             </div>
           </div>
           <StatusBadge status={job.status} />

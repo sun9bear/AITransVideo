@@ -24,6 +24,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..")
 // formats dates/numbers? Add it here so the guard keeps it locale-aware.
 const IN_SCOPE = [
   "src/app/[locale]/(app)/projects/page.tsx",
+  "src/app/[locale]/(app)/projects/[jobId]/page.tsx",
   "src/app/[locale]/(app)/notifications/page.tsx",
   "src/app/[locale]/(app)/settings/page.tsx",
   "src/app/[locale]/(app)/voices/page.tsx",
@@ -52,14 +53,15 @@ for (const rel of IN_SCOPE) {
     fail(`in-scope file missing: ${rel} (update IN_SCOPE if it moved/was deleted)`)
     continue
   }
+  // Scan the whole file (not line-by-line): a hardcoded locale literal can sit
+  // on its own line in a multi-line formatter call, e.g.
+  //   d.toLocaleDateString(\n    "zh-CN",\n    { ... },\n  )
+  // \s* between "(" and the literal spans newlines only against the full source.
   const src = readFileSync(abs, "utf8")
-  const lines = src.split("\n")
-  lines.forEach((line, i) => {
-    if (HARDCODED_FORMATTER.test(line)) {
-      fail(`${rel}:${i + 1} hardcoded-locale formatter — use useIntlLocale(): ${line.trim()}`)
-    }
-    HARDCODED_FORMATTER.lastIndex = 0
-  })
+  for (const m of src.matchAll(HARDCODED_FORMATTER)) {
+    const lineNo = src.slice(0, m.index).split("\n").length
+    fail(`${rel}:${lineNo} hardcoded-locale formatter — use useIntlLocale(): ${m[0].replace(/\s+/g, " ")}`)
+  }
 }
 
 // 2) The shared mapper exists and keeps zh the byte-identical default.
