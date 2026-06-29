@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { toast } from "sonner"
+import { useIntlLocale } from "@/lib/intl-locale"
 
 const PLAN_LABELS: Record<string, string> = {
   free: "免费版",
@@ -27,6 +28,7 @@ function maskPhone(phone: string): string {
 export default function SettingsPage() {
   const { user, loading } = useSession()
   const router = useRouter()
+  const formatLocale = useIntlLocale()
 
   if (loading) {
     return (
@@ -90,7 +92,7 @@ export default function SettingsPage() {
           <CardTitle className="text-base">账户信息</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <InfoRow label="注册时间" value={user.created_at ? new Date(user.created_at).toLocaleDateString("zh-CN") : "—"} />
+          <InfoRow label="注册时间" value={user.created_at ? new Date(user.created_at).toLocaleDateString(formatLocale) : "—"} />
           <InfoRow label="账户角色" value={user.role === "admin" ? "管理员" : "普通用户"} />
           <InfoRow label="账户 ID" value={user.id.slice(0, 8) + "..."} />
         </CardContent>

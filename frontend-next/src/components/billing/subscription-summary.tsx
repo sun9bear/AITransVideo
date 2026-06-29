@@ -17,6 +17,7 @@
  */
 
 import type { MeSubscriptionResponse } from "@/lib/billing/get-subscription"
+import { useIntlLocale } from "@/lib/intl-locale"
 
 const PERIOD_LABELS: Record<string, string> = {
   monthly: "月付",
@@ -31,11 +32,11 @@ const PROVIDER_LABELS: Record<string, string> = {
   stripe: "Stripe",
 }
 
-function formatDate(iso: string | null): string {
+function formatDate(iso: string | null, formatLocale: string): string {
   if (!iso) return "--"
   try {
     const d = new Date(iso)
-    return d.toLocaleDateString("zh-CN", {
+    return d.toLocaleDateString(formatLocale, {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -60,6 +61,7 @@ function TrialLine({
   granted_at: string | null
   ends_at: string | null
 }) {
+  const formatLocale = useIntlLocale()
   // No granted_at → user has never gone through the phone-auth trial-grant
   // path. Render nothing; the summary still reads cleanly.
   if (!granted_at) return null
@@ -67,14 +69,14 @@ function TrialLine({
   if (!ends_at) {
     return (
       <p className="mt-3 rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-        试用已于 {formatDate(granted_at)} 发放。
+        试用已于 {formatDate(granted_at, formatLocale)} 发放。
       </p>
     )
   }
 
   return (
     <p className="mt-3 rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-      试用已于 {formatDate(granted_at)} 发放,到期时间 {formatDate(ends_at)}。
+      试用已于 {formatDate(granted_at, formatLocale)} 发放,到期时间 {formatDate(ends_at, formatLocale)}。
     </p>
   )
 }
@@ -85,6 +87,7 @@ export function SubscriptionSummary({
   subscription: MeSubscriptionResponse
 }) {
   const active = subscription.subscription
+  const formatLocale = useIntlLocale()
 
   if (subscription.subscription_status !== "active" || !active) {
     return (
@@ -147,19 +150,19 @@ export function SubscriptionSummary({
         <div>
           <dt className="text-xs text-muted-foreground">本期开始</dt>
           <dd className="mt-0.5 font-medium text-foreground">
-            {formatDate(active.current_period_start)}
+            {formatDate(active.current_period_start, formatLocale)}
           </dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">本期结束</dt>
           <dd className="mt-0.5 font-medium text-foreground">
-            {formatDate(active.current_period_end)}
+            {formatDate(active.current_period_end, formatLocale)}
           </dd>
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">订阅起始</dt>
           <dd className="mt-0.5 font-medium text-foreground">
-            {formatDate(active.started_at)}
+            {formatDate(active.started_at, formatLocale)}
           </dd>
         </div>
       </dl>

@@ -25,6 +25,7 @@ import {
   markNotificationsRead,
   type NotificationView,
 } from "@/lib/api/notifications"
+import { useIntlLocale } from "@/lib/intl-locale"
 
 const TOPIC_LABELS: Record<string, string> = {
   billing: "账单",
@@ -66,6 +67,8 @@ export default function NotificationsPage() {
   useEffect(() => {
     void reload()
   }, [])
+
+  const formatLocale = useIntlLocale()
 
   const visible = useMemo(() => {
     return items.filter((n) => {
@@ -238,7 +241,7 @@ export default function NotificationsPage() {
                   </p>
                   <p className="mt-2 text-xs text-muted-foreground/80">
                     {TOPIC_LABELS[n.topic] ?? n.topic} ·{" "}
-                    {new Date(n.created_at).toLocaleString("zh-CN")}
+                    {new Date(n.created_at).toLocaleString(formatLocale)}
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-col gap-1 text-xs">

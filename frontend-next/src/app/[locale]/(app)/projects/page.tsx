@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
+import { useIntlLocale } from "@/lib/intl-locale"
 import { Link } from "@/i18n/navigation"
 import { useSearchParams } from "next/navigation"
 import { useRouter } from "@/i18n/navigation"
@@ -102,8 +103,8 @@ function daysRemaining(updatedAt: string): number {
 }
 void daysRemaining  // keep reference to avoid unused-import-style lint noise
 
-function timeLabel(iso: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
+function timeLabel(iso: string, formatLocale: string) {
+  return new Intl.DateTimeFormat(formatLocale, {
     dateStyle: "short",
     timeStyle: "short",
   }).format(new Date(iso))
@@ -790,6 +791,7 @@ function ProjectCard({
 }) {
   const t = useTranslations("app")
   const router = useRouter()
+  const formatLocale = useIntlLocale()
   const expiry = computeExpiryInfo(job)
   const isNonExpiring = isAdminView || job.roleSnapshot === "admin"
   const expiryText = isNonExpiring ? "永不过期" : expiryLabel(t, expiry)
@@ -847,7 +849,7 @@ function ProjectCard({
             </div>
           )}
           <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-            <span>{timeLabel(cardTimestamp(job))}</span>
+            <span>{timeLabel(cardTimestamp(job), formatLocale)}</span>
             {expiryText ? (
               <span className={isNonExpiring ? "text-[color:var(--bamboo)]" : expiryColorClass(expiry.tier)}>
                 {expiryText}
