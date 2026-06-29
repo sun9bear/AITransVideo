@@ -51,8 +51,18 @@ PayPal（第四条收款轨，海外 USD 专轨）已**合并 main 并部署 pro
 
 - 新文件 `gateway/payment_provider_paypal.py`（自包含 provider，<800 行门）+ `billing.py` 增长 → **file-size-guard 基线（TU-03）须从最新 main 重算**。
 - `billing.py` 是金融模块；PayPal 已带 `tests/test_paypal_*`（366+ 测试绿）。
-- 关联：`gateway/credits_service.py` 的 `ensure_subscription_bucket_from_v2`（line 1655，`scalar_one_or_none()` 遇**重复 subscription bucket** 抛 `MultipleResultsFound`，**非致命** shadow 路径、不阻断支付/升级/积分）正由独立 worktree 修复中（Claude spawned task，未合并）——与本方案 EH/健壮性主题同类，可纳入跟踪（含审计其它 `scalar_one_or_none` 脆弱点）。
+- 关联（**已完整修复并落本地 main，未 push**）：`gateway/credits_service.py` 的 `ensure_subscription_bucket_from_v2`（line 1655，`scalar_one_or_none()` 遇**重复 subscription bucket** 抛 `MultipleResultsFound`，**非致命** shadow 路径、不阻断支付/升级/积分）。三 commit 闭合：① 代码容忍多行 `6df6c68e` ② 去重诊断脚本（默认 dry-run）`973dc6e6` ③ **alembic 044** 三个 partial unique index 根治并发 dup（per-order / free·trial / no-order backfill）+ 模型 `__table_args__` 同步 + 契约测试 `ffa65a0d`（CodeX 复核补上第三个 backfill 并发 index）。生产 2026-06-27 全量巡检干净（0 幻影）→ 可直接 `alembic upgrade head`，**待合并 + 维护窗口**。与本方案 EH/健壮性主题同类，已审计其它 `scalar_one_or_none`（line 1643 由 partial unique index 兜底；line 499 CloneBillingEvent 是 smart-clone 另一类、未改）。
 
-## 6. 一句话
+## 6. file-size-guard 红的处理（2026-06-27 已核实，省得各会话重复排查）
+
+**机制**：基线在 `tools/file_size_baseline.json`（每文件一条行数上限）。CI 的 `file-size-guard` 故意读**目标分支(base)的基线**（`git show FETCH_HEAD:...`）、不读 PR 自己的 → 防"撑大文件 + 自抬基线"一步到位（anti-self-bump；对照 memory「PR 内改基线无效，不可自助抬」）。**它是 advisory**——main 无 required status check（`contexts: None`）→ **不硬挡 merge**（PR 显示 UNSTABLE 仍可合）。
+
+**billing.py（PayPal 撑到 1996 > 1617 基线）已解决**：PR **#54**（分支 `chore/file-size-baseline-billing`，merge commit `e44999d3`，2026-06-27 02:29 UTC 合并）bump 了 billing.py 基线。**已证明有效**——PR #52 的 file-size-guard 现在 pass（它基于 #54 之后的 main、读到新基线）。注：bump PR 自己的 file-size-guard 必然红（anti-self-bump），合并后才对后续 PR 生效——故"测试绿就无视那条红合并"是正解。
+
+**预先于 #54 的 PR（如 #53 uiloc UI-03b）file-size-guard 显示 stale 红**：rebase 最新 main + 重跑即绿；不 rebase 也 mergeable（advisory）。其 `backend-full-suite` 红是项目已知**非阻断**全量套件（~335 预存失败、按 set-diff 判，见 [[project_code_quality_wave_b_status]]），与 file-size 无关——各 PR 自行 set-diff 确认无真回归；required 检查（backend / pg-integration / frontend / python-lint）需全绿。
+
+**credits 两文件基线（`gateway/credits_service.py`→1805 / `gateway/models.py`→1884）**：只在本地 main（未 push、当前没挡任何人）；随 credits 那条线 push 时在**同一次 commit** bump `tools/file_size_baseline.json` 两条，**不单开会自我红的 bump PR**。
+
+## 7. 一句话
 
 PayPal 已 LIVE 上线、与两方案**无架构冲突**；唯一需注意的接口面是 **uiloc 的 i18n 共享文件已被 PayPal 动过（billing namespace）**——两方案续接都**从最新 main 切分支**即可避免冲突。
