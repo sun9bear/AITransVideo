@@ -1514,13 +1514,19 @@ async def ensure_free_bucket(db: AsyncSession, user_id) -> CreditsBucket | None:
     Shadow mode: failures are logged, never block auth.
     """
     try:
+        # Tolerate accidental duplicates (no DB unique constraint guards this
+        # check-then-create against concurrent /api/me/credits reads): return
+        # the most recent existing bucket instead of raising MultipleResultsFound.
         result = await db.execute(
-            select(CreditsBucket).where(
+            select(CreditsBucket)
+            .where(
                 CreditsBucket.user_id == user_id,
                 CreditsBucket.bucket_type == "free",
             )
+            .order_by(CreditsBucket.created_at.desc())
+            .limit(1)
         )
-        existing = result.scalar_one_or_none()
+        existing = result.scalars().first()
         if existing is not None:
             return existing
 
@@ -1546,13 +1552,18 @@ async def ensure_trial_bucket(
     Shadow mode: failures are logged, never block trial grant.
     """
     try:
+        # Tolerate accidental duplicates (same race class as ensure_free_bucket):
+        # return the most recent existing bucket rather than raising.
         result = await db.execute(
-            select(CreditsBucket).where(
+            select(CreditsBucket)
+            .where(
                 CreditsBucket.user_id == user_id,
                 CreditsBucket.bucket_type == "trial",
             )
+            .order_by(CreditsBucket.created_at.desc())
+            .limit(1)
         )
-        existing = result.scalar_one_or_none()
+        existing = result.scalars().first()
         if existing is not None:
             return existing
 
@@ -1588,15 +1599,22 @@ async def ensure_subscription_bucket(
     """
     try:
         if related_order_id is not None:
+            # The order row lock in the settlement caller is the primary
+            # idempotency defense; this per-order dedup is defense-in-depth.
+            # No unique constraint backs related_order_id, so tolerate >1 row
+            # (return the latest) instead of raising MultipleResultsFound.
             existing = (
                 await db.execute(
-                    select(CreditsBucket).where(
+                    select(CreditsBucket)
+                    .where(
                         CreditsBucket.user_id == user_id,
                         CreditsBucket.bucket_type == "subscription",
                         CreditsBucket.related_order_id == related_order_id,
                     )
+                    .order_by(CreditsBucket.created_at.desc())
+                    .limit(1)
                 )
-            ).scalar_one_or_none()
+            ).scalars().first()
             if existing is not None:
                 return existing
         grants = _get_runtime_grant_amounts()
@@ -1644,15 +1662,28 @@ async def ensure_subscription_bucket_from_v2(
         if active_sub is None:
             return None
 
-        # Check if we already have a bucket for this subscription
+        # Check if we already have a bucket for this subscription.
+        #
+        # NOTE: a subscription legitimately owns *multiple* subscription buckets
+        # over its lifetime — `upsert_active_subscription` reuses the same
+        # `Subscription.id` across renewals/upgrades, while `ensure_subscription_bucket`
+        # mints one bucket per paid order (keyed on `related_order_id`). So this
+        # query is fundamentally a 0-or-many existence check, NOT 0-or-1.
+        # Using `scalar_one_or_none()` here threw `MultipleResultsFound` for any
+        # user who had paid more than once (observed in prod 2026-06-26). We only
+        # need to know whether *any* bucket already backs this subscription, so
+        # take the most recent one and skip the backfill grant.
         existing_result = await db.execute(
-            select(CreditsBucket).where(
+            select(CreditsBucket)
+            .where(
                 CreditsBucket.user_id == user_id,
                 CreditsBucket.bucket_type == "subscription",
                 CreditsBucket.related_subscription_id == active_sub.id,
             )
+            .order_by(CreditsBucket.created_at.desc())
+            .limit(1)
         )
-        existing = existing_result.scalar_one_or_none()
+        existing = existing_result.scalars().first()
         if existing is not None:
             return existing
 
@@ -1681,14 +1712,21 @@ async def ensure_admin_credits_bucket(db: AsyncSession, user_id) -> CreditsBucke
         # P0-4 (audit 2026-05-07): row lock to prevent concurrent reserve from over-allocating free quota
         # (here: protects the read-modify-write top-up branch below from lost updates
         # when two requests both observe granted < ADMIN_CREDITS_GRANT and both add delta).
+        # with_for_update locks an existing row but cannot prevent two
+        # concurrent INSERTs when none exists yet, so a duplicate admin bucket
+        # is possible. Tolerate it (take the latest) rather than raising.
         result = await db.execute(
-            select(CreditsBucket).where(
+            select(CreditsBucket)
+            .where(
                 CreditsBucket.user_id == user_id,
                 CreditsBucket.bucket_type == "manual_adjustment",
                 CreditsBucket.source_label == ADMIN_CREDITS_SOURCE_LABEL,
-            ).with_for_update()
+            )
+            .order_by(CreditsBucket.created_at.desc())
+            .limit(1)
+            .with_for_update()
         )
-        existing = result.scalar_one_or_none()
+        existing = result.scalars().first()
         if existing is None:
             return await shadow_grant(
                 db,

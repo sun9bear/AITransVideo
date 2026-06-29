@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import MultipleResultsFound
 
 _gateway_dir = str(__import__("pathlib").Path(__file__).resolve().parent.parent / "gateway")
 if _gateway_dir not in sys.path:
@@ -281,7 +282,7 @@ class TestEnsureFreeBucket:
         db.flush = AsyncMock()
         # First query: check existing → None
         no_result = MagicMock()
-        no_result.scalar_one_or_none.return_value = None
+        no_result.scalars.return_value.first.return_value = None
         db.execute = AsyncMock(return_value=no_result)
         added = []
         db.add = lambda obj: added.append(obj)
@@ -298,7 +299,7 @@ class TestEnsureFreeBucket:
         existing = _make_bucket(bucket_type="free", granted=500, remaining=400, user_id=uid)
         db = AsyncMock()
         result = MagicMock()
-        result.scalar_one_or_none.return_value = existing
+        result.scalars.return_value.first.return_value = existing
         db.execute = AsyncMock(return_value=result)
 
         bucket = _run(ensure_free_bucket(db, uid))
@@ -315,7 +316,7 @@ class TestEnsureTrialBucket:
         db = AsyncMock()
         db.flush = AsyncMock()
         no_result = MagicMock()
-        no_result.scalar_one_or_none.return_value = None
+        no_result.scalars.return_value.first.return_value = None
         db.execute = AsyncMock(return_value=no_result)
         added = []
         db.add = lambda obj: added.append(obj)
@@ -332,7 +333,7 @@ class TestEnsureTrialBucket:
         existing = _make_bucket(bucket_type="trial", granted=300, remaining=200, user_id=uid)
         db = AsyncMock()
         result = MagicMock()
-        result.scalar_one_or_none.return_value = existing
+        result.scalars.return_value.first.return_value = existing
         db.execute = AsyncMock(return_value=result)
 
         bucket = _run(ensure_trial_bucket(db, uid, None))
@@ -362,9 +363,9 @@ class TestEnsureSubscriptionBucketFromV2:
                 r.scalar_one_or_none.return_value = active_sub
             elif call_n["n"] == 2:
                 # Check existing bucket for this subscription → None
-                r.scalar_one_or_none.return_value = None
+                r.scalars.return_value.first.return_value = None
             else:
-                r.scalar_one_or_none.return_value = None
+                r.scalars.return_value.first.return_value = None
             return r
 
         db.execute = smart_execute
@@ -398,7 +399,7 @@ class TestEnsureSubscriptionBucketFromV2:
             if call_n["n"] == 1:
                 r.scalar_one_or_none.return_value = active_sub
             elif call_n["n"] == 2:
-                r.scalar_one_or_none.return_value = existing_bucket
+                r.scalars.return_value.first.return_value = existing_bucket
             return r
 
         db.execute = smart_execute
@@ -419,6 +420,61 @@ class TestEnsureSubscriptionBucketFromV2:
         bucket = _run(ensure_subscription_bucket_from_v2(db, uid))
 
         assert bucket is None
+
+    def test_multiple_buckets_same_subscription_does_not_raise(self):
+        """Regression (prod 2026-06-26): a subscription legitimately owns more
+        than one bucket over its lifetime — `upsert_active_subscription` reuses
+        the same `Subscription.id` across renewals/upgrades while
+        `ensure_subscription_bucket` mints one bucket per paid order, so several
+        buckets share one `related_subscription_id`. The existence check must
+        tolerate >1 row (return an existing bucket, create no third) instead of
+        raising `MultipleResultsFound`.
+        """
+        uid = uuid.uuid4()
+        sub_id = uuid.uuid4()
+        active_sub = SimpleNamespace(
+            id=sub_id, user_id=uid, plan_code="pro", status="active",
+            current_period_end=datetime.now(timezone.utc) + timedelta(days=25),
+        )
+        # Two existing subscription buckets sharing the same related_subscription_id.
+        bucket_a = _make_bucket(
+            bucket_type="subscription", granted=3500, remaining=3500, user_id=uid,
+        )
+        bucket_b = _make_bucket(
+            bucket_type="subscription", granted=3500, remaining=3500, user_id=uid,
+        )
+
+        db = AsyncMock()
+        db.flush = AsyncMock()
+        added: list = []
+        db.add = lambda obj: added.append(obj)
+        call_n = {"n": 0}
+
+        async def smart_execute(*args, **kwargs):
+            call_n["n"] += 1
+            r = MagicMock()
+            if call_n["n"] == 1:
+                # Subscription query → active sub found.
+                r.scalar_one_or_none.return_value = active_sub
+            elif call_n["n"] == 2:
+                # The hardened existence check uses `.limit(1)` + `.scalars().first()`.
+                # If the code ever regresses to `.scalar_one_or_none()`, the >1-row
+                # result raises here; the function would swallow it and return None,
+                # failing the `is bucket_a` assertion below.
+                r.scalar_one_or_none.side_effect = MultipleResultsFound()
+                r.scalars.return_value.first.return_value = bucket_a
+            return r
+
+        db.execute = smart_execute
+
+        bucket = _run(ensure_subscription_bucket_from_v2(db, uid))
+
+        # Returned one of the existing buckets — never raised, never None.
+        assert bucket is bucket_a
+        assert bucket in (bucket_a, bucket_b)
+        # No third (backfill) bucket was created.
+        db.flush.assert_not_awaited()
+        assert added == []
 
 
 class TestGetMyCreditsLiveGrant:

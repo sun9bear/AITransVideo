@@ -14,7 +14,7 @@
   "src/services/jobs/service.py": 1902,
   "main.py": 1868,
   "gateway/models.py": 1842,
-  "gateway/credits_service.py": 1767,
+  "gateway/credits_service.py": 1805,
   "gateway/billing.py": 1996,
   "gateway/admin_smart_analytics_api.py": 1539,
   "src/services/jobs/jianying_draft_runner.py": 1538,
