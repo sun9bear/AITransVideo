@@ -1,5 +1,8 @@
+"use client"
+
 import type { CSSProperties } from "react"
-import { JOB_STATUS_LABELS, type JobStatus } from "@/types/jobs"
+import { useTranslations } from "next-intl"
+import { JOB_STATUSES, type JobStatus } from "@/types/jobs"
 
 /**
  * Status pill — ink-aesthetic soft style: tinted bg + matching border + same-
@@ -64,10 +67,14 @@ export interface StatusBadgeProps {
   editGeneration?: number
 }
 
+const KNOWN_STATUSES = new Set<string>(JOB_STATUSES)
+
 export function StatusBadge({ status, editGeneration }: StatusBadgeProps) {
-  let label: string = JOB_STATUS_LABELS[status as JobStatus] ?? status
+  const t = useTranslations("app")
+  // 已知状态走字典；未知状态（防御性）回退原始字符串。
+  let label: string = KNOWN_STATUSES.has(status) ? t(`status.${status as JobStatus}`) : status
   if (status === "running" && editGeneration && editGeneration > 0) {
-    label = `重合成中 · 第 ${editGeneration} 次修改`
+    label = t("status.resynthesizing", { n: editGeneration })
   }
   const tone: Tone = STATUS_TONE[status] ?? "muted"
 

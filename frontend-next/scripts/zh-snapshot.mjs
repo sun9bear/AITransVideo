@@ -454,4 +454,116 @@ assert.equal(
   "en seo.site.defaultDescription ≠ localeSeo.en.defaultDescription（en 双源漂移）",
 )
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo 字节一致 + en seo 双源同步 全部通过")
+// 7) UI-05（App 中央字典）：status/stage/error/expiry/review/progress chrome 从
+//    types/jobs.ts、features/jobs/{presentation,stageMetadata,expiry}.ts、status-badge.tsx
+//    的内联中文迁入 messages/{zh,en}/app.json 后，默认 zh 值必须与改造前内联字面量
+//    【逐字节】相同（红线 R1）。下面钉死每个子 namespace 标点/全半角/间隔号/占位符最敏感的
+//    代表串（任一漂移即 red = 默认 zh 渲染回归）：
+//    - status.resynthesizing 用间隔号 ·（U+00B7）+ ICU {n}（不得退回字面 ${} 或半角点）
+//    - stage.none 与改造前 getStageLabel(null) fallback「待开始」同值
+//    - error.*.suggestion 含全角句号。/全角逗号，；ingestion 含半角阿拉伯数字 10
+//    - secondary.youtubePrefix/projectPrefix 用间隔号 · + ICU {id}（前缀 chrome，id 是 content）
+//    - expiry.daysLeft/hoursLeft 用 ICU {days}/{hours} + 前导/尾随空格 verbatim（zh 非复数）
+//    - review.descriptionForStage/actionForStage 用 ICU {stageLabel}，与原模板拼接逐字节一致
+//    - progress.* 是 sanitizedProgressMessages 的 4 个 zh 显示值（key 仍为后端 EN 串）
+const zhApp = JSON.parse(readFileSync(path.join(root, "messages/zh/app.json"), "utf8"))
+
+// status：11 状态 + resynthesizing ICU（间隔号 + 占位符）
+assert.equal(zhApp.status.queued, "待开始", "app.status.queued 漂移（红线 R1）")
+assert.equal(zhApp.status.running, "处理中", "app.status.running 漂移（红线 R1）")
+assert.equal(zhApp.status.waiting_for_review, "等待审核", "app.status.waiting_for_review 漂移（红线 R1）")
+assert.equal(zhApp.status.purged, "已清理", "app.status.purged 漂移（红线 R1）")
+assert.equal(zhApp.status.archiving, "归档中", "app.status.archiving 漂移（红线 R1）")
+assert.equal(
+  zhApp.status.resynthesizing,
+  "重合成中 · 第 {n} 次修改",
+  "app.status.resynthesizing 间隔号 ·/ICU {n} 漂移（红线 R1）",
+)
+
+// stage：9 阶段 + none fallback（与 getStageLabel(null) 旧值「待开始」同值）
+assert.equal(zhApp.stage.none, "待开始", "app.stage.none 漂移（getStageLabel(null) fallback，红线 R1）")
+assert.equal(zhApp.stage.draft, "草稿与配音", "app.stage.draft 漂移（红线 R1）")
+assert.equal(zhApp.stage.legacy_process_output, "输出完成", "app.stage.legacy_process_output 漂移（红线 R1）")
+assert.equal(zhApp.stage.voice_selection_review, "音色选择", "app.stage.voice_selection_review 漂移（红线 R1）")
+
+// stageDescription：9 条阶段描述（全角句号。结尾）
+assert.equal(
+  zhApp.stageDescription.media_understanding,
+  "提取媒体信息并建立后续处理上下文。",
+  "app.stageDescription.media_understanding 漂移（红线 R1）",
+)
+assert.equal(zhApp.stageDescription.draft, "生成配音和对齐。", "app.stageDescription.draft 漂移（红线 R1）")
+
+// reviewStageDescription：5 条（全角逗号，+ 句号。）
+assert.equal(
+  zhApp.reviewStageDescription.speaker_review,
+  "请先确认说话人名称和片段归属，然后继续下一步。",
+  "app.reviewStageDescription.speaker_review 漂移（红线 R1）",
+)
+assert.equal(
+  zhApp.reviewStageDescription.voice_selection_review,
+  "请为每位说话人选择或克隆配音音色，然后继续下一步。",
+  "app.reviewStageDescription.voice_selection_review 漂移（红线 R1）",
+)
+
+// review：helper 内联 fallback（ICU {stageLabel} 拼接与原模板逐字节一致）
+assert.equal(zhApp.review.pendingTitle, "等待审核", "app.review.pendingTitle 漂移（红线 R1）")
+assert.equal(zhApp.review.genericStage, "审核", "app.review.genericStage 漂移（红线 R1）")
+assert.equal(
+  zhApp.review.descriptionForStage,
+  "当前任务正在等待{stageLabel}，请先完成处理。",
+  "app.review.descriptionForStage ICU/标点漂移（红线 R1）",
+)
+assert.equal(zhApp.review.descriptionGeneric, "当前任务正在等待审核处理。", "app.review.descriptionGeneric 漂移（红线 R1）")
+assert.equal(zhApp.review.actionForStage, "处理{stageLabel}", "app.review.actionForStage ICU 漂移（红线 R1）")
+assert.equal(zhApp.review.actionGeneric, "继续处理审核", "app.review.actionGeneric 漂移（红线 R1）")
+assert.equal(
+  zhApp.review.needsReviewFirst,
+  "当前任务需要先完成审核，然后才能继续。",
+  "app.review.needsReviewFirst 漂移（红线 R1）",
+)
+
+// error：5 分类 {label,suggestion} + noDetail fallback（半角数字 10 + 全角标点）
+assert.equal(zhApp.error.noDetail, "当前没有更多失败说明。", "app.error.noDetail 漂移（红线 R1）")
+assert.equal(zhApp.error.ingestion.label, "音频上传或转录失败", "app.error.ingestion.label 漂移（红线 R1）")
+assert.equal(
+  zhApp.error.ingestion.suggestion,
+  "长视频容易上传失败，建议使用 10 分钟以内的视频重试。",
+  "app.error.ingestion.suggestion 半角数字 10/全角标点漂移（红线 R1）",
+)
+assert.equal(zhApp.error.voiceclone.label, "音色克隆失败", "app.error.voiceclone.label 漂移（红线 R1）")
+assert.equal(zhApp.error.translation.label, "翻译生成失败", "app.error.translation.label 漂移（红线 R1）")
+assert.equal(zhApp.error.alignment.label, "时长对齐失败", "app.error.alignment.label 漂移（红线 R1）")
+assert.equal(zhApp.error.generic.label, "处理失败", "app.error.generic.label 漂移（红线 R1）")
+assert.equal(zhApp.error.generic.suggestion, "请查看项目详情了解更多信息。", "app.error.generic.suggestion 漂移（红线 R1）")
+
+// title / secondary：未命名视频 fallback（chrome）+ 前缀 chrome（id 是 content，走 ICU 占位符）
+assert.equal(zhApp.title.untitled, "未命名视频", "app.title.untitled 漂移（红线 R1，getJobDisplayTitle fallback）")
+assert.equal(
+  zhApp.secondary.youtubePrefix,
+  "YouTube 视频 · {id}",
+  "app.secondary.youtubePrefix 间隔号 ·/ICU {id} 漂移（红线 R1，id 是 content 透传）",
+)
+assert.equal(
+  zhApp.secondary.projectPrefix,
+  "项目记录 · {id}",
+  "app.secondary.projectPrefix 间隔号 ·/ICU {id} 漂移（红线 R1）",
+)
+
+// expiry：4 串（ICU {days}/{hours} + 前导/尾随空格 verbatim；zh 非复数）
+assert.equal(zhApp.expiry.deletingSoon, "即将删除", "app.expiry.deletingSoon 漂移（红线 R1）")
+assert.equal(zhApp.expiry.daysLeft, "{days} 天后过期", "app.expiry.daysLeft ICU {days}/空格漂移（红线 R1）")
+assert.equal(zhApp.expiry.hoursLeft, "{hours} 小时后过期", "app.expiry.hoursLeft ICU {hours}/空格漂移（红线 R1）")
+assert.equal(zhApp.expiry.underOneHour, "不到 1 小时后过期", "app.expiry.underOneHour 半角数字 1/空格漂移（红线 R1）")
+
+// progress：sanitizedProgressMessages 的 4 个 zh 显示值（lookup key 仍为后端 EN 串，见 presentation.ts）
+assert.equal(zhApp.progress.completed, "任务已完成。", "app.progress.completed 漂移（红线 R1）")
+assert.equal(zhApp.progress.queued, "任务已进入队列。", "app.progress.queued 漂移（红线 R1）")
+assert.equal(
+  zhApp.progress.reviewingSpeakers,
+  "正在处理说话人审核结果。",
+  "app.progress.reviewingSpeakers 漂移（红线 R1）",
+)
+assert.equal(zhApp.progress.starting, "任务已开始处理。", "app.progress.starting 漂移（红线 R1）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app 字节一致 + en seo 双源同步 全部通过")

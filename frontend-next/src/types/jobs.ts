@@ -1,21 +1,24 @@
-export const JOB_STATUS_LABELS = {
-  cancelled: '已取消',
-  editing: '修改中',
-  failed: '已失败',
-  queued: '待开始',
-  running: '处理中',
-  succeeded: '已完成',
-  waiting_for_review: '等待审核',
-  // 2026-04-21: gateway project_cleanup 7d TTL soft-delete. DB 记录
-  // 保留做历史；project_dir 已在磁盘清理。下载 / 修改入口应当禁用。
-  purged: '已清理',
-  // Pan backup statuses (plan 2026-05-14 Task 1.5 / design 2026-05-13 §4.1)
-  archiving: '归档中',
-  archived: '已归档',
-  restoring: '恢复中',
-} as const
+// UI-05（方案 §0.2 / Task 2.1）：状态显示文案迁入 messages/{zh,en}/app.json 的 `status.*`，
+// 由消费方 `t('status.' + status)`（status-badge.tsx / log-viewer.tsx）解析。此处只保留
+// 状态键的真源——`JobStatus` 类型与运行时遍历用键集仍以本数组为单一来源。
+//   - purged（2026-04-21）：gateway project_cleanup 7d TTL soft-delete。DB 记录保留做历史；
+//     project_dir 已在磁盘清理。下载 / 修改入口应当禁用。
+//   - archiving/archived/restoring：Pan backup statuses（plan 2026-05-14 Task 1.5 / design 2026-05-13 §4.1）。
+export const JOB_STATUSES = [
+  'cancelled',
+  'editing',
+  'failed',
+  'queued',
+  'running',
+  'succeeded',
+  'waiting_for_review',
+  'purged',
+  'archiving',
+  'archived',
+  'restoring',
+] as const
 
-export type JobStatus = keyof typeof JOB_STATUS_LABELS
+export type JobStatus = (typeof JOB_STATUSES)[number]
 
 export type PublicStage =
   | 'draft'

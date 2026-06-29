@@ -1,0 +1,98 @@
+{
+  "status": {
+    "cancelled": "已取消",
+    "editing": "修改中",
+    "failed": "已失败",
+    "queued": "待开始",
+    "running": "处理中",
+    "succeeded": "已完成",
+    "waiting_for_review": "等待审核",
+    "purged": "已清理",
+    "archiving": "归档中",
+    "archived": "已归档",
+    "restoring": "恢复中",
+    "resynthesizing": "重合成中 · 第 {n} 次修改"
+  },
+  "stage": {
+    "none": "待开始",
+    "draft": "草稿与配音",
+    "failed": "处理失败",
+    "ingestion": "输入准备",
+    "legacy_process_output": "输出完成",
+    "media_understanding": "媒体理解",
+    "speaker_review": "说话人审核",
+    "translation_config_review": "翻译配置",
+    "translation_review": "翻译审核",
+    "voice_review": "音色确认",
+    "voice_selection_review": "音色选择"
+  },
+  "stageDescription": {
+    "ingestion": "确认输入来源与可处理边界。",
+    "media_understanding": "提取媒体信息并建立后续处理上下文。",
+    "speaker_review": "确认说话人归属。",
+    "voice_review": "确认各发言人音色配置。",
+    "translation_config_review": "选择翻译模型和提示词。",
+    "translation_review": "确认翻译内容。",
+    "voice_selection_review": "为每位说话人选择配音音色。",
+    "draft": "生成配音和对齐。",
+    "legacy_process_output": "产出结果和可下载文件。"
+  },
+  "reviewStageDescription": {
+    "speaker_review": "请先确认说话人名称和片段归属，然后继续下一步。",
+    "translation_config_review": "请选择翻译模型并确认提示词，然后开始翻译。",
+    "translation_review": "请先确认翻译内容，然后继续配音与后续处理。",
+    "voice_review": "请先确认每位说话人的音色绑定，然后继续下一步。",
+    "voice_selection_review": "请为每位说话人选择或克隆配音音色，然后继续下一步。"
+  },
+  "review": {
+    "pendingTitle": "等待审核",
+    "genericStage": "审核",
+    "descriptionForStage": "当前任务正在等待{stageLabel}，请先完成处理。",
+    "descriptionGeneric": "当前任务正在等待审核处理。",
+    "actionForStage": "处理{stageLabel}",
+    "actionGeneric": "继续处理审核",
+    "needsReviewFirst": "当前任务需要先完成审核，然后才能继续。"
+  },
+  "error": {
+    "noDetail": "当前没有更多失败说明。",
+    "ingestion": {
+      "label": "音频上传或转录失败",
+      "suggestion": "长视频容易上传失败，建议使用 10 分钟以内的视频重试。"
+    },
+    "voiceclone": {
+      "label": "音色克隆失败",
+      "suggestion": "可能是音频质量不足，建议检查原视频音频是否清晰。"
+    },
+    "translation": {
+      "label": "翻译生成失败",
+      "suggestion": "可能是模型服务临时不可用，建议稍后重试。"
+    },
+    "alignment": {
+      "label": "时长对齐失败",
+      "suggestion": "配音时长与原始片段差距过大，可尝试重新创建任务。"
+    },
+    "generic": {
+      "label": "处理失败",
+      "suggestion": "请查看项目详情了解更多信息。"
+    }
+  },
+  "title": {
+    "untitled": "未命名视频"
+  },
+  "secondary": {
+    "youtubePrefix": "YouTube 视频 · {id}",
+    "projectPrefix": "项目记录 · {id}"
+  },
+  "expiry": {
+    "deletingSoon": "即将删除",
+    "daysLeft": "{days} 天后过期",
+    "hoursLeft": "{hours} 小时后过期",
+    "underOneHour": "不到 1 小时后过期"
+  },
+  "progress": {
+    "completed": "任务已完成。",
+    "queued": "任务已进入队列。",
+    "reviewingSpeakers": "正在处理说话人审核结果。",
+    "starting": "任务已开始处理。"
+  }
+}

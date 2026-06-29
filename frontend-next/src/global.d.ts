@@ -9,6 +9,7 @@ import marketing from "../messages/zh/marketing.json"
 import auth from "../messages/zh/auth.json"
 import seo from "../messages/zh/seo.json"
 import billing from "../messages/zh/billing.json"
+import app from "../messages/zh/app.json"
 import { routing } from "./i18n/routing"
 
 type Messages = {
@@ -17,6 +18,7 @@ type Messages = {
   auth: typeof auth
   seo: typeof seo
   billing: typeof billing
+  app: typeof app
 }
 
 declare module "next-intl" {

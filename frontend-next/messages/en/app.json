@@ -1,0 +1,98 @@
+{
+  "status": {
+    "cancelled": "Cancelled",
+    "editing": "Editing",
+    "failed": "Failed",
+    "queued": "Pending",
+    "running": "Processing",
+    "succeeded": "Completed",
+    "waiting_for_review": "Awaiting review",
+    "purged": "Purged",
+    "archiving": "Archiving",
+    "archived": "Archived",
+    "restoring": "Restoring",
+    "resynthesizing": "Re-synthesizing · edit {n}"
+  },
+  "stage": {
+    "none": "Pending",
+    "draft": "Draft & dubbing",
+    "failed": "Processing failed",
+    "ingestion": "Input prep",
+    "legacy_process_output": "Output ready",
+    "media_understanding": "Media understanding",
+    "speaker_review": "Speaker review",
+    "translation_config_review": "Translation config",
+    "translation_review": "Translation review",
+    "voice_review": "Voice confirmation",
+    "voice_selection_review": "Voice selection"
+  },
+  "stageDescription": {
+    "ingestion": "Confirm the input source and processing boundaries.",
+    "media_understanding": "Extract media information and build context for later steps.",
+    "speaker_review": "Confirm speaker assignments.",
+    "voice_review": "Confirm each speaker's voice configuration.",
+    "translation_config_review": "Choose the translation model and prompt.",
+    "translation_review": "Confirm the translated content.",
+    "voice_selection_review": "Choose a dubbing voice for each speaker.",
+    "draft": "Generate dubbing and alignment.",
+    "legacy_process_output": "Produce results and downloadable files."
+  },
+  "reviewStageDescription": {
+    "speaker_review": "Confirm the speaker names and segment assignments, then continue.",
+    "translation_config_review": "Choose the translation model and confirm the prompt, then start translating.",
+    "translation_review": "Confirm the translated content, then continue to dubbing and later steps.",
+    "voice_review": "Confirm each speaker's voice binding, then continue.",
+    "voice_selection_review": "Select or clone a dubbing voice for each speaker, then continue."
+  },
+  "review": {
+    "pendingTitle": "Awaiting review",
+    "genericStage": "Review",
+    "descriptionForStage": "This task is waiting for {stageLabel}; please complete it first.",
+    "descriptionGeneric": "This task is waiting for review.",
+    "actionForStage": "Handle {stageLabel}",
+    "actionGeneric": "Continue review",
+    "needsReviewFirst": "This task needs to complete review before it can continue."
+  },
+  "error": {
+    "noDetail": "No further failure details available.",
+    "ingestion": {
+      "label": "Audio upload or transcription failed",
+      "suggestion": "Long videos often fail to upload; try again with a video under 10 minutes."
+    },
+    "voiceclone": {
+      "label": "Voice cloning failed",
+      "suggestion": "The audio quality may be insufficient; check that the source video audio is clear."
+    },
+    "translation": {
+      "label": "Translation generation failed",
+      "suggestion": "The model service may be temporarily unavailable; please try again later."
+    },
+    "alignment": {
+      "label": "Duration alignment failed",
+      "suggestion": "The dubbing duration differs too much from the original segment; try recreating the task."
+    },
+    "generic": {
+      "label": "Processing failed",
+      "suggestion": "Check the project details for more information."
+    }
+  },
+  "title": {
+    "untitled": "Untitled video"
+  },
+  "secondary": {
+    "youtubePrefix": "YouTube video · {id}",
+    "projectPrefix": "Project record · {id}"
+  },
+  "expiry": {
+    "deletingSoon": "Deleting soon",
+    "daysLeft": "{days, plural, one {Expires in # day} other {Expires in # days}}",
+    "hoursLeft": "{hours, plural, one {Expires in # hour} other {Expires in # hours}}",
+    "underOneHour": "Expires in under 1 hour"
+  },
+  "progress": {
+    "completed": "Task completed.",
+    "queued": "Task queued.",
+    "reviewingSpeakers": "Processing speaker review results.",
+    "starting": "Task processing started."
+  }
+}

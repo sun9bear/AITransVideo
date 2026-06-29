@@ -15,6 +15,7 @@
  */
 
 import type { JobSummary } from "@/types/jobs"
+import type { AppTranslator } from "@/features/jobs/i18n"
 
 const LEGACY_RETENTION_DAYS = 7
 const MS_PER_HOUR = 60 * 60 * 1000
@@ -81,13 +82,13 @@ export function expiryColorClass(tier: ExpiryInfo["tier"]): string {
   }
 }
 
-export function expiryLabel(info: ExpiryInfo): string {
+export function expiryLabel(t: AppTranslator, info: ExpiryInfo): string {
   if (info.tier === "unknown" || info.expiresAt === null) return ""
-  if (info.tier === "expired") return "即将删除"
+  if (info.tier === "expired") return t("expiry.deletingSoon")
   const msLeft = info.msLeft
   const days = Math.floor(msLeft / MS_PER_DAY)
-  if (days >= 1) return `${days} 天后过期`
+  if (days >= 1) return t("expiry.daysLeft", { days })
   const hours = Math.floor(msLeft / MS_PER_HOUR)
-  if (hours >= 1) return `${hours} 小时后过期`
-  return "不到 1 小时后过期"
+  if (hours >= 1) return t("expiry.hoursLeft", { hours })
+  return t("expiry.underOneHour")
 }

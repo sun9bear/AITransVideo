@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { useTranslations } from "next-intl"
 import { useParams } from "next/navigation"
 import { Link } from "@/i18n/navigation"
 import { EmptyState } from "@/components/empty-state"
@@ -14,6 +15,7 @@ import type { ProjectDetailResource } from "@/types/jobs"
 import { ApiError } from "@/lib/api/client"
 
 export default function ProjectDetailPage() {
+  const t = useTranslations("app")
   const params = useParams()
   const jobId = (params.jobId as string)?.trim() ?? ""
   const [detail, setDetail] = useState<ProjectDetailResource | null>(null)
@@ -42,10 +44,10 @@ export default function ProjectDetailPage() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-2 min-w-0">
             <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">项目详情</p>
-            <h1 className="text-2xl font-bold font-heading text-foreground truncate">{getJobDisplayTitle(job)}</h1>
-            <p className="text-sm text-muted-foreground">{getJobSecondaryLabel(job)}</p>
+            <h1 className="text-2xl font-bold font-heading text-foreground truncate">{getJobDisplayTitle(t, job)}</h1>
+            <p className="text-sm text-muted-foreground">{getJobSecondaryLabel(t, job)}</p>
             <div className="flex gap-3 text-xs text-muted-foreground/60">
-              <span>阶段：{getStageLabel(job.currentStage)}</span>
+              <span>阶段：{getStageLabel(t, job.currentStage)}</span>
               <span>·</span>
               <span>更新：{new Date(job.updatedAt).toLocaleString("zh-CN")}</span>
             </div>

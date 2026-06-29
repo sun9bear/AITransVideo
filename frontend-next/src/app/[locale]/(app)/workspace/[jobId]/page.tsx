@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect } from 'react'
+import { useTranslations } from 'next-intl'
 import { Link, useRouter } from "@/i18n/navigation"
 import { useParams } from "next/navigation"
 import { toast } from 'sonner'
@@ -57,6 +58,7 @@ function sendBrowserNotification(status: string, title: string) {
 }
 
 export default function WorkspacePage() {
+  const t = useTranslations('app')
   const params = useParams()
   const router = useRouter()
   const jobId = ((params.jobId as string) ?? '').trim()
@@ -97,7 +99,7 @@ export default function WorkspacePage() {
       if (prevStatusRef.current &&
           prevStatusRef.current !== nextJob.status &&
           (nextJob.status === 'succeeded' || nextJob.status === 'failed' || nextJob.status === 'cancelled')) {
-        sendBrowserNotification(nextJob.status, getJobDisplayTitle(nextJob))
+        sendBrowserNotification(nextJob.status, getJobDisplayTitle(t, nextJob))
         // Auto-redirect to projects page after successful completion.
         // 智能版预览任务例外：teaser + 转完整 CTA 就在本工作区页，跳转到 /projects
         // 会丢失试看上下文 → 留在原页。
@@ -197,15 +199,15 @@ export default function WorkspacePage() {
   const isSucceeded = job.status === 'succeeded'
   const isFailed = job.status === 'failed'
   const editGeneration = job.editGeneration ?? 0
-  const displayTitle = getJobDisplayTitle(job)
-  const secondaryLabel = getJobSecondaryLabel(job)
+  const displayTitle = getJobDisplayTitle(t, job)
+  const secondaryLabel = getJobSecondaryLabel(t, job)
   const availableDownloadCount = downloads.filter((i) => i.available).length
 
   // Use Web UI's active stage when available (more accurate than Job API's currentStage)
   const effectiveReviewStage = webUiStage ?? job.currentStage
   // Use effective stage for progress bar and labels
   const effectiveStage = (isWaitingForReview && effectiveReviewStage) ? effectiveReviewStage as PublicStage : job.currentStage
-  const stageItems = buildStageProgress(job.status, effectiveStage)
+  const stageItems = buildStageProgress(t, job.status, effectiveStage)
 
   return (
     <div className="space-y-6">
@@ -254,7 +256,7 @@ export default function WorkspacePage() {
         <div className="mt-3 text-sm text-muted-foreground">
           {isWaitingForReview ? (
             <span className="font-medium" style={{ color: "var(--ochre)" }}>
-              当前需要处理：{getStageLabel(effectiveStage)}
+              当前需要处理：{getStageLabel(t, effectiveStage)}
             </span>
           ) : isEditing ? (
             <span className="font-medium" style={{ color: "var(--ochre)" }}>
@@ -284,11 +286,11 @@ export default function WorkspacePage() {
           <h3 className="text-lg font-semibold text-foreground">
             {editGeneration > 0
               ? `正在重合成 · 第 ${editGeneration} 次修改`
-              : `正在处理 · ${getStageLabel(effectiveStage)}`}
+              : `正在处理 · ${getStageLabel(t, effectiveStage)}`}
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
             {isAdmin
-              ? (getUserFacingProgressMessage(job.progressMessage) ?? '任务正在后台处理，页面会自动刷新…')
+              ? (getUserFacingProgressMessage(t, job.progressMessage) ?? '任务正在后台处理，页面会自动刷新…')
               : '任务正在后台处理，页面会自动刷新…'}
           </p>
         </section>
@@ -359,14 +361,14 @@ export default function WorkspacePage() {
       {isFailed ? (
         <section className="surface-card p-6 border border-red-200 dark:border-red-500/20">
           <h3 className="text-lg font-semibold text-red-700 dark:text-red-400">
-            {getErrorCategory(job.errorSummary).label}
+            {getErrorCategory(t, job.errorSummary).label}
           </h3>
           <p className="mt-2 text-sm text-red-600 dark:text-red-400/80">
-            {getErrorSummaryMessage(job.errorSummary)}
+            {getErrorSummaryMessage(t, job.errorSummary)}
           </p>
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/20 dark:bg-amber-500/5">
             <p className="text-sm font-medium text-foreground/80">建议</p>
-            <p className="text-sm text-muted-foreground">{getErrorCategory(job.errorSummary).suggestion}</p>
+            <p className="text-sm text-muted-foreground">{getErrorCategory(t, job.errorSummary).suggestion}</p>
           </div>
           <div className="mt-4 flex gap-2">
             <Link className="secondary-button" href="/projects?new=1">重新创建任务</Link>
