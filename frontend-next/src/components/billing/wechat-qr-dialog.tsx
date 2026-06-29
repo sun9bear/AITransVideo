@@ -19,6 +19,7 @@
  */
 
 import { useEffect, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import QRCode from "react-qr-code"
 import { CheckCircle2, Loader2 } from "lucide-react"
 import {
@@ -55,6 +56,7 @@ export function WechatQrDialog({
   onClose,
   onPaid,
 }: WechatQrDialogProps) {
+  const t = useTranslations("appBilling")
   const [status, setStatus] = useState<PaymentOrderStatus | "pending">("pending")
   const [pollExhausted, setPollExhausted] = useState(false)
   const onPaidRef = useRef(onPaid)
@@ -115,25 +117,25 @@ export function WechatQrDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle>微信扫码支付</DialogTitle>
+          <DialogTitle>{t("wechat.title")}</DialogTitle>
           <DialogDescription>
-            应付金额 <span className="font-semibold tabular-nums">{formatYuan(amountFen)}</span>
+            {t("wechat.amountDue")} <span className="font-semibold tabular-nums">{formatYuan(amountFen)}</span>
           </DialogDescription>
         </DialogHeader>
 
         {status === "paid" ? (
           <div className="flex flex-col items-center gap-3 py-8">
             <CheckCircle2 className="h-10 w-10 text-primary" aria-hidden="true" />
-            <p className="text-sm font-medium text-foreground">支付成功</p>
-            <p className="text-xs text-muted-foreground">订阅与点数正在更新…</p>
+            <p className="text-sm font-medium text-foreground">{t("wechat.paidTitle")}</p>
+            <p className="text-xs text-muted-foreground">{t("wechat.paidBody")}</p>
           </div>
         ) : terminalFailed ? (
           <div className="flex flex-col items-center gap-3 py-8 text-center">
             <p className="text-sm font-medium text-foreground">
-              {status === "failed" ? "支付失败" : "订单已关闭"}
+              {status === "failed" ? t("wechat.failedTitle") : t("wechat.closedTitle")}
             </p>
             <p className="text-xs leading-relaxed text-muted-foreground">
-              本次订单未完成支付。关闭本窗口后可重新发起支付。
+              {t("wechat.failedBody")}
             </p>
           </div>
         ) : (
@@ -147,25 +149,24 @@ export function WechatQrDialog({
                 size={256}
                 style={{ height: "100%", width: "100%" }}
                 viewBox="0 0 256 256"
-                aria-label="微信支付二维码"
+                aria-label={t("wechat.qrAriaLabel")}
               />
             </div>
             <p className="px-2 text-center text-sm font-medium leading-relaxed text-foreground sm:hidden">
-              手机端请将截图发送到电脑端扫码支付，或用另一个手机扫码支付。
+              {t("wechat.screenshotHint")}
             </p>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {pollExhausted ? (
-                <span>确认超时。若你已完成支付,可关闭本窗口,到账后账单页会自动更新。</span>
+                <span>{t("wechat.pollExhausted")}</span>
               ) : (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                  等待支付确认…支付完成后本窗口会自动更新
+                  {t("wechat.waiting")}
                 </>
               )}
             </div>
             <p className="px-2 text-center text-xs leading-relaxed text-muted-foreground">
-              请打开手机微信,用「扫一扫」扫描上方二维码完成支付。
-              二维码不支持长按识别。
+              {t("wechat.scanHint")}
             </p>
           </div>
         )}

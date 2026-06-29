@@ -1,0 +1,95 @@
+{
+  "header": {
+    "title": "Video Translation",
+    "currentTask": "Current task",
+    "newTranslation": "New translation"
+  },
+  "empty": {
+    "title": "No translation tasks yet",
+    "description": "Create your first translation task to start dubbing videos.",
+    "newTranslation": "New translation"
+  },
+  "error": {
+    "retry": "Retry"
+  },
+  "retention": {
+    "admin": "Admin projects <strong>never expire</strong> and won't be removed by routine cleanup.",
+    "user": "Each project is kept for up to <strong>7 days</strong>, then deleted automatically. Download your result files in time."
+  },
+  "backup": {
+    "selectedCount": "<strong>{count}</strong> completed {count, plural, one {project} other {projects}} selected",
+    "backupToPan": "Back up to cloud drive",
+    "clearSelection": "Clear selection",
+    "clear": "Clear"
+  },
+  "loadMore": {
+    "loading": "Loading more tasks...",
+    "button": "Load more",
+    "shown": "Showing {shown}/{total} tasks"
+  },
+  "card": {
+    "neverExpires": "Never expires",
+    "backupCheckboxTitle": "Select to back up to cloud drive",
+    "backupCheckboxAria": "Select project {title} for batch backup",
+    "derivedFrom": "· Derived from {source}",
+    "derivedSourcePurged": "purged task",
+    "rename": "Rename",
+    "delete": "Delete"
+  },
+  "expanded": {
+    "stageLabel": "Stage:",
+    "enterWorkspace": "Open workspace",
+    "cancelling": "Cancelling...",
+    "cancel": "Cancel",
+    "needsReview": "Review required",
+    "editingInProgress": "You are editing this task",
+    "editsCompleted": "· {count} {count, plural, one {edit} other {edits}} completed",
+    "continueEditing": "Continue editing",
+    "processingFailed": "Processing failed",
+    "recreate": "Recreate",
+    "queued": "In queue...",
+    "cancelled": "Cancelled"
+  },
+  "rename": {
+    "title": "Rename task",
+    "description": "Up to about 12 Chinese characters. A random suffix is appended automatically if the name collides with an existing task.",
+    "label": "New task name",
+    "badChar": "Cannot contain {lt} {gt} quotes / \\ or null characters",
+    "tooLong": "Name too long (over 60 characters)",
+    "cancel": "Cancel",
+    "saving": "Saving…",
+    "save": "Save"
+  },
+  "toast": {
+    "loadMoreFailed": "Failed to load more projects",
+    "loadListFailed": "Failed to load the project list",
+    "deleteConfirm": "Delete this project?",
+    "deleteSuccess": "Project deleted",
+    "deleteFailed": "Delete failed, please try again later",
+    "cancelSuccess": "Task cancelled",
+    "cancelFailed": "Cancel failed, please try again later",
+    "renameSuccess": "Task renamed",
+    "renameSuccessCollision": "Task renamed to \"{title}\"",
+    "renameFailed": "Rename failed",
+    "bulkBackupConfirm": "Back up {count} completed {count, plural, one {task} other {tasks}} to the cloud drive?\n\nFor each task we will:\n• Pack the project directory into a tar.gz\n• Upload it across borders to the admin cloud drive (~15-30 min for a 1GB task)\n• On success, mark the task as \"Archived\" and delete the local source files\n\nFailed tasks can be retried individually at /admin/pan/backups.",
+    "bulkBackupEnqueued": "Enqueued {count} backup {count, plural, one {task} other {tasks}}",
+    "bulkBackupAllFailed": "All {count} failed: {reason}",
+    "bulkBackupUnknownError": "Unknown error",
+    "bulkBackupPartial": "{okCount} enqueued · {failCount} failed ({ids}{more})",
+    "bulkBackupEnqueueFailed": "Batch backup enqueue failed"
+  },
+  "detail": {
+    "loading": "Loading",
+    "loadingDescription": "Loading project details...",
+    "loadFailed": "Failed to load",
+    "backToList": "Back to project list",
+    "notFound": "Project not found",
+    "projectDetail": "Project details",
+    "stagePrefix": "Stage: ",
+    "updatedPrefix": "Updated: ",
+    "enterWorkspace": "Enter workspace",
+    "newTranslation": "New translation",
+    "moreDownloads": "More downloads",
+    "noDownloads": "No downloadable result files yet."
+  }
+}

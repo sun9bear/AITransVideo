@@ -1,11 +1,17 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import { useSearchParams } from "next/navigation"
 import { usePathname, useRouter } from "@/i18n/navigation"
 import { AlertCircle, CheckCircle2, Info, X } from "lucide-react"
 import { getOrder, type PaymentOrderStatus } from "@/lib/billing/get-order"
 import { cn } from "@/lib/utils"
+
+/** Translator scoped to the `appBilling` namespace (relative keys). */
+type BillingTranslator = ReturnType<typeof useTranslations<"appBilling">>
+/** Literal message-key type for appBilling — lets label-key maps stay typed. */
+type BillingKey = Parameters<BillingTranslator>[0]
 
 type BannerTone = "success" | "info" | "error"
 
@@ -19,8 +25,8 @@ type BillingStatusBannerProps = {
   onOrderSettled?: () => void
 }
 
-const ERROR_REASON_COPY: Record<string, string> = {
-  order_not_found: "未找到对应的订单，可能已经过期或被取消。",
+const ERROR_REASON_KEYS: Record<string, BillingKey> = {
+  order_not_found: "banner.orderNotFound",
 }
 
 // Providers whose final status is confirmed by polling getOrder(refresh) after
@@ -82,6 +88,7 @@ function clearStashedPendingOrder(): void {
 }
 
 function readBannerFromStatus(
+  t: BillingTranslator,
   status: string | null,
   reason: string | null,
 ): BannerContent | null {
@@ -89,85 +96,85 @@ function readBannerFromStatus(
   if (status === "paid") {
     return {
       tone: "success",
-      title: "支付成功",
-      body: "订单已处理，你的订阅信息已更新。",
+      title: t("banner.paidTitle"),
+      body: t("banner.paidBody"),
     }
   }
   if (status === "already_settled") {
     return {
       tone: "info",
-      title: "订单已处理",
-      body: "这个订单此前已经支付成功，当前没有新的扣款。",
+      title: t("banner.alreadySettledTitle"),
+      body: t("banner.alreadySettledBody"),
     }
   }
   if (status === "error") {
+    const reasonKey = reason ? ERROR_REASON_KEYS[reason] : null
     return {
       tone: "error",
-      title: "支付未完成",
-      body:
-        (reason && ERROR_REASON_COPY[reason]) ||
-        "支付流程未能完成，请稍后重试或重新创建订单。",
+      title: t("banner.errorTitle"),
+      body: reasonKey ? t(reasonKey) : t("banner.errorBody"),
     }
   }
   // successUrl / checkout.closed returns may arrive without an order_id AND
   // without a localStorage stash (private mode) — show static copy instead of
   // nothing so a paid user isn't left staring at an unchanged page.
-  if (status === "processing") return pendingBanner(false)
-  if (status === "closed") return pendingBanner(true)
+  if (status === "processing") return pendingBanner(t, false)
+  if (status === "closed") return pendingBanner(t, true)
   return null
 }
 
-function pendingBanner(closedReturn: boolean): BannerContent {
+function pendingBanner(t: BillingTranslator, closedReturn: boolean): BannerContent {
   if (closedReturn) {
     // The buyer deliberately closed the checkout window. Don't pretend a
     // payment is confirming — but keep polling: a WeChat buyer often closes
     // the QR page while the async capture is still in flight.
     return {
       tone: "info",
-      title: "支付窗口已关闭",
-      body: "若你已完成付款,系统会自动确认到账并更新本页;若尚未支付,可重新发起支付。",
+      title: t("banner.closedTitle"),
+      body: t("banner.closedBody"),
     }
   }
   return {
     tone: "info",
-    title: "支付确认中",
-    body: "银行卡支付通常几秒内确认;微信支付最长约 10 分钟。确认后本页会自动刷新,无需重复支付。",
+    title: t("banner.pendingTitle"),
+    body: t("banner.pendingBody"),
   }
 }
 
 function readBannerFromOrderStatus(
+  t: BillingTranslator,
   status: PaymentOrderStatus,
   closedReturn = false,
 ): BannerContent {
   if (status === "paid") {
     return {
       tone: "success",
-      title: "支付成功",
-      body: "系统已经确认到账，订阅与权益会自动刷新。",
+      title: t("banner.paidConfirmedTitle"),
+      body: t("banner.paidConfirmedBody"),
     }
   }
   if (status === "failed") {
     return {
       tone: "error",
-      title: "支付失败",
-      body: "订单未能完成支付，请重新发起支付或稍后再试。",
+      title: t("banner.failedTitle"),
+      body: t("banner.failedBody"),
     }
   }
   if (status === "cancelled" || status === "expired") {
     return {
       tone: "info",
-      title: "订单未完成",
-      body: "订单当前未支付完成，如需升级可重新创建订单。",
+      title: t("banner.incompleteTitle"),
+      body: t("banner.incompleteBody"),
     }
   }
   if (status === "refunded") {
     return {
       tone: "info",
-      title: "订单已退款",
-      body: "退款状态已同步到账单记录中。",
+      title: t("banner.refundedTitle"),
+      body: t("banner.refundedBody"),
     }
   }
-  return pendingBanner(closedReturn)
+  return pendingBanner(t, closedReturn)
 }
 
 function toneStyles(tone: BannerTone) {
@@ -199,6 +206,7 @@ async function sleep(ms: number) {
 export function BillingStatusBanner({
   onOrderSettled,
 }: BillingStatusBannerProps) {
+  const t = useTranslations("appBilling")
   const searchParams = useSearchParams()
   const pathname = usePathname()
   const router = useRouter()
@@ -219,9 +227,9 @@ export function BillingStatusBanner({
   const [dismissed, setDismissed] = useState(false)
   const [content, setContent] = useState<BannerContent | null>(() => {
     if (effectiveOrderId && isPollableReturnProvider(effectiveProvider)) {
-      return pendingBanner(closedReturn)
+      return pendingBanner(t, closedReturn)
     }
-    return readBannerFromStatus(initialStatus, initialReason)
+    return readBannerFromStatus(t, initialStatus, initialReason)
   })
   const onOrderSettledRef = useRef(onOrderSettled)
   const notifiedRef = useRef(false)
@@ -250,7 +258,7 @@ export function BillingStatusBanner({
         try {
           const order = await getOrder(orderId, { refresh: true })
           if (cancelled) return
-          setContent(readBannerFromOrderStatus(order.status, closedReturn))
+          setContent(readBannerFromOrderStatus(t, order.status, closedReturn))
           if (order.status !== "created" && order.status !== "pending") {
             clearStashedPendingOrder()
             if (!notifiedRef.current) {
@@ -270,8 +278,8 @@ export function BillingStatusBanner({
       if (!cancelled) {
         setContent({
           tone: "info",
-          title: "支付仍在确认中",
-          body: "到账确认晚于预期(银行卡通常几秒,微信最长约 10 分钟)。确认后本页会自动更新,你也可以稍后刷新查看;若你未完成支付,订单会在 30 分钟后自动过期。",
+          title: t("banner.stillConfirmingTitle"),
+          body: t("banner.stillConfirmingBody"),
         })
       }
     }
@@ -308,7 +316,7 @@ export function BillingStatusBanner({
         type="button"
         onClick={() => setDismissed(true)}
         className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
-        aria-label="关闭通知"
+        aria-label={t("banner.dismiss")}
       >
         <X className="h-4 w-4" aria-hidden="true" />
       </button>

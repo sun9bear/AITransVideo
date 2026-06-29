@@ -1,0 +1,95 @@
+{
+  "header": {
+    "title": "视频翻译",
+    "currentTask": "当前任务",
+    "newTranslation": "新建翻译"
+  },
+  "empty": {
+    "title": "还没有翻译任务",
+    "description": "创建第一个翻译任务，开始体验视频翻译。",
+    "newTranslation": "新建翻译"
+  },
+  "error": {
+    "retry": "重试"
+  },
+  "retention": {
+    "admin": "管理员项目 <strong>永不过期</strong>，后台定期清理不会自动删除。",
+    "user": "每个项目最长保留 <strong>7 天</strong>，过期后自动删除。请及时下载结果文件。"
+  },
+  "backup": {
+    "selectedCount": "已选 <strong>{count}</strong> 个已完成项目",
+    "backupToPan": "批量备份到网盘",
+    "clearSelection": "清空选择",
+    "clear": "清空"
+  },
+  "loadMore": {
+    "loading": "加载更多任务...",
+    "button": "加载更多",
+    "shown": "已显示 {shown}/{total} 个任务"
+  },
+  "card": {
+    "neverExpires": "永不过期",
+    "backupCheckboxTitle": "勾选以批量备份到网盘",
+    "backupCheckboxAria": "选择项目 {title} 加入批量备份",
+    "derivedFrom": "· 派生自 {source}",
+    "derivedSourcePurged": "已清理的任务",
+    "rename": "重命名",
+    "delete": "删除"
+  },
+  "expanded": {
+    "stageLabel": "阶段:",
+    "enterWorkspace": "进入工作台",
+    "cancelling": "取消中...",
+    "cancel": "取消",
+    "needsReview": "需要审核",
+    "editingInProgress": "你正在修改此任务",
+    "editsCompleted": "· 已完成 {count} 次修改",
+    "continueEditing": "继续修改",
+    "processingFailed": "处理失败",
+    "recreate": "重新创建",
+    "queued": "排队中...",
+    "cancelled": "已取消"
+  },
+  "rename": {
+    "title": "重命名任务",
+    "description": "最多约 12 个中文字符。与已有任务重名时会自动追加随机后缀。",
+    "label": "新任务名",
+    "badChar": "不能包含 {lt} {gt} 引号 / \\ 或空字符",
+    "tooLong": "名称过长（超过 60 个字符）",
+    "cancel": "取消",
+    "saving": "保存中…",
+    "save": "保存"
+  },
+  "toast": {
+    "loadMoreFailed": "加载更多项目失败",
+    "loadListFailed": "加载项目列表失败",
+    "deleteConfirm": "确定删除这个项目？",
+    "deleteSuccess": "项目已删除",
+    "deleteFailed": "删除失败，请稍后重试",
+    "cancelSuccess": "任务已取消",
+    "cancelFailed": "取消失败，请稍后重试",
+    "renameSuccess": "任务已重命名",
+    "renameSuccessCollision": "任务已重命名为 \"{title}\"",
+    "renameFailed": "重命名失败",
+    "bulkBackupConfirm": "确认将 {count} 个已完成任务批量备份到百度网盘?\n\n每个任务会:\n• 打包工程目录为 tar.gz\n• 跨境上传到 admin 网盘 (1GB 任务约 15-30 分钟)\n• 成功后任务状态变为「已归档」, 本地原文件被删除\n\n失败任务可在 /admin/pan/backups 单独重试。",
+    "bulkBackupEnqueued": "已入队 {count} 个备份任务",
+    "bulkBackupAllFailed": "全部 {count} 个失败:{reason}",
+    "bulkBackupUnknownError": "未知错误",
+    "bulkBackupPartial": "{okCount} 个入队成功 · {failCount} 个失败 ({ids}{more})",
+    "bulkBackupEnqueueFailed": "批量备份入队失败"
+  },
+  "detail": {
+    "loading": "加载中",
+    "loadingDescription": "正在加载项目详情...",
+    "loadFailed": "加载失败",
+    "backToList": "返回项目列表",
+    "notFound": "项目不存在",
+    "projectDetail": "项目详情",
+    "stagePrefix": "阶段：",
+    "updatedPrefix": "更新：",
+    "enterWorkspace": "进入工作区",
+    "newTranslation": "新建翻译",
+    "moreDownloads": "更多下载",
+    "noDownloads": "当前没有可下载的结果文件。"
+  }
+}

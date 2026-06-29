@@ -17,6 +17,7 @@ import { ApiError } from "@/lib/api/client"
 
 export default function ProjectDetailPage() {
   const t = useTranslations("app")
+  const tp = useTranslations("appProjects")
   const formatLocale = useIntlLocale()
   const params = useParams()
   const jobId = (params.jobId as string)?.trim() ?? ""
@@ -28,13 +29,13 @@ export default function ProjectDetailPage() {
     if (!jobId) return
     getProjectDetail(jobId)
       .then(setDetail)
-      .catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"))
+      .catch((e) => setError(e instanceof ApiError ? e.message : tp("detail.loadFailed")))
       .finally(() => setIsLoading(false))
-  }, [jobId])
+  }, [jobId, tp])
 
-  if (isLoading) return <EmptyState title="加载中" description="正在加载项目详情..." />
-  if (error) return <EmptyState title="加载失败" description={error} actionLabel="返回项目列表" actionTo="/projects" />
-  if (!detail) return <EmptyState title="项目不存在" actionLabel="返回项目列表" actionTo="/projects" />
+  if (isLoading) return <EmptyState title={tp("detail.loading")} description={tp("detail.loadingDescription")} />
+  if (error) return <EmptyState title={tp("detail.loadFailed")} description={error} actionLabel={tp("detail.backToList")} actionTo="/projects" />
+  if (!detail) return <EmptyState title={tp("detail.notFound")} actionLabel={tp("detail.backToList")} actionTo="/projects" />
 
   const { job, downloads } = detail
   const availableDownloads = downloads.filter((d) => d.available)
@@ -45,13 +46,13 @@ export default function ProjectDetailPage() {
       <section className="rounded-2xl border border-border bg-card p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-2 min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">项目详情</p>
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{tp("detail.projectDetail")}</p>
             <h1 className="text-2xl font-bold font-heading text-foreground truncate">{getJobDisplayTitle(t, job)}</h1>
             <p className="text-sm text-muted-foreground">{getJobSecondaryLabel(t, job)}</p>
             <div className="flex gap-3 text-xs text-muted-foreground/60">
-              <span>阶段：{getStageLabel(t, job.currentStage)}</span>
+              <span>{tp("detail.stagePrefix")}{getStageLabel(t, job.currentStage)}</span>
               <span>·</span>
-              <span>更新：{new Date(job.updatedAt).toLocaleString(formatLocale)}</span>
+              <span>{tp("detail.updatedPrefix")}{new Date(job.updatedAt).toLocaleString(formatLocale)}</span>
             </div>
           </div>
           <StatusBadge status={job.status} />
@@ -59,14 +60,14 @@ export default function ProjectDetailPage() {
         <div className="mt-5 flex flex-wrap gap-3">
           {(job.status === "waiting_for_review" || job.status === "running" || job.status === "queued") ? (
             <Link className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110" href={`/workspace/${jobId}`}>
-              进入工作区
+              {tp("detail.enterWorkspace")}
             </Link>
           ) : null}
           <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-sm text-muted-foreground transition hover:bg-muted/60" href="/projects">
-            返回项目列表
+            {tp("detail.backToList")}
           </Link>
           <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-sm text-muted-foreground transition hover:bg-muted/60" href="/projects?new=1">
-            新建翻译
+            {tp("detail.newTranslation")}
           </Link>
         </div>
       </section>
@@ -87,7 +88,7 @@ export default function ProjectDetailPage() {
       {job.smartPreviewMode === true ? null : availableDownloads.length > 0 ? (
         <details className="mt-2">
           <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-            更多下载
+            {tp("detail.moreDownloads")}
           </summary>
           <div className="mt-2">
             <ResultDownloadList items={downloads} serviceMode={job.serviceMode} />
@@ -95,7 +96,7 @@ export default function ProjectDetailPage() {
         </details>
       ) : job.status === "succeeded" ? (
         <section className="rounded-2xl border border-dashed border-border bg-card/50 p-6 text-center">
-          <p className="text-sm text-muted-foreground">当前没有可下载的结果文件。</p>
+          <p className="text-sm text-muted-foreground">{tp("detail.noDownloads")}</p>
         </section>
       ) : null}
     </div>

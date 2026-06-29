@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
+import { useTranslations } from "next-intl"
 import { EmptyState } from "@/components/empty-state"
 import { useConfirmDialog } from "@/components/ui/confirm-dialog"
 import {
@@ -14,11 +15,15 @@ import {
 } from "@/lib/api/voiceLibrary"
 import { useIntlLocale } from "@/lib/intl-locale"
 
+/** Translator scoped to the `appVoices` namespace (relative keys). */
+type VoicesTranslator = ReturnType<typeof useTranslations<"appVoices">>
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
 export default function VoiceLibraryPage() {
+  const t = useTranslations("appVoices")
   const [summary, setSummary] = useState<VoiceLibrarySummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [running, setRunning] = useState<Record<string, true>>({})
@@ -50,9 +55,9 @@ export default function VoiceLibraryPage() {
         charsPerSecond: result.calibration?.cps ?? null,
         speedCalibratedAt: String(result.voice?.speed_calibrated_at ?? '') || new Date().toISOString(),
       }))
-      showToast("语速标定完成")
+      showToast(t("toast.calibrateDone"))
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : "标定失败" }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.calibrateFailed") }))
     } finally {
       setRunning((s) => { const n = { ...s }; delete n[voiceId]; return n })
     }
@@ -72,7 +77,7 @@ export default function VoiceLibraryPage() {
         audio.play().catch(() => {})
       }
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : "试听失败" }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.probeFailed") }))
     } finally {
       setProbing((s) => { const n = { ...s }; delete n[voiceId]; return n })
     }
@@ -85,9 +90,9 @@ export default function VoiceLibraryPage() {
       setCopiedId(voiceId)
       setTimeout(() => setCopiedId(null), 2000)
     } catch {
-      showToast("复制失败")
+      showToast(t("toast.copyFailed"))
     }
-  }, [])
+  }, [t])
 
   // --- Edit label ---
   const startEdit = useCallback((voiceId: string, currentLabel: string) => {
@@ -102,17 +107,17 @@ export default function VoiceLibraryPage() {
     try {
       await updateVoiceLabel(voiceId, trimmed)
       setSummary((s) => patchVoice(s, voiceId, { label: trimmed }))
-      showToast("名称已更新")
+      showToast(t("toast.labelUpdated"))
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : "更新失败" }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.labelUpdateFailed") }))
     }
-  }, [editValue])
+  }, [editValue, t])
 
   // --- Delete voice ---
   const handleDelete = useCallback(async (voiceId: string, label: string) => {
     const confirmed = await confirm({
-      title: "删除音色",
-      description: `确定删除音色「${label}」吗？删除后不可恢复。`,
+      title: t("delete.confirmTitle"),
+      description: t("delete.confirmDescription", { label }),
       destructive: true,
     })
     if (!confirmed) return
@@ -121,26 +126,26 @@ export default function VoiceLibraryPage() {
         method: 'DELETE',
         credentials: 'include',
       })
-      if (!resp.ok) throw new Error(`删除失败 (${resp.status})`)
+      if (!resp.ok) throw new Error(t("error.deleteFailedWithStatus", { status: resp.status }))
       setSummary((s) => s ? {
         ...s,
         voiceCount: s.voiceCount - 1,
         clonedVoiceCount: Math.max(0, s.clonedVoiceCount - 1),
         voices: s.voices.filter((v) => v.voiceId !== voiceId),
       } : s)
-      showToast("音色已删除")
+      showToast(t("toast.voiceDeleted"))
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : "删除失败" }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.deleteFailed") }))
     }
-  }, [confirm])
+  }, [confirm, t])
 
   // --- Add voice modal callback ---
   const handleAddSuccess = useCallback(() => {
     setShowAdd(false)
-    showToast("音色已添加")
+    showToast(t("toast.voiceAdded"))
     // Re-fetch full library to include new voice
     getVoiceLibrary().then(setSummary).catch(() => {})
-  }, [])
+  }, [t])
 
   // --- Helpers ---
   const clearError = (voiceId: string) => {
@@ -151,14 +156,14 @@ export default function VoiceLibraryPage() {
     setTimeout(() => setToast(null), 3000)
   }
 
-  if (isLoading) return <EmptyState title="加载中" description="正在加载音色库…" />
+  if (isLoading) return <EmptyState title={t("loading.title")} description={t("loading.description")} />
   if (!summary || summary.voices.length === 0) {
     return (
       <div className="space-y-6">
         <EmptyState
-          title="音色库为空"
-          description="在翻译任务中克隆音色后会自动保存到这里，或手动添加。"
-          actionLabel="添加音色"
+          title={t("empty.title")}
+          description={t("empty.description")}
+          actionLabel={t("empty.addAction")}
           actionTo={undefined}
         />
         <div className="flex justify-center">
@@ -167,7 +172,7 @@ export default function VoiceLibraryPage() {
             onClick={() => setShowAdd(true)}
             className="rounded-full bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground"
           >
-            + 添加音色
+            {t("header.addButton")}
           </button>
         </div>
         {showAdd && <AddVoiceModal onClose={() => setShowAdd(false)} onSuccess={handleAddSuccess} />}
@@ -180,18 +185,18 @@ export default function VoiceLibraryPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold font-heading text-foreground">我的音色</h1>
-          <p className="text-sm text-muted-foreground mt-1">管理已克隆和内置的音色。</p>
+          <h1 className="text-2xl font-bold font-heading text-foreground">{t("header.title")}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{t("header.subtitle")}</p>
         </div>
         <div className="flex gap-3 items-center">
-          <span className="rounded-full bg-muted/40 px-3 py-1 text-xs text-muted-foreground">{summary.voiceCount} 个音色</span>
-          <span className="rounded-full bg-primary/15 px-3 py-1 text-xs text-primary/80">{summary.clonedVoiceCount} 个克隆</span>
+          <span className="rounded-full bg-muted/40 px-3 py-1 text-xs text-muted-foreground">{t("header.voiceCount", { count: summary.voiceCount })}</span>
+          <span className="rounded-full bg-primary/15 px-3 py-1 text-xs text-primary/80">{t("header.clonedCount", { count: summary.clonedVoiceCount })}</span>
           <button
             type="button"
             onClick={() => setShowAdd(true)}
             className="rounded-full bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition"
           >
-            + 添加音色
+            {t("header.addButton")}
           </button>
         </div>
       </div>
@@ -205,9 +210,9 @@ export default function VoiceLibraryPage() {
           const audioUrl = audioUrls[voice.voiceId]
           const isCopied = copiedId === voice.voiceId
           const isEditing = editingLabel === voice.voiceId
-          const sourceTitle = getVoiceSourceTitle(voice)
+          const sourceTitle = getVoiceSourceTitle(voice, t)
           const sourceHref = getVoiceSourceHref(voice)
-          const sourceBadges = getVoiceSourceBadges(voice)
+          const sourceBadges = getVoiceSourceBadges(voice, t)
 
           return (
             <article
@@ -240,7 +245,7 @@ export default function VoiceLibraryPage() {
                           type="button"
                           onClick={() => startEdit(voice.voiceId, voice.label || voice.voiceId)}
                           className="text-muted-foreground/40 hover:text-foreground transition shrink-0"
-                          title="修改名称"
+                          title={t("card.editNameTitle")}
                         >
                           ✏️
                         </button>
@@ -253,14 +258,14 @@ export default function VoiceLibraryPage() {
                     {voice.createdAt ? (
                       <span>{new Date(voice.createdAt).toLocaleDateString(formatLocale)}</span>
                     ) : null}
-                    <SpeedBadge cps={voice.charsPerSecond} calibratedAt={voice.speedCalibratedAt} />
+                    <SpeedBadge cps={voice.charsPerSecond} calibratedAt={voice.speedCalibratedAt} t={t} />
                   </div>
 
                   {sourceTitle || sourceBadges.length > 0 ? (
                     <div className="space-y-1 pt-1 text-xs text-muted-foreground">
                       {sourceTitle ? (
                         <p className="truncate">
-                          <span className="text-muted-foreground/70">来源：</span>
+                          <span className="text-muted-foreground/70">{t("card.sourceLabel")}</span>
                           {sourceHref ? (
                             <a
                               href={sourceHref}
@@ -301,7 +306,7 @@ export default function VoiceLibraryPage() {
                     className="rounded-full border border-border bg-muted/40 px-3 py-1 text-xs font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
                     title={voice.voiceId}
                   >
-                    {isCopied ? "✓ 已复制" : "复制 ID"}
+                    {isCopied ? t("card.copied") : t("card.copyId")}
                   </button>
 
                   {/* Probe (试听) */}
@@ -311,7 +316,7 @@ export default function VoiceLibraryPage() {
                     disabled={isProbing}
                     className="rounded-full border border-border bg-muted/40 px-3 py-1 text-xs font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {isProbing ? "合成中…" : "试听"}
+                    {isProbing ? t("card.synthesizing") : t("card.probe")}
                   </button>
 
                   {/* Calibrate (测试语速) */}
@@ -321,7 +326,7 @@ export default function VoiceLibraryPage() {
                     disabled={isRunning}
                     className="rounded-full border border-border bg-muted/40 px-3 py-1 text-xs font-semibold text-muted-foreground transition hover:border-primary/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {isRunning ? "标定中…" : voice.charsPerSecond != null ? "重新测试" : "测试语速"}
+                    {isRunning ? t("card.calibrating") : voice.charsPerSecond != null ? t("card.recalibrate") : t("card.calibrate")}
                   </button>
 
                   {/* Delete */}
@@ -330,7 +335,7 @@ export default function VoiceLibraryPage() {
                     onClick={() => handleDelete(voice.voiceId, voice.label || voice.voiceId)}
                     className="rounded-full border border-border bg-muted/40 px-3 py-1 text-xs font-semibold text-destructive/70 transition hover:border-destructive/40 hover:text-destructive"
                   >
-                    删除
+                    {t("card.delete")}
                   </button>
                 </div>
               </div>
@@ -384,35 +389,38 @@ function patchVoice(
   }
 }
 
-function SpeedBadge({ cps, calibratedAt }: { cps: number | null; calibratedAt: string | null }) {
-  if (cps == null) return <span className="text-muted-foreground/60">· 未标定</span>
-  const tier = cps < 3.5 ? { label: "慢", cls: "text-amber-500/80" }
-    : cps >= 4.5 ? { label: "快", cls: "text-cyan-500/80" }
-    : { label: "中速", cls: "" }
-  const ago = relativeAgo(calibratedAt)
+function SpeedBadge({ cps, calibratedAt, t }: { cps: number | null; calibratedAt: string | null; t: VoicesTranslator }) {
+  if (cps == null) return <span className="text-muted-foreground/60">{t("speedBadge.uncalibrated")}</span>
+  const tier = cps < 3.5 ? { label: t("speedBadge.tierSlow"), cls: "text-amber-500/80" }
+    : cps >= 4.5 ? { label: t("speedBadge.tierFast"), cls: "text-cyan-500/80" }
+    : { label: t("speedBadge.tierMedium"), cls: "" }
+  const ago = relativeAgo(calibratedAt, t)
+  const cpsLabel = cps.toFixed(1)
   return (
     <span className={tier.cls}>
-      · {cps.toFixed(1)} 字/秒（{tier.label}）{ago ? ` · ${ago}` : ""}
+      {ago
+        ? t("speedBadge.summaryWithAgo", { cps: cpsLabel, tier: tier.label, ago })
+        : t("speedBadge.summary", { cps: cpsLabel, tier: tier.label })}
     </span>
   )
 }
 
-function relativeAgo(iso: string | null): string | null {
+function relativeAgo(iso: string | null, t: VoicesTranslator): string | null {
   if (!iso) return null
   const ts = Date.parse(iso)
   if (!Number.isFinite(ts)) return null
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000))
-  if (s < 60) return "刚刚"
-  if (s < 3600) return `${Math.floor(s / 60)}分钟前`
-  if (s < 86400) return `${Math.floor(s / 3600)}小时前`
-  return `${Math.floor(s / 86400)}天前`
+  if (s < 60) return t("ago.justNow")
+  if (s < 3600) return t("ago.minutesAgo", { minutes: Math.floor(s / 60) })
+  if (s < 86400) return t("ago.hoursAgo", { hours: Math.floor(s / 3600) })
+  return t("ago.daysAgo", { days: Math.floor(s / 86400) })
 }
 
-function getVoiceSourceTitle(voice: VoiceLibraryEntry): string | null {
+function getVoiceSourceTitle(voice: VoiceLibraryEntry, t: VoicesTranslator): string | null {
   const title = voice.sourceVideoTitle?.trim()
   if (title && !isGeneratedSourceTitle(title)) return title
-  if (voice.sourceType === "youtube_url") return "YouTube 视频"
-  if (voice.sourceType === "local_video") return "上传视频"
+  if (voice.sourceType === "youtube_url") return t("source.youtube")
+  if (voice.sourceType === "local_video") return t("source.uploadedVideo")
   return null
 }
 
@@ -424,26 +432,26 @@ function getVoiceSourceHref(voice: VoiceLibraryEntry): string | null {
   return ref
 }
 
-function getVoiceSourceBadges(voice: VoiceLibraryEntry): string[] {
+function getVoiceSourceBadges(voice: VoiceLibraryEntry, t: VoicesTranslator): string[] {
   const badges: string[] = []
-  const origin = formatCreatedFrom(voice.createdFrom)
+  const origin = formatCreatedFrom(voice.createdFrom, t)
   if (origin) badges.push(origin)
 
   const speakerName = voice.sourceSpeakerName?.trim()
   const label = voice.label?.trim() ?? ""
   if (speakerName && !label.includes(speakerName)) {
-    badges.push(`说话人：${speakerName}`)
+    badges.push(t("source.speakerBadge", { name: speakerName }))
   }
 
   const channel = getSourceChannel(voice.sourceContentTags)
-  if (channel) badges.push(`频道：${channel}`)
-  if (voice.sourceContentEra) badges.push(`${voice.sourceContentEra}年`)
+  if (channel) badges.push(t("source.channelBadge", { channel }))
+  if (voice.sourceContentEra) badges.push(t("source.eraBadge", { era: voice.sourceContentEra }))
 
-  const sample = formatSampleSeconds(voice.cloneSampleSeconds)
+  const sample = formatSampleSeconds(voice.cloneSampleSeconds, t)
   if (sample) badges.push(sample)
 
   if (badges.length === 0 && voice.sourceContentHash) {
-    badges.push("可按来源复用")
+    badges.push(t("source.reusableBadge"))
   }
   return badges.slice(0, 5)
 }
@@ -452,20 +460,20 @@ function isGeneratedSourceTitle(title: string): boolean {
   return /^(油管视频|上传视频) \d{4}-\d{2}-\d{2} \d{3}(?:_[a-z0-9]{4})?$/.test(title)
 }
 
-function formatCreatedFrom(value: string | null): string | null {
-  if (value === "smart_auto") return "智能版自动克隆"
-  if (value === "studio_manual") return "工作台克隆"
-  if (value === "manual_add") return "手动添加"
+function formatCreatedFrom(value: string | null, t: VoicesTranslator): string | null {
+  if (value === "smart_auto") return t("source.createdFromSmartAuto")
+  if (value === "studio_manual") return t("source.createdFromStudioManual")
+  if (value === "manual_add") return t("source.createdFromManualAdd")
   return null
 }
 
-function formatSampleSeconds(seconds: number | null): string | null {
+function formatSampleSeconds(seconds: number | null, t: VoicesTranslator): string | null {
   if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null
   if (seconds >= 60) {
     const minutes = Math.round(seconds / 60)
-    return `样本 ${minutes} 分钟`
+    return t("source.sampleMinutes", { minutes })
   }
-  return `样本 ${Math.round(seconds)} 秒`
+  return t("source.sampleSeconds", { seconds: Math.round(seconds) })
 }
 
 function getSourceChannel(tags: unknown): string | null {
@@ -481,6 +489,7 @@ function getSourceChannel(tags: unknown): string | null {
 // ---------------------------------------------------------------------------
 
 function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+  const t = useTranslations("appVoices")
   const [voiceId, setVoiceId] = useState("")
   const [label, setLabel] = useState("")
   const [saving, setSaving] = useState(false)
@@ -506,7 +515,7 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
       }
     } catch (err) {
       setProbeOk(false)
-      setError(err instanceof Error ? err.message : "试听失败")
+      setError(err instanceof Error ? err.message : t("error.probeFailed"))
     } finally {
       setProbeRunning(false)
     }
@@ -525,7 +534,7 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
       })
       onSuccess()
     } catch (err) {
-      setError(err instanceof Error ? err.message : "添加失败")
+      setError(err instanceof Error ? err.message : t("error.addFailed"))
     } finally {
       setSaving(false)
     }
@@ -538,26 +547,26 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-bold text-foreground">添加音色</h2>
+          <h2 className="text-lg font-bold text-foreground">{t("addModal.title")}</h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-xl">&times;</button>
         </div>
 
         <div className="space-y-3">
           <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">Voice ID</label>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">{t("addModal.voiceIdLabel")}</label>
             <input
               value={voiceId}
               onChange={(e) => { setVoiceId(e.target.value); setProbeOk(null) }}
-              placeholder="例如 vt_speaker_a_1776252490214"
+              placeholder={t("addModal.voiceIdPlaceholder")}
               className="w-full rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/50"
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-muted-foreground mb-1">音色名称</label>
+            <label className="block text-xs font-medium text-muted-foreground mb-1">{t("addModal.voiceNameLabel")}</label>
             <input
               value={label}
               onChange={(e) => setLabel(e.target.value)}
-              placeholder="例如 查理·芒格"
+              placeholder={t("addModal.voiceNamePlaceholder")}
               className="w-full rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary/50"
             />
           </div>
@@ -566,11 +575,11 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
         {/* Probe result */}
         {probeOk === true && (
           <div className="flex items-center gap-2 text-xs text-green-500">
-            <span>✓ 音色可用</span>
+            <span>{t("addModal.probeOk")}</span>
           </div>
         )}
         {probeOk === false && (
-          <div className="text-xs text-destructive">{error || "音色不可用"}</div>
+          <div className="text-xs text-destructive">{error || t("addModal.probeUnavailable")}</div>
         )}
         {probeAudioUrl && (
           <audio controls src={probeAudioUrl} className="w-full h-8" />
@@ -586,7 +595,7 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
             onClick={onClose}
             className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground transition"
           >
-            取消
+            {t("addModal.cancel")}
           </button>
           <button
             type="button"
@@ -594,7 +603,7 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
             disabled={!voiceId.trim() || probeRunning}
             className="rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-semibold text-primary hover:bg-primary/20 transition disabled:opacity-50"
           >
-            {probeRunning ? "合成中…" : "试听测试"}
+            {probeRunning ? t("addModal.probeRunning") : t("addModal.probeTest")}
           </button>
           <button
             type="button"
@@ -602,7 +611,7 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
             disabled={!voiceId.trim() || !label.trim() || saving}
             className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50"
           >
-            {saving ? "保存中…" : "添加"}
+            {saving ? t("addModal.saving") : t("addModal.save")}
           </button>
         </div>
       </div>

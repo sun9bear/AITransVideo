@@ -1,0 +1,90 @@
+{
+  "toast": {
+    "calibrateDone": "语速标定完成",
+    "copyFailed": "复制失败",
+    "labelUpdated": "名称已更新",
+    "voiceDeleted": "音色已删除",
+    "voiceAdded": "音色已添加"
+  },
+  "error": {
+    "calibrateFailed": "标定失败",
+    "probeFailed": "试听失败",
+    "labelUpdateFailed": "更新失败",
+    "deleteFailed": "删除失败",
+    "deleteFailedWithStatus": "删除失败 ({status})",
+    "addFailed": "添加失败"
+  },
+  "delete": {
+    "confirmTitle": "删除音色",
+    "confirmDescription": "确定删除音色「{label}」吗？删除后不可恢复。"
+  },
+  "loading": {
+    "title": "加载中",
+    "description": "正在加载音色库…"
+  },
+  "empty": {
+    "title": "音色库为空",
+    "description": "在翻译任务中克隆音色后会自动保存到这里，或手动添加。",
+    "addAction": "添加音色"
+  },
+  "header": {
+    "title": "我的音色",
+    "subtitle": "管理已克隆和内置的音色。",
+    "voiceCount": "{count} 个音色",
+    "clonedCount": "{count} 个克隆",
+    "addButton": "+ 添加音色"
+  },
+  "card": {
+    "editNameTitle": "修改名称",
+    "sourceLabel": "来源：",
+    "copied": "✓ 已复制",
+    "copyId": "复制 ID",
+    "synthesizing": "合成中…",
+    "probe": "试听",
+    "calibrating": "标定中…",
+    "recalibrate": "重新测试",
+    "calibrate": "测试语速",
+    "delete": "删除"
+  },
+  "speedBadge": {
+    "uncalibrated": "· 未标定",
+    "tierSlow": "慢",
+    "tierFast": "快",
+    "tierMedium": "中速",
+    "summary": "· {cps} 字/秒（{tier}）",
+    "summaryWithAgo": "· {cps} 字/秒（{tier}） · {ago}"
+  },
+  "ago": {
+    "justNow": "刚刚",
+    "minutesAgo": "{minutes}分钟前",
+    "hoursAgo": "{hours}小时前",
+    "daysAgo": "{days}天前"
+  },
+  "source": {
+    "youtube": "YouTube 视频",
+    "uploadedVideo": "上传视频",
+    "speakerBadge": "说话人：{name}",
+    "channelBadge": "频道：{channel}",
+    "eraBadge": "{era}年",
+    "reusableBadge": "可按来源复用",
+    "createdFromSmartAuto": "智能版自动克隆",
+    "createdFromStudioManual": "工作台克隆",
+    "createdFromManualAdd": "手动添加",
+    "sampleMinutes": "样本 {minutes} 分钟",
+    "sampleSeconds": "样本 {seconds} 秒"
+  },
+  "addModal": {
+    "title": "添加音色",
+    "voiceIdLabel": "Voice ID",
+    "voiceIdPlaceholder": "例如 vt_speaker_a_1776252490214",
+    "voiceNameLabel": "音色名称",
+    "voiceNamePlaceholder": "例如 查理·芒格",
+    "probeOk": "✓ 音色可用",
+    "probeUnavailable": "音色不可用",
+    "cancel": "取消",
+    "probeRunning": "合成中…",
+    "probeTest": "试听测试",
+    "saving": "保存中…",
+    "save": "添加"
+  }
+}

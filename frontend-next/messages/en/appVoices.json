@@ -1,0 +1,90 @@
+{
+  "toast": {
+    "calibrateDone": "Speed calibration complete",
+    "copyFailed": "Copy failed",
+    "labelUpdated": "Name updated",
+    "voiceDeleted": "Voice deleted",
+    "voiceAdded": "Voice added"
+  },
+  "error": {
+    "calibrateFailed": "Calibration failed",
+    "probeFailed": "Preview failed",
+    "labelUpdateFailed": "Update failed",
+    "deleteFailed": "Delete failed",
+    "deleteFailedWithStatus": "Delete failed ({status})",
+    "addFailed": "Add failed"
+  },
+  "delete": {
+    "confirmTitle": "Delete voice",
+    "confirmDescription": "Delete the voice “{label}”? This cannot be undone."
+  },
+  "loading": {
+    "title": "Loading",
+    "description": "Loading your voice library…"
+  },
+  "empty": {
+    "title": "Your voice library is empty",
+    "description": "Voices cloned during translation jobs are saved here automatically, or you can add one manually.",
+    "addAction": "Add voice"
+  },
+  "header": {
+    "title": "My voices",
+    "subtitle": "Manage your cloned and built-in voices.",
+    "voiceCount": "{count, plural, one {# voice} other {# voices}}",
+    "clonedCount": "{count, plural, one {# cloned} other {# cloned}}",
+    "addButton": "+ Add voice"
+  },
+  "card": {
+    "editNameTitle": "Edit name",
+    "sourceLabel": "Source: ",
+    "copied": "✓ Copied",
+    "copyId": "Copy ID",
+    "synthesizing": "Synthesizing…",
+    "probe": "Preview",
+    "calibrating": "Calibrating…",
+    "recalibrate": "Test again",
+    "calibrate": "Test speed",
+    "delete": "Delete"
+  },
+  "speedBadge": {
+    "uncalibrated": "· Not calibrated",
+    "tierSlow": "Slow",
+    "tierFast": "Fast",
+    "tierMedium": "Medium",
+    "summary": "· {cps} chars/sec ({tier})",
+    "summaryWithAgo": "· {cps} chars/sec ({tier}) · {ago}"
+  },
+  "ago": {
+    "justNow": "Just now",
+    "minutesAgo": "{minutes, plural, one {# minute ago} other {# minutes ago}}",
+    "hoursAgo": "{hours, plural, one {# hour ago} other {# hours ago}}",
+    "daysAgo": "{days, plural, one {# day ago} other {# days ago}}"
+  },
+  "source": {
+    "youtube": "YouTube video",
+    "uploadedVideo": "Uploaded video",
+    "speakerBadge": "Speaker: {name}",
+    "channelBadge": "Channel: {channel}",
+    "eraBadge": "{era}",
+    "reusableBadge": "Reusable by source",
+    "createdFromSmartAuto": "Smart auto-clone",
+    "createdFromStudioManual": "Studio clone",
+    "createdFromManualAdd": "Manually added",
+    "sampleMinutes": "{minutes, plural, one {# min sample} other {# min sample}}",
+    "sampleSeconds": "{seconds, plural, one {# sec sample} other {# sec sample}}"
+  },
+  "addModal": {
+    "title": "Add voice",
+    "voiceIdLabel": "Voice ID",
+    "voiceIdPlaceholder": "e.g. vt_speaker_a_1776252490214",
+    "voiceNameLabel": "Voice name",
+    "voiceNamePlaceholder": "e.g. Charlie Munger",
+    "probeOk": "✓ Voice available",
+    "probeUnavailable": "Voice unavailable",
+    "cancel": "Cancel",
+    "probeRunning": "Synthesizing…",
+    "probeTest": "Run preview",
+    "saving": "Saving…",
+    "save": "Add"
+  }
+}
