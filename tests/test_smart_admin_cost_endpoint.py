@@ -230,7 +230,7 @@ class TestUserFacingPageNoCostLeakage:
         for ts_file in frontend_dir.rglob("*.ts*"):
             rel = ts_file.relative_to(frontend_dir).as_posix()
             # Admin subroute is the allowed home for cost data.
-            if rel.startswith("app/(app)/admin/") or rel.startswith("app/admin/"):
+            if rel.startswith("app/[locale]/(app)/admin/") or rel.startswith("app/admin/"):
                 continue
             text = ts_file.read_text(encoding="utf-8", errors="replace")
             for token in forbidden_outside_admin:

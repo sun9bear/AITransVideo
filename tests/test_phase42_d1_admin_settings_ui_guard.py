@@ -43,7 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ADMIN_SETTINGS_PAGE = (
-    REPO_ROOT / "frontend-next" / "src" / "app" / "(app)" / "admin"
+    REPO_ROOT / "frontend-next" / "src" / "app" / "[locale]" / "(app)" / "admin"
     / "settings" / "page.tsx"
 )
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-PAGE_PATH = Path(__file__).resolve().parents[1] / "frontend-next" / "src" / "app" / "(app)" / "admin" / "pricing" / "page.tsx"
+PAGE_PATH = Path(__file__).resolve().parents[1] / "frontend-next" / "src" / "app" / "[locale]" / "(app)" / "admin" / "pricing" / "page.tsx"
 
 
 def _read_page() -> str:

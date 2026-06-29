@@ -31,7 +31,7 @@ if str(GATEWAY_DIR) not in sys.path:
     sys.path.insert(0, str(GATEWAY_DIR))
 
 ADMIN_SETTINGS_PAGE = (
-    REPO_ROOT / "frontend-next" / "src" / "app" / "(app)" / "admin"
+    REPO_ROOT / "frontend-next" / "src" / "app" / "[locale]" / "(app)" / "admin"
     / "settings" / "page.tsx"
 )
 

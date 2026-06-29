@@ -85,6 +85,7 @@ class TestFrontendSmartEditButtonGate:
         / "frontend-next"
         / "src"
         / "app"
+        / "[locale]"
         / "(app)"
         / "projects"
         / "page.tsx"

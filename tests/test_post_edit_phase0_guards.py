@@ -450,7 +450,7 @@ def test_frontend_projects_page_has_editing_case() -> None:
     """The list page's ExpandedContent switch must have a dedicated editing
     branch so the card renders the "继续修改" CTA instead of falling through
     to ``default: return null``."""
-    src = _read("frontend-next/src/app/(app)/projects/page.tsx")
+    src = _read("frontend-next/src/app/[locale]/(app)/projects/page.tsx")
     assert re.search(r"case\s+[\"']editing[\"']", src), (
         "projects/page.tsx switch must include case 'editing'"
     )
@@ -462,7 +462,7 @@ def test_frontend_projects_page_has_editing_case() -> None:
 def test_frontend_projects_page_edit_button_is_feature_flag_gated() -> None:
     """D43 direct-access button must be gated so Phase 0 never exposes the
     edit route to users. Scan for both the flag and the three-way condition."""
-    src = _read("frontend-next/src/app/(app)/projects/page.tsx")
+    src = _read("frontend-next/src/app/[locale]/(app)/projects/page.tsx")
     assert "NEXT_PUBLIC_ENABLE_POST_EDIT" in src, (
         "feature flag env var must be referenced"
     )
@@ -494,7 +494,7 @@ def test_frontend_workspace_page_editing_does_not_trigger_generic_cancel() -> No
     """Editing sessions must NOT surface the generic "取消任务" button on the
     workspace header — cancelling an editing session drops the user's draft
     and must route through the edit page's own二次确认 flow (plan §7.6)."""
-    src = _read("frontend-next/src/app/(app)/workspace/[jobId]/page.tsx")
+    src = _read("frontend-next/src/app/[locale]/(app)/workspace/[jobId]/page.tsx")
     assert "isEditing" in src, "workspace page must derive an isEditing flag"
     # Find the cancel button block. Its render guard is an expression using
     # `isWaitingForReview` / `isProcessing` — confirm `isEditing` is NOT in
@@ -515,7 +515,7 @@ def test_frontend_workspace_page_editing_does_not_trigger_generic_cancel() -> No
 
 
 def test_frontend_workspace_page_has_editing_section() -> None:
-    src = _read("frontend-next/src/app/(app)/workspace/[jobId]/page.tsx")
+    src = _read("frontend-next/src/app/[locale]/(app)/workspace/[jobId]/page.tsx")
     assert re.search(r"\{isEditing\s*\?", src), (
         "workspace page must render a dedicated {isEditing ? ...} section"
     )

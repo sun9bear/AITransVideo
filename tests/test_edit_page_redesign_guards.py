@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EDIT_DIR = REPO_ROOT / "frontend-next" / "src" / "app" / "(app)" / "workspace" / "[jobId]" / "edit"
+EDIT_DIR = REPO_ROOT / "frontend-next" / "src" / "app" / "[locale]" / "(app)" / "workspace" / "[jobId]" / "edit"
 EDIT_PAGE = EDIT_DIR / "page.tsx"
 COMPONENTS_DIR = REPO_ROOT / "frontend-next" / "src" / "components" / "workspace" / "edit"
 VL_PATH = REPO_ROOT / "frontend-next" / "src" / "components" / "workspace" / "segments" / "SegmentVirtualList.tsx"
