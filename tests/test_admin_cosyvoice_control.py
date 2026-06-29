@@ -16,6 +16,7 @@ ADMIN_COSYVOICE_PAGE = (
     / "frontend-next"
     / "src"
     / "app"
+    / "[locale]"
     / "(app)"
     / "admin"
     / "cosyvoice"

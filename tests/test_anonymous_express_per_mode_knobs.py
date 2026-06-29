@@ -21,7 +21,7 @@ for _p in (_GATEWAY, _SRC):
         sys.path.insert(0, _p)
 
 ADMIN_SETTINGS_PAGE = (
-    _REPO / "frontend-next" / "src" / "app" / "(app)" / "admin"
+    _REPO / "frontend-next" / "src" / "app" / "[locale]" / "(app)" / "admin"
     / "settings" / "page.tsx"
 )
 

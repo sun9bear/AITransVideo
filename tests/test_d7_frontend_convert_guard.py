@@ -22,7 +22,7 @@ JOBS_TS = FE / "lib" / "api" / "jobs.ts"
 TYPES_TS = FE / "types" / "jobs.ts"
 FORM_TSX = FE / "components" / "workspace" / "TranslationForm.tsx"
 APP_SHELL_TSX = FE / "components" / "app-shell.tsx"
-SETTINGS_TSX = FE / "app" / "(app)" / "settings" / "page.tsx"
+SETTINGS_TSX = FE / "app" / "[locale]" / "(app)" / "settings" / "page.tsx"
 POST_AUTH_TS = FE / "lib" / "auth" / "post-auth-redirect.ts"
 
 

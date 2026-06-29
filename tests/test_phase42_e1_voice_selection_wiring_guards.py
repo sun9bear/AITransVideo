@@ -65,7 +65,13 @@ VOICE_SELECTION_PANEL = (
     FE_DIR / "components" / "workspace" / "VoiceSelectionPanel.tsx"
 )
 VOICE_MODIFY_TAB = (
-    FE_DIR / "app" / "(app)" / "workspace" / "[jobId]" / "edit" / "VoiceModifyTab.tsx"
+    FE_DIR / "app" / "[locale]" / "(app)" / "workspace" / "[jobId]" / "edit" / "VoiceModifyTab.tsx"
+)
+# VoiceCloneModal (MiniMax legacy modal) was extracted out of
+# VoiceSelectionPanel.tsx into its own component file. The body-scoped
+# G6.1.5 reverse guard below reads the modal from its current home.
+VOICE_CLONE_MODAL = (
+    FE_DIR / "components" / "workspace" / "VoiceCloneModal.tsx"
 )
 VOICE_SELECTION_API = FE_DIR / "lib" / "api" / "voiceSelection.ts"
 
@@ -249,7 +255,7 @@ def test_g6_1_5_voice_clone_modal_body_has_no_cosyvoice_literals():
     (onClick dispatch). Only the legacy modal function body must stay
     clean.
     """
-    src = _strip_comments(VOICE_SELECTION_PANEL.read_text(encoding="utf-8"))
+    src = _strip_comments(VOICE_CLONE_MODAL.read_text(encoding="utf-8"))
     body = _extract_function_body(src, _VOICE_CLONE_MODAL_SIG)
     forbidden = [
         "cosyvoice",
@@ -263,7 +269,7 @@ def test_g6_1_5_voice_clone_modal_body_has_no_cosyvoice_literals():
     ]
     for lit in forbidden:
         assert lit not in body, (
-            f"VoiceSelectionPanel.tsx::VoiceCloneModal function body "
+            f"VoiceCloneModal.tsx::VoiceCloneModal function body "
             f"contains forbidden CosyVoice literal `{lit}`. The MiniMax "
             f"legacy modal function must stay clean — CosyVoice routing "
             f"belongs in the parent component's onClick dispatch."

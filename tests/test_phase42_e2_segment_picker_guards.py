@@ -74,6 +74,7 @@ VOICE_MODIFY_TAB = (
     FRONTEND_DIR
     / "src"
     / "app"
+    / "[locale]"
     / "(app)"
     / "workspace"
     / "[jobId]"

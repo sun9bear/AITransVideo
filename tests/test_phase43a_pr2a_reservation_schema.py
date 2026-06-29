@@ -25,7 +25,7 @@ if str(GATEWAY) not in sys.path:
 
 MIGRATION_PATH = GATEWAY / "alembic" / "versions" / "032_express_clone_reservations.py"
 ADMIN_SETTINGS_PAGE = (
-    REPO_ROOT / "frontend-next" / "src" / "app" / "(app)" / "admin"
+    REPO_ROOT / "frontend-next" / "src" / "app" / "[locale]" / "(app)" / "admin"
     / "settings" / "page.tsx"
 )
 

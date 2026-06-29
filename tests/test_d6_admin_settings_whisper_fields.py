@@ -202,7 +202,7 @@ def test_gateway_and_runtime_share_the_same_whisper_model_whitelist():
 
 def test_frontend_default_settings_match_backend_defaults():
     """The TypeScript ``DEFAULT_SETTINGS`` literal in
-    ``frontend-next/src/app/(app)/admin/settings/page.tsx`` for the
+    ``frontend-next/src/app/[locale]/(app)/admin/settings/page.tsx`` for the
     four whisper fields must match the Pydantic defaults. Otherwise
     the UI and the API disagree on what "default" means and admin
     sees flickering values on save.
@@ -212,7 +212,7 @@ def test_frontend_default_settings_match_backend_defaults():
     """
     page = (
         _REPO_ROOT
-        / "frontend-next" / "src" / "app" / "(app)" / "admin" / "settings"
+        / "frontend-next" / "src" / "app" / "[locale]" / "(app)" / "admin" / "settings"
         / "page.tsx"
     )
     text = page.read_text(encoding="utf-8")
