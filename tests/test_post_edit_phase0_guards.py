@@ -363,10 +363,18 @@ def _collect_op_names(func: ast.FunctionDef, op_name: str, arg_index: int = 0) -
 # runner but sufficient for "did someone delete the editing branch?" checks.
 
 
-def test_frontend_job_status_labels_includes_editing() -> None:
-    src = _read("frontend-next/src/types/jobs.ts")
-    assert re.search(r"editing\s*:\s*['\"]修改中['\"]", src), (
-        "JOB_STATUS_LABELS must include editing: '修改中'"
+def test_frontend_editing_status_has_zh_label() -> None:
+    """UI-05 (2026-06-29): the '修改中' label for the editing status moved out of
+    the inline JOB_STATUS_LABELS object in jobs.ts into the next-intl source
+    catalog messages/zh/app.json (`status.editing`). Pin it at the new home so a
+    regression that drops the label still fails CI."""
+    import json
+
+    app_zh = REPO_ROOT / "frontend-next" / "messages" / "zh" / "app.json"
+    data = json.loads(app_zh.read_text(encoding="utf-8"))
+    assert data.get("status", {}).get("editing") == "修改中", (
+        "messages/zh/app.json status.editing must be '修改中' "
+        "(moved from JOB_STATUS_LABELS in UI-05)"
     )
 
 
