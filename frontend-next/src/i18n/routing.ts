@@ -12,5 +12,12 @@ export const routing = defineRouting({
   defaultLocale: "zh",
   localePrefix: "as-needed",
   localeDetection: false,
+  // alternateLinks:false 关掉 next-intl middleware 给【每条】路由自动 emit 的
+  // `Link: rel="alternate" hreflang` 响应头。该通道绕过 site.ts/localizedRoutes，会把未翻旗的
+  // legal 页（/terms /privacy /refund）也挂上 en hreflang（2026-06-29 生产实测 /terms 响应头含
+  // en，违反「legal 不翻旗」口径）。关掉后 hreflang 只由 page 级 generateMetadata 产出：localized
+  // 路由仍互惠（HTML <link rel=alternate>），legal 干净无 en，并顺带消除 header 用 `zh`/HTML 用
+  // `zh-Hans` 的重复不一致。守卫见 scripts/hreflang-check.mjs。
+  alternateLinks: false,
   localeCookie: { maxAge: 60 * 60 * 24 * 365 },
 })

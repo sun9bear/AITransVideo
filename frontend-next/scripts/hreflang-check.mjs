@@ -78,6 +78,22 @@ if (!("zh-Hans" in hlLegal) || !("x-default" in hlLegal)) {
   fail(`${legalRoute}: 应含 zh-Hans + x-default（hreflang=${JSON.stringify(hlLegal)}）`)
 }
 
+// middleware 通道（alternateLinks，2026-06-29 M1-hardening）：上面只覆盖 site.ts/page-metadata 这条
+// hreflang 通道。next-intl middleware 另有一条——alternateLinks 为真（默认）时它给【每条】路由 emit
+// `Link: rel="alternate" hreflang` 响应头，绕过 site.ts/localizedRoutes，会给未翻旗的 legal 也挂 en
+// （生产实测 /terms 响应头含 en）。故断言 routing.alternateLinks === false，把「legal 无 en hreflang」
+// 从两条通道都钉死。**语义断言**（import 取 resolved 值）而非源文本正则——routing.ts 自身的解释性
+// 注释含字面「alternateLinks:false」，源文本正则会误匹配注释 → 配置翻成 true / 删属性时仍 false-pass
+// （多 lens 审查实证）。bare Node 可 import routing.ts（同上方 site.ts type-stripping；next-intl/routing
+// 解析正常，实测 OK）；属性删除时 alternateLinks 为 undefined/默认 true，!==false 同样 fail-closed。
+const routingMod = await import(pathToFileURL(path.join(root, "src/i18n/routing.ts")).href)
+if (routingMod.routing.alternateLinks !== false) {
+  fail(
+    `routing.alternateLinks=${JSON.stringify(routingMod.routing.alternateLinks)}，必须显式 false —— ` +
+      "否则 next-intl middleware 给每条路由（含未翻旗 legal）自动挂 `Link: rel=alternate hreflang=en` 响应头，绕过 localizedRoutes",
+  )
+}
+
 // home 路由（`/`）：UI-03g 已翻旗（AnonymousTrialPanel + anonymousPreview 本地化、/en home 整页英文）
 // → 现属 localizedRoutes，互惠断言由上方主循环统一覆盖（zh-Hans+en+x-default 全齐 + 自指 + 唯一 x-default）。
 // 故此处不再单列 home no-en 断言（早先 @codex #66 P2 临时移出已收回）。

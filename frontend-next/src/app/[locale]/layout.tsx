@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 import { hasLocale, NextIntlClientProvider } from "next-intl"
-import { setRequestLocale, getMessages } from "next-intl/server"
+import { setRequestLocale, getMessages, getTranslations } from "next-intl/server"
 import "../globals.css"
 import { Toaster } from "@/components/ui/sonner"
 import { SessionProvider } from "@/components/providers/session-provider"
@@ -94,6 +94,7 @@ export default async function LocaleLayout({
   // 让本 layout + 其下静态页可静态渲染（漏调会静默退化为 dynamic，R10）。
   setRequestLocale(locale)
   const messages = await getMessages()
+  const t = await getTranslations("common")
   // zh→zh-Hans（注：旧 root 为 zh-CN，此为已登记的单点字节豁免），en→en。
   const htmlLang = locale === "zh" ? "zh-Hans" : "en"
 
@@ -111,7 +112,7 @@ export default async function LocaleLayout({
         />
       </head>
       <body className="min-h-full bg-background">
-        <a href="#main-content" className="skip-to-main">跳到主内容</a>
+        <a href="#main-content" className="skip-to-main">{t("skipToMain")}</a>
         <NextIntlClientProvider messages={messages}>
           <SessionProvider>{children}</SessionProvider>
         </NextIntlClientProvider>

@@ -14,6 +14,18 @@ const enCommon = JSON.parse(readFileSync(path.join(root, "messages/en/common.jso
 assert.equal(zhCommon.appName, "爱译视频", "messages/zh/common.json appName 漂移")
 assert.equal(enCommon.appName, "AITrans.Video", "messages/en/common.json appName 漂移")
 
+// 1b) M1-hardening（2026-06-29）：skip-to-main + not-found chrome 从 layout.tsx / not-found.tsx
+//     内联中文迁入 common 字典后，默认 zh 值与改造前内联字面量【逐字节】相同（红线 R1）。
+assert.equal(zhCommon.skipToMain, "跳到主内容", "common.skipToMain 漂移（红线 R1）")
+assert.equal(zhCommon.notFound.eyebrow, "页面提示", "common.notFound.eyebrow 漂移（红线 R1，EmptyState 默认值同源）")
+assert.equal(zhCommon.notFound.title, "找不到页面", "common.notFound.title 漂移（红线 R1）")
+assert.equal(
+  zhCommon.notFound.description,
+  "你访问的页面不存在或已移动，试试回到首页。",
+  "common.notFound.description 漂移（红线 R1）",
+)
+assert.equal(zhCommon.notFound.actionLabel, "返回首页", "common.notFound.actionLabel 漂移（红线 R1）")
+
 // 2) site.ts inert：默认 zh / 单参 absoluteUrl 行为与旧实现等价（红线 1），hreflang 只 zh
 // site.ts 在 import 时即按 NEXT_PUBLIC_SITE_URL 求值 siteUrl；本守卫测的是 absoluteUrl/hreflang
 // 的【逻辑】（相对 siteUrl 的前缀拼接），与具体 origin 无关。故先清掉环境变量，让 siteUrl

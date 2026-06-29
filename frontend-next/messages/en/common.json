@@ -1,8 +1,15 @@
 {
   "appName": "AITrans.Video",
+  "skipToMain": "Skip to main content",
   "actions": {
     "confirm": "Confirm",
     "cancel": "Cancel"
+  },
+  "notFound": {
+    "eyebrow": "Notice",
+    "title": "Page not found",
+    "description": "This page doesn't exist or has moved. Try heading back home.",
+    "actionLabel": "Back to home"
   },
   "localeSwitcher": {
     "groupLabel": "Switch interface language",
