@@ -1,103 +1,64 @@
 import { getStageLabel } from '@/features/jobs/presentation'
+import type { AppTranslator } from '@/features/jobs/i18n'
 import type { JobStatus, PublicStage, StageProgressItem } from '@/types/jobs'
 
+// UI-05：阶段描述文案迁入 messages/{zh,en}/app.json 的 `stageDescription.*`，
+// 由 buildStageProgress 用 `t('stageDescription.' + key)` 解析。此处只保留阶段顺序（key 列表）。
 const stageSequence = [
-  {
-    description: '确认输入来源与可处理边界。',
-    key: 'ingestion',
-  },
-  {
-    description: '提取媒体信息并建立后续处理上下文。',
-    key: 'media_understanding',
-  },
-  {
-    description: '确认说话人归属。',
-    key: 'speaker_review',
-  },
-  {
-    description: '确认各发言人音色配置。',
-    key: 'voice_review',
-  },
-  {
-    description: '选择翻译模型和提示词。',
-    key: 'translation_config_review',
-  },
-  {
-    description: '确认翻译内容。',
-    key: 'translation_review',
-  },
-  {
-    description: '为每位说话人选择配音音色。',
-    key: 'voice_selection_review',
-  },
-  {
-    description: '生成配音和对齐。',
-    key: 'draft',
-  },
-  {
-    description: '产出结果和可下载文件。',
-    key: 'legacy_process_output',
-  },
-] as const satisfies readonly {
-  description: string
-  key: PublicStage
-}[]
+  'ingestion',
+  'media_understanding',
+  'speaker_review',
+  'voice_review',
+  'translation_config_review',
+  'translation_review',
+  'voice_selection_review',
+  'draft',
+  'legacy_process_output',
+] as const satisfies readonly PublicStage[]
+
+// 序列内的阶段键（窄于 PublicStage：不含 failed）——保证 `stageDescription.${key}`
+// 落在 app.json 实际存在的键集合内，满足 next-intl 严格键类型。
+type StageKey = (typeof stageSequence)[number]
 
 export function buildStageProgress(
+  t: AppTranslator,
   status: JobStatus,
   currentStage: PublicStage | null,
 ): StageProgressItem[] {
+  const itemFor = (key: StageKey, state: StageProgressItem['state']): StageProgressItem => ({
+    key,
+    description: t(`stageDescription.${key}`),
+    label: getStageLabel(t, key),
+    state,
+  })
+
   if ((status === 'queued' || status === 'running') && currentStage === null) {
-    return stageSequence.map((stage, index) => ({
-      ...stage,
-      label: getStageLabel(stage.key),
-      state: index === 0 ? 'current' : 'upcoming',
-    }))
+    return stageSequence.map((key, index) => itemFor(key, index === 0 ? 'current' : 'upcoming'))
   }
 
   if (status === 'succeeded') {
-    return stageSequence.map((stage) => ({
-      ...stage,
-      label: getStageLabel(stage.key),
-      state: 'complete',
-    }))
+    return stageSequence.map((key) => itemFor(key, 'complete'))
   }
 
   const activeIndex = currentStage
-    ? stageSequence.findIndex((stage) => stage.key === currentStage)
+    ? stageSequence.findIndex((key) => key === currentStage)
     : -1
 
-  return stageSequence.map((stage, index) => {
+  return stageSequence.map((key, index) => {
     if (status === 'failed' && index === activeIndex) {
-      return {
-        ...stage,
-        label: getStageLabel(stage.key),
-        state: 'error',
-      }
+      return itemFor(key, 'error')
     }
 
     if (activeIndex >= 0) {
       if (index < activeIndex) {
-        return {
-          ...stage,
-          label: getStageLabel(stage.key),
-          state: 'complete',
-        }
+        return itemFor(key, 'complete')
       }
 
       if (index === activeIndex) {
-        return {
-          ...stage,
-          label: getStageLabel(stage.key),
-          state: 'current',
-        }
+        return itemFor(key, 'current')
       }
     }
 
-    return {
-      ...stage,
-      label: getStageLabel(stage.key),
-      state: 'upcoming',
-    }
+    return itemFor(key, 'upcoming')
   })
 }

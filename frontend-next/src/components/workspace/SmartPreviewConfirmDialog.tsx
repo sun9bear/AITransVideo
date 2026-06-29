@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { toast } from "sonner"
 
@@ -51,6 +52,7 @@ export function SmartPreviewConfirmDialog({
   cloneCostLoadFailed,
   onCreated,
 }: SmartPreviewConfirmDialogProps) {
+  const t = useTranslations("app")
   const [consented, setConsented] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -92,10 +94,10 @@ export function SmartPreviewConfirmDialog({
     setShowRecharge(false)
     try {
       const job = await createSmartPreviewJob(jobInput)
-      toast.success(`预览任务已创建：${getJobDisplayTitle(job)}`)
+      toast.success(`预览任务已创建：${getJobDisplayTitle(t, job)}`)
       setConsented(false)
       onOpenChange(false)
-      onCreated({ id: job.id, title: getJobDisplayTitle(job) })
+      onCreated({ id: job.id, title: getJobDisplayTitle(t, job) })
     } catch (error) {
       const mapped = mapSmartPreviewCreateError(error, { cloneCostCredits })
       setErrorMessage(mapped.message)

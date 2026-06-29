@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState, type FormEvent } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { toast } from "sonner"
 
@@ -46,6 +47,7 @@ export interface TranslationFormProps {
 type ServiceMode = "express" | "studio" | "smart" | "free"
 
 export function TranslationForm({ onCreated, mode, initialSourceUrl }: TranslationFormProps) {
+  const t = useTranslations("app")
   const { user } = useSession()
   const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">("youtube_url")
   const [youtubeUrl, setYoutubeUrl] = useState(initialSourceUrl ?? "")
@@ -402,10 +404,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       setSubmitState("success")
       // 转完整成功 → 清 convert-ready key（避免返回创建页再次进入转完整模式）。
       if (reuseAnonPreviewId) clearAnonConvertReady()
-      toast.success(`任务已创建：${getJobDisplayTitle(createdJob)}`)
+      toast.success(`任务已创建：${getJobDisplayTitle(t, createdJob)}`)
       // Store latest job ID for /tasks/current fallback
       try { localStorage.setItem("avt_latest_job_id", createdJob.id) } catch {}
-      onCreated({ id: createdJob.id, title: getJobDisplayTitle(createdJob) })
+      onCreated({ id: createdJob.id, title: getJobDisplayTitle(t, createdJob) })
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         await loadActiveJobs(true)
@@ -487,7 +489,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
               <p className="font-semibold text-foreground">请先完成或取消当前任务，再创建新的翻译。</p>
               <p className="text-sm text-muted-foreground">
-                {getJobDisplayTitle(latestActiveJob)} · {getStageLabel(latestActiveJob.currentStage)}
+                {getJobDisplayTitle(t, latestActiveJob)} · {getStageLabel(t, latestActiveJob.currentStage)}
               </p>
             </div>
             {latestActiveJob ? (

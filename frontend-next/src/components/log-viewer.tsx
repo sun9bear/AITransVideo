@@ -1,7 +1,8 @@
 import { useState } from 'react'
+import { useTranslations } from 'next-intl'
 
 import { getStageLabel, getUserFacingProgressMessage } from '@/features/jobs/presentation'
-import { JOB_STATUS_LABELS, type JobLogEntry } from '@/types/jobs'
+import { type JobLogEntry } from '@/types/jobs'
 
 type LogViewerProps = {
   entries: readonly JobLogEntry[]
@@ -30,6 +31,7 @@ export function LogViewer({
   emptyMessage = '当前没有可显示的日志。',
   initialVisibleCount = 5,
 }: LogViewerProps) {
+  const t = useTranslations('app')
   const [isExpanded, setIsExpanded] = useState(false)
   const shouldTruncate = entries.length > initialVisibleCount
   const visibleEntries =
@@ -76,12 +78,12 @@ export function LogViewer({
             >
               <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] opacity-70">
                 <span>{levelLabelMap[entry.level]}</span>
-                {entry.stage ? <span>{getStageLabel(entry.stage)}</span> : null}
-                {entry.status ? <span>{JOB_STATUS_LABELS[entry.status]}</span> : null}
+                {entry.stage ? <span>{getStageLabel(t, entry.stage)}</span> : null}
+                {entry.status ? <span>{t(`status.${entry.status}`)}</span> : null}
                 <span>{entry.createdAt}</span>
               </div>
               <p className="mt-2 text-sm leading-6">
-                {getUserFacingProgressMessage(entry.message) ?? entry.message}
+                {getUserFacingProgressMessage(t, entry.message) ?? entry.message}
               </p>
             </article>
           ))}

@@ -1,6 +1,7 @@
 "use client"
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { useSearchParams } from "next/navigation"
 import { useRouter } from "@/i18n/navigation"
@@ -147,6 +148,7 @@ export default function MyProjectsPage() {
 }
 
 function ProjectsContent() {
+  const t = useTranslations("app")
   const router = useRouter()
   const searchParams = useSearchParams()
 
@@ -644,7 +646,7 @@ function ProjectsContent() {
           const sourceJob = job.copyOfJobId
             ? jobs.find((j) => j.id === job.copyOfJobId)
             : null
-          const sourceTitle = sourceJob ? getJobDisplayTitle(sourceJob) : null
+          const sourceTitle = sourceJob ? getJobDisplayTitle(t, sourceJob) : null
           return (
             <ProjectCard
               key={job.id}
@@ -786,10 +788,11 @@ function ProjectCard({
   isBackupSelected: boolean
   onToggleBackupSelect: (jobId: string) => void
 }) {
+  const t = useTranslations("app")
   const router = useRouter()
   const expiry = computeExpiryInfo(job)
   const isNonExpiring = isAdminView || job.roleSnapshot === "admin"
-  const expiryText = isNonExpiring ? "永不过期" : expiryLabel(expiry)
+  const expiryText = isNonExpiring ? "永不过期" : expiryLabel(t, expiry)
   const showEditShortcut = isJobEditEligible(job)
 
   return (
@@ -811,7 +814,7 @@ function ProjectCard({
           >
             <input
               type="checkbox"
-              aria-label={`选择项目 ${getJobDisplayTitle(job)} 加入批量备份`}
+              aria-label={`选择项目 ${getJobDisplayTitle(t, job)} 加入批量备份`}
               checked={isBackupSelected}
               onChange={() => onToggleBackupSelect(job.id)}
               className="h-4 w-4 cursor-pointer accent-[color:var(--cinnabar)]"
@@ -832,7 +835,7 @@ function ProjectCard({
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-foreground truncate">
-              {getJobDisplayTitle(job)}
+              {getJobDisplayTitle(t, job)}
             </span>
             <StatusBadge status={job.status} editGeneration={job.editGeneration ?? 0} />
           </div>
@@ -905,6 +908,7 @@ function ExpandedContent({
   onReCreate: () => void
   isCancelling: boolean
 }) {
+  const t = useTranslations("app")
   const editShortcutHref = isJobEditEligible(job)
     ? `/workspace/${job.id}/edit`
     : undefined
@@ -932,12 +936,12 @@ function ExpandedContent({
             <div className="flex items-center gap-2 text-sm">
               <span className="text-muted-foreground">阶段:</span>
               <span className="font-medium text-foreground">
-                {getStageLabel(job.currentStage)}
+                {getStageLabel(t, job.currentStage)}
               </span>
             </div>
             {job.progressMessage && (
               <p className="text-xs text-muted-foreground">
-                {getUserFacingProgressMessage(job.progressMessage) ??
+                {getUserFacingProgressMessage(t, job.progressMessage) ??
                   job.progressMessage}
               </p>
             )}
@@ -1036,7 +1040,7 @@ function ExpandedContent({
             }}
           >
             <AlertTriangle className="h-4 w-4 shrink-0" />
-            {getUserFacingProgressMessage(job.progressMessage) ?? "处理失败"}
+            {getUserFacingProgressMessage(t, job.progressMessage) ?? "处理失败"}
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={onReCreate}>
@@ -1207,7 +1211,8 @@ function RenameJobDialogForm({
   onConfirm: (newName: string) => void
   onCancel: () => void
 }) {
-  const [value, setValue] = useState(() => getJobDisplayTitle(job))
+  const t = useTranslations("app")
+  const [value, setValue] = useState(() => getJobDisplayTitle(t, job))
 
   const trimmed = value.trim()
   const tooLong = trimmed.length > 60

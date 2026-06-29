@@ -1,25 +1,5 @@
 import type { ErrorSummary, JobSummary, PublicStage, ReviewGate } from '@/types/jobs'
-
-const stageLabels = {
-  draft: '草稿与配音',
-  failed: '处理失败',
-  ingestion: '输入准备',
-  legacy_process_output: '输出完成',
-  media_understanding: '媒体理解',
-  speaker_review: '说话人审核',
-  translation_config_review: '翻译配置',
-  translation_review: '翻译审核',
-  voice_review: '音色确认',
-  voice_selection_review: '音色选择',
-} as const satisfies Record<PublicStage, string>
-
-const reviewStageDescriptions = {
-  speaker_review: '请先确认说话人名称和片段归属，然后继续下一步。',
-  translation_config_review: '请选择翻译模型并确认提示词，然后开始翻译。',
-  translation_review: '请先确认翻译内容，然后继续配音与后续处理。',
-  voice_review: '请先确认每位说话人的音色绑定，然后继续下一步。',
-  voice_selection_review: '请为每位说话人选择或克隆配音音色，然后继续下一步。',
-} as const
+import type { AppTranslator } from '@/features/jobs/i18n'
 
 const reviewStageTabs = {
   speaker_review: 'review',
@@ -29,39 +9,61 @@ const reviewStageTabs = {
   voice_selection_review: 'voice-selection',
 } as const
 
-const sanitizedProgressMessages = new Map<string, string>([
-  ['Job completed successfully.', '任务已完成。'],
-  ['Job queued.', '任务已进入队列。'],
-  ['Reviewing speaker labels...', '正在处理说话人审核结果。'],
-  ['Starting process-backed localization job.', '任务已开始处理。'],
+type ReviewStage =
+  | 'speaker_review'
+  | 'translation_config_review'
+  | 'translation_review'
+  | 'voice_review'
+  | 'voice_selection_review'
+
+/**
+ * UI-05：后端 EN 进度串 → app.progress.* 字典键的映射。lookup 仍以后端 EN 串为键
+ * （与改造前 sanitizedProgressMessages 完全一致），命中后由 translator 解析为本地化文案
+ * （zh 字节一致，en 自然英文）。**保留 null 过滤语义**：含 Web UI/fallback/legacy 仍返回 null。
+ */
+// value 类型 = translator 接受的 namespaced 键（窄于 string），让 `t(key)` 满足 next-intl 严格键类型。
+type AppMessageKey = Parameters<AppTranslator>[0]
+
+const PROGRESS_MESSAGE_KEYS = new Map<string, AppMessageKey>([
+  ['Job completed successfully.', 'progress.completed'],
+  ['Job queued.', 'progress.queued'],
+  ['Reviewing speaker labels...', 'progress.reviewingSpeakers'],
+  ['Starting process-backed localization job.', 'progress.starting'],
 ])
 
-type ReviewStage = keyof typeof reviewStageDescriptions
-
-export function getStageLabel(stage: PublicStage | null) {
+export function getStageLabel(t: AppTranslator, stage: PublicStage | null) {
   if (!stage) {
-    return '待开始'
+    return t('stage.none')
   }
 
-  return stageLabels[stage]
+  return t(`stage.${stage}`)
 }
 
-export function getReviewPrompt(reviewGate: ReviewGate | null, stage: PublicStage | null) {
+export function getReviewPrompt(
+  t: AppTranslator,
+  reviewGate: ReviewGate | null,
+  stage: PublicStage | null,
+) {
   const normalizedStage = normalizeReviewStage(reviewGate?.stage) ?? normalizeReviewStage(stage)
-  const message = sanitizeUserFacingMessage(normalizeText(reviewGate?.message), normalizedStage)
+  const message = sanitizeUserFacingMessage(t, normalizeText(reviewGate?.message), normalizedStage)
 
   return {
-    message: message ?? normalizedStageDescription(normalizedStage),
+    message: message ?? normalizedStageDescription(t, normalizedStage),
     stage: normalizedStage,
-    title: normalizedStage ? getStageLabel(normalizedStage) : '等待审核',
+    title: normalizedStage ? getStageLabel(t, normalizedStage) : t('review.pendingTitle'),
   }
 }
 
-export function getReviewAction(reviewGate: ReviewGate | null, stage: PublicStage | null) {
-  return getReviewActionForJob(reviewGate, stage, null)
+export function getReviewAction(
+  t: AppTranslator,
+  reviewGate: ReviewGate | null,
+  stage: PublicStage | null,
+) {
+  return getReviewActionForJob(t, reviewGate, stage, null)
 }
 
 export function getReviewActionForJob(
+  t: AppTranslator,
   reviewGate: ReviewGate | null,
   stage: PublicStage | null,
   jobId: string | null,
@@ -85,33 +87,33 @@ export function getReviewActionForJob(
   const fallbackHref = '/workspace'
   const nativeRoute = buildNativeReviewRoute(normalizedStage, jobId)
   const href = nativeRoute ?? fallbackHref
-  const stageLabel = normalizedStage ? getStageLabel(normalizedStage) : '审核'
+  const stageLabel = normalizedStage ? getStageLabel(t, normalizedStage) : t('review.genericStage')
 
   return {
     description: normalizedStage
-      ? `当前任务正在等待${stageLabel}，请先完成处理。`
-      : '当前任务正在等待审核处理。',
+      ? t('review.descriptionForStage', { stageLabel })
+      : t('review.descriptionGeneric'),
     fallbackHref,
     href,
-    label: normalizedStage ? `处理${stageLabel}` : '继续处理审核',
+    label: normalizedStage ? t('review.actionForStage', { stageLabel }) : t('review.actionGeneric'),
     nativeRoute,
     tab: normalizedStage ? reviewStageTabs[normalizedStage] : 'run',
   }
 }
 
-export function getErrorSummaryMessage(errorSummary: ErrorSummary | null) {
+export function getErrorSummaryMessage(t: AppTranslator, errorSummary: ErrorSummary | null) {
   const message = normalizeText(errorSummary?.message)
   const errorType = normalizeText(errorSummary?.error_type)
   const stage = normalizeText(errorSummary?.stage)
 
   if (message) {
-    return getUserFacingProgressMessage(message) ?? message
+    return getUserFacingProgressMessage(t, message) ?? message
   }
 
-  return [stage, errorType].filter(Boolean).join(' / ') || '当前没有更多失败说明。'
+  return [stage, errorType].filter(Boolean).join(' / ') || t('error.noDetail')
 }
 
-export function getErrorCategory(errorSummary: ErrorSummary | null): {
+export function getErrorCategory(t: AppTranslator, errorSummary: ErrorSummary | null): {
   label: string
   suggestion: string
 } {
@@ -127,15 +129,15 @@ export function getErrorCategory(errorSummary: ErrorSummary | null): {
     message.includes('upload')
   ) {
     return {
-      label: '音频上传或转录失败',
-      suggestion: '长视频容易上传失败，建议使用 10 分钟以内的视频重试。',
+      label: t('error.ingestion.label'),
+      suggestion: t('error.ingestion.suggestion'),
     }
   }
 
   if (errorType.includes('voiceclone') || errorType.includes('voice_clone')) {
     return {
-      label: '音色克隆失败',
-      suggestion: '可能是音频质量不足，建议检查原视频音频是否清晰。',
+      label: t('error.voiceclone.label'),
+      suggestion: t('error.voiceclone.suggestion'),
     }
   }
 
@@ -144,8 +146,8 @@ export function getErrorCategory(errorSummary: ErrorSummary | null): {
     errorType.includes('translation')
   ) {
     return {
-      label: '翻译生成失败',
-      suggestion: '可能是模型服务临时不可用，建议稍后重试。',
+      label: t('error.translation.label'),
+      suggestion: t('error.translation.suggestion'),
     }
   }
 
@@ -156,18 +158,21 @@ export function getErrorCategory(errorSummary: ErrorSummary | null): {
     stage.includes('draft')
   ) {
     return {
-      label: '时长对齐失败',
-      suggestion: '配音时长与原始片段差距过大，可尝试重新创建任务。',
+      label: t('error.alignment.label'),
+      suggestion: t('error.alignment.suggestion'),
     }
   }
 
   return {
-    label: '处理失败',
-    suggestion: '请查看项目详情了解更多信息。',
+    label: t('error.generic.label'),
+    suggestion: t('error.generic.suggestion'),
   }
 }
 
-export function getJobDisplayTitle(job: Pick<JobSummary, 'projectDir' | 'sourceRef' | 'title'>) {
+export function getJobDisplayTitle(
+  t: AppTranslator,
+  job: Pick<JobSummary, 'projectDir' | 'sourceRef' | 'title'>,
+) {
   const sourceVideoId = extractYoutubeVideoId(job.sourceRef)
   const normalizedTitle = discardGeneratedJobId(normalizeText(job.title))
   const projectSlug = extractProjectSlug(job.projectDir)
@@ -178,24 +183,32 @@ export function getJobDisplayTitle(job: Pick<JobSummary, 'projectDir' | 'sourceR
     return slugTitle
   }
 
-  return normalizedTitle ?? slugTitle ?? '未命名视频'
+  // R5 content passthrough：job 标题/slug 本身是 content 透传，只有「未命名视频」fallback 是 chrome。
+  return normalizedTitle ?? slugTitle ?? t('title.untitled')
 }
 
-export function getJobSecondaryLabel(job: Pick<JobSummary, 'projectDir' | 'sourceRef'>) {
+export function getJobSecondaryLabel(
+  t: AppTranslator,
+  job: Pick<JobSummary, 'projectDir' | 'sourceRef'>,
+) {
   const sourceVideoId = extractYoutubeVideoId(job.sourceRef)
   if (sourceVideoId) {
-    return `YouTube 视频 · ${sourceVideoId}`
+    // chrome 前缀本地化；id 本身是 content 透传。
+    return t('secondary.youtubePrefix', { id: sourceVideoId })
   }
 
   const projectSlug = extractProjectSlug(job.projectDir)
   if (projectSlug) {
-    return `项目记录 · ${humanizeSlug(projectSlug) ?? projectSlug}`
+    return t('secondary.projectPrefix', { id: humanizeSlug(projectSlug) ?? projectSlug })
   }
 
   return job.sourceRef
 }
 
-export function getUserFacingProgressMessage(message: string | null | undefined) {
+export function getUserFacingProgressMessage(
+  t: AppTranslator,
+  message: string | null | undefined,
+) {
   const normalizedMessage = normalizeText(message)
   if (!normalizedMessage) {
     return null
@@ -209,11 +222,16 @@ export function getUserFacingProgressMessage(message: string | null | undefined)
     return null
   }
 
-  return sanitizedProgressMessages.get(normalizedMessage) ?? normalizedMessage
+  const key = PROGRESS_MESSAGE_KEYS.get(normalizedMessage)
+  return key ? t(key) : normalizedMessage
 }
 
-export function getReviewPageMessage(stage: ReviewStage, message: string | null | undefined) {
-  return sanitizeUserFacingMessage(message, stage) ?? reviewStageDescriptions[stage]
+export function getReviewPageMessage(
+  t: AppTranslator,
+  stage: ReviewStage,
+  message: string | null | undefined,
+) {
+  return sanitizeUserFacingMessage(t, message, stage) ?? t(`reviewStageDescription.${stage}`)
 }
 
 function buildNativeReviewRoute(stage: ReviewStage | null, jobId: string | null) {
@@ -230,27 +248,28 @@ function buildNativeReviewRoute(stage: ReviewStage | null, jobId: string | null)
 }
 
 function sanitizeUserFacingMessage(
+  t: AppTranslator,
   message: string | null | undefined,
   stage: ReviewStage | null,
 ) {
-  const normalizedMessage = getUserFacingProgressMessage(message)
+  const normalizedMessage = getUserFacingProgressMessage(t, message)
   if (!normalizedMessage) {
     return null
   }
 
   if (normalizedMessage.includes('旧版') || normalizedMessage.includes('审核页')) {
-    return normalizedStageDescription(stage)
+    return normalizedStageDescription(t, stage)
   }
 
   return normalizedMessage
 }
 
-function normalizedStageDescription(stage: ReviewStage | null) {
+function normalizedStageDescription(t: AppTranslator, stage: ReviewStage | null) {
   if (!stage) {
-    return '当前任务需要先完成审核，然后才能继续。'
+    return t('review.needsReviewFirst')
   }
 
-  return reviewStageDescriptions[stage]
+  return t(`reviewStageDescription.${stage}`)
 }
 
 function normalizeReviewStage(value: unknown): ReviewStage | null {

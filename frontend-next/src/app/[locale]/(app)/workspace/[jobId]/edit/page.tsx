@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { useParams } from "next/navigation"
 import { useRouter } from "@/i18n/navigation"
@@ -114,6 +115,7 @@ function hasTtsLengthGuidanceWarning(
 
 
 export default function VideoEditPage() {
+  const t = useTranslations("app")
   const params = useParams()
   const router = useRouter()
   const jobId = ((params.jobId as string) ?? "").trim()
@@ -979,7 +981,7 @@ export default function VideoEditPage() {
     // collision-aware suggestion as soon as it arrives. We pre-seed so
     // the field isn't empty during the ~100-200 ms fetch.
     setCopyDisplayName(
-      job ? `${getJobDisplayTitle(job)} · 副本 1` : "",
+      job ? `${getJobDisplayTitle(t, job)} · 副本 1` : "",
     )
     setCommitModalOpen(true)
     // Fire-and-forget server lookup: picks the correct N by counting
@@ -1273,7 +1275,7 @@ export default function VideoEditPage() {
           返回
         </Link>
         <h1 className="text-base font-bold truncate min-w-0 flex-1">
-          {getJobDisplayTitle(job)}
+          {getJobDisplayTitle(t, job)}
           {resource.edit_generation > 0 && (
             <span className="ml-2 text-xs text-muted-foreground font-normal">
               · 已修改 {resource.edit_generation} 次
@@ -1583,7 +1585,7 @@ export default function VideoEditPage() {
         }
         availableSpeakerIds={availableSpeakerIds}
         speakerNameMap={speakerNameMap}
-        videoTitle={job ? getJobDisplayTitle(job) : undefined}
+        videoTitle={job ? getJobDisplayTitle(t, job) : undefined}
         onClose={() => setSplitDialogSegmentId(null)}
         onSubmit={async (sid, body) => {
           // Phase 2a: dialog always submits multi-cut payload. Backend's

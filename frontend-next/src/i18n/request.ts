@@ -14,12 +14,13 @@ export default getRequestConfig(async ({ requestLocale }) => {
     ? requested
     : routing.defaultLocale
 
-  const [common, marketing, auth, seo, billing] = await Promise.all([
+  const [common, marketing, auth, seo, billing, app] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
     import(`../../messages/${locale}/marketing.json`),
     import(`../../messages/${locale}/auth.json`),
     import(`../../messages/${locale}/seo.json`),
     import(`../../messages/${locale}/billing.json`),
+    import(`../../messages/${locale}/app.json`),
   ])
 
   return {
@@ -30,6 +31,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
       auth: auth.default,
       seo: seo.default,
       billing: billing.default,
+      app: app.default,
     },
   }
 })
