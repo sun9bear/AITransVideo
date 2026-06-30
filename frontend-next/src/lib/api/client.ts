@@ -25,16 +25,25 @@ function isUploadBody(body: RequestBody): boolean {
 export class ApiError extends Error {
   readonly status: number
   readonly payload: unknown
+  /**
+   * 机器可读的后端错误码（如 `insufficient_credits` / `csrf_origin_rejected`）。
+   * 从失败响应体提取（detail.error_code / 顶层 error_code / 网关 _error_response 的
+   * body.error）。显示层用它查 `errors.code.<code>` 本地化串；查不到则降级到
+   * 后端 message / status 兜底。无码时为 null。详见 lib/api/error-localization.ts。
+   */
+  readonly errorCode: string | null
 
   constructor(
     message: string,
     status: number,
     payload: unknown,
+    errorCode: string | null = null,
   ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.payload = payload
+    this.errorCode = errorCode
   }
 }
 
@@ -82,10 +91,13 @@ export class ApiClient {
       })
     } catch (error) {
       if (error instanceof DOMException && error.name === 'TimeoutError') {
+        const timeoutSeconds = Math.round(effectiveTimeout / 1000)
+        // payload 携带 timeoutSeconds 供显示层本地化（status===0 分支）；message 保留
+        // 中文串供非组件消费方（getErrorMessage / 直接读 err.message 的旧路径）。
         throw new ApiError(
-          `请求超时（${Math.round(effectiveTimeout / 1000)} 秒无响应），请检查网络后重试`,
+          `请求超时（${timeoutSeconds} 秒无响应），请检查网络后重试`,
           0,
-          null,
+          { timeoutSeconds },
         )
       }
       throw error
@@ -94,14 +106,13 @@ export class ApiClient {
 
     if (!response.ok) {
       const message =
-        payload && typeof payload === 'object' && 'message' in payload
-          ? String(payload.message)
-          : payload && typeof payload === 'object' && 'detail' in payload
-            ? stringifyErrorDetail(payload.detail)
-          : payload && typeof payload === 'object' && 'error' in payload
-            ? String(payload.error)
-          : statusFallbackMessage(response.status)
-      throw new ApiError(message, response.status, payload)
+        resolveBackendMessage(payload) ?? statusFallbackMessage(response.status)
+      throw new ApiError(
+        message,
+        response.status,
+        payload,
+        extractErrorCode(payload),
+      )
     }
 
     return payload as T
@@ -154,6 +165,61 @@ export class ApiClient {
 }
 
 export const apiClient = new ApiClient(resolveJobApiBaseUrl())
+
+/**
+ * 提取后端给出的人类可读错误消息（message / detail / error），无则返回 null
+ * 让调用方降级到 status 兜底。**presence-based** 语义与历史失败分支逐字节一致
+ * （`'message' in payload` 取 String(message)，即便为空串），故非组件消费方
+ * （直接读 err.message）行为不变（红线 R1）。显示层（error-localization）复用本函数
+ * 判断「是否有后端消息」——有则原样显示（zh 字节一致 / en 已知漏中文缺口，待
+ * UI-BE-01 补码），无才本地化 status 串。
+ */
+export function resolveBackendMessage(payload: unknown): string | null {
+  if (payload && typeof payload === 'object') {
+    if ('message' in payload) {
+      return String((payload as { message: unknown }).message)
+    }
+    if ('detail' in payload) {
+      return stringifyErrorDetail((payload as { detail: unknown }).detail)
+    }
+    if ('error' in payload) {
+      return String((payload as { error: unknown }).error)
+    }
+  }
+  return null
+}
+
+/**
+ * 从失败响应体提取机器可读错误码。三种后端约定都覆盖：
+ *   - FastAPI 结构化 detail：{ detail: { error_code, message } }
+ *   - 顶层 error_code
+ *   - 网关 _error_response：{ error: <code>, message: <msg> }（code 放 body.error）
+ * 提取从宽即可——显示层用 `errors.code.<code>` 的 t.has() 守门，命不中（含把散文
+ * message 误当 code 的情况）自动降级，故误提取无害。无码返回 null。
+ */
+export function extractErrorCode(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+  const p = payload as {
+    detail?: unknown
+    error_code?: unknown
+    error?: unknown
+  }
+  if (p.detail && typeof p.detail === 'object' && 'error_code' in p.detail) {
+    const code = (p.detail as { error_code?: unknown }).error_code
+    if (typeof code === 'string' && code) {
+      return code
+    }
+  }
+  if (typeof p.error_code === 'string' && p.error_code) {
+    return p.error_code
+  }
+  if (typeof p.error === 'string' && p.error) {
+    return p.error
+  }
+  return null
+}
 
 function stringifyErrorDetail(detail: unknown): string {
   if (typeof detail === 'string') {

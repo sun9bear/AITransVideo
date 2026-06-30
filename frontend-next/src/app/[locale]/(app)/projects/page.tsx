@@ -50,6 +50,7 @@ import { computeExpiryInfo, expiryColorClass, expiryLabel } from "@/features/job
 import { getEntitlements } from "@/lib/api/entitlements"
 import { listJobsPage, renameJob } from "@/lib/api/jobs"
 import { cancelJob, deleteJob } from "@/lib/api/reviews"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { ACTIVE_JOB_STATUSES, type JobSummary, type JobStatus } from "@/types/jobs"
 
@@ -151,6 +152,7 @@ export default function MyProjectsPage() {
 function ProjectsContent() {
   const t = useTranslations("app")
   const tp = useTranslations("appProjects")
+  const localizeError = useApiErrorMessage()
   const router = useRouter()
   const searchParams = useSearchParams()
 
@@ -216,12 +218,12 @@ function ProjectsContent() {
         return next
       })
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : tp("toast.loadMoreFailed"))
+      setLoadError(err instanceof Error ? localizeError(err) : tp("toast.loadMoreFailed"))
     } finally {
       loadingMoreRef.current = false
       setIsLoadingMore(false)
     }
-  }, [commitJobs, hasMoreJobs, tp])
+  }, [commitJobs, hasMoreJobs, localizeError, tp])
 
   const updateJobs = useCallback(
     (updater: (current: JobSummary[]) => JobSummary[]) => {
@@ -261,11 +263,11 @@ function ProjectsContent() {
         })
       }
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : tp("toast.loadListFailed"))
+      setLoadError(err instanceof Error ? localizeError(err) : tp("toast.loadListFailed"))
     } finally {
       setIsLoading(false)
     }
-  }, [commitJobs, tp])
+  }, [commitJobs, localizeError, tp])
 
   // Initial load
   useEffect(() => {
@@ -408,12 +410,12 @@ function ProjectsContent() {
         )
         setRenamingJob(null)
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : tp("toast.renameFailed"))
+        toast.error(err instanceof Error ? localizeError(err) : tp("toast.renameFailed"))
       } finally {
         setRenameSubmitting(false)
       }
     },
-    [renamingJob, updateJobs, tp],
+    [renamingJob, updateJobs, localizeError, tp],
   )
 
   // ---- Bulk pan-backup helpers (admin only) ----
@@ -486,11 +488,11 @@ function ProjectsContent() {
       }
       if (okN > 0) clearBackupSelection()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : tp("toast.bulkBackupEnqueueFailed"))
+      toast.error(e instanceof Error ? localizeError(e) : tp("toast.bulkBackupEnqueueFailed"))
     } finally {
       setBulkBackingUp(false)
     }
-  }, [selectedBackupIds, clearBackupSelection, tp])
+  }, [selectedBackupIds, clearBackupSelection, localizeError, tp])
 
   // ---- Derived state ----
 

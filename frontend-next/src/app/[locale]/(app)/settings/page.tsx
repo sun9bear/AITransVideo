@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { toast } from "sonner"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 import { useIntlLocale } from "@/lib/intl-locale"
 
 // Non-"free" plan codes render as their proper-noun brand names (not localized);
@@ -137,6 +138,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 
 function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
   const t = useTranslations("appSettings")
+  const localizeError = useApiErrorMessage()
   const [oldPwd, setOldPwd] = useState("")
   const [newPwd, setNewPwd] = useState("")
   const [confirmPwd, setConfirmPwd] = useState("")
@@ -168,7 +170,7 @@ function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
       setNewPwd("")
       setConfirmPwd("")
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : t("password.changeFailed"))
+      toast.error(e instanceof Error ? localizeError(e) : t("password.changeFailed"))
     } finally {
       setSubmitting(false)
     }
@@ -204,6 +206,7 @@ function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
 
 function BindEmailCard() {
   const t = useTranslations("appSettings")
+  const localizeError = useApiErrorMessage()
   const [email, setEmail] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
@@ -227,7 +230,7 @@ function BindEmailCard() {
       toast.success(t("bindEmail.bindSuccess"))
       window.location.reload()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : t("bindEmail.bindFailed"))
+      toast.error(e instanceof Error ? localizeError(e) : t("bindEmail.bindFailed"))
     } finally {
       setSubmitting(false)
     }

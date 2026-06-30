@@ -16,6 +16,7 @@ import {
   type CreditsResponse,
   type LedgerEntry,
 } from "@/lib/billing/get-credits"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 
 /** Translator scoped to the `appBilling` namespace (relative keys). */
 type BillingTranslator = ReturnType<typeof useTranslations<"appBilling">>
@@ -60,6 +61,7 @@ function formatRelativeTime(t: BillingTranslator, isoStr: string | null): string
 
 export function CreditsSummary() {
   const t = useTranslations("appBilling")
+  const localizeError = useApiErrorMessage()
   const [credits, setCredits] = useState<CreditsResponse | null>(null)
   const [ledger, setLedger] = useState<LedgerEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -78,7 +80,7 @@ export function CreditsSummary() {
         setLedger(ledgerRes.entries)
       } catch (err) {
         if (cancelled) return
-        setError(err instanceof Error ? err.message : t("credits.loadError"))
+        setError(err instanceof Error ? localizeError(err) : t("credits.loadError"))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -86,7 +88,7 @@ export function CreditsSummary() {
     return () => {
       cancelled = true
     }
-  }, [t])
+  }, [t, localizeError])
 
   if (loading) {
     return (

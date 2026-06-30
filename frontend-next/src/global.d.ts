@@ -16,6 +16,7 @@ import appSettings from "../messages/zh/appSettings.json"
 import appHelp from "../messages/zh/appHelp.json"
 import appNotifications from "../messages/zh/appNotifications.json"
 import appBilling from "../messages/zh/appBilling.json"
+import errors from "../messages/zh/errors.json"
 import { routing } from "./i18n/routing"
 
 type Messages = {
@@ -31,6 +32,7 @@ type Messages = {
   appHelp: typeof appHelp
   appNotifications: typeof appNotifications
   appBilling: typeof appBilling
+  errors: typeof errors
 }
 
 declare module "next-intl" {

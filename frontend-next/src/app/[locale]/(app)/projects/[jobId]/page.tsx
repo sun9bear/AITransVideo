@@ -14,10 +14,12 @@ import { getJobDisplayTitle, getJobSecondaryLabel, getStageLabel } from "@/featu
 import { getProjectDetail } from "@/lib/api/jobs"
 import type { ProjectDetailResource } from "@/types/jobs"
 import { ApiError } from "@/lib/api/client"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 
 export default function ProjectDetailPage() {
   const t = useTranslations("app")
   const tp = useTranslations("appProjects")
+  const localizeError = useApiErrorMessage()
   const formatLocale = useIntlLocale()
   const params = useParams()
   const jobId = (params.jobId as string)?.trim() ?? ""
@@ -29,9 +31,9 @@ export default function ProjectDetailPage() {
     if (!jobId) return
     getProjectDetail(jobId)
       .then(setDetail)
-      .catch((e) => setError(e instanceof ApiError ? e.message : tp("detail.loadFailed")))
+      .catch((e) => setError(e instanceof ApiError ? localizeError(e) : tp("detail.loadFailed")))
       .finally(() => setIsLoading(false))
-  }, [jobId, tp])
+  }, [jobId, tp, localizeError])
 
   if (isLoading) return <EmptyState title={tp("detail.loading")} description={tp("detail.loadingDescription")} />
   if (error) return <EmptyState title={tp("detail.loadFailed")} description={error} actionLabel={tp("detail.backToList")} actionTo="/projects" />

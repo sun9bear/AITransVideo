@@ -13,6 +13,7 @@ import {
   type VoiceLibraryEntry,
   type VoiceLibrarySummary,
 } from "@/lib/api/voiceLibrary"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 import { useIntlLocale } from "@/lib/intl-locale"
 
 /** Translator scoped to the `appVoices` namespace (relative keys). */
@@ -24,6 +25,7 @@ type VoicesTranslator = ReturnType<typeof useTranslations<"appVoices">>
 
 export default function VoiceLibraryPage() {
   const t = useTranslations("appVoices")
+  const localizeError = useApiErrorMessage()
   const [summary, setSummary] = useState<VoiceLibrarySummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [running, setRunning] = useState<Record<string, true>>({})
@@ -57,7 +59,7 @@ export default function VoiceLibraryPage() {
       }))
       showToast(t("toast.calibrateDone"))
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.calibrateFailed") }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? localizeError(err) : t("error.calibrateFailed") }))
     } finally {
       setRunning((s) => { const n = { ...s }; delete n[voiceId]; return n })
     }
@@ -77,7 +79,7 @@ export default function VoiceLibraryPage() {
         audio.play().catch(() => {})
       }
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.probeFailed") }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? localizeError(err) : t("error.probeFailed") }))
     } finally {
       setProbing((s) => { const n = { ...s }; delete n[voiceId]; return n })
     }
@@ -109,9 +111,9 @@ export default function VoiceLibraryPage() {
       setSummary((s) => patchVoice(s, voiceId, { label: trimmed }))
       showToast(t("toast.labelUpdated"))
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.labelUpdateFailed") }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? localizeError(err) : t("error.labelUpdateFailed") }))
     }
-  }, [editValue, t])
+  }, [editValue, t, localizeError])
 
   // --- Delete voice ---
   const handleDelete = useCallback(async (voiceId: string, label: string) => {
@@ -135,9 +137,9 @@ export default function VoiceLibraryPage() {
       } : s)
       showToast(t("toast.voiceDeleted"))
     } catch (err) {
-      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? err.message : t("error.deleteFailed") }))
+      setErrors((e) => ({ ...e, [voiceId]: err instanceof Error ? localizeError(err) : t("error.deleteFailed") }))
     }
-  }, [confirm, t])
+  }, [confirm, t, localizeError])
 
   // --- Add voice modal callback ---
   const handleAddSuccess = useCallback(() => {
@@ -490,6 +492,7 @@ function getSourceChannel(tags: unknown): string | null {
 
 function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
   const t = useTranslations("appVoices")
+  const localizeError = useApiErrorMessage()
   const [voiceId, setVoiceId] = useState("")
   const [label, setLabel] = useState("")
   const [saving, setSaving] = useState(false)
@@ -515,7 +518,7 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
       }
     } catch (err) {
       setProbeOk(false)
-      setError(err instanceof Error ? err.message : t("error.probeFailed"))
+      setError(err instanceof Error ? localizeError(err) : t("error.probeFailed"))
     } finally {
       setProbeRunning(false)
     }
@@ -534,7 +537,7 @@ function AddVoiceModal({ onClose, onSuccess }: { onClose: () => void; onSuccess:
       })
       onSuccess()
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("error.addFailed"))
+      setError(err instanceof Error ? localizeError(err) : t("error.addFailed"))
     } finally {
       setSaving(false)
     }

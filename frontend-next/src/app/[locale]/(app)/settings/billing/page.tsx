@@ -39,6 +39,7 @@ import { SubscriptionSummary } from "@/components/billing/subscription-summary"
 import { getPlans } from "@/lib/billing/get-plans"
 import { getMySubscription } from "@/lib/billing/get-subscription"
 import { getCheckoutConfig } from "@/lib/billing/get-checkout-config"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 import type { Plan } from "@/lib/billing/types"
 import type { MeSubscriptionResponse } from "@/lib/billing/get-subscription"
 import type { CheckoutConfigResponse } from "@/lib/billing/get-checkout-config"
@@ -55,6 +56,7 @@ type PageState =
 
 export default function BillingPage() {
   const t = useTranslations("appSettings")
+  const localizeError = useApiErrorMessage()
   const [state, setState] = useState<PageState>({ status: "loading" })
   const [refetchToken, setRefetchToken] = useState(0)
 
@@ -80,7 +82,7 @@ export default function BillingPage() {
         })
       } catch (err) {
         if (cancelled) return
-        const message = err instanceof Error ? err.message : t("billing.loadFailed")
+        const message = err instanceof Error ? localizeError(err) : t("billing.loadFailed")
         setState({ status: "error", message })
       }
     })()

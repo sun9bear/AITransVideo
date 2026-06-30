@@ -27,6 +27,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
     appHelp,
     appNotifications,
     appBilling,
+    errors,
   ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
     import(`../../messages/${locale}/marketing.json`),
@@ -40,6 +41,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
     import(`../../messages/${locale}/appHelp.json`),
     import(`../../messages/${locale}/appNotifications.json`),
     import(`../../messages/${locale}/appBilling.json`),
+    import(`../../messages/${locale}/errors.json`),
   ])
 
   return {
@@ -57,6 +59,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
       appHelp: appHelp.default,
       appNotifications: appNotifications.default,
       appBilling: appBilling.default,
+      errors: errors.default,
     },
   }
 })
