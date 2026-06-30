@@ -577,6 +577,7 @@ assert.equal(zhErrors.status.forbidden, "没有权限执行此操作", "errors.s
 assert.equal(zhErrors.status.notFound, "请求的资源不存在", "errors.status.notFound 漂移（红线 R1，404）")
 assert.equal(zhErrors.status.serviceUnavailable, "服务暂时不可用，请稍后重试", "errors.status.serviceUnavailable 漂移（红线 R1，502/503/504）")
 assert.equal(zhErrors.status.serverError, "服务器开小差了，请稍后重试", "errors.status.serverError 漂移（红线 R1，>=500）")
+assert.equal(zhErrors.status.generic, "请求失败（{status}）", "errors.status.generic 漂移（红线 R1，client.ts statusFallbackMessage 非映射 status 兜底，{status} 占位符 verbatim）")
 assert.equal(zhErrors.timeout, "请求超时（{seconds} 秒无响应），请检查网络后重试", "errors.timeout 漂移（红线 R1，client.ts timeout，{seconds} 占位符 verbatim）")
 assert.equal(zhErrors.generic, "请求失败，请稍后重试。", "errors.generic 漂移（红线 R1，errors.ts getErrorMessage 兜底）")
 

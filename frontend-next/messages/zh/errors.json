@@ -6,6 +6,7 @@
     "forbidden": "没有权限执行此操作",
     "notFound": "请求的资源不存在",
     "serviceUnavailable": "服务暂时不可用，请稍后重试",
-    "serverError": "服务器开小差了，请稍后重试"
+    "serverError": "服务器开小差了，请稍后重试",
+    "generic": "请求失败（{status}）"
   }
 }

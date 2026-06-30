@@ -6,6 +6,7 @@
     "forbidden": "You don't have permission to do that.",
     "notFound": "The requested resource was not found.",
     "serviceUnavailable": "The service is temporarily unavailable. Please try again shortly.",
-    "serverError": "Something went wrong on our end. Please try again."
+    "serverError": "Something went wrong on our end. Please try again.",
+    "generic": "Request failed ({status})"
   }
 }

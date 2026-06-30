@@ -85,10 +85,13 @@ export function localizeApiError(t: ErrorsTranslator, error: unknown): string {
     if (statusKey) {
       return t(statusKey)
     }
-    if (error.message) {
-      return error.message
+    // 其余非映射 status（400/409/422/429…）且无后端 message：本地化 client.ts 自有兜底
+    // `请求失败（{status}）`（@codex PR #86 P2）。这是【前端自有】中文（非后端文案），不依赖
+    // UI-BE-01；zh 值与 statusFallbackMessage 的 `请求失败（${status}）` 逐字节一致（红线 R1）。
+    if (error.status > 0) {
+      return t("status.generic", { status: error.status })
     }
-    return t("generic")
+    return error.message || t("generic")
   }
   if (error instanceof Error && error.message) {
     return error.message
