@@ -1,0 +1,115 @@
+{
+  "pageTitle": "新建翻译",
+  "dialog": {
+    "title": "新建翻译任务",
+    "created": "任务已创建"
+  },
+  "formTitle": "任务输入",
+  "loading": "读取中",
+  "loadFailed": "暂时无法读取",
+  "credits": "{n} 点",
+  "ratePerMin": "{n} 点/分钟",
+  "validation": {
+    "uploadFirst": "请先上传视频文件。",
+    "noModes": "当前没有可用的任务方案，请联系管理员。",
+    "modeUnavailable": "当前选择的任务方案暂未上线，请选择其它方案。",
+    "youtubeEmpty": "请输入 YouTube 链接。",
+    "youtubeInvalid": "当前只支持有效的 YouTube 链接。",
+    "urlInvalid": "请输入有效的链接。"
+  },
+  "concurrency": {
+    "unlimited": "无限制",
+    "limitReached": "已达到并发上限（{count}/{limit}）",
+    "blockedHint": "请先完成或取消当前任务，再创建新的翻译。",
+    "goHandle": "去处理当前任务",
+    "activeHint": "当前有 {count} 个进行中的任务，仍可创建新任务（上限 {limit}）。",
+    "view": "查看任务"
+  },
+  "reuse": {
+    "title": "使用你刚才预览的视频转完整版",
+    "body": "将用你预览过的完整原始视频生成正式成片，无需重新上传。下面选择方案后按所选档位正常扣点创建。",
+    "changeVideo": "改用其它视频"
+  },
+  "source": {
+    "youtube": "YouTube 链接",
+    "upload": "上传视频",
+    "chooseFile": "选择视频文件",
+    "remove": "移除"
+  },
+  "upload": {
+    "hashing": "正在校验文件完整性… {percent}%",
+    "uploading": "正在分片上传 {name}… {percent}%",
+    "merging": "正在合并校验…（大文件需要数十秒，请勿关闭页面）",
+    "single": "正在上传 {name}…",
+    "failed": "上传失败"
+  },
+  "plan": {
+    "label": "任务方案",
+    "offline": "已下线",
+    "unlockUpgrade": "升级解锁",
+    "comingSoon": "即将开放",
+    "express": {
+      "name": "快捷版",
+      "desc": "全自动流程，AI 识别说话人、翻译、配音，无需人工操作。"
+    },
+    "free": {
+      "name": "免费版",
+      "desc": "免费保留原声 AI 配音（限时），每日 1 次、单条 ≤10 分钟，成品带水印。"
+    },
+    "studio": {
+      "name": "工作台版",
+      "desc": "可审核译文、克隆原声音色，更高质量的定制化配音。"
+    },
+    "smart": {
+      "name": "智能版",
+      "desc": "100 点/分钟固定价，AI 自动审核翻译并自动克隆音色，无需人工操作。",
+      "previewBadge": "预览",
+      "previewDesc": "克隆主说话人音色，先看前 3 分钟带水印预览（预扣 {cost}）。满意再转完整成片，按分钟正常扣点。",
+      "tryPreview": "试用 3 分钟预览"
+    },
+    "freeQuota": "免费额度：已用 {used} / {total} 次"
+  },
+  "pricing": {
+    "title": "扣点标准",
+    "balance": "当前可用：{balance}",
+    "free": "免费版当前不扣点（限时免费），保留原声 AI 配音。每日 1 次、单条 ≤10 分钟，成品视频带水印。后续如需「后编辑」或「剪映草稿」为付费 add-on，将另行计点。",
+    "express": "快捷版按源视频时长扣点，当前标准为 {rate}。创建任务时会按可识别的时长预扣；点数不足会停止创建，可前往账单页升级套餐。",
+    "smart": "智能版按源视频时长扣点，当前基础标准为 {rate}。AI 自动审核翻译并按需处理主说话人音色；若需要自动新克隆音色，会额外预扣 {cloneCost}，未发生新克隆时会释放。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。",
+    "studio": "工作台版按源视频时长扣点，基础标准为 {rate}；后续选择高级/旗舰音质时分别按 {high} / {flagship} 点/分钟扣除。音色克隆为单次独立扣点，克隆弹窗会再次确认费用。"
+  },
+  "smartPause": {
+    "title": "弱匹配确认模式已开启",
+    "body": "管理员已开启“弱匹配确认”策略：如果系统在你的个人音色库中发现可能匹配的音色（但相似度不够强），任务会暂停在音色审核页面，等你确认是否复用，再继续后续步骤。复用个人音色不消耗克隆点；如果不想复用，可以选择官方音色或重新克隆。"
+  },
+  "language": {
+    "label": "语言方向",
+    "beta": "（内测）",
+    "comingSoon": "（即将上线）"
+  },
+  "advanced": {
+    "transcription": "转录方案",
+    "assemblyai": "AssemblyAI（音频上传）",
+    "gemini": "Gemini 多模态（≤30分钟）",
+    "speakers": "说话人数",
+    "speakerAuto": "自动",
+    "speakerCount": "{n} 人"
+  },
+  "footnote": "快捷版自动完成全部流程，无需人工操作。工作台版可审核译文、克隆原声音色。",
+  "creditGate": {
+    "upgrade": "去升级"
+  },
+  "duration": {
+    "upgrade": "升级套餐",
+    "fallbackOverMax": "原视频时长超过当前最高套餐上限，请改用更短的视频，或联系客服。",
+    "fallbackUpgrade": "原视频时长超出当前套餐上限，升级套餐即可处理更长视频。"
+  },
+  "submit": {
+    "create": "创建任务",
+    "submitting": "创建中…"
+  },
+  "toast": {
+    "created": "任务已创建：{title}",
+    "previewExpired": "该预览已无法转完整（可能已过期），请重新上传视频创建。",
+    "stillActive": "当前有未完成的任务，请先完成或取消后再创建新翻译。"
+  }
+}
