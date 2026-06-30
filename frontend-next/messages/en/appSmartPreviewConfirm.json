@@ -1,0 +1,18 @@
+{
+  "title": "Try Smart · 3-minute preview",
+  "description": "Clone the main speaker's voice and generate a watermarked online preview of the first 3 minutes. If you're happy with it, convert to the full version (charged per minute as usual; reusing won't charge the clone fee again).",
+  "credits": "{n} credits",
+  "costUnavailable": "Temporarily unavailable",
+  "loading": "Loading…",
+  "prechargeLabel": "Pre-charge this time (clone main speaker)",
+  "availableLabel": "Currently available",
+  "insufficient": "Not enough balance for {cost}.",
+  "recharge": "Add credits",
+  "costLoadFailed": "Charge info is temporarily unavailable. Please try again later.",
+  "costLoading": "Loading charge info, please wait.",
+  "consent": "I understand this preview will clone the main speaker's voice and pre-charge {cost}, and I have the rights to use the voice in this video.",
+  "cancel": "Cancel",
+  "creating": "Creating…",
+  "confirm": "Confirm and pre-charge {cost}",
+  "createdToast": "Preview task created: {title}"
+}

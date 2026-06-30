@@ -581,4 +581,59 @@ assert.equal(zhErrors.status.generic, "请求失败（{status}）", "errors.stat
 assert.equal(zhErrors.timeout, "请求超时（{seconds} 秒无响应），请检查网络后重试", "errors.timeout 漂移（红线 R1，client.ts timeout，{seconds} 占位符 verbatim）")
 assert.equal(zhErrors.generic, "请求失败，请稍后重试。", "errors.generic 漂移（红线 R1，errors.ts getErrorMessage 兜底）")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors 字节一致 + en seo 双源同步 全部通过")
+// 9) UI-06 part2 W1（核心工作台 · 任务详情→结果/下载）：5 个 app* namespace（appWorkspace /
+//    appResultMedia / appSmartPreviewConfirm / appSmartPreviewResult / appJianyingDraft）的内联中文
+//    迁入字典后，默认 zh 值必须与改造前组件源【逐字节】相同（红线 R1）。下面钉死每个 namespace
+//    标点/全半角/间隔号/破折号/箭头/占位符最敏感的代表串（任一漂移即 red = 默认 zh 渲染回归）：
+//    - reviewNeeded 用全角冒号 ：(U+FF1A)；resynthesizing/processingStage 用间隔号 ·(U+00B7)
+//    - editingInlineSuffix 用全角括号（）(U+FF08/U+FF09)；redirectToast 用半角三点 ...（历史，照搬不得改 …）
+//    - completedBanner 是 next-intl rich-text <link> 标签（不得退回字面）；notification body 用 {title} 占位
+//    - empty.loading.description 用全角省略号 …(U+2026)
+const zhWorkspace = JSON.parse(readFileSync(path.join(root, "messages/zh/appWorkspace.json"), "utf8"))
+assert.equal(zhWorkspace.reviewNeeded, "当前需要处理：{stage}", "appWorkspace.reviewNeeded 全角冒号/占位符漂移（红线 R1）")
+assert.equal(zhWorkspace.resynthesizing, "正在重合成 · 第 {n} 次修改", "appWorkspace.resynthesizing 间隔号 ·/占位符漂移（红线 R1）")
+assert.equal(zhWorkspace.processingStage, "正在处理 · {stage}", "appWorkspace.processingStage 间隔号 ·/占位符漂移（红线 R1）")
+assert.equal(zhWorkspace.editingInlineSuffix, "（已完成 {n} 次修改）", "appWorkspace.editingInlineSuffix 全角括号/占位符漂移（红线 R1）")
+assert.equal(zhWorkspace.redirectToast, "任务已完成，即将跳转到视频翻译主页...", "appWorkspace.redirectToast 半角三点 ... 漂移（红线 R1，照搬历史不得改全角 …）")
+assert.equal(zhWorkspace.completedBanner, "任务已完成，请前往<link>视频翻译主页</link>查看和播放结果。", "appWorkspace.completedBanner rich-text <link> 标签/标点漂移（红线 R1）")
+assert.equal(zhWorkspace.notification.succeeded.body, "{title} 已完成，点击查看结果", "appWorkspace.notification.succeeded.body {title} 占位符/标点漂移（红线 R1，title 是 content 透传）")
+assert.equal(zhWorkspace.empty.loading.description, "正在加载工作区…", "appWorkspace.empty.loading.description 全角省略号 … 漂移（红线 R1）")
+
+//    appResultMedia：material.subtitles 全角括号（中/英/双语）+ 半角斜杠；packFailed/packExpired 间隔号 ·；
+//    packingPercent {pct}% 占位符 verbatim；packRetentionNote 全角分号 ；；generateDraftTitle 半角连字符 5-30
+const zhResultMedia = JSON.parse(readFileSync(path.join(root, "messages/zh/appResultMedia.json"), "utf8"))
+assert.equal(zhResultMedia.material.dubbed_video, "完整中文视频", "appResultMedia.material.dubbed_video 漂移（红线 R1）")
+assert.equal(zhResultMedia.material.subtitles, "字幕包（中/英/双语）", "appResultMedia.material.subtitles 全角括号/半角斜杠漂移（红线 R1）")
+assert.equal(zhResultMedia.packFailed, "打包失败 · 重试", "appResultMedia.packFailed 间隔号 · 漂移（红线 R1）")
+assert.equal(zhResultMedia.packingPercent, "素材打包中 {pct}%", "appResultMedia.packingPercent {pct}% 占位符/空格漂移（红线 R1）")
+assert.equal(zhResultMedia.packRetentionNote, "素材包仅保存 24 小时，请及时下载；超时后可重新打包，不额外扣点。", "appResultMedia.packRetentionNote 全角分号 ；/标点漂移（红线 R1）")
+assert.equal(zhResultMedia.generateDraftTitle, "生成可用剪映打开的草稿包，5-30 秒", "appResultMedia.generateDraftTitle 半角连字符 5-30/全角逗号漂移（红线 R1）")
+assert.equal(zhResultMedia.stage.starting, "正在准备", "appResultMedia.stage.starting 漂移（红线 R1，stageLabel）")
+
+//    appSmartPreviewConfirm：title 间隔号 ·；credits {n} 点；insufficient 全角句号 。；consent 是声音权益
+//    确认文案（W1 唯一 consent-adjacent 串）——钉死防漂移（counsel 完善前忠实翻译，逻辑/gate 不动）
+const zhSpc = JSON.parse(readFileSync(path.join(root, "messages/zh/appSmartPreviewConfirm.json"), "utf8"))
+assert.equal(zhSpc.title, "试用智能版 · 3 分钟预览", "appSmartPreviewConfirm.title 间隔号 · 漂移（红线 R1）")
+assert.equal(zhSpc.credits, "{n} 点", "appSmartPreviewConfirm.credits {n} 占位符/空格漂移（红线 R1）")
+assert.equal(zhSpc.insufficient, "余额不足 {cost}。", "appSmartPreviewConfirm.insufficient 全角句号 。/占位符漂移（红线 R1）")
+assert.equal(zhSpc.consent, "我已了解本次预览将克隆主说话人音色并预扣 {cost}，且我拥有该视频的声音使用授权。", "appSmartPreviewConfirm.consent 声音权益文案漂移（红线 R1，consent 文案 counsel 前 verbatim）")
+
+//    appSmartPreviewResult：header/badge 间隔号 ·；teaserNote 半角斜杠分隔 ' / '；convertingToast 全角省略号 …
+const zhSpr = JSON.parse(readFileSync(path.join(root, "messages/zh/appSmartPreviewResult.json"), "utf8"))
+assert.equal(zhSpr.header, "智能版 · 3 分钟预览", "appSmartPreviewResult.header 间隔号 · 漂移（红线 R1）")
+assert.equal(zhSpr.badge, "带水印 · 仅在线播放", "appSmartPreviewResult.badge 间隔号 · 漂移（红线 R1）")
+assert.equal(zhSpr.convertingToast, "正在转完整成片，按分钟正常扣点…", "appSmartPreviewResult.convertingToast 全角省略号 … 漂移（红线 R1）")
+assert.equal(
+  zhSpr.teaserNote,
+  "这是用克隆音色生成的前 3 分钟带水印预览，仅供在线试看，不提供下载 / 导出 / 修改。满意后可转完整成片，去掉水印、生成全长内容。",
+  "appSmartPreviewResult.teaserNote 半角斜杠分隔 ' / '/全角顿号 、漂移（红线 R1）",
+)
+
+//    appJianyingDraft：copied/copyAria {os} 占位；windowsLabel 全角冒号 ：；howToFindBody 箭头 → (U+2192)
+const zhJd = JSON.parse(readFileSync(path.join(root, "messages/zh/appJianyingDraft.json"), "utf8"))
+assert.equal(zhJd.copied, "已复制 {os} 路径", "appJianyingDraft.copied {os} 占位符/空格漂移（红线 R1，os 是 content 透传）")
+assert.equal(zhJd.windowsLabel, "Windows 默认路径：", "appJianyingDraft.windowsLabel 全角冒号 ： 漂移（红线 R1）")
+assert.equal(zhJd.howToFindBody, "打开剪映 → 设置 → 草稿位置，将该路径复制到上方输入框", "appJianyingDraft.howToFindBody 箭头 →/标点漂移（红线 R1）")
+assert.equal(zhJd.placeholder, "请输入剪映草稿目录的绝对路径", "appJianyingDraft.placeholder 漂移（红线 R1）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1 字节一致 + en seo 双源同步 全部通过")

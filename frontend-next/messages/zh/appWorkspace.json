@@ -1,0 +1,68 @@
+{
+  "eyebrow": "工作区",
+  "projectDetails": "项目详情",
+  "cancelTask": "取消任务",
+  "cancelling": "取消中…",
+  "redirectToast": "任务已完成，即将跳转到视频翻译主页...",
+  "reviewNeeded": "当前需要处理：{stage}",
+  "editingInline": "此任务处于修改中",
+  "editingInlineSuffix": "（已完成 {n} 次修改）",
+  "succeededMsg": "任务已完成",
+  "failedMsg": "任务处理失败",
+  "resynthesizing": "正在重合成 · 第 {n} 次修改",
+  "processingStage": "正在处理 · {stage}",
+  "processingHint": "任务正在后台处理，页面会自动刷新…",
+  "editingCardTitle": "此任务正在修改中",
+  "editingCardBodyProgress": "已完成 {n} 次修改。点击下方按钮继续本轮编辑，或在修改页放弃草稿。",
+  "editingCardBody": "点击下方按钮继续本轮编辑，或在修改页放弃草稿。",
+  "continueEditing": "继续修改",
+  "autoProcessing": "正在自动处理",
+  "autoSpeaker": "说话人识别中，即将自动进入下一步…",
+  "autoTranslationConfig": "翻译配置已自动确认，正在继续处理…",
+  "suggestionLabel": "建议",
+  "recreate": "重新创建任务",
+  "completedBanner": "任务已完成，请前往<link>视频翻译主页</link>查看和播放结果。",
+  "notification": {
+    "succeeded": {
+      "title": "任务完成",
+      "body": "{title} 已完成，点击查看结果"
+    },
+    "failed": {
+      "title": "任务失败",
+      "body": "{title} 处理失败，点击查看详情"
+    },
+    "cancelled": {
+      "title": "任务已取消",
+      "body": "{title} 已被取消"
+    }
+  },
+  "cancelConfirm": {
+    "title": "取消任务",
+    "description": "确定要取消当前任务吗？取消后可以创建新的翻译任务。"
+  },
+  "empty": {
+    "noJobId": {
+      "title": "无法打开工作区",
+      "description": "缺少任务标识。",
+      "action": "返回当前任务"
+    },
+    "loading": {
+      "title": "加载中",
+      "description": "正在加载工作区…"
+    },
+    "loadError": {
+      "title": "无法加载工作区",
+      "action": "返回当前任务"
+    },
+    "notFound": {
+      "title": "任务不存在",
+      "description": "找不到该任务。",
+      "action": "新建翻译"
+    }
+  },
+  "logViewer": {
+    "title": "关键进展",
+    "description": "最近关键进展。",
+    "empty": "当前还没有关键进展。"
+  }
+}

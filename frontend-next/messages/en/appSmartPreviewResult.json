@@ -1,0 +1,15 @@
+{
+  "header": "Smart · 3-minute preview",
+  "badge": "Watermarked · Online only",
+  "playAria": "Play 3-minute preview",
+  "playerError": "Preview failed to load. Please try again later.",
+  "teaserNote": "This is a watermarked 3-minute preview generated with the cloned voice, for online viewing only — no download / export / editing. If you're happy with it, convert to the full version to remove the watermark and generate the complete result.",
+  "durationOverMax": "This video is longer than your highest available plan allows. Please use a shorter video, or contact support about processing longer videos.",
+  "upgradeRequired": "Converting to the full Smart version requires upgrading to a Plus / Pro plan. Reusing won't charge the clone fee already paid for the preview again.",
+  "upgradeCta": "Upgrade to Plus / Pro",
+  "satisfiedTitle": "Happy with the result?",
+  "convertNote": "Converting to the full version reuses the same video and the already-cloned voice, charged per minute as usual — the clone fee already paid for the preview won't be charged again.",
+  "convertingToast": "Converting to the full version, charged per minute as usual…",
+  "submitting": "Submitting…",
+  "convertCta": "Convert to full version"
+}

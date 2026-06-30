@@ -25,7 +25,7 @@ import {
   getUserFacingProgressMessage,
 } from '@/features/jobs/presentation'
 import { buildStageProgress } from '@/features/jobs/stageMetadata'
-import { getErrorMessage } from '@/lib/api/errors'
+import { useApiErrorMessage } from '@/lib/api/error-localization'
 import {
   getJob,
   getJobLogs,
@@ -42,14 +42,17 @@ import {
   type ResultDownloadItem,
 } from '@/types/jobs'
 
-function sendBrowserNotification(status: string, title: string) {
+type WorkspaceTranslator = ReturnType<typeof useTranslations<"appWorkspace">>
+
+function sendBrowserNotification(tw: WorkspaceTranslator, status: string, title: string) {
   if (typeof window === 'undefined' || !('Notification' in window)) return
   if (Notification.permission !== 'granted') return
 
+  // title 是 job 标题（content），作 ICU {title} 占位符透传不译。
   const messages: Record<string, { title: string; body: string }> = {
-    succeeded: { title: '任务完成', body: `${title} 已完成，点击查看结果` },
-    failed: { title: '任务失败', body: `${title} 处理失败，点击查看详情` },
-    cancelled: { title: '任务已取消', body: `${title} 已被取消` },
+    succeeded: { title: tw('notification.succeeded.title'), body: tw('notification.succeeded.body', { title }) },
+    failed: { title: tw('notification.failed.title'), body: tw('notification.failed.body', { title }) },
+    cancelled: { title: tw('notification.cancelled.title'), body: tw('notification.cancelled.body', { title }) },
   }
   const msg = messages[status]
   if (msg) {
@@ -59,6 +62,8 @@ function sendBrowserNotification(status: string, title: string) {
 
 export default function WorkspacePage() {
   const t = useTranslations('app')
+  const tw = useTranslations('appWorkspace')
+  const localizeError = useApiErrorMessage()
   const params = useParams()
   const router = useRouter()
   const jobId = ((params.jobId as string) ?? '').trim()
@@ -99,12 +104,12 @@ export default function WorkspacePage() {
       if (prevStatusRef.current &&
           prevStatusRef.current !== nextJob.status &&
           (nextJob.status === 'succeeded' || nextJob.status === 'failed' || nextJob.status === 'cancelled')) {
-        sendBrowserNotification(nextJob.status, getJobDisplayTitle(t, nextJob))
+        sendBrowserNotification(tw, nextJob.status, getJobDisplayTitle(t, nextJob))
         // Auto-redirect to projects page after successful completion.
         // 智能版预览任务例外：teaser + 转完整 CTA 就在本工作区页，跳转到 /projects
         // 会丢失试看上下文 → 留在原页。
         if (nextJob.status === 'succeeded' && !nextJob.smartPreviewMode) {
-          toast.success('任务已完成，即将跳转到视频翻译主页...')
+          toast.success(tw('redirectToast'))
           setTimeout(() => {
             router.push('/projects')
           }, 2000)
@@ -119,7 +124,7 @@ export default function WorkspacePage() {
       if (derivedStage) setWebUiStage(derivedStage)
       setPageError(null)
     } catch (error) {
-      setPageError(getErrorMessage(error))
+      setPageError(localizeError(error))
     } finally {
       setIsLoading(false)
     }
@@ -151,10 +156,12 @@ export default function WorkspacePage() {
         await approveTranslationConfigReview(job.id)
         void loadJob(true)
       } catch (error) {
-        setPageError(getErrorMessage(error))
+        setPageError(localizeError(error))
       }
     })()
-  }, [job])
+    // localizeError 是 useCallback 稳定引用，纳入依赖不会触发额外重跑；loadJob 仍按原状省略
+    // （它每次渲染重建，纳入会每帧重跑——沿用本文件既有取舍）。
+  }, [job, localizeError])
 
   // Called by review panels after approval to refresh job state
   const handleAdvanced = () => {
@@ -163,8 +170,8 @@ export default function WorkspacePage() {
 
   const handleCancel = async () => {
     const confirmed = await confirm({
-      title: '取消任务',
-      description: '确定要取消当前任务吗？取消后可以创建新的翻译任务。',
+      title: tw('cancelConfirm.title'),
+      description: tw('cancelConfirm.description'),
       destructive: true,
     })
     if (!confirmed) return
@@ -173,22 +180,22 @@ export default function WorkspacePage() {
       await cancelJob(jobId)
       router.push('/projects?new=1')
     } catch (error) {
-      setPageError(getErrorMessage(error))
+      setPageError(localizeError(error))
       setIsCancelling(false)
     }
   }
 
   if (!jobId) {
-    return <EmptyState actionLabel="返回当前任务" actionTo="/tasks/current" description="缺少任务标识。" title="无法打开工作区" />
+    return <EmptyState actionLabel={tw('empty.noJobId.action')} actionTo="/tasks/current" description={tw('empty.noJobId.description')} title={tw('empty.noJobId.title')} />
   }
   if (isLoading && !job && !pageError) {
-    return <EmptyState description="正在加载工作区…" title="加载中" />
+    return <EmptyState description={tw('empty.loading.description')} title={tw('empty.loading.title')} />
   }
   if (pageError && !job) {
-    return <EmptyState actionLabel="返回当前任务" actionTo="/tasks/current" description={pageError} title="无法加载工作区" />
+    return <EmptyState actionLabel={tw('empty.loadError.action')} actionTo="/tasks/current" description={pageError} title={tw('empty.loadError.title')} />
   }
   if (!job) {
-    return <EmptyState actionLabel="新建翻译" actionTo="/projects?new=1" description="找不到该任务。" title="任务不存在" />
+    return <EmptyState actionLabel={tw('empty.notFound.action')} actionTo="/projects?new=1" description={tw('empty.notFound.description')} title={tw('empty.notFound.title')} />
   }
 
   const isWaitingForReview = job.status === 'waiting_for_review'
@@ -215,13 +222,13 @@ export default function WorkspacePage() {
       <section className="surface-card p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-2 min-w-0">
-            <p className="eyebrow">工作区</p>
+            <p className="eyebrow">{tw('eyebrow')}</p>
             <h1 className="text-2xl font-bold text-foreground truncate">{displayTitle}</h1>
             <p className="text-sm text-muted-foreground">{secondaryLabel}</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
             <StatusBadge status={job.status} editGeneration={editGeneration} />
-            <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground transition hover:bg-muted/50" href={`/projects/${jobId}`}>项目详情</Link>
+            <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground transition hover:bg-muted/50" href={`/projects/${jobId}`}>{tw('projectDetails')}</Link>
             {(isWaitingForReview || isProcessing) ? (
               <button
                 className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-xs font-medium text-red-400 transition hover:bg-red-500/20 hover:border-red-500/50 disabled:opacity-50"
@@ -229,7 +236,7 @@ export default function WorkspacePage() {
                 onClick={() => { void handleCancel() }}
                 type="button"
               >
-                {isCancelling ? '取消中…' : '取消任务'}
+                {isCancelling ? tw('cancelling') : tw('cancelTask')}
               </button>
             ) : null}
             {/*
@@ -256,17 +263,17 @@ export default function WorkspacePage() {
         <div className="mt-3 text-sm text-muted-foreground">
           {isWaitingForReview ? (
             <span className="font-medium" style={{ color: "var(--ochre)" }}>
-              当前需要处理：{getStageLabel(t, effectiveStage)}
+              {tw('reviewNeeded', { stage: getStageLabel(t, effectiveStage) })}
             </span>
           ) : isEditing ? (
             <span className="font-medium" style={{ color: "var(--ochre)" }}>
-              此任务处于修改中
-              {editGeneration > 0 ? `（已完成 ${editGeneration} 次修改）` : ''}
+              {tw('editingInline')}
+              {editGeneration > 0 ? tw('editingInlineSuffix', { n: editGeneration }) : ''}
             </span>
           ) : isSucceeded ? (
-            <span className="font-medium" style={{ color: "var(--bamboo)" }}>任务已完成</span>
+            <span className="font-medium" style={{ color: "var(--bamboo)" }}>{tw('succeededMsg')}</span>
           ) : isFailed ? (
-            <span className="font-medium" style={{ color: "var(--cinnabar)" }}>任务处理失败</span>
+            <span className="font-medium" style={{ color: "var(--cinnabar)" }}>{tw('failedMsg')}</span>
           ) : null}
         </div>
       </section>
@@ -285,13 +292,13 @@ export default function WorkspacePage() {
           <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
           <h3 className="text-lg font-semibold text-foreground">
             {editGeneration > 0
-              ? `正在重合成 · 第 ${editGeneration} 次修改`
-              : `正在处理 · ${getStageLabel(t, effectiveStage)}`}
+              ? tw('resynthesizing', { n: editGeneration })
+              : tw('processingStage', { stage: getStageLabel(t, effectiveStage) })}
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
             {isAdmin
-              ? (getUserFacingProgressMessage(t, job.progressMessage) ?? '任务正在后台处理，页面会自动刷新…')
-              : '任务正在后台处理，页面会自动刷新…'}
+              ? (getUserFacingProgressMessage(t, job.progressMessage) ?? tw('processingHint'))
+              : tw('processingHint')}
           </p>
         </section>
       ) : null}
@@ -311,12 +318,12 @@ export default function WorkspacePage() {
         >
           <RefreshCw className="mx-auto mb-4 h-10 w-10" style={{ color: "var(--ochre)" }} />
           <h3 className="text-lg font-semibold text-foreground">
-            此任务正在修改中
+            {tw('editingCardTitle')}
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
             {editGeneration > 0
-              ? `已完成 ${editGeneration} 次修改。点击下方按钮继续本轮编辑，或在修改页放弃草稿。`
-              : '点击下方按钮继续本轮编辑，或在修改页放弃草稿。'}
+              ? tw('editingCardBodyProgress', { n: editGeneration })
+              : tw('editingCardBody')}
           </p>
           <div className="mt-4 flex justify-center">
             <Link
@@ -324,7 +331,7 @@ export default function WorkspacePage() {
               className="inline-flex items-center gap-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90"
             >
               <RefreshCw className="h-4 w-4" />
-              继续修改
+              {tw('continueEditing')}
             </Link>
           </div>
         </section>
@@ -349,10 +356,9 @@ export default function WorkspacePage() {
       {isWaitingForReview && (effectiveReviewStage === 'speaker_review' || effectiveReviewStage === 'translation_config_review') ? (
         <section className="surface-card p-8 text-center">
           <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
-          <h3 className="text-lg font-semibold text-foreground">正在自动处理</h3>
+          <h3 className="text-lg font-semibold text-foreground">{tw('autoProcessing')}</h3>
           <p className="mt-2 text-sm text-muted-foreground">
-            {effectiveReviewStage === 'speaker_review' ? '说话人识别中，即将自动进入下一步…' :
-             '翻译配置已自动确认，正在继续处理…'}
+            {effectiveReviewStage === 'speaker_review' ? tw('autoSpeaker') : tw('autoTranslationConfig')}
           </p>
         </section>
       ) : null}
@@ -367,11 +373,11 @@ export default function WorkspacePage() {
             {getErrorSummaryMessage(t, job.errorSummary)}
           </p>
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/20 dark:bg-amber-500/5">
-            <p className="text-sm font-medium text-foreground/80">建议</p>
+            <p className="text-sm font-medium text-foreground/80">{tw('suggestionLabel')}</p>
             <p className="text-sm text-muted-foreground">{getErrorCategory(t, job.errorSummary).suggestion}</p>
           </div>
           <div className="mt-4 flex gap-2">
-            <Link className="secondary-button" href="/projects?new=1">重新创建任务</Link>
+            <Link className="secondary-button" href="/projects?new=1">{tw('recreate')}</Link>
           </div>
         </section>
       ) : null}
@@ -401,7 +407,11 @@ export default function WorkspacePage() {
         <>
           {isSucceeded && (
             <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm text-muted-foreground">
-              任务已完成，请前往<Link href="/projects" className="text-primary underline ml-1">视频翻译主页</Link>查看和播放结果。
+              {tw.rich('completedBanner', {
+                link: (chunks) => (
+                  <Link href="/projects" className="text-primary underline ml-1">{chunks}</Link>
+                ),
+              })}
             </div>
           )}
           <ResultDownloadList items={downloads} serviceMode={job.serviceMode} />
@@ -415,11 +425,11 @@ export default function WorkspacePage() {
        *  are the primary signal). */}
       {isAdmin ? (
         <LogViewer
-          description="最近关键进展。"
-          emptyMessage="当前还没有关键进展。"
+          description={tw('logViewer.description')}
+          emptyMessage={tw('logViewer.empty')}
           entries={logs}
           initialVisibleCount={5}
-          title="关键进展"
+          title={tw('logViewer.title')}
         />
       ) : null}
 

@@ -1,0 +1,18 @@
+{
+  "title": "试用智能版 · 3 分钟预览",
+  "description": "克隆主说话人音色，生成前 3 分钟带水印的在线预览。满意后可转完整成片（按分钟正常扣点，复用不再重复扣克隆费）。",
+  "credits": "{n} 点",
+  "costUnavailable": "暂时无法读取",
+  "loading": "读取中…",
+  "prechargeLabel": "本次预扣（克隆主说话人）",
+  "availableLabel": "当前可用",
+  "insufficient": "余额不足 {cost}。",
+  "recharge": "去充值",
+  "costLoadFailed": "扣点信息暂不可用，请稍后重试。",
+  "costLoading": "扣点信息读取中，请稍候。",
+  "consent": "我已了解本次预览将克隆主说话人音色并预扣 {cost}，且我拥有该视频的声音使用授权。",
+  "cancel": "取消",
+  "creating": "创建中…",
+  "confirm": "确认并预扣 {cost}",
+  "createdToast": "预览任务已创建：{title}"
+}

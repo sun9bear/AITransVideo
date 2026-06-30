@@ -1,0 +1,16 @@
+{
+  "copied": "Copied {os} path",
+  "copyFailed": "Copy failed — please select and copy manually",
+  "titleFirst": "Enter your Jianying draft folder",
+  "title": "Jianying draft folder",
+  "placeholder": "Enter the absolute path to your Jianying draft folder",
+  "howToFindLabel": "How to find it: ",
+  "howToFindBody": "Open Jianying → Settings → Draft location, then copy that path into the box above",
+  "windowsLabel": "Windows default path:",
+  "macLabel": "Mac default path:",
+  "copy": "Copy",
+  "copyAria": "Copy {os} path",
+  "editHint": "To change the path, edit the box above directly",
+  "cancel": "Cancel",
+  "submit": "Start generating"
+}

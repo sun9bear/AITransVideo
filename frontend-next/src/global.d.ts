@@ -16,6 +16,11 @@ import appSettings from "../messages/zh/appSettings.json"
 import appHelp from "../messages/zh/appHelp.json"
 import appNotifications from "../messages/zh/appNotifications.json"
 import appBilling from "../messages/zh/appBilling.json"
+import appWorkspace from "../messages/zh/appWorkspace.json"
+import appResultMedia from "../messages/zh/appResultMedia.json"
+import appSmartPreviewConfirm from "../messages/zh/appSmartPreviewConfirm.json"
+import appJianyingDraft from "../messages/zh/appJianyingDraft.json"
+import appSmartPreviewResult from "../messages/zh/appSmartPreviewResult.json"
 import errors from "../messages/zh/errors.json"
 import { routing } from "./i18n/routing"
 
@@ -32,6 +37,11 @@ type Messages = {
   appHelp: typeof appHelp
   appNotifications: typeof appNotifications
   appBilling: typeof appBilling
+  appWorkspace: typeof appWorkspace
+  appResultMedia: typeof appResultMedia
+  appSmartPreviewConfirm: typeof appSmartPreviewConfirm
+  appJianyingDraft: typeof appJianyingDraft
+  appSmartPreviewResult: typeof appSmartPreviewResult
   errors: typeof errors
 }
 
