@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import {
@@ -20,11 +21,15 @@ import {
 import { JianyingDraftPathDialog } from "@/components/workspace/JianyingDraftPathDialog"
 import { useBackgroundTask } from "@/lib/react/useBackgroundTask"
 import { usePollingTask } from "@/lib/react/usePollingTask"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2, RefreshCw, Clapperboard } from "lucide-react"
 import { Link } from "@/i18n/navigation"
 import { toast } from "sonner"
 
 const RESULT_VIDEO_PLAY_EVENT = "aivt:result-video-play"
+
+/** Translator scoped to the `appResultMedia` namespace（UI-06 part2 W1）。 */
+type ResultMediaTranslator = ReturnType<typeof useTranslations<"appResultMedia">>
 
 interface ResultMediaCardProps {
   jobId: string
@@ -43,17 +48,19 @@ interface ResultMediaCardProps {
   editHref?: string
 }
 
+// label 由 t(`material.${key}`) 在渲染时本地化（UI-06 part2 W1）；key 仍是 content 透传。
 const MATERIAL_OPTIONS = [
-  { key: "source_video", label: "原始视频" },
-  { key: "dubbed_video", label: "完整中文视频" },
-  { key: "dubbed_audio", label: "完整中文音频" },
-  { key: "segments", label: "分段音频包" },
-  { key: "subtitles", label: "字幕包（中/英/双语）" },
+  { key: "source_video" },
+  { key: "dubbed_video" },
+  { key: "dubbed_audio" },
+  { key: "segments" },
+  { key: "subtitles" },
 ] as const
 
 type MaterialItemKey = (typeof MATERIAL_OPTIONS)[number]["key"]
 
 export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCardProps) {
+  const t = useTranslations("appResultMedia")
   // Free shares Express's restricted media UI (dubbed video only; audio /
   // materials hidden — those are gated / paid add-ons in Phase 2b).
   const isExpress = serviceMode === 'express' || serviceMode === 'free'
@@ -140,13 +147,13 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
 
   async function handleStartPack() {
     if (selectedItems.size === 0) {
-      toast.error("请至少选择一项")
+      toast.error(t("selectAtLeastOne"))
       return
     }
     const items = Array.from(selectedItems).sort()
     const id = await packTask.startTask({ items })
     if (id) {
-      toast.success("素材包正在打包，完成后自动可下载")
+      toast.success(t("packStartedToast"))
       setShowPackDialog(false)
     } else if (packTask.error) {
       toast.error(packTask.error)
@@ -217,7 +224,7 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
               <a href={videoDownloadUrl} download>
                 <Button variant="outline" size="sm" className="gap-2">
                   <Video className="h-4 w-4" />
-                  配音视频
+                  {t("dubbedVideo")}
                   <Download className="h-3 w-3" />
                 </Button>
               </a>
@@ -226,7 +233,7 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
               <a href={audioDownloadUrl} download>
                 <Button variant="outline" size="sm" className="gap-2">
                   <Music className="h-4 w-4" />
-                  配音音频
+                  {t("dubbedAudio")}
                   <Download className="h-3 w-3" />
                 </Button>
               </a>
@@ -250,10 +257,10 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
                   color: "var(--cinnabar, #C73E3A)",
                   border: "1px solid color-mix(in oklab, var(--cinnabar) 35%, transparent)",
                 }}
-                title="修改此任务"
+                title={t("editTitle")}
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                修改
+                {t("edit")}
               </Link>
             )}
           </div>
@@ -267,7 +274,7 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
         {!isExpress && showPackDialog && (
           <div className="mt-4 rounded-lg border border-border bg-card p-4 space-y-3">
             <div className="flex items-center justify-between">
-              <h4 className="text-sm font-medium">选择素材</h4>
+              <h4 className="text-sm font-medium">{t("selectMaterials")}</h4>
               <button onClick={() => setShowPackDialog(false)} className="text-muted-foreground hover:text-foreground">
                 <X className="h-4 w-4" />
               </button>
@@ -287,8 +294,8 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
                       onChange={() => available && toggleItem(opt.key)}
                       className="rounded"
                     />
-                    {opt.label}
-                    {!available && <span className="text-xs text-muted-foreground">(不可用)</span>}
+                    {t(`material.${opt.key}`)}
+                    {!available && <span className="text-xs text-muted-foreground">{t("unavailable")}</span>}
                   </label>
                 )
               })}
@@ -298,13 +305,13 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
               onClick={handleStartPack}
               disabled={selectedItems.size === 0 || packTask.isActive}
             >
-              {packTask.isActive ? "打包中..." : "开始打包"}
+              {packTask.isActive ? t("packing") : t("startPack")}
             </Button>
             {/* 2026-04-21: 磁盘上 zip 体积可达 GB 级，Gateway 每小时扫一次，
              *  超过 24h 的已完成 pack task 会被 cleanup_expired_pack_zips
              *  标记为 expired 并删除磁盘文件。前端应告知用户保留窗口。 */}
             <p className="text-xs text-muted-foreground">
-              素材包仅保存 24 小时，请及时下载；超时后可重新打包，不额外扣点。
+              {t("packRetentionNote")}
             </p>
           </div>
         )}
@@ -327,6 +334,7 @@ function MaterialsPackButton({
   onOpenDialog: () => void
   onDownload: () => void
 }) {
+  const t = useTranslations("appResultMedia")
   if (task.status === "completed") {
     return (
       <Button
@@ -336,7 +344,7 @@ function MaterialsPackButton({
         onClick={onDownload}
       >
         <CheckCircle2 className="h-4 w-4" />
-        素材包可下载
+        {t("packDownloadable")}
         <Download className="ml-1 h-3 w-3" />
       </Button>
     )
@@ -346,7 +354,7 @@ function MaterialsPackButton({
     return (
       <Button variant="outline" size="sm" className="gap-2" disabled>
         <Loader2 className="h-4 w-4 animate-spin" />
-        {pct !== null ? `素材打包中 ${pct}%` : "素材打包中..."}
+        {pct !== null ? t("packingPercent", { pct }) : t("packingNoPercent")}
       </Button>
     )
   }
@@ -359,7 +367,7 @@ function MaterialsPackButton({
         onClick={onOpenDialog}
       >
         <RotateCcw className="h-4 w-4" />
-        打包失败 · 重试
+        {t("packFailed")}
       </Button>
     )
   }
@@ -375,17 +383,17 @@ function MaterialsPackButton({
         size="sm"
         className="gap-2 border-amber-500/60 text-amber-500"
         onClick={onOpenDialog}
-        title="素材包已过保留期（24 小时）被自动清理，重新打包不再扣点"
+        title={t("packExpiredTitle")}
       >
         <RotateCcw className="h-4 w-4" />
-        素材包已过期 · 重新打包不扣点
+        {t("packExpired")}
       </Button>
     )
   }
   return (
     <Button variant="outline" size="sm" className="gap-2" onClick={onOpenDialog}>
       <Package className="h-4 w-4" />
-      素材包
+      {t("pack")}
       <Download className="ml-auto h-3 w-3" />
     </Button>
   )
@@ -404,10 +412,11 @@ function VideoGenerationControl({
   stalled: boolean
   onStart: () => void
 }) {
+  const t = useTranslations("appResultMedia")
   if (status === "pending" || status === "running") {
     const stage = typeof progress?.stage === "string" ? progress.stage : ""
     const pct = typeof progress?.percent === "number" ? progress.percent : 0
-    const label = stageLabel(stage)
+    const label = stageLabel(t, stage)
     return (
       <div className="flex flex-col items-center gap-2">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -421,7 +430,7 @@ function VideoGenerationControl({
           />
         </div>
         {stalled && (
-          <p className="text-xs text-amber-500">任务耗时较长，仍在进行中</p>
+          <p className="text-xs text-amber-500">{t("videoStalled")}</p>
         )}
       </div>
     )
@@ -429,37 +438,37 @@ function VideoGenerationControl({
   if (status === "failed") {
     return (
       <div className="flex flex-col items-center gap-2">
-        <p className="text-sm text-destructive">{error || "视频生成失败"}</p>
+        <p className="text-sm text-destructive">{error || t("videoFailed")}</p>
         <Button size="sm" variant="outline" onClick={onStart}>
           <RotateCcw className="h-3.5 w-3.5 mr-1" />
-          重试
+          {t("retry")}
         </Button>
       </div>
     )
   }
   return (
     <>
-      <p className="text-sm text-muted-foreground">暂未生成视频</p>
+      <p className="text-sm text-muted-foreground">{t("noVideo")}</p>
       <Button size="sm" variant="outline" onClick={onStart}>
         <Video className="h-3.5 w-3.5 mr-1" />
-        生成视频
+        {t("generateVideo")}
       </Button>
     </>
   )
 }
 
-function stageLabel(stage: string): string {
+function stageLabel(t: ResultMediaTranslator, stage: string): string {
   switch (stage) {
     case "starting":
-      return "正在准备"
+      return t("stage.starting")
     case "muxing":
-      return "正在合成"
+      return t("stage.muxing")
     case "finalizing":
-      return "正在收尾"
+      return t("stage.finalizing")
     case "done":
-      return "完成"
+      return t("stage.done")
     default:
-      return "处理中"
+      return t("stage.default")
   }
 }
 
@@ -518,6 +527,8 @@ function elapsedSeconds(startedAt: string | null): number | null {
  * Failed: shows error + retry button.
  */
 function JianyingDraftSection({ jobId }: { jobId: string }) {
+  const t = useTranslations("appResultMedia")
+  const localizeError = useApiErrorMessage()
   const [draftState, setDraftState] = useState<JianyingDraftStatusResponse>(JIANYING_DEFAULT_STATE)
   const [triggering, setTriggering] = useState(false)
   const [elapsedSec, setElapsedSec] = useState<number | null>(null)
@@ -600,7 +611,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
         getJianyingDraftStatus(jobId).then(setDraftState).catch(() => {})
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '触发失败，请稍后重试'
+      const msg = err instanceof Error ? localizeError(err) : t("triggerFailed")
       // Surface the error inside the dialog so the user can correct and retry.
       // Do NOT close the dialog on error.
       setDialogError(msg)
@@ -617,7 +628,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground select-none flex items-center gap-1">
           <Clapperboard className="h-3.5 w-3.5" />
-          剪映草稿
+          {t("jianyingDraft")}
         </span>
 
         {/* idle */}
@@ -628,14 +639,14 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
             className="gap-2"
             onClick={handleGenerateClick}
             disabled={triggering}
-            title="生成可用剪映打开的草稿包，5-30 秒"
+            title={t("generateDraftTitle")}
           >
             {triggering ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Clapperboard className="h-4 w-4" />
             )}
-            生成剪映草稿
+            {t("generateDraft")}
           </Button>
         )}
 
@@ -643,7 +654,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
         {status === 'running' && (
           <Button variant="outline" size="sm" className="gap-2" disabled>
             <Loader2 className="h-4 w-4 animate-spin" />
-            生成中
+            {t("generating")}
             {elapsedSec !== null && (
               <span className="text-muted-foreground text-xs">· {elapsedSec}s</span>
             )}
@@ -660,7 +671,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
                 className="gap-2 border-emerald-500/60 text-emerald-500 hover:bg-emerald-500/10"
               >
                 <CheckCircle2 className="h-4 w-4" />
-                下载剪映草稿
+                {t("downloadDraft")}
                 {sizeHint && (
                   <span className="text-xs text-muted-foreground">{sizeHint}</span>
                 )}
@@ -668,7 +679,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
               </Button>
             </a>
             <p className="text-xs text-muted-foreground pl-0.5">
-              下载后解压，将草稿文件夹放入剪映草稿目录，再在剪映中打开。
+              {t("draftHelp")}
             </p>
           </div>
         )}
@@ -689,7 +700,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
               ) : (
                 <RotateCcw className="h-4 w-4" />
               )}
-              重试生成
+              {t("retryGenerate")}
             </Button>
             {error && (
               <p className="text-xs text-destructive/80 max-w-xs truncate pl-0.5" title={error}>
@@ -717,6 +728,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
  * and video data never loads unless the user clicks play.
  */
 function LazyVideoPlayer({ jobId }: { jobId: string }) {
+  const t = useTranslations("appResultMedia")
   const [hasStarted, setHasStarted] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const posterUrl = buildStreamUrl(jobId, "poster")
@@ -760,7 +772,7 @@ function LazyVideoPlayer({ jobId }: { jobId: string }) {
       type="button"
       onClick={() => setHasStarted(true)}
       className="relative w-full aspect-video rounded-lg overflow-hidden bg-muted group"
-      aria-label="播放视频"
+      aria-label={t("playVideo")}
     >
       {/* Native lazy-loading: browser only fetches image when it scrolls into view */}
       {/* eslint-disable-next-line @next/next/no-img-element */}

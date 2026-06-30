@@ -1,0 +1,68 @@
+{
+  "eyebrow": "Workspace",
+  "projectDetails": "Project details",
+  "cancelTask": "Cancel task",
+  "cancelling": "Cancelling…",
+  "redirectToast": "Task complete. Redirecting to the translation home…",
+  "reviewNeeded": "Needs attention now: {stage}",
+  "editingInline": "This task is being edited",
+  "editingInlineSuffix": " ({n} edits made)",
+  "succeededMsg": "Task complete",
+  "failedMsg": "Task processing failed",
+  "resynthesizing": "Re-synthesizing · edit #{n}",
+  "processingStage": "Processing · {stage}",
+  "processingHint": "Your task is processing in the background; this page refreshes automatically…",
+  "editingCardTitle": "This task is being edited",
+  "editingCardBodyProgress": "{n} edits made. Click the button below to continue this editing round, or discard the draft on the edit page.",
+  "editingCardBody": "Click the button below to continue this editing round, or discard the draft on the edit page.",
+  "continueEditing": "Continue editing",
+  "autoProcessing": "Processing automatically",
+  "autoSpeaker": "Identifying speakers, moving to the next step automatically…",
+  "autoTranslationConfig": "Translation settings confirmed automatically, continuing…",
+  "suggestionLabel": "Suggestion",
+  "recreate": "Create the task again",
+  "completedBanner": "Task complete. Go to the <link>translation home</link> to view and play the result.",
+  "notification": {
+    "succeeded": {
+      "title": "Task complete",
+      "body": "{title} is done — click to view the result"
+    },
+    "failed": {
+      "title": "Task failed",
+      "body": "{title} failed to process — click for details"
+    },
+    "cancelled": {
+      "title": "Task cancelled",
+      "body": "{title} has been cancelled"
+    }
+  },
+  "cancelConfirm": {
+    "title": "Cancel task",
+    "description": "Are you sure you want to cancel this task? After cancelling you can create a new translation task."
+  },
+  "empty": {
+    "noJobId": {
+      "title": "Can't open the workspace",
+      "description": "Missing task identifier.",
+      "action": "Back to current task"
+    },
+    "loading": {
+      "title": "Loading",
+      "description": "Loading the workspace…"
+    },
+    "loadError": {
+      "title": "Can't load the workspace",
+      "action": "Back to current task"
+    },
+    "notFound": {
+      "title": "Task not found",
+      "description": "This task can't be found.",
+      "action": "New translation"
+    }
+  },
+  "logViewer": {
+    "title": "Key updates",
+    "description": "Recent key updates.",
+    "empty": "No key updates yet."
+  }
+}

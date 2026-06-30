@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import {
   Dialog,
@@ -14,18 +15,23 @@ import { Button } from "@/components/ui/button"
 
 const LS_KEY = "avt:jianying_draft_root"
 
+/** Translator scoped to the `appJianyingDraft` namespace（UI-06 part2 W1，同 part1 typed-key 模式）。 */
+type JianyingDraftTranslator = ReturnType<typeof useTranslations<"appJianyingDraft">>
+
 // Path templates rendered in the help block + copied on demand.
 // String.raw keeps Windows backslashes literal without double-escaping.
 const WINDOWS_PATH = String.raw`%LocalAppData%\JianyingPro\User Data\Projects\com.lveditor.draft`
 const MAC_PATH = "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
 
-async function copyToClipboard(text: string, label: string) {
+// translator 线程化传入（模块级函数拿不到 hook，沿用 part1 首参 translator 约定）。
+// label（"Windows" / "Mac"）是 content，作 ICU {os} 占位符透传不译。
+async function copyToClipboard(tj: JianyingDraftTranslator, text: string, label: string) {
   try {
     await navigator.clipboard.writeText(text)
-    toast.success(`已复制 ${label} 路径`)
+    toast.success(tj("copied", { os: label }))
   } catch {
     // navigator.clipboard rejects on: 非 HTTPS 上下文 / 权限被拒 / 老 webview
-    toast.error("复制失败，请手动选中复制")
+    toast.error(tj("copyFailed"))
   }
 }
 
@@ -76,6 +82,7 @@ interface DialogBodyProps {
 }
 
 function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) {
+  const tj = useTranslations("appJianyingDraft")
   // Read localStorage once on mount (fresh mount per open, see key above).
   const storedOnOpen = readStoredPath()
   const [value, setValue] = useState<string>(storedOnOpen)
@@ -101,7 +108,7 @@ function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) 
     <>
       <DialogHeader>
         <DialogTitle>
-          {isFirstTime ? "请填写剪映草稿目录" : "剪映草稿目录"}
+          {isFirstTime ? tj("titleFirst") : tj("title")}
         </DialogTitle>
       </DialogHeader>
 
@@ -110,7 +117,7 @@ function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) 
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="请输入剪映草稿目录的绝对路径"
+          placeholder={tj("placeholder")}
           autoFocus
         />
 
@@ -123,21 +130,21 @@ function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) 
         {isFirstTime && (
           <div className="space-y-2 rounded-lg bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground/70">如何找：</span>
-              打开剪映 → 设置 → 草稿位置，将该路径复制到上方输入框
+              <span className="font-medium text-foreground/70">{tj("howToFindLabel")}</span>
+              {tj("howToFindBody")}
             </p>
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <p className="font-medium text-foreground/70">Windows 默认路径：</p>
+                <p className="font-medium text-foreground/70">{tj("windowsLabel")}</p>
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-[10px]"
-                  onClick={() => copyToClipboard(WINDOWS_PATH, "Windows")}
-                  aria-label="复制 Windows 路径"
+                  onClick={() => copyToClipboard(tj, WINDOWS_PATH, "Windows")}
+                  aria-label={tj("copyAria", { os: "Windows" })}
                 >
-                  复制
+                  {tj("copy")}
                 </Button>
               </div>
               <code className="block break-all font-mono text-[11px] text-foreground/60">
@@ -146,16 +153,16 @@ function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) 
             </div>
             <div className="space-y-1">
               <div className="flex items-center justify-between">
-                <p className="font-medium text-foreground/70">Mac 默认路径：</p>
+                <p className="font-medium text-foreground/70">{tj("macLabel")}</p>
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-[10px]"
-                  onClick={() => copyToClipboard(MAC_PATH, "Mac")}
-                  aria-label="复制 Mac 路径"
+                  onClick={() => copyToClipboard(tj, MAC_PATH, "Mac")}
+                  aria-label={tj("copyAria", { os: "Mac" })}
                 >
-                  复制
+                  {tj("copy")}
                 </Button>
               </div>
               <code className="block break-all font-mono text-[11px] text-foreground/60">
@@ -168,7 +175,7 @@ function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) 
         {/* Return visit hint */}
         {!isFirstTime && (
           <p className="text-xs text-muted-foreground">
-            修改路径请直接编辑上方输入框
+            {tj("editHint")}
           </p>
         )}
       </div>
@@ -178,13 +185,13 @@ function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) 
           variant="outline"
           onClick={() => onOpenChange(false)}
         >
-          取消
+          {tj("cancel")}
         </Button>
         <Button
           onClick={handleSubmit}
           disabled={!canSubmit}
         >
-          开始生成
+          {tj("submit")}
         </Button>
       </DialogFooter>
     </>

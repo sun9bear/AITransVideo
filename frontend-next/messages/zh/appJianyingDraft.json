@@ -1,0 +1,16 @@
+{
+  "copied": "已复制 {os} 路径",
+  "copyFailed": "复制失败，请手动选中复制",
+  "titleFirst": "请填写剪映草稿目录",
+  "title": "剪映草稿目录",
+  "placeholder": "请输入剪映草稿目录的绝对路径",
+  "howToFindLabel": "如何找：",
+  "howToFindBody": "打开剪映 → 设置 → 草稿位置，将该路径复制到上方输入框",
+  "windowsLabel": "Windows 默认路径：",
+  "macLabel": "Mac 默认路径：",
+  "copy": "复制",
+  "copyAria": "复制 {os} 路径",
+  "editHint": "修改路径请直接编辑上方输入框",
+  "cancel": "取消",
+  "submit": "开始生成"
+}

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { useRouter } from "@/i18n/navigation"
 import { toast } from "sonner"
@@ -34,6 +35,7 @@ interface SmartPreviewResultCardProps {
 }
 
 export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
+  const tspr = useTranslations("appSmartPreviewResult")
   const router = useRouter()
   const [started, setStarted] = useState(false)
   const [playerError, setPlayerError] = useState<string | null>(null)
@@ -77,7 +79,7 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
     setDurationOverMax(false)
     try {
       const fullJob = await convertPreviewToFull(buildReuseInput(), job.id)
-      toast.success("正在转完整成片，按分钟正常扣点…")
+      toast.success(tspr("convertingToast"))
       router.push(`/workspace/${fullJob.id}`)
     } catch (error) {
       const mapped = mapSmartPreviewReuseError(error)
@@ -98,9 +100,9 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
       {/* Header banner */}
       <div className="flex items-center gap-2 border-b border-border bg-primary/[0.06] px-5 py-3">
         <Sparkles className="h-4 w-4 text-primary" />
-        <span className="text-sm font-semibold text-foreground">智能版 · 3 分钟预览</span>
+        <span className="text-sm font-semibold text-foreground">{tspr("header")}</span>
         <span className="ml-auto rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-          带水印 · 仅在线播放
+          {tspr("badge")}
         </span>
       </div>
 
@@ -128,7 +130,7 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
                 // 流式拉取失败（产物未落盘 / 网络中断 / 瞬时 404）→ 退回可点击的
                 // poster 态并给出可恢复提示，避免卡在坏掉的播放器控件上。
                 setStarted(false)
-                setPlayerError("预览加载失败，请稍后重试。")
+                setPlayerError(tspr("playerError"))
               }}
             />
           ) : (
@@ -139,7 +141,7 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
                 setStarted(true)
               }}
               className="group relative aspect-video w-full overflow-hidden rounded-lg bg-muted"
-              aria-label="播放 3 分钟预览"
+              aria-label={tspr("playAria")}
             >
               <div className="absolute inset-0 flex items-center justify-center bg-black/30 transition group-hover:bg-black/20">
                 <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/90 transition group-hover:scale-110">
@@ -157,7 +159,7 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
         ) : null}
 
         <p className="text-xs leading-relaxed text-muted-foreground">
-          这是用克隆音色生成的前 3 分钟带水印预览，仅供在线试看，不提供下载 / 导出 / 修改。满意后可转完整成片，去掉水印、生成全长内容。
+          {tspr("teaserNote")}
         </p>
 
         {/* 转完整 CTA */}
@@ -166,28 +168,26 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
             // 原视频超最高自助套餐：升级也没用 → 仅提示用更短视频 / 联系客服，
             // 不给 /pricing（升无可升）、不给转完整按钮（重试同源必再失败，CodeX P1）。
             <p className="text-sm leading-relaxed text-foreground">
-              {errorMessage ??
-                "原视频时长超过当前最高套餐上限，请改用更短的视频，或联系客服了解更长视频的处理方案。"}
+              {errorMessage ?? tspr("durationOverMax")}
             </p>
           ) : upgradeRequired ? (
             <div className="space-y-3">
               <p className="text-sm leading-relaxed text-foreground">
-                {errorMessage ??
-                  "转完整智能版需升级到 Plus / Pro 套餐后再试。复用不会重复扣除预览已支付的克隆费用。"}
+                {errorMessage ?? tspr("upgradeRequired")}
               </p>
               <Link
                 href="/pricing"
                 className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90"
               >
-                升级 Plus / Pro
+                {tspr("upgradeCta")}
                 <ArrowRight className="h-4 w-4" />
               </Link>
             </div>
           ) : (
             <div className="space-y-2.5">
-              <p className="text-sm font-medium text-foreground">满意这个效果？</p>
+              <p className="text-sm font-medium text-foreground">{tspr("satisfiedTitle")}</p>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                转完整成片将复用同一视频与已克隆音色，按分钟正常扣点，不再重复扣预览已支付的克隆费。
+                {tspr("convertNote")}
               </p>
               {errorMessage ? (
                 <p className="text-xs leading-relaxed text-[color:var(--cinnabar)]">{errorMessage}</p>
@@ -196,11 +196,11 @@ export function SmartPreviewResultCard({ job }: SmartPreviewResultCardProps) {
                 {converting ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    提交中…
+                    {tspr("submitting")}
                   </>
                 ) : (
                   <>
-                    转完整成片
+                    {tspr("convertCta")}
                     <ArrowRight className="h-4 w-4" />
                   </>
                 )}

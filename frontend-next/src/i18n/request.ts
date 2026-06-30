@@ -27,6 +27,11 @@ export default getRequestConfig(async ({ requestLocale }) => {
     appHelp,
     appNotifications,
     appBilling,
+    appWorkspace,
+    appResultMedia,
+    appSmartPreviewConfirm,
+    appJianyingDraft,
+    appSmartPreviewResult,
     errors,
   ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
@@ -41,6 +46,11 @@ export default getRequestConfig(async ({ requestLocale }) => {
     import(`../../messages/${locale}/appHelp.json`),
     import(`../../messages/${locale}/appNotifications.json`),
     import(`../../messages/${locale}/appBilling.json`),
+    import(`../../messages/${locale}/appWorkspace.json`),
+    import(`../../messages/${locale}/appResultMedia.json`),
+    import(`../../messages/${locale}/appSmartPreviewConfirm.json`),
+    import(`../../messages/${locale}/appJianyingDraft.json`),
+    import(`../../messages/${locale}/appSmartPreviewResult.json`),
     import(`../../messages/${locale}/errors.json`),
   ])
 
@@ -59,6 +69,11 @@ export default getRequestConfig(async ({ requestLocale }) => {
       appHelp: appHelp.default,
       appNotifications: appNotifications.default,
       appBilling: appBilling.default,
+      appWorkspace: appWorkspace.default,
+      appResultMedia: appResultMedia.default,
+      appSmartPreviewConfirm: appSmartPreviewConfirm.default,
+      appJianyingDraft: appJianyingDraft.default,
+      appSmartPreviewResult: appSmartPreviewResult.default,
       errors: errors.default,
     },
   }

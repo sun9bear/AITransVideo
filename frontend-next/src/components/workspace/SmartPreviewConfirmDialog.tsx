@@ -53,6 +53,7 @@ export function SmartPreviewConfirmDialog({
   onCreated,
 }: SmartPreviewConfirmDialogProps) {
   const t = useTranslations("app")
+  const tc = useTranslations("appSmartPreviewConfirm")
   const [consented, setConsented] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -65,11 +66,11 @@ export function SmartPreviewConfirmDialog({
       ? Math.trunc(cloneCostCredits)
       : null
   const cloneCostReady = normalizedCloneCost !== null
-  const cloneCostLabel = cloneCostReady
-    ? `${normalizedCloneCost} 点`
+  const cloneCostLabel = normalizedCloneCost !== null
+    ? tc("credits", { n: normalizedCloneCost })
     : cloneCostLoadFailed
-      ? "暂时无法读取"
-      : "读取中…"
+      ? tc("costUnavailable")
+      : tc("loading")
 
   // 余额已知且不足 gateway 返回的预览克隆费用 → 本地预挡（服务端仍会最终判定）。
   const insufficientKnown =
@@ -94,7 +95,7 @@ export function SmartPreviewConfirmDialog({
     setShowRecharge(false)
     try {
       const job = await createSmartPreviewJob(jobInput)
-      toast.success(`预览任务已创建：${getJobDisplayTitle(t, job)}`)
+      toast.success(tc("createdToast", { title: getJobDisplayTitle(t, job) }))
       setConsented(false)
       onOpenChange(false)
       onCreated({ id: job.id, title: getJobDisplayTitle(t, job) })
@@ -114,19 +115,19 @@ export function SmartPreviewConfirmDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>试用智能版 · 3 分钟预览</DialogTitle>
+          <DialogTitle>{tc("title")}</DialogTitle>
           <DialogDescription>
-            克隆主说话人音色，生成前 3 分钟带水印的在线预览。满意后可转完整成片（按分钟正常扣点，复用不再重复扣克隆费）。
+            {tc("description")}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3 text-sm">
           <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2">
-            <span className="text-muted-foreground">本次预扣（克隆主说话人）</span>
+            <span className="text-muted-foreground">{tc("prechargeLabel")}</span>
             <span className="font-semibold text-foreground">{cloneCostLabel}</span>
           </div>
           <div className="flex items-center justify-between px-1 text-xs">
-            <span className="text-muted-foreground">当前可用</span>
+            <span className="text-muted-foreground">{tc("availableLabel")}</span>
             <span
               className={
                 insufficientKnown
@@ -134,22 +135,22 @@ export function SmartPreviewConfirmDialog({
                   : "text-foreground"
               }
             >
-              {availableCredits === null ? "读取中…" : `${availableCredits} 点`}
+              {availableCredits === null ? tc("loading") : tc("credits", { n: availableCredits })}
             </span>
           </div>
 
           {insufficientKnown ? (
             <p className="rounded-lg border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/5 px-3 py-2 text-xs leading-relaxed text-[color:var(--cinnabar)]">
-              余额不足 {cloneCostLabel}。
+              {tc("insufficient", { cost: cloneCostLabel })}
               <Link href="/settings/billing" className="ml-1 underline underline-offset-2">
-                去充值
+                {tc("recharge")}
               </Link>
             </p>
           ) : null}
 
           {!cloneCostReady ? (
             <p className="rounded-lg border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/5 px-3 py-2 text-xs leading-relaxed text-[color:var(--cinnabar)]">
-              {cloneCostLoadFailed ? "扣点信息暂不可用，请稍后重试。" : "扣点信息读取中，请稍候。"}
+              {cloneCostLoadFailed ? tc("costLoadFailed") : tc("costLoading")}
             </p>
           ) : null}
 
@@ -162,7 +163,7 @@ export function SmartPreviewConfirmDialog({
               onChange={(e) => setConsented(e.target.checked)}
             />
             <span className="text-xs leading-relaxed text-muted-foreground">
-              我已了解本次预览将克隆主说话人音色并预扣 {cloneCostLabel}，且我拥有该视频的声音使用授权。
+              {tc("consent", { cost: cloneCostLabel })}
             </span>
           </label>
 
@@ -171,7 +172,7 @@ export function SmartPreviewConfirmDialog({
               {errorMessage}
               {showRecharge ? (
                 <Link href="/settings/billing" className="ml-1 underline underline-offset-2">
-                  去充值
+                  {tc("recharge")}
                 </Link>
               ) : null}
             </p>
@@ -180,10 +181,10 @@ export function SmartPreviewConfirmDialog({
 
         <DialogFooter>
           <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={submitting}>
-            取消
+            {tc("cancel")}
           </Button>
           <Button onClick={handleConfirm} disabled={confirmDisabled}>
-            {submitting ? "创建中…" : `确认并预扣 ${cloneCostLabel}`}
+            {submitting ? tc("creating") : tc("confirm", { cost: cloneCostLabel })}
           </Button>
         </DialogFooter>
       </DialogContent>
