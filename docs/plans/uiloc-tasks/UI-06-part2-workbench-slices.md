@@ -1,8 +1,9 @@
 # UI-06 part2 · 核心工作台英文化（薄切片方案，2026-06-30 起草）
 
 > **状态：◐ 执行中**。切片序 = W1 先（owner 认可）；法务口径已定（§2，Claude 把关）。
-> **W1 任务详情→结果/下载 ✅ 已合并 main（[PR #87](https://github.com/sun9bear/AITransVideo/pull/87) squash `805cb92c`，2026-06-30）**；
-> W2a/W2b/W3/W4/W5 待做（下一片建议 W2a 漏斗入口 chrome）。这是 [UI-06](UI-06-app-user-flows.md) 的
+> **W1 任务详情→结果/下载 ✅ 已合并 main（[PR #87](https://github.com/sun9bear/AITransVideo/pull/87) squash `805cb92c`）**；
+> **W2a 创建表单 chrome ✅ 已合并 main（[PR #88](https://github.com/sun9bear/AITransVideo/pull/88) squash `4c0a5d36`，2026-06-30）**——consent 14 串留 inline 待 W2b、克隆门逻辑零改、errors.code.* 拆跟进单；
+> W2b/W3/W4/W5 待做（下一片：W2b consent 文案 Claude 把关，或 W3 Studio 审校）。这是 [UI-06](UI-06-app-user-flows.md) 的
 > part2——把英文「一路做到核心工作台」（母方案 [§9.2 Q2=是](../2026-06-25-ui-page-locale-switch-plan.md)，
 > 备海外）。part1（常驻账户页 332 key）已合（[PR #85](https://github.com/sun9bear/AITransVideo/pull/85)）；
 > 错误显示底座 [UI-09](UI-09-client-error-layer.md) 已合（[PR #86](https://github.com/sun9bear/AITransVideo/pull/86)）。
