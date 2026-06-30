@@ -52,6 +52,8 @@ type TranslationFormTranslator = ReturnType<typeof useTranslations<"appTranslati
 export function TranslationForm({ onCreated, mode, initialSourceUrl }: TranslationFormProps) {
   const t = useTranslations("app")
   const tForm = useTranslations("appTranslationForm")
+  // W2b: 法务/consent 文案独立 namespace（便于 owner 单独 review）；逻辑/门控不动，仅译显示文案。
+  const tConsent = useTranslations("appTranslationFormConsent")
   const localizeError = useApiErrorMessage()
   const { user } = useSession()
   const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">("youtube_url")
@@ -172,10 +174,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     (!hasAnyServiceMode ? tForm("validation.noModes") : null) ??
     serviceModeUnavailableError ??
     (serviceMode === "express" && expressAutoCloneAvailable && !expressAutoVoiceClone
-      ? "快捷版 CosyVoice 需要先确认自动克隆主说话人音色。"
+      ? tConsent("express.validation")
       : null) ??
     (serviceMode === "free" && !freeVoiceRightsConfirmed
-      ? "请先阅读并勾选免费版声音授权声明。"
+      ? tConsent("free.validation")
       : null)
 
   const isUnlimitedConcurrency = entitlements?.limits.max_concurrent_jobs === null
@@ -592,7 +594,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                 <p className="text-xs text-red-400">{validationError}</p>
               ) : null}
               <p className="text-xs text-muted-foreground/80">
-                仅用于翻译您本人或已获授权的视频内容；使用前请确认拥有合法授权，不得用于侵权用途。
+                {tConsent("youtubeRightsHint")}
               </p>
             </div>
           ) : (
@@ -997,9 +999,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   onChange={(e) => setFreeVoiceRightsConfirmed(e.target.checked)}
                 />
                 <span className="block space-y-1.5">
-                  <span className="block text-sm font-medium text-foreground">声音授权声明（必读必勾）</span>
+                  <span className="block text-sm font-medium text-foreground">{tConsent("free.title")}</span>
                   <span className="block text-xs leading-relaxed text-muted-foreground">
-                    我确认：我已获得该视频内容及其中所有说话人声音的合法授权，或该使用属于法律允许的范围；因使用本服务声音克隆功能产生的肖像权 / 声音权纠纷由我自行承担。
+                    {tConsent("free.attestation")}
                   </span>
                 </span>
               </label>
@@ -1028,7 +1030,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                 />
                 <span className="block space-y-1.5">
                   <span className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">自动克隆主说话人音色</span>
+                    <span className="text-sm font-medium text-foreground">{tConsent("express.title")}</span>
                     <span
                       className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
                       style={{
@@ -1037,16 +1039,16 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                         border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
                       }}
                     >
-                      实验性
+                      {tConsent("express.experimental")}
                     </span>
                   </span>
                   <span className="block text-xs leading-relaxed text-muted-foreground">
-                    勾选后，系统会用视频中占比最高的说话人的一小段语音（约 10–20 秒）克隆一个临时音色用于本次配音，让主说话人的声音更贴近原片。
+                    {tConsent("express.desc")}
                   </span>
                   <span className="block space-y-0.5 text-xs leading-relaxed text-muted-foreground">
-                    <span className="block">· 该音色为本次任务临时使用，不进入你的永久音色库；系统后续会按清理策略处理</span>
-                    <span className="block">· 会占用一次音色克隆配额</span>
-                    <span className="block">· 失败时自动改用预设音色，不影响配音完成</span>
+                    <span className="block">{tConsent("express.bullet1")}</span>
+                    <span className="block">{tConsent("express.bullet2")}</span>
+                    <span className="block">{tConsent("express.bullet3")}</span>
                   </span>
                 </span>
               </label>
@@ -1078,9 +1080,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   onChange={(e) => setSmartPaidCloneAccepted(e.target.checked)}
                 />
                 <span className="block space-y-1.5">
-                  <span className="block text-sm font-medium text-foreground">确认智能版自动克隆扣点</span>
+                  <span className="block text-sm font-medium text-foreground">{tConsent("smart.title")}</span>
                   <span className="block text-xs leading-relaxed text-muted-foreground">
-                    我确认：如果本次智能版需要自动新克隆主说话人音色，将额外预扣 {voiceCloneCostLabel}；未发生新克隆或任务未消耗该克隆时会释放。
+                    {tConsent("smart.attestation", { cost: voiceCloneCostLabel })}
                   </span>
                 </span>
               </label>

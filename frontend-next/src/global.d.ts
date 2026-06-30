@@ -22,6 +22,7 @@ import appSmartPreviewConfirm from "../messages/zh/appSmartPreviewConfirm.json"
 import appJianyingDraft from "../messages/zh/appJianyingDraft.json"
 import appSmartPreviewResult from "../messages/zh/appSmartPreviewResult.json"
 import appTranslationForm from "../messages/zh/appTranslationForm.json"
+import appTranslationFormConsent from "../messages/zh/appTranslationFormConsent.json"
 import errors from "../messages/zh/errors.json"
 import { routing } from "./i18n/routing"
 
@@ -44,6 +45,7 @@ type Messages = {
   appJianyingDraft: typeof appJianyingDraft
   appSmartPreviewResult: typeof appSmartPreviewResult
   appTranslationForm: typeof appTranslationForm
+  appTranslationFormConsent: typeof appTranslationFormConsent
   errors: typeof errors
 }
 
