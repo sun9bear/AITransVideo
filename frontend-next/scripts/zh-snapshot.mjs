@@ -636,4 +636,67 @@ assert.equal(zhJd.windowsLabel, "Windows 默认路径：", "appJianyingDraft.win
 assert.equal(zhJd.howToFindBody, "打开剪映 → 设置 → 草稿位置，将该路径复制到上方输入框", "appJianyingDraft.howToFindBody 箭头 →/标点漂移（红线 R1）")
 assert.equal(zhJd.placeholder, "请输入剪映草稿目录的绝对路径", "appJianyingDraft.placeholder 漂移（红线 R1）")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1 字节一致 + en seo 双源同步 全部通过")
+// 10) UI-06 part2 W2a（上传/提交表单 chrome）：appTranslationForm namespace 的内联中文迁入字典后，
+//     默认 zh 值必须与改造前 TranslationForm/NewTranslationDialog/translations-new 源【逐字节】相同
+//     （红线 R1）。consent/声音权益文案（《民法典》1023 等）**不在本片**——留 inline 待 W2b，故不 pin。
+//     下面钉死标点/全半角/间隔号/箭头/占位符最敏感的代表串：
+//     - credits/ratePerMin {n} 占位 + `点`/`点/分钟`；concurrency.limitReached 全角括号（）
+//     - pricing.balance/toast.created/plan.freeQuota 全角冒号 ：；plan.free.desc 顿号 、+ ≤ + 全角（）
+//     - plan.smart.previewDesc 全角括号（预扣 {cost}）；pricing.studio 半角斜杠 ' / ' + `点/分钟`
+//     - smartPause.body 全角弯引号 “弱匹配确认”；advanced.gemini `≤30分钟`（无空格）；submit.submitting 全角省略号 …
+//     - pricing.free 全角直角引号「」+ ascii `add-on`；upload.merging 全角省略号 …+全角括号（）
+const zhTf = JSON.parse(readFileSync(path.join(root, "messages/zh/appTranslationForm.json"), "utf8"))
+assert.equal(zhTf.credits, "{n} 点", "appTranslationForm.credits {n}/`点` 漂移（红线 R1）")
+assert.equal(zhTf.ratePerMin, "{n} 点/分钟", "appTranslationForm.ratePerMin {n}/`点/分钟` 漂移（红线 R1）")
+assert.equal(zhTf.loading, "读取中", "appTranslationForm.loading 漂移（红线 R1，注意无省略号，与 W1 appSmartPreviewConfirm.loading 的 读取中… 不同源）")
+assert.equal(zhTf.concurrency.limitReached, "已达到并发上限（{count}/{limit}）", "appTranslationForm.concurrency.limitReached 全角括号/占位符漂移（红线 R1）")
+assert.equal(zhTf.pricing.balance, "当前可用：{balance}", "appTranslationForm.pricing.balance 全角冒号/占位符漂移（红线 R1）")
+assert.equal(zhTf.toast.created, "任务已创建：{title}", "appTranslationForm.toast.created 全角冒号/占位符漂移（红线 R1，title 是 content 透传）")
+assert.equal(zhTf.plan.freeQuota, "免费额度：已用 {used} / {total} 次", "appTranslationForm.plan.freeQuota 全角冒号/半角斜杠/占位符漂移（红线 R1）")
+assert.equal(
+  zhTf.plan.express.desc,
+  "全自动流程，AI 识别说话人、翻译、配音，无需人工操作。",
+  "appTranslationForm.plan.express.desc 顿号 、/标点漂移（红线 R1）",
+)
+assert.equal(
+  zhTf.plan.free.desc,
+  "免费保留原声 AI 配音（限时），每日 1 次、单条 ≤10 分钟，成品带水印。",
+  "appTranslationForm.plan.free.desc 全角括号/顿号/≤/空格漂移（红线 R1）",
+)
+assert.equal(
+  zhTf.plan.smart.desc,
+  "100 点/分钟固定价，AI 自动审核翻译并自动克隆音色，无需人工操作。",
+  "appTranslationForm.plan.smart.desc `点/分钟`/标点漂移（红线 R1）",
+)
+assert.equal(
+  zhTf.plan.smart.previewDesc,
+  "克隆主说话人音色，先看前 3 分钟带水印预览（预扣 {cost}）。满意再转完整成片，按分钟正常扣点。",
+  "appTranslationForm.plan.smart.previewDesc 全角括号/占位符漂移（红线 R1）",
+)
+assert.equal(
+  zhTf.pricing.studio,
+  "工作台版按源视频时长扣点，基础标准为 {rate}；后续选择高级/旗舰音质时分别按 {high} / {flagship} 点/分钟扣除。音色克隆为单次独立扣点，克隆弹窗会再次确认费用。",
+  "appTranslationForm.pricing.studio 半角斜杠 ' / '/`点/分钟`/全角分号/占位符漂移（红线 R1）",
+)
+assert.equal(
+  zhTf.pricing.free,
+  "免费版当前不扣点（限时免费），保留原声 AI 配音。每日 1 次、单条 ≤10 分钟，成品视频带水印。后续如需「后编辑」或「剪映草稿」为付费 add-on，将另行计点。",
+  "appTranslationForm.pricing.free 全角直角引号「」/add-on/标点漂移（红线 R1）",
+)
+assert.equal(
+  zhTf.smartPause.body,
+  "管理员已开启“弱匹配确认”策略：如果系统在你的个人音色库中发现可能匹配的音色（但相似度不够强），任务会暂停在音色审核页面，等你确认是否复用，再继续后续步骤。复用个人音色不消耗克隆点；如果不想复用，可以选择官方音色或重新克隆。",
+  "appTranslationForm.smartPause.body 全角弯引号 “”/标点漂移（红线 R1）",
+)
+assert.equal(zhTf.advanced.gemini, "Gemini 多模态（≤30分钟）", "appTranslationForm.advanced.gemini 全角括号/≤/无空格 漂移（红线 R1）")
+assert.equal(zhTf.advanced.speakerCount, "{n} 人", "appTranslationForm.advanced.speakerCount {n}/`人` 漂移（红线 R1）")
+assert.equal(zhTf.language.beta, "（内测）", "appTranslationForm.language.beta 全角括号漂移（红线 R1）")
+assert.equal(zhTf.submit.submitting, "创建中…", "appTranslationForm.submit.submitting 全角省略号 … 漂移（红线 R1）")
+assert.equal(
+  zhTf.upload.merging,
+  "正在合并校验…（大文件需要数十秒，请勿关闭页面）",
+  "appTranslationForm.upload.merging 全角省略号/全角括号漂移（红线 R1）",
+)
+assert.equal(zhTf.upload.failed, "上传失败", "appTranslationForm.upload.failed 漂移（红线 R1）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a 字节一致 + en seo 双源同步 全部通过")

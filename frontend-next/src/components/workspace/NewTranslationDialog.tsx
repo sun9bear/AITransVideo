@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 import { CheckCircle } from "lucide-react"
 
 import {
@@ -26,11 +27,12 @@ export function NewTranslationDialog({
   onJobCreated,
   initialSourceUrl,
 }: NewTranslationDialogProps) {
+  const t = useTranslations("appTranslationForm")
   return (
     <Dialog open={open} onOpenChange={(value) => onOpenChange(value)}>
       <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>新建翻译任务</DialogTitle>
+          <DialogTitle>{t("dialog.title")}</DialogTitle>
         </DialogHeader>
         {/* Key on `open` forces fresh mount each time dialog opens,
             resetting showSuccess without needing setState in useEffect */}
@@ -55,6 +57,7 @@ function DialogBody({
   onJobCreated?: () => void
   initialSourceUrl?: string
 }) {
+  const t = useTranslations("appTranslationForm")
   const [showSuccess, setShowSuccess] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -77,7 +80,7 @@ function DialogBody({
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-10">
         <CheckCircle className="h-12 w-12" style={{ color: "var(--bamboo)" }} />
-        <p className="text-base font-semibold text-foreground">任务已创建</p>
+        <p className="text-base font-semibold text-foreground">{t("dialog.created")}</p>
       </div>
     )
   }

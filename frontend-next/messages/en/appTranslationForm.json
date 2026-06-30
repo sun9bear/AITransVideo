@@ -1,0 +1,115 @@
+{
+  "pageTitle": "New translation",
+  "dialog": {
+    "title": "New translation task",
+    "created": "Task created"
+  },
+  "formTitle": "Task input",
+  "loading": "Loading",
+  "loadFailed": "Temporarily unavailable",
+  "credits": "{n} credits",
+  "ratePerMin": "{n} credits/min",
+  "validation": {
+    "uploadFirst": "Please upload a video file first.",
+    "noModes": "No task plan is available right now. Please contact the administrator.",
+    "modeUnavailable": "The selected task plan isn't available yet. Please choose another plan.",
+    "youtubeEmpty": "Please enter a YouTube link.",
+    "youtubeInvalid": "Only valid YouTube links are supported.",
+    "urlInvalid": "Please enter a valid link."
+  },
+  "concurrency": {
+    "unlimited": "Unlimited",
+    "limitReached": "Concurrency limit reached ({count}/{limit})",
+    "blockedHint": "Please finish or cancel the current task before creating a new translation.",
+    "goHandle": "Go to current task",
+    "activeHint": "You have {count} task(s) in progress; you can still create a new one (limit {limit}).",
+    "view": "View task"
+  },
+  "reuse": {
+    "title": "Convert the video you just previewed to the full version",
+    "body": "We'll use the full original video you previewed to generate the final result — no need to re-upload. Choose a plan below and create at the normal per-tier charge.",
+    "changeVideo": "Use a different video"
+  },
+  "source": {
+    "youtube": "YouTube link",
+    "upload": "Upload video",
+    "chooseFile": "Choose a video file",
+    "remove": "Remove"
+  },
+  "upload": {
+    "hashing": "Verifying file integrity… {percent}%",
+    "uploading": "Uploading in chunks {name}… {percent}%",
+    "merging": "Merging and verifying… (large files take tens of seconds, please don't close the page)",
+    "single": "Uploading {name}…",
+    "failed": "Upload failed"
+  },
+  "plan": {
+    "label": "Task plan",
+    "offline": "Offline",
+    "unlockUpgrade": "Upgrade to unlock",
+    "comingSoon": "Coming soon",
+    "express": {
+      "name": "Express",
+      "desc": "Fully automated — AI identifies speakers, translates, and dubs, with no manual steps."
+    },
+    "free": {
+      "name": "Free",
+      "desc": "Free original-voice AI dubbing (limited time), once per day, ≤10 min per clip, watermarked output."
+    },
+    "studio": {
+      "name": "Studio",
+      "desc": "Review translations and clone the original voice for higher-quality, customized dubbing."
+    },
+    "smart": {
+      "name": "Smart",
+      "desc": "Flat 100 credits/min; AI auto-reviews translations and auto-clones the voice, with no manual steps.",
+      "previewBadge": "Preview",
+      "previewDesc": "Clone the main speaker's voice and watch a watermarked 3-minute preview first (pre-charge {cost}). If you're happy, convert to the full version, charged per minute as usual.",
+      "tryPreview": "Try the 3-minute preview"
+    },
+    "freeQuota": "Free quota: {used} / {total} used"
+  },
+  "pricing": {
+    "title": "Charging",
+    "balance": "Currently available: {balance}",
+    "free": "Free mode isn't charged right now (free for a limited time) and keeps original-voice AI dubbing. Once per day, ≤10 min per clip, watermarked output. If you later need post-editing or a Jianying draft as paid add-ons, they'll be charged separately.",
+    "express": "Express is charged by source video duration, currently {rate}. Credits are pre-charged by the detected duration when you create a task; if your balance is short, creation stops — you can upgrade your plan on the billing page.",
+    "smart": "Smart is charged by source video duration, currently a base rate of {rate}. AI auto-reviews translations and handles the main speaker's voice as needed; if a new auto-clone is required, an extra {cloneCost} is pre-charged and released if no new clone happens. Current-phase limits: up to 3 main speakers; if the conditions aren't met, it auto-downgrades to Studio or refunds.",
+    "studio": "Studio is charged by source video duration, with a base rate of {rate}; higher / flagship audio quality is then charged at {high} / {flagship} credits/min respectively. Voice cloning is a separate one-time charge, and the clone dialog confirms the cost again."
+  },
+  "smartPause": {
+    "title": "Weak-match confirmation mode is on",
+    "body": "The administrator has enabled the \"weak-match confirmation\" policy: if the system finds a possibly matching voice in your personal voice library (but the similarity isn't strong enough), the task pauses at the voice-review page for you to confirm whether to reuse it before continuing. Reusing a personal voice doesn't consume clone credits; if you'd rather not reuse it, you can pick an official voice or clone again."
+  },
+  "language": {
+    "label": "Language direction",
+    "beta": " (beta)",
+    "comingSoon": " (coming soon)"
+  },
+  "advanced": {
+    "transcription": "Transcription method",
+    "assemblyai": "AssemblyAI (audio upload)",
+    "gemini": "Gemini multimodal (≤30 min)",
+    "speakers": "Number of speakers",
+    "speakerAuto": "Auto",
+    "speakerCount": "{n} speakers"
+  },
+  "footnote": "Express completes the whole flow automatically with no manual steps. Studio lets you review translations and clone the original voice.",
+  "creditGate": {
+    "upgrade": "Upgrade"
+  },
+  "duration": {
+    "upgrade": "Upgrade plan",
+    "fallbackOverMax": "This video is longer than your highest plan allows. Please use a shorter video, or contact support.",
+    "fallbackUpgrade": "This video is longer than your current plan allows; upgrade your plan to process longer videos."
+  },
+  "submit": {
+    "create": "Create task",
+    "submitting": "Creating…"
+  },
+  "toast": {
+    "created": "Task created: {title}",
+    "previewExpired": "This preview can no longer be converted to full (it may have expired). Please re-upload a video to create one.",
+    "stillActive": "You have an unfinished task. Please finish or cancel it before creating a new translation."
+  }
+}
