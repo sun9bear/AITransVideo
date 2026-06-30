@@ -26,6 +26,7 @@ import {
   markNotificationsRead,
   type NotificationView,
 } from "@/lib/api/notifications"
+import { useApiErrorMessage } from "@/lib/api/error-localization"
 import { useIntlLocale } from "@/lib/intl-locale"
 
 const TOPIC_KEYS = ["billing", "account", "artifact", "support", "maintenance"] as const
@@ -39,6 +40,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 
 export default function NotificationsPage() {
   const t = useTranslations("appNotifications")
+  const localizeError = useApiErrorMessage()
   const topicLabel = (topic: string): string =>
     (TOPIC_KEYS as readonly string[]).includes(topic)
       ? t(`topic.${topic}` as Parameters<typeof t>[0])
@@ -58,7 +60,7 @@ export default function NotificationsPage() {
       setItems(data.items)
       setUnread(data.unread_count)
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("error.loadFailed"))
+      setError(err instanceof Error ? localizeError(err) : t("error.loadFailed"))
     } finally {
       setLoading(false)
     }
@@ -91,7 +93,7 @@ export default function NotificationsPage() {
       await markNotificationsRead({ mark_all: true })
       await reload()
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("error.markFailed"))
+      setError(err instanceof Error ? localizeError(err) : t("error.markFailed"))
     }
   }
 
@@ -105,7 +107,7 @@ export default function NotificationsPage() {
       )
       setUnread((prev) => Math.max(0, prev - 1))
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("error.markFailed"))
+      setError(err instanceof Error ? localizeError(err) : t("error.markFailed"))
     }
   }
 
@@ -114,7 +116,7 @@ export default function NotificationsPage() {
       await archiveNotifications([id])
       setItems((prev) => prev.filter((n) => n.id !== id))
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("error.archiveFailed"))
+      setError(err instanceof Error ? localizeError(err) : t("error.archiveFailed"))
     }
   }
 

@@ -566,4 +566,18 @@ assert.equal(
 )
 assert.equal(zhApp.progress.starting, "任务已开始处理。", "app.progress.starting 漂移（红线 R1）")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app 字节一致 + en seo 双源同步 全部通过")
+// 8) UI-09（errors namespace）：客户端错误显示层本地化（lib/api/error-localization.ts）。
+//    errors.status.* / errors.timeout 的 zh 值＝client.ts statusFallbackMessage / timeout 串
+//    【逐字节】照搬；errors.generic zh＝lib/api/errors.ts getErrorMessage 兜底串照搬（红线 R1）。
+//    这些都是【前端自有】串（非后端文案），故无后端漂移风险；改任一值即 = 默认 zh 失败路径回归。
+//    timeout 的 {seconds} 占位符 verbatim（client.ts 写入 payload.timeoutSeconds，显示层 ICU 填充）。
+const zhErrors = JSON.parse(readFileSync(path.join(root, "messages/zh/errors.json"), "utf8"))
+assert.equal(zhErrors.status.unauthorized, "登录已过期，请重新登录", "errors.status.unauthorized 漂移（红线 R1，client.ts statusFallbackMessage 401）")
+assert.equal(zhErrors.status.forbidden, "没有权限执行此操作", "errors.status.forbidden 漂移（红线 R1，403）")
+assert.equal(zhErrors.status.notFound, "请求的资源不存在", "errors.status.notFound 漂移（红线 R1，404）")
+assert.equal(zhErrors.status.serviceUnavailable, "服务暂时不可用，请稍后重试", "errors.status.serviceUnavailable 漂移（红线 R1，502/503/504）")
+assert.equal(zhErrors.status.serverError, "服务器开小差了，请稍后重试", "errors.status.serverError 漂移（红线 R1，>=500）")
+assert.equal(zhErrors.timeout, "请求超时（{seconds} 秒无响应），请检查网络后重试", "errors.timeout 漂移（红线 R1，client.ts timeout，{seconds} 占位符 verbatim）")
+assert.equal(zhErrors.generic, "请求失败，请稍后重试。", "errors.generic 漂移（红线 R1，errors.ts getErrorMessage 兜底）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors 字节一致 + en seo 双源同步 全部通过")

@@ -1,0 +1,11 @@
+{
+  "generic": "Something went wrong. Please try again.",
+  "timeout": "The request timed out ({seconds}s with no response). Check your network and try again.",
+  "status": {
+    "unauthorized": "Your session has expired. Please sign in again.",
+    "forbidden": "You don't have permission to do that.",
+    "notFound": "The requested resource was not found.",
+    "serviceUnavailable": "The service is temporarily unavailable. Please try again shortly.",
+    "serverError": "Something went wrong on our end. Please try again."
+  }
+}

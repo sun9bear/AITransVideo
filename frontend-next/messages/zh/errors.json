@@ -1,0 +1,11 @@
+{
+  "generic": "请求失败，请稍后重试。",
+  "timeout": "请求超时（{seconds} 秒无响应），请检查网络后重试",
+  "status": {
+    "unauthorized": "登录已过期，请重新登录",
+    "forbidden": "没有权限执行此操作",
+    "notFound": "请求的资源不存在",
+    "serviceUnavailable": "服务暂时不可用，请稍后重试",
+    "serverError": "服务器开小差了，请稍后重试"
+  }
+}
