@@ -10,6 +10,12 @@ import auth from "../messages/zh/auth.json"
 import seo from "../messages/zh/seo.json"
 import billing from "../messages/zh/billing.json"
 import app from "../messages/zh/app.json"
+import appProjects from "../messages/zh/appProjects.json"
+import appVoices from "../messages/zh/appVoices.json"
+import appSettings from "../messages/zh/appSettings.json"
+import appHelp from "../messages/zh/appHelp.json"
+import appNotifications from "../messages/zh/appNotifications.json"
+import appBilling from "../messages/zh/appBilling.json"
 import { routing } from "./i18n/routing"
 
 type Messages = {
@@ -19,6 +25,12 @@ type Messages = {
   seo: typeof seo
   billing: typeof billing
   app: typeof app
+  appProjects: typeof appProjects
+  appVoices: typeof appVoices
+  appSettings: typeof appSettings
+  appHelp: typeof appHelp
+  appNotifications: typeof appNotifications
+  appBilling: typeof appBilling
 }
 
 declare module "next-intl" {

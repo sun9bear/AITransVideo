@@ -14,13 +14,32 @@ export default getRequestConfig(async ({ requestLocale }) => {
     ? requested
     : routing.defaultLocale
 
-  const [common, marketing, auth, seo, billing, app] = await Promise.all([
+  const [
+    common,
+    marketing,
+    auth,
+    seo,
+    billing,
+    app,
+    appProjects,
+    appVoices,
+    appSettings,
+    appHelp,
+    appNotifications,
+    appBilling,
+  ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
     import(`../../messages/${locale}/marketing.json`),
     import(`../../messages/${locale}/auth.json`),
     import(`../../messages/${locale}/seo.json`),
     import(`../../messages/${locale}/billing.json`),
     import(`../../messages/${locale}/app.json`),
+    import(`../../messages/${locale}/appProjects.json`),
+    import(`../../messages/${locale}/appVoices.json`),
+    import(`../../messages/${locale}/appSettings.json`),
+    import(`../../messages/${locale}/appHelp.json`),
+    import(`../../messages/${locale}/appNotifications.json`),
+    import(`../../messages/${locale}/appBilling.json`),
   ])
 
   return {
@@ -32,6 +51,12 @@ export default getRequestConfig(async ({ requestLocale }) => {
       seo: seo.default,
       billing: billing.default,
       app: app.default,
+      appProjects: appProjects.default,
+      appVoices: appVoices.default,
+      appSettings: appSettings.default,
+      appHelp: appHelp.default,
+      appNotifications: appNotifications.default,
+      appBilling: appBilling.default,
     },
   }
 })

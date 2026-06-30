@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useState } from "react"
+import { useTranslations } from "next-intl"
 import { FileText, Loader2 } from "lucide-react"
 import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
@@ -25,32 +26,39 @@ import {
 } from "@/lib/billing/get-order-history"
 import { useIntlLocale } from "@/lib/intl-locale"
 
+/** Translator scoped to the `appBilling` namespace (relative keys). */
+type BillingTranslator = ReturnType<typeof useTranslations<"appBilling">>
+/** Literal message-key type for appBilling — lets label-key maps stay typed. */
+type BillingKey = Parameters<BillingTranslator>[0]
+
 type State =
   | { status: "loading" }
   | { status: "ready"; invoices: BillingInvoice[] }
   | { status: "error"; message: string }
 
-const PERIOD_LABELS: Record<string, string> = {
-  monthly: "月付",
-  quarterly: "季付",
-  annual: "年付",
+const PERIOD_LABEL_KEYS: Record<string, BillingKey> = {
+  monthly: "period.monthly",
+  quarterly: "period.quarterly",
+  annual: "period.annual",
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
-  fake: "测试支付",
-  alipay: "支付宝",
-  wechatpay: "微信支付",
-  stripe: "Stripe",
-  paypal: "PayPal",
+const PROVIDER_LABEL_KEYS: Record<string, BillingKey> = {
+  fake: "provider.fake",
+  alipay: "provider.alipay",
+  wechatpay: "provider.wechatpay",
+  stripe: "provider.stripe",
+  paypal: "provider.paypal",
 }
 
+// Status → { label key, tone }. The label is resolved at render time via the
+// active translator; tone drives the pill colour (purely presentational).
 const STATUS_META: Record<
   string,
-  { label: string; tone: "ok" | "warn" | "error" | "neutral" }
+  { labelKey: BillingKey; tone: "ok" | "warn" | "error" | "neutral" }
 > = {
-  paid: { label: "已支付", tone: "ok" },
-  failed: { label: "失败", tone: "error" },
-  refunded: { label: "已退款", tone: "warn" },
+  paid: { labelKey: "history.status.paid", tone: "ok" },
+  failed: { labelKey: "history.status.failed", tone: "error" },
+  refunded: { labelKey: "history.status.refunded", tone: "warn" },
 }
 
 function formatYuan(amountFen: number, currency: string): string {
@@ -83,14 +91,16 @@ function formatDateTime(iso: string | null, formatLocale: string): string {
   }
 }
 
-function StatusPill({ status }: { status: string }) {
-  const meta = STATUS_META[status] ?? { label: status, tone: "neutral" as const }
+function StatusPill({ status, t }: { status: string; t: BillingTranslator }) {
+  const meta = STATUS_META[status]
+  const label = meta ? t(meta.labelKey) : status
+  const tone = meta?.tone ?? "neutral"
   const colorClass =
-    meta.tone === "ok"
+    tone === "ok"
       ? "border-primary/30 bg-primary/5 text-primary"
-      : meta.tone === "error"
+      : tone === "error"
         ? "border-destructive/40 bg-destructive/5 text-destructive"
-        : meta.tone === "warn"
+        : tone === "warn"
           ? "border-amber-500/40 bg-amber-500/5 text-amber-600 dark:text-amber-400"
           : "border-border bg-muted/30 text-muted-foreground"
   return (
@@ -100,21 +110,21 @@ function StatusPill({ status }: { status: string }) {
         colorClass,
       )}
     >
-      {meta.label}
+      {label}
     </span>
   )
 }
 
-function EmptyState() {
+function EmptyState({ t }: { t: BillingTranslator }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-border bg-muted/20 py-10 text-center">
       <FileText
         className="h-8 w-8 text-muted-foreground/60"
         aria-hidden="true"
       />
-      <p className="mt-3 text-sm font-medium text-foreground">暂无账单记录</p>
+      <p className="mt-3 text-sm font-medium text-foreground">{t("history.emptyTitle")}</p>
       <p className="mt-1 text-xs text-muted-foreground">
-        完成首次付费后,账单会在这里出现。
+        {t("history.emptyBody")}
       </p>
     </div>
   )
@@ -131,6 +141,7 @@ function LoadingState() {
 }
 
 export function OrderHistory() {
+  const t = useTranslations("appBilling")
   const [state, setState] = useState<State>({ status: "loading" })
   const formatLocale = useIntlLocale()
 
@@ -143,25 +154,25 @@ export function OrderHistory() {
         setState({ status: "ready", invoices: res.invoices ?? [] })
       } catch (err) {
         if (cancelled) return
-        const message = err instanceof Error ? err.message : "加载账单失败"
+        const message = err instanceof Error ? err.message : t("history.loadError")
         setState({ status: "error", message })
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [t])
 
   return (
     <section
-      aria-label="账单历史"
+      aria-label={t("history.sectionLabel")}
       className="rounded-lg border border-border bg-card p-6"
     >
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold text-foreground">账单历史</h2>
+          <h2 className="text-base font-semibold text-foreground">{t("history.title")}</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            显示你的付费记录,按创建时间倒序排列。
+            {t("history.subtitle")}
           </p>
         </div>
       </div>
@@ -171,23 +182,23 @@ export function OrderHistory() {
         {state.status === "error" && (
           <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 shrink-0" aria-hidden="true" />
-            <span>账单暂时无法加载,请稍后重试。</span>
+            <span>{t("history.loadFailedInline")}</span>
           </div>
         )}
         {state.status === "ready" && state.invoices.length === 0 && (
-          <EmptyState />
+          <EmptyState t={t} />
         )}
         {state.status === "ready" && state.invoices.length > 0 && (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-left text-xs uppercase tracking-wider text-muted-foreground">
-                  <th className="py-2 pr-4 font-medium">时间</th>
-                  <th className="py-2 pr-4 font-medium">套餐</th>
-                  <th className="py-2 pr-4 font-medium">周期</th>
-                  <th className="py-2 pr-4 font-medium">渠道</th>
-                  <th className="py-2 pr-4 font-medium">状态</th>
-                  <th className="py-2 text-right font-medium">金额</th>
+                  <th className="py-2 pr-4 font-medium">{t("history.colTime")}</th>
+                  <th className="py-2 pr-4 font-medium">{t("history.colPlan")}</th>
+                  <th className="py-2 pr-4 font-medium">{t("history.colPeriod")}</th>
+                  <th className="py-2 pr-4 font-medium">{t("history.colProvider")}</th>
+                  <th className="py-2 pr-4 font-medium">{t("history.colStatus")}</th>
+                  <th className="py-2 text-right font-medium">{t("history.colAmount")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -203,13 +214,17 @@ export function OrderHistory() {
                       {inv.plan_code.toUpperCase()}
                     </td>
                     <td className="py-3 pr-4 text-muted-foreground">
-                      {PERIOD_LABELS[inv.billing_period] ?? inv.billing_period}
+                      {PERIOD_LABEL_KEYS[inv.billing_period]
+                        ? t(PERIOD_LABEL_KEYS[inv.billing_period])
+                        : inv.billing_period}
                     </td>
                     <td className="py-3 pr-4 text-muted-foreground">
-                      {PROVIDER_LABELS[inv.provider] ?? inv.provider}
+                      {PROVIDER_LABEL_KEYS[inv.provider]
+                        ? t(PROVIDER_LABEL_KEYS[inv.provider])
+                        : inv.provider}
                     </td>
                     <td className="py-3 pr-4">
-                      <StatusPill status={inv.status} />
+                      <StatusPill status={inv.status} t={t} />
                     </td>
                     <td className="py-3 text-right font-medium tabular-nums text-foreground">
                       {formatInvoiceAmount(inv)}

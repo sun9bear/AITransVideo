@@ -26,6 +26,7 @@
  */
 
 import { Suspense, useEffect, useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { Loader2 } from "lucide-react"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -53,6 +54,7 @@ type PageState =
   | { status: "error"; message: string }
 
 export default function BillingPage() {
+  const t = useTranslations("appSettings")
   const [state, setState] = useState<PageState>({ status: "loading" })
   const [refetchToken, setRefetchToken] = useState(0)
 
@@ -78,7 +80,7 @@ export default function BillingPage() {
         })
       } catch (err) {
         if (cancelled) return
-        const message = err instanceof Error ? err.message : "加载失败"
+        const message = err instanceof Error ? err.message : t("billing.loadFailed")
         setState({ status: "error", message })
       }
     })()
@@ -99,9 +101,9 @@ export default function BillingPage() {
   return (
     <div className="space-y-6">
       <header>
-        <h1 className="text-2xl font-bold text-foreground">订阅与账单</h1>
+        <h1 className="text-2xl font-bold text-foreground">{t("billing.title")}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          查看你的当前套餐、付费记录,并在需要时升级到付费方案。
+          {t("billing.subtitle")}
         </p>
       </header>
 
@@ -125,7 +127,7 @@ export default function BillingPage() {
       {state.status === "error" && (
         <div className="rounded-lg border border-border bg-card p-6">
           <p className="text-sm text-muted-foreground">
-            {state.message || "加载失败,请稍后重试"}
+            {state.message || t("billing.loadFailedRetry")}
           </p>
           <Button
             variant="outline"
@@ -134,7 +136,7 @@ export default function BillingPage() {
             onClick={handleRetry}
           >
             <Loader2 className="mr-2 h-3 w-3" />
-            重试
+            {t("billing.retry")}
           </Button>
         </div>
       )}
@@ -156,21 +158,21 @@ export default function BillingPage() {
           */}
           <OrderHistory />
           <p className="text-xs text-muted-foreground">
-            查看
+            {t("billing.footerView")}
             <Link
               href="/pricing"
               className="mx-1 text-primary hover:text-primary/80 transition-colors"
             >
-              完整套餐对比
+              {t("billing.footerPlanCompare")}
             </Link>
-            或返回
+            {t("billing.footerOrReturn")}
             <Link
               href="/settings"
               className="ml-1 text-primary hover:text-primary/80 transition-colors"
             >
-              工作台
+              {t("billing.footerWorkspace")}
             </Link>
-            。
+            {t("billing.footerPeriod")}
           </p>
         </>
       )}

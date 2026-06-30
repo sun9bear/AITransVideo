@@ -1,0 +1,33 @@
+{
+  "page": {
+    "title": "Notifications",
+    "summary": "{unread} unread · {total} total"
+  },
+  "filter": {
+    "all": "All",
+    "unread": "Unread",
+    "markAllRead": "Mark all as read"
+  },
+  "topic": {
+    "all": "All topics",
+    "billing": "Billing",
+    "account": "Account",
+    "artifact": "Tasks",
+    "support": "Support",
+    "maintenance": "System"
+  },
+  "state": {
+    "loading": "Loading…",
+    "empty": "No matching notifications."
+  },
+  "action": {
+    "view": "View",
+    "markRead": "Mark read",
+    "archive": "Archive"
+  },
+  "error": {
+    "loadFailed": "Failed to load notifications",
+    "markFailed": "Failed to update",
+    "archiveFailed": "Failed to archive"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "header": {
+    "title": "Help Center",
+    "intro": "Start with the topics below. If none of them solve your issue, click the “Support” launcher in the bottom-right corner — our AI assistant will try to help first and hand off to a human when needed."
+  },
+  "topics": {
+    "billing": {
+      "title": "Trials, Plans & Billing",
+      "body": "Trial rules, plan comparisons, how video duration is counted, no charge for failed jobs, and more."
+    },
+    "uploadAuth": {
+      "title": "Uploading Videos & Rights",
+      "body": "Supported video sources (local file / YouTube / other links) and the rights you need to confirm."
+    },
+    "expressStudio": {
+      "title": "Express vs. Studio Mode",
+      "body": "The differences between the two processing modes and which one to pick for your use case."
+    },
+    "jianyingDraft": {
+      "title": "Downloading CapCut Drafts & Asset Packs",
+      "body": "Where to download, when to regenerate, and how to keep editing in CapCut."
+    },
+    "failureTroubleshooting": {
+      "title": "Troubleshooting Failed Jobs",
+      "body": "Common failure causes, retry strategies, and whether credits are charged."
+    },
+    "refundPrivacy": {
+      "title": "Refunds, Copyright & Privacy",
+      "body": "These cases are handled directly by our support team — reach out via the support launcher or email."
+    }
+  },
+  "contact": {
+    "title": "Contact Human Support",
+    "intro": "Click the “Support” launcher in the bottom-right corner to start a chat. When the AI agent can’t resolve your issue — or it involves billing, refunds, copyright, or privacy — a human ticket is created automatically and our team replies by email.",
+    "emailPrefix": "You can also email us directly at",
+    "emailSuffix": "."
+  }
+}

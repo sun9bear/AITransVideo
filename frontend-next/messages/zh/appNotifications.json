@@ -1,0 +1,33 @@
+{
+  "page": {
+    "title": "通知中心",
+    "summary": "未读 {unread} 条 · 共 {total} 条"
+  },
+  "filter": {
+    "all": "全部",
+    "unread": "未读",
+    "markAllRead": "全部标为已读"
+  },
+  "topic": {
+    "all": "全部话题",
+    "billing": "账单",
+    "account": "账户",
+    "artifact": "任务",
+    "support": "客服",
+    "maintenance": "系统"
+  },
+  "state": {
+    "loading": "加载中…",
+    "empty": "没有匹配的通知。"
+  },
+  "action": {
+    "view": "查看",
+    "markRead": "标已读",
+    "archive": "归档"
+  },
+  "error": {
+    "loadFailed": "加载通知失败",
+    "markFailed": "标记失败",
+    "archiveFailed": "归档失败"
+  }
+}

@@ -16,20 +16,26 @@
  *   slot, distinct from paid subscription.
  */
 
+import { useTranslations } from "next-intl"
 import type { MeSubscriptionResponse } from "@/lib/billing/get-subscription"
 import { useIntlLocale } from "@/lib/intl-locale"
 
-const PERIOD_LABELS: Record<string, string> = {
-  monthly: "月付",
-  quarterly: "季付",
-  annual: "年付",
+/** Translator scoped to the `appBilling` namespace (relative keys). */
+type BillingTranslator = ReturnType<typeof useTranslations<"appBilling">>
+/** Literal message-key type for appBilling — lets label-key maps stay typed. */
+type BillingKey = Parameters<BillingTranslator>[0]
+
+const PERIOD_LABEL_KEYS: Record<string, BillingKey> = {
+  monthly: "period.monthly",
+  quarterly: "period.quarterly",
+  annual: "period.annual",
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
-  fake: "测试支付",
-  alipay: "支付宝",
-  wechatpay: "微信支付",
-  stripe: "Stripe",
+const PROVIDER_LABEL_KEYS: Record<string, BillingKey> = {
+  fake: "provider.fake",
+  alipay: "provider.alipay",
+  wechatpay: "provider.wechatpay",
+  stripe: "provider.stripe",
 }
 
 function formatDate(iso: string | null, formatLocale: string): string {
@@ -46,12 +52,14 @@ function formatDate(iso: string | null, formatLocale: string): string {
   }
 }
 
-function providerLabel(provider: string): string {
-  return PROVIDER_LABELS[provider] ?? provider
+function providerLabel(t: BillingTranslator, provider: string): string {
+  const key = PROVIDER_LABEL_KEYS[provider]
+  return key ? t(key) : provider
 }
 
-function periodLabel(period: string): string {
-  return PERIOD_LABELS[period] ?? period
+function periodLabel(t: BillingTranslator, period: string): string {
+  const key = PERIOD_LABEL_KEYS[period]
+  return key ? t(key) : period
 }
 
 function TrialLine({
@@ -61,6 +69,7 @@ function TrialLine({
   granted_at: string | null
   ends_at: string | null
 }) {
+  const t = useTranslations("appBilling")
   const formatLocale = useIntlLocale()
   // No granted_at → user has never gone through the phone-auth trial-grant
   // path. Render nothing; the summary still reads cleanly.
@@ -69,14 +78,19 @@ function TrialLine({
   if (!ends_at) {
     return (
       <p className="mt-3 rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-        试用已于 {formatDate(granted_at, formatLocale)} 发放。
+        {t("subscription.trialGranted", {
+          date: formatDate(granted_at, formatLocale),
+        })}
       </p>
     )
   }
 
   return (
     <p className="mt-3 rounded-md border border-dashed border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-      试用已于 {formatDate(granted_at, formatLocale)} 发放,到期时间 {formatDate(ends_at, formatLocale)}。
+      {t("subscription.trialGrantedWithEnd", {
+        granted: formatDate(granted_at, formatLocale),
+        ends: formatDate(ends_at, formatLocale),
+      })}
     </p>
   )
 }
@@ -86,22 +100,23 @@ export function SubscriptionSummary({
 }: {
   subscription: MeSubscriptionResponse
 }) {
+  const t = useTranslations("appBilling")
   const active = subscription.subscription
   const formatLocale = useIntlLocale()
 
   if (subscription.subscription_status !== "active" || !active) {
     return (
       <section
-        aria-label="当前订阅"
+        aria-label={t("subscription.sectionLabel")}
         className="rounded-lg border border-border bg-card p-6"
       >
-        <h2 className="text-base font-semibold text-foreground">当前订阅</h2>
+        <h2 className="text-base font-semibold text-foreground">{t("subscription.title")}</h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          你还没有付费订阅。当前账户按
+          {t("subscription.noneBody")}
           <span className="mx-1 font-medium text-foreground">
             {subscription.plan_code.toUpperCase()}
           </span>
-          套餐运行。
+          {t("subscription.planRunSuffix")}
         </p>
         <TrialLine
           granted_at={subscription.trial.granted_at}
@@ -113,54 +128,54 @@ export function SubscriptionSummary({
 
   return (
     <section
-      aria-label="当前订阅"
+      aria-label={t("subscription.sectionLabel")}
       className="rounded-lg border border-border bg-card p-6"
     >
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold text-foreground">当前订阅</h2>
+          <h2 className="text-base font-semibold text-foreground">{t("subscription.title")}</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            以下信息为服务器实际记录,不含自动续费承诺。
+            {t("subscription.subtitle")}
           </p>
         </div>
         <span className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-2.5 py-0.5 text-xs font-medium text-primary">
-          {active.status === "active" ? "生效中" : active.status}
+          {active.status === "active" ? t("subscription.active") : active.status}
         </span>
       </div>
 
       <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-2">
         <div>
-          <dt className="text-xs text-muted-foreground">套餐</dt>
+          <dt className="text-xs text-muted-foreground">{t("subscription.planLabel")}</dt>
           <dd className="mt-0.5 font-medium text-foreground">
             {active.plan_code.toUpperCase()}
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">计费周期</dt>
+          <dt className="text-xs text-muted-foreground">{t("subscription.periodLabel")}</dt>
           <dd className="mt-0.5 font-medium text-foreground">
-            {periodLabel(active.billing_period)}
+            {periodLabel(t, active.billing_period)}
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">支付方式</dt>
+          <dt className="text-xs text-muted-foreground">{t("subscription.providerLabel")}</dt>
           <dd className="mt-0.5 font-medium text-foreground">
-            {providerLabel(active.provider)}
+            {providerLabel(t, active.provider)}
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">本期开始</dt>
+          <dt className="text-xs text-muted-foreground">{t("subscription.periodStart")}</dt>
           <dd className="mt-0.5 font-medium text-foreground">
             {formatDate(active.current_period_start, formatLocale)}
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">本期结束</dt>
+          <dt className="text-xs text-muted-foreground">{t("subscription.periodEnd")}</dt>
           <dd className="mt-0.5 font-medium text-foreground">
             {formatDate(active.current_period_end, formatLocale)}
           </dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">订阅起始</dt>
+          <dt className="text-xs text-muted-foreground">{t("subscription.subscriptionStart")}</dt>
           <dd className="mt-0.5 font-medium text-foreground">
             {formatDate(active.started_at, formatLocale)}
           </dd>

@@ -43,10 +43,12 @@ const PLAN_RANK: Record<string, number> = {
   pro: 2,
 }
 
-const PERIOD_LABELS: Record<BillingPeriod, string> = {
-  monthly: "月付",
-  quarterly: "季付",
-  annual: "年付",
+type BillingKey = Parameters<ReturnType<typeof useTranslations<"appBilling">>>[0]
+
+const PERIOD_LABEL_KEYS: Record<BillingPeriod, BillingKey> = {
+  monthly: "period.monthly",
+  quarterly: "period.quarterly",
+  annual: "period.annual",
 }
 
 const ACTIVE_CHOICE_CLASS =
@@ -94,6 +96,7 @@ export function CheckoutCard({
   onOrderSettled,
 }: CheckoutCardProps) {
   const t = useTranslations("billing")
+  const tb = useTranslations("appBilling")
   const paidPlans = useMemo(
     () => plans.filter((p) => p.price_cny_fen !== null),
     [plans],
@@ -165,7 +168,7 @@ export function CheckoutCard({
   const providerEntry = checkoutConfig?.providers.find(
     (p) => p.code === selectedProvider,
   )
-  const providerDisplay = providerEntry?.display_name ?? "测试支付"
+  const providerDisplay = providerEntry?.display_name ?? tb("checkout.providerDefault")
   const providerOperational = providerEntry?.operational ?? true
 
   const canCheckout =
@@ -210,7 +213,7 @@ export function CheckoutCard({
         return
       }
       if (!result.checkout_url) {
-        throw new Error("未收到支付链接,请稍后重试")
+        throw new Error(tb("checkout.errorNoCheckoutUrl"))
       }
       // Hand off to the provider checkout URL immediately — every ms of delay
       // on the pay CTA is conversion loss, and a toast would be destroyed by
@@ -219,7 +222,7 @@ export function CheckoutCard({
       setRedirecting(true)
       window.location.assign(result.checkout_url)
     } catch (err) {
-      const message = err instanceof Error ? err.message : "创建订单失败"
+      const message = err instanceof Error ? err.message : tb("checkout.errorCreateOrder")
       toast.error(message)
       setRedirecting(false)
       setSubmitting(false)
@@ -229,7 +232,7 @@ export function CheckoutCard({
   if (paidPlans.length === 0) {
     return (
       <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
-        当前没有可购买的套餐。
+        {tb("checkout.noPlans")}
       </div>
     )
   }
@@ -237,15 +240,15 @@ export function CheckoutCard({
   return (
     <div className="rounded-lg border border-border bg-card p-6 space-y-6">
       <div>
-        <h3 className="text-base font-semibold text-foreground">选择套餐</h3>
+        <h3 className="text-base font-semibold text-foreground">{tb("checkout.title")}</h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          支付完成后将立即升级你的账户权益。
+          {tb("checkout.subtitle")}
         </p>
       </div>
 
       {/* Plan picker */}
       <div>
-        <Label className="text-xs font-medium text-muted-foreground">套餐</Label>
+        <Label className="text-xs font-medium text-muted-foreground">{tb("checkout.planLabel")}</Label>
         <div className="mt-2 grid gap-2 sm:grid-cols-2">
           {paidPlans.map((plan) => {
             const rank = PLAN_RANK[plan.code] ?? 0
@@ -265,11 +268,14 @@ export function CheckoutCard({
               >
                 <div className="text-sm font-semibold">{plan.display_name}</div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  单次视频 {plan.max_duration_minutes} 分钟 · {plan.max_concurrent_jobs} 个并行任务
+                  {tb("checkout.planMeta", {
+                    minutes: plan.max_duration_minutes,
+                    jobs: plan.max_concurrent_jobs,
+                  })}
                 </div>
                 {disabled && (
                   <div className="mt-1 text-[11px] text-muted-foreground">
-                    当前套餐已覆盖此级别
+                    {tb("checkout.planCovered")}
                   </div>
                 )}
               </button>
@@ -282,7 +288,7 @@ export function CheckoutCard({
       {periods.length > 1 && (
         <div>
           <Label className="text-xs font-medium text-muted-foreground">
-            计费周期
+            {tb("checkout.periodLabel")}
           </Label>
           <div className="mt-2 flex flex-wrap gap-2">
             {periods.map((p) => (
@@ -297,7 +303,7 @@ export function CheckoutCard({
                     : "border-border bg-background text-muted-foreground hover:text-foreground",
                 )}
               >
-                {PERIOD_LABELS[p]}
+                {tb(PERIOD_LABEL_KEYS[p])}
               </button>
             ))}
           </div>
@@ -309,7 +315,7 @@ export function CheckoutCard({
       {operationalProviders.length > 1 && (
         <div>
           <Label className="text-xs font-medium text-muted-foreground">
-            支付方式
+            {tb("checkout.providerLabel")}
           </Label>
           <div className="mt-2 grid gap-2 sm:grid-cols-2">
             {operationalProviders.map((p) => {
@@ -351,13 +357,13 @@ export function CheckoutCard({
       {/* Summary */}
       <div className="rounded-md border border-border bg-background px-4 py-3 text-sm">
         <div className="flex items-center justify-between">
-          <span className="text-muted-foreground">应付金额</span>
+          <span className="text-muted-foreground">{tb("checkout.amountDue")}</span>
           <span className="text-lg font-semibold tabular-nums text-foreground">
             {priceFen != null ? formatYuan(priceFen) : "--"}
           </span>
         </div>
         <div className="mt-2 flex items-center justify-between text-xs">
-          <span className="text-muted-foreground">支付方式</span>
+          <span className="text-muted-foreground">{tb("checkout.providerLabel")}</span>
           <span
             className={cn(
               "text-foreground",
@@ -365,7 +371,7 @@ export function CheckoutCard({
             )}
           >
             {providerDisplay}
-            {!providerOperational && <span className="ml-1">(暂未开放)</span>}
+            {!providerOperational && <span className="ml-1">{tb("checkout.providerUnavailable")}</span>}
           </span>
         </div>
         {selectedProvider === "paypal" && paypalUsdCents != null && (
@@ -385,11 +391,11 @@ export function CheckoutCard({
         onClick={handleCheckout}
       >
         {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-        {redirecting ? "正在跳转支付页…" : submitting ? "正在创建订单…" : "立即支付"}
+        {redirecting ? tb("checkout.redirecting") : submitting ? tb("checkout.submitting") : tb("checkout.pay")}
       </Button>
 
       <p className="text-xs leading-relaxed text-muted-foreground">
-        支付渠道和价格均由服务器侧配置,试用与退款规则参见后续通知。本次支付仅创建当前选中套餐的订单,不会自动续费。
+        {tb("checkout.footnote")}
       </p>
 
       {qrCheckout && (
@@ -405,7 +411,7 @@ export function CheckoutCard({
             } catch {
               // non-fatal
             }
-            toast.success("支付成功,订阅已更新")
+            toast.success(tb("checkout.paidToast"))
             onOrderSettled?.()
           }}
         />

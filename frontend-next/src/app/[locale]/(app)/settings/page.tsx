@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useTranslations } from "next-intl"
 import { Link } from "@/i18n/navigation"
 import { useRouter } from "@/i18n/navigation"
 import { useSession } from "@/components/providers/session-provider"
@@ -12,8 +13,9 @@ import { Label } from "@/components/ui/label"
 import { toast } from "sonner"
 import { useIntlLocale } from "@/lib/intl-locale"
 
+// Non-"free" plan codes render as their proper-noun brand names (not localized);
+// the "free" plan label is localized via t("account.planLabel.free").
 const PLAN_LABELS: Record<string, string> = {
-  free: "免费版",
   plus: "Plus",
   pro: "Pro",
 }
@@ -26,6 +28,7 @@ function maskPhone(phone: string): string {
 }
 
 export default function SettingsPage() {
+  const t = useTranslations("appSettings")
   const { user, loading } = useSession()
   const router = useRouter()
   const formatLocale = useIntlLocale()
@@ -33,7 +36,7 @@ export default function SettingsPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">账户设置</h1>
+        <h1 className="text-2xl font-bold">{t("account.title")}</h1>
         <div className="animate-pulse space-y-4">
           <div className="h-40 rounded-lg bg-muted" />
           <div className="h-40 rounded-lg bg-muted" />
@@ -45,25 +48,30 @@ export default function SettingsPage() {
   if (!user) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">账户设置</h1>
-        <p className="text-muted-foreground">请先登录。</p>
+        <h1 className="text-2xl font-bold">{t("account.title")}</h1>
+        <p className="text-muted-foreground">{t("account.loginPrompt")}</p>
       </div>
     )
   }
 
+  const planLabel =
+    user.plan_code && user.plan_code !== "free"
+      ? PLAN_LABELS[user.plan_code] ?? user.plan_code
+      : t("account.planLabel.free")
+
   return (
     <div className="space-y-6 max-w-2xl">
-      <h1 className="text-2xl font-bold">账户设置</h1>
+      <h1 className="text-2xl font-bold">{t("account.title")}</h1>
 
       {/* 个人信息 */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">个人信息</CardTitle>
+          <CardTitle className="text-base">{t("profile.title")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <InfoRow label="手机号" value={user.phone_number ? maskPhone(user.phone_number) : "未绑定"} />
-          <InfoRow label="邮箱" value={user.email || "未绑定"} />
-          <InfoRow label="显示名称" value={user.display_name || "—"} />
+          <InfoRow label={t("profile.phone")} value={user.phone_number ? maskPhone(user.phone_number) : t("profile.notBound")} />
+          <InfoRow label={t("profile.email")} value={user.email || t("profile.notBound")} />
+          <InfoRow label={t("profile.displayName")} value={user.display_name || "—"} />
         </CardContent>
       </Card>
 
@@ -76,12 +84,12 @@ export default function SettingsPage() {
       {/* 套餐信息 */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">套餐信息</CardTitle>
+          <CardTitle className="text-base">{t("plan.title")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <InfoRow label="当前套餐" value={PLAN_LABELS[user.plan_code ?? "free"] ?? user.plan_code ?? "免费版"} />
+          <InfoRow label={t("plan.current")} value={planLabel} />
           <Link href="/settings/billing">
-            <Button variant="outline" size="sm">查看账单与订阅</Button>
+            <Button variant="outline" size="sm">{t("plan.viewBilling")}</Button>
           </Link>
         </CardContent>
       </Card>
@@ -89,12 +97,12 @@ export default function SettingsPage() {
       {/* 账户信息 */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">账户信息</CardTitle>
+          <CardTitle className="text-base">{t("accountInfo.title")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <InfoRow label="注册时间" value={user.created_at ? new Date(user.created_at).toLocaleDateString(formatLocale) : "—"} />
-          <InfoRow label="账户角色" value={user.role === "admin" ? "管理员" : "普通用户"} />
-          <InfoRow label="账户 ID" value={user.id.slice(0, 8) + "..."} />
+          <InfoRow label={t("accountInfo.registeredAt")} value={user.created_at ? new Date(user.created_at).toLocaleDateString(formatLocale) : "—"} />
+          <InfoRow label={t("accountInfo.role")} value={user.role === "admin" ? t("accountInfo.roleAdmin") : t("accountInfo.roleUser")} />
+          <InfoRow label={t("accountInfo.accountId")} value={user.id.slice(0, 8) + "..."} />
         </CardContent>
       </Card>
 
@@ -106,11 +114,11 @@ export default function SettingsPage() {
             onClick={async () => {
               await fetch("/auth/logout", { method: "POST", credentials: "include" })
               clearAnonConvertReady()
-              toast.success("已退出登录")
+              toast.success(t("logout.success"))
               router.push("/auth")
             }}
           >
-            退出登录
+            {t("logout.button")}
           </Button>
         </CardContent>
       </Card>
@@ -128,6 +136,7 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 }
 
 function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
+  const t = useTranslations("appSettings")
   const [oldPwd, setOldPwd] = useState("")
   const [newPwd, setNewPwd] = useState("")
   const [confirmPwd, setConfirmPwd] = useState("")
@@ -135,11 +144,11 @@ function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
 
   async function handleSubmit() {
     if (newPwd.length < 12) {
-      toast.error("新密码长度至少 12 位")
+      toast.error(t("password.tooShort"))
       return
     }
     if (newPwd !== confirmPwd) {
-      toast.error("两次输入的密码不一致")
+      toast.error(t("password.mismatch"))
       return
     }
     setSubmitting(true)
@@ -152,14 +161,14 @@ function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail || "修改失败")
+        throw new Error(data.detail || t("password.changeFailed"))
       }
-      toast.success("密码修改成功")
+      toast.success(t("password.changeSuccess"))
       setOldPwd("")
       setNewPwd("")
       setConfirmPwd("")
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "修改失败")
+      toast.error(e instanceof Error ? e.message : t("password.changeFailed"))
     } finally {
       setSubmitting(false)
     }
@@ -168,25 +177,25 @@ function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{hasPassword ? "修改密码" : "设置密码"}</CardTitle>
+        <CardTitle className="text-base">{hasPassword ? t("password.changeTitle") : t("password.setTitle")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 max-w-sm">
         {hasPassword && (
           <div className="space-y-1">
-            <Label htmlFor="old-pwd">当前密码</Label>
+            <Label htmlFor="old-pwd">{t("password.current")}</Label>
             <Input id="old-pwd" type="password" value={oldPwd} onChange={(e) => setOldPwd(e.target.value)} />
           </div>
         )}
         <div className="space-y-1">
-          <Label htmlFor="new-pwd">新密码</Label>
+          <Label htmlFor="new-pwd">{t("password.new")}</Label>
           <Input id="new-pwd" type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)} />
         </div>
         <div className="space-y-1">
-          <Label htmlFor="confirm-pwd">确认新密码</Label>
+          <Label htmlFor="confirm-pwd">{t("password.confirm")}</Label>
           <Input id="confirm-pwd" type="password" value={confirmPwd} onChange={(e) => setConfirmPwd(e.target.value)} />
         </div>
         <Button size="sm" onClick={handleSubmit} disabled={submitting}>
-          {submitting ? "提交中..." : "保存"}
+          {submitting ? t("password.submitting") : t("password.save")}
         </Button>
       </CardContent>
     </Card>
@@ -194,12 +203,13 @@ function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
 }
 
 function BindEmailCard() {
+  const t = useTranslations("appSettings")
   const [email, setEmail] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSubmit() {
     if (!email || !email.includes("@")) {
-      toast.error("请输入有效的邮箱地址")
+      toast.error(t("bindEmail.invalidEmail"))
       return
     }
     setSubmitting(true)
@@ -212,12 +222,12 @@ function BindEmailCard() {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail || "绑定失败")
+        throw new Error(data.detail || t("bindEmail.bindFailed"))
       }
-      toast.success("邮箱绑定成功")
+      toast.success(t("bindEmail.bindSuccess"))
       window.location.reload()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "绑定失败")
+      toast.error(e instanceof Error ? e.message : t("bindEmail.bindFailed"))
     } finally {
       setSubmitting(false)
     }
@@ -226,15 +236,15 @@ function BindEmailCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">绑定邮箱</CardTitle>
+        <CardTitle className="text-base">{t("bindEmail.title")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 max-w-sm">
         <div className="space-y-1">
-          <Label htmlFor="bind-email">邮箱地址</Label>
+          <Label htmlFor="bind-email">{t("bindEmail.addressLabel")}</Label>
           <Input id="bind-email" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
         </div>
         <Button size="sm" onClick={handleSubmit} disabled={submitting}>
-          {submitting ? "绑定中..." : "绑定"}
+          {submitting ? t("bindEmail.binding") : t("bindEmail.bind")}
         </Button>
       </CardContent>
     </Card>

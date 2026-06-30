@@ -18,6 +18,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react"
+import { useTranslations } from "next-intl"
 
 import {
   archiveNotifications,
@@ -27,13 +28,7 @@ import {
 } from "@/lib/api/notifications"
 import { useIntlLocale } from "@/lib/intl-locale"
 
-const TOPIC_LABELS: Record<string, string> = {
-  billing: "账单",
-  account: "账户",
-  artifact: "任务",
-  support: "客服",
-  maintenance: "系统",
-}
+const TOPIC_KEYS = ["billing", "account", "artifact", "support", "maintenance"] as const
 
 const SEVERITY_COLORS: Record<string, string> = {
   info: "border-border bg-card",
@@ -43,6 +38,11 @@ const SEVERITY_COLORS: Record<string, string> = {
 }
 
 export default function NotificationsPage() {
+  const t = useTranslations("appNotifications")
+  const topicLabel = (topic: string): string =>
+    (TOPIC_KEYS as readonly string[]).includes(topic)
+      ? t(`topic.${topic}` as Parameters<typeof t>[0])
+      : topic
   const [items, setItems] = useState<NotificationView[]>([])
   const [unread, setUnread] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -58,7 +58,7 @@ export default function NotificationsPage() {
       setItems(data.items)
       setUnread(data.unread_count)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载通知失败")
+      setError(err instanceof Error ? err.message : t("error.loadFailed"))
     } finally {
       setLoading(false)
     }
@@ -91,7 +91,7 @@ export default function NotificationsPage() {
       await markNotificationsRead({ mark_all: true })
       await reload()
     } catch (err) {
-      setError(err instanceof Error ? err.message : "标记失败")
+      setError(err instanceof Error ? err.message : t("error.markFailed"))
     }
   }
 
@@ -105,7 +105,7 @@ export default function NotificationsPage() {
       )
       setUnread((prev) => Math.max(0, prev - 1))
     } catch (err) {
-      setError(err instanceof Error ? err.message : "标记失败")
+      setError(err instanceof Error ? err.message : t("error.markFailed"))
     }
   }
 
@@ -114,7 +114,7 @@ export default function NotificationsPage() {
       await archiveNotifications([id])
       setItems((prev) => prev.filter((n) => n.id !== id))
     } catch (err) {
-      setError(err instanceof Error ? err.message : "归档失败")
+      setError(err instanceof Error ? err.message : t("error.archiveFailed"))
     }
   }
 
@@ -123,10 +123,10 @@ export default function NotificationsPage() {
       <header className="flex items-center justify-between">
         <div>
           <h1 className="ink-display text-2xl text-foreground sm:text-3xl">
-            通知中心
+            {t("page.title")}
           </h1>
           <p className="text-sm text-muted-foreground">
-            未读 {unread} 条 · 共 {items.length} 条
+            {t("page.summary", { unread, total: items.length })}
           </p>
         </div>
         <div className="flex gap-2 text-xs">
@@ -140,7 +140,7 @@ export default function NotificationsPage() {
                 : "border-border bg-card text-foreground hover:bg-muted")
             }
           >
-            全部
+            {t("filter.all")}
           </button>
           <button
             type="button"
@@ -152,7 +152,7 @@ export default function NotificationsPage() {
                 : "border-border bg-card text-foreground hover:bg-muted")
             }
           >
-            未读
+            {t("filter.unread")}
           </button>
           <button
             type="button"
@@ -160,7 +160,7 @@ export default function NotificationsPage() {
             className="rounded border border-border bg-card px-2 py-1 text-foreground hover:bg-muted"
             disabled={unread === 0}
           >
-            全部标为已读
+            {t("filter.markAllRead")}
           </button>
         </div>
       </header>
@@ -176,9 +176,9 @@ export default function NotificationsPage() {
               : "border-border bg-card text-foreground hover:bg-muted")
           }
         >
-          全部话题
+          {t("topic.all")}
         </button>
-        {Object.entries(TOPIC_LABELS).map(([key, label]) => (
+        {TOPIC_KEYS.map((key) => (
           <button
             type="button"
             key={key}
@@ -192,7 +192,7 @@ export default function NotificationsPage() {
                 : "border-border bg-card text-foreground hover:bg-muted")
             }
           >
-            {label}
+            {t(`topic.${key}`)}
             {topicCounts[key] ? (
               <span className="ml-1 rounded bg-[color:var(--cinnabar,#C73E3A)]/20 px-1 text-[10px] text-[color:var(--cinnabar,#C73E3A)]">
                 {topicCounts[key]}
@@ -209,10 +209,10 @@ export default function NotificationsPage() {
       ) : null}
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">加载中…</p>
+        <p className="text-sm text-muted-foreground">{t("state.loading")}</p>
       ) : visible.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border bg-card p-8 text-center text-sm text-muted-foreground">
-          没有匹配的通知。
+          {t("state.empty")}
         </p>
       ) : (
         <ul className="space-y-3">
@@ -240,7 +240,7 @@ export default function NotificationsPage() {
                     {n.body}
                   </p>
                   <p className="mt-2 text-xs text-muted-foreground/80">
-                    {TOPIC_LABELS[n.topic] ?? n.topic} ·{" "}
+                    {topicLabel(n.topic)} ·{" "}
                     {new Date(n.created_at).toLocaleString(formatLocale)}
                   </p>
                 </div>
@@ -251,7 +251,7 @@ export default function NotificationsPage() {
                       onClick={() => void handleMarkOne(n.id)}
                       className="rounded border border-border bg-card px-2 py-1 text-foreground hover:bg-muted"
                     >
-                      查看
+                      {t("action.view")}
                     </a>
                   ) : null}
                   {!n.read ? (
@@ -260,7 +260,7 @@ export default function NotificationsPage() {
                       onClick={() => void handleMarkOne(n.id)}
                       className="rounded border border-border bg-card px-2 py-1 text-foreground hover:bg-muted"
                     >
-                      标已读
+                      {t("action.markRead")}
                     </button>
                   ) : null}
                   <button
@@ -268,7 +268,7 @@ export default function NotificationsPage() {
                     onClick={() => void handleArchive(n.id)}
                     className="rounded border border-border bg-card px-2 py-1 text-muted-foreground hover:bg-muted"
                   >
-                    归档
+                    {t("action.archive")}
                   </button>
                 </div>
               </div>

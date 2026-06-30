@@ -150,6 +150,7 @@ export default function MyProjectsPage() {
 
 function ProjectsContent() {
   const t = useTranslations("app")
+  const tp = useTranslations("appProjects")
   const router = useRouter()
   const searchParams = useSearchParams()
 
@@ -215,12 +216,12 @@ function ProjectsContent() {
         return next
       })
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "加载更多项目失败")
+      setLoadError(err instanceof Error ? err.message : tp("toast.loadMoreFailed"))
     } finally {
       loadingMoreRef.current = false
       setIsLoadingMore(false)
     }
-  }, [commitJobs, hasMoreJobs])
+  }, [commitJobs, hasMoreJobs, tp])
 
   const updateJobs = useCallback(
     (updater: (current: JobSummary[]) => JobSummary[]) => {
@@ -260,11 +261,11 @@ function ProjectsContent() {
         })
       }
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "加载项目列表失败")
+      setLoadError(err instanceof Error ? err.message : tp("toast.loadListFailed"))
     } finally {
       setIsLoading(false)
     }
-  }, [commitJobs])
+  }, [commitJobs, tp])
 
   // Initial load
   useEffect(() => {
@@ -349,19 +350,19 @@ function ProjectsContent() {
 
   const handleDelete = useCallback(
     async (job: JobSummary) => {
-      if (!window.confirm("确定删除这个项目？")) return
+      if (!window.confirm(tp("toast.deleteConfirm"))) return
       setDeletingId(job.id)
       try {
         await deleteJob(job.id)
         updateJobs((prev) => prev.filter((j) => j.id !== job.id))
-        toast.success("项目已删除")
+        toast.success(tp("toast.deleteSuccess"))
       } catch {
-        toast.error("删除失败，请稍后重试")
+        toast.error(tp("toast.deleteFailed"))
       } finally {
         setDeletingId(null)
       }
     },
-    [updateJobs],
+    [updateJobs, tp],
   )
 
   const handleCancel = useCallback(
@@ -369,15 +370,15 @@ function ProjectsContent() {
       setCancellingId(job.id)
       try {
         await cancelJob(job.id)
-        toast.success("任务已取消")
+        toast.success(tp("toast.cancelSuccess"))
         void loadJobs()
       } catch {
-        toast.error("取消失败，请稍后重试")
+        toast.error(tp("toast.cancelFailed"))
       } finally {
         setCancellingId(null)
       }
     },
-    [loadJobs],
+    [loadJobs, tp],
   )
 
   const handleReCreate = useCallback((job: JobSummary) => {
@@ -402,17 +403,17 @@ function ProjectsContent() {
         updateJobs((prev) => prev.map((j) => (j.id === updated.id ? updated : j)))
         toast.success(
           updated.title === newName.trim()
-            ? "任务已重命名"
-            : `任务已重命名为 "${updated.title}"`, // collision suffix applied
+            ? tp("toast.renameSuccess")
+            : tp("toast.renameSuccessCollision", { title: updated.title }), // collision suffix applied
         )
         setRenamingJob(null)
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "重命名失败")
+        toast.error(err instanceof Error ? err.message : tp("toast.renameFailed"))
       } finally {
         setRenameSubmitting(false)
       }
     },
-    [renamingJob, updateJobs],
+    [renamingJob, updateJobs, tp],
   )
 
   // ---- Bulk pan-backup helpers (admin only) ----
@@ -453,14 +454,7 @@ function ProjectsContent() {
     if (selectedBackupIds.size === 0) return
     const ids = Array.from(selectedBackupIds)
     if (
-      !window.confirm(
-        `确认将 ${ids.length} 个已完成任务批量备份到百度网盘?\n\n` +
-          "每个任务会:\n" +
-          "• 打包工程目录为 tar.gz\n" +
-          "• 跨境上传到 admin 网盘 (1GB 任务约 15-30 分钟)\n" +
-          "• 成功后任务状态变为「已归档」, 本地原文件被删除\n\n" +
-          "失败任务可在 /admin/pan/backups 单独重试。",
-      )
+      !window.confirm(tp("toast.bulkBackupConfirm", { count: ids.length }))
     )
       return
     setBulkBackingUp(true)
@@ -469,24 +463,34 @@ function ProjectsContent() {
       const okN = r.succeeded?.length ?? 0
       const failN = r.failed?.length ?? 0
       if (failN === 0) {
-        toast.success(`已入队 ${okN} 个备份任务`)
+        toast.success(tp("toast.bulkBackupEnqueued", { count: okN }))
       } else if (okN === 0) {
-        toast.error(`全部 ${failN} 个失败:${r.failed[0]?.reason ?? "未知错误"}`)
+        toast.error(
+          tp("toast.bulkBackupAllFailed", {
+            count: failN,
+            reason: r.failed[0]?.reason ?? tp("toast.bulkBackupUnknownError"),
+          }),
+        )
       } else {
         toast.warning(
-          `${okN} 个入队成功 · ${failN} 个失败 (${r.failed
-            .slice(0, 2)
-            .map((f) => f.job_id.slice(0, 8))
-            .join(", ")}${failN > 2 ? "…" : ""})`,
+          tp("toast.bulkBackupPartial", {
+            okCount: okN,
+            failCount: failN,
+            ids: r.failed
+              .slice(0, 2)
+              .map((f) => f.job_id.slice(0, 8))
+              .join(", "),
+            more: failN > 2 ? "…" : "",
+          }),
         )
       }
       if (okN > 0) clearBackupSelection()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "批量备份入队失败")
+      toast.error(e instanceof Error ? e.message : tp("toast.bulkBackupEnqueueFailed"))
     } finally {
       setBulkBackingUp(false)
     }
-  }, [selectedBackupIds, clearBackupSelection])
+  }, [selectedBackupIds, clearBackupSelection, tp])
 
   // ---- Derived state ----
 
@@ -529,7 +533,7 @@ function ProjectsContent() {
         <div className="max-w-md mx-auto mt-12 rounded-2xl border border-red-200 bg-red-50 dark:border-red-500/20 dark:bg-red-500/5 p-8 text-center space-y-4">
           <p className="text-sm font-medium text-red-600 dark:text-red-400">{loadError}</p>
           <Button variant="outline" size="sm" onClick={() => { setIsLoading(true); loadJobs() }}>
-            重试
+            {tp("error.retry")}
           </Button>
         </div>
         <NewTranslationDialog
@@ -556,14 +560,14 @@ function ProjectsContent() {
             <Play className="h-6 w-6 text-muted-foreground" />
           </div>
           <h2 className="text-xl font-semibold text-foreground">
-            还没有翻译任务
+            {tp("empty.title")}
           </h2>
           <p className="text-sm text-muted-foreground">
-            创建第一个翻译任务，开始体验视频翻译。
+            {tp("empty.description")}
           </p>
           <Button onClick={() => setDialogOpen(true)} className="mt-2">
             <Plus className="h-4 w-4 mr-1" />
-            新建翻译
+            {tp("empty.newTranslation")}
           </Button>
         </div>
 
@@ -589,15 +593,9 @@ function ProjectsContent() {
       <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 flex items-center gap-3">
         <Clock className="h-5 w-5 text-amber-400 shrink-0" />
         <p className="text-sm text-amber-400/90">
-          {isAdminView ? (
-            <>
-              管理员项目 <strong>永不过期</strong>，后台定期清理不会自动删除。
-            </>
-          ) : (
-            <>
-              每个项目最长保留 <strong>7 天</strong>，过期后自动删除。请及时下载结果文件。
-            </>
-          )}
+          {isAdminView
+            ? tp.rich("retention.admin", { strong: (chunks) => <strong>{chunks}</strong> })
+            : tp.rich("retention.user", { strong: (chunks) => <strong>{chunks}</strong> })}
         </p>
       </div>
 
@@ -608,7 +606,10 @@ function ProjectsContent() {
       {isAdminView && selectedBackupIds.size > 0 && (
         <div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 rounded-xl border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/5 px-4 py-3 shadow-sm">
           <span className="text-sm text-foreground">
-            已选 <strong>{selectedBackupIds.size}</strong> 个已完成项目
+            {tp.rich("backup.selectedCount", {
+              count: selectedBackupIds.size,
+              strong: (chunks) => <strong>{chunks}</strong>,
+            })}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <button
@@ -622,17 +623,17 @@ function ProjectsContent() {
               ) : (
                 <Cloud className="h-3.5 w-3.5" />
               )}
-              批量备份到网盘
+              {tp("backup.backupToPan")}
             </button>
             <button
               type="button"
               onClick={clearBackupSelection}
               disabled={bulkBackingUp}
               className="flex items-center gap-1 rounded-lg border border-border px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/40 disabled:opacity-50"
-              title="清空选择"
+              title={tp("backup.clearSelection")}
             >
               <X className="h-3.5 w-3.5" />
-              清空
+              {tp("backup.clear")}
             </button>
           </div>
         </div>
@@ -678,15 +679,15 @@ function ProjectsContent() {
         {isLoadingMore ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <RefreshCw className="h-4 w-4 animate-spin" />
-            <span>加载更多任务...</span>
+            <span>{tp("loadMore.loading")}</span>
           </div>
         ) : hasMoreJobs ? (
           <Button variant="outline" size="sm" onClick={() => void loadMoreJobs()}>
-            加载更多
+            {tp("loadMore.button")}
           </Button>
         ) : totalJobs !== null ? (
           <p className="text-xs text-muted-foreground">
-            已显示 {jobs.length}/{totalJobs} 个任务
+            {tp("loadMore.shown", { shown: jobs.length, total: totalJobs })}
           </p>
         ) : null}
       </div>
@@ -719,13 +720,14 @@ function PageHeader({
   activeTask: JobSummary | null
   onNewClick: () => void
 }) {
+  const tp = useTranslations("appProjects")
   const router = useRouter()
   const hasWaiting = activeTask?.status === "waiting_for_review"
 
   return (
     <div className="flex items-center justify-between gap-3">
       <h1 className="text-2xl font-bold font-heading text-foreground">
-        视频翻译
+        {tp("header.title")}
       </h1>
 
       <div className="flex items-center gap-2">
@@ -737,7 +739,7 @@ function PageHeader({
             className="relative"
           >
             <ExternalLink className="h-3.5 w-3.5 mr-1" />
-            当前任务
+            {tp("header.currentTask")}
             {hasWaiting && (
               <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-500" />
             )}
@@ -745,7 +747,7 @@ function PageHeader({
         )}
         <Button size="sm" onClick={onNewClick}>
           <Plus className="h-3.5 w-3.5 mr-1" />
-          新建翻译
+          {tp("header.newTranslation")}
         </Button>
       </div>
     </div>
@@ -790,11 +792,12 @@ function ProjectCard({
   onToggleBackupSelect: (jobId: string) => void
 }) {
   const t = useTranslations("app")
+  const tp = useTranslations("appProjects")
   const router = useRouter()
   const formatLocale = useIntlLocale()
   const expiry = computeExpiryInfo(job)
   const isNonExpiring = isAdminView || job.roleSnapshot === "admin"
-  const expiryText = isNonExpiring ? "永不过期" : expiryLabel(t, expiry)
+  const expiryText = isNonExpiring ? tp("card.neverExpires") : expiryLabel(t, expiry)
   const showEditShortcut = isJobEditEligible(job)
 
   return (
@@ -812,11 +815,11 @@ function ProjectCard({
           <label
             className="flex shrink-0 cursor-pointer items-center"
             onClick={(e) => e.stopPropagation()}
-            title="勾选以批量备份到网盘"
+            title={tp("card.backupCheckboxTitle")}
           >
             <input
               type="checkbox"
-              aria-label={`选择项目 ${getJobDisplayTitle(t, job)} 加入批量备份`}
+              aria-label={tp("card.backupCheckboxAria", { title: getJobDisplayTitle(t, job) })}
               checked={isBackupSelected}
               onChange={() => onToggleBackupSelect(job.id)}
               className="h-4 w-4 cursor-pointer accent-[color:var(--cinnabar)]"
@@ -845,7 +848,7 @@ function ProjectCard({
            *   视图）；源已被 7d TTL 清走时 fallback 成通用 "· 副本"。 */}
           {job.copyOfJobId && (
             <div className="text-[11px] text-muted-foreground truncate">
-              · 派生自 {sourceTitle ?? "已清理的任务"}
+              {tp("card.derivedFrom", { source: sourceTitle ?? tp("card.derivedSourcePurged") })}
             </div>
           )}
           <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
@@ -911,6 +914,7 @@ function ExpandedContent({
   isCancelling: boolean
 }) {
   const t = useTranslations("app")
+  const tp = useTranslations("appProjects")
   const editShortcutHref = isJobEditEligible(job)
     ? `/workspace/${job.id}/edit`
     : undefined
@@ -936,7 +940,7 @@ function ExpandedContent({
         <div className="space-y-3">
           <div className="rounded-lg bg-muted/30 px-4 py-3 space-y-1">
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">阶段:</span>
+              <span className="text-muted-foreground">{tp("expanded.stageLabel")}</span>
               <span className="font-medium text-foreground">
                 {getStageLabel(t, job.currentStage)}
               </span>
@@ -954,7 +958,7 @@ function ExpandedContent({
               className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1.5 text-[0.8rem] font-medium text-primary-foreground transition hover:bg-primary/80"
             >
               <ExternalLink className="h-3.5 w-3.5" />
-              进入工作台
+              {tp("expanded.enterWorkspace")}
             </a>
             <Button
               variant="ghost"
@@ -963,7 +967,7 @@ function ExpandedContent({
               disabled={isCancelling}
             >
               <XCircle className="h-3.5 w-3.5 mr-1" />
-              {isCancelling ? "取消中..." : "取消"}
+              {isCancelling ? tp("expanded.cancelling") : tp("expanded.cancel")}
             </Button>
           </div>
         </div>
@@ -983,12 +987,12 @@ function ExpandedContent({
             }}
           >
             <AlertTriangle className="h-4 w-4 shrink-0" />
-            需要审核
+            {tp("expanded.needsReview")}
           </div>
           <Link href={`/workspace/${job.id}`}>
             <Button size="sm">
               <ExternalLink className="h-3.5 w-3.5 mr-1" />
-              进入工作台
+              {tp("expanded.enterWorkspace")}
             </Button>
           </Link>
         </div>
@@ -1012,17 +1016,17 @@ function ExpandedContent({
             }}
           >
             <RefreshCw className="h-4 w-4 shrink-0" />
-            你正在修改此任务
+            {tp("expanded.editingInProgress")}
             {(job.editGeneration ?? 0) > 0 && (
               <span className="text-xs opacity-75">
-                · 已完成 {job.editGeneration} 次修改
+                {tp("expanded.editsCompleted", { count: job.editGeneration ?? 0 })}
               </span>
             )}
           </div>
           <Link href={`/workspace/${job.id}/edit`}>
             <Button size="sm">
               <ExternalLink className="h-3.5 w-3.5 mr-1" />
-              继续修改
+              {tp("expanded.continueEditing")}
             </Button>
           </Link>
         </div>
@@ -1042,12 +1046,12 @@ function ExpandedContent({
             }}
           >
             <AlertTriangle className="h-4 w-4 shrink-0" />
-            {getUserFacingProgressMessage(t, job.progressMessage) ?? "处理失败"}
+            {getUserFacingProgressMessage(t, job.progressMessage) ?? tp("expanded.processingFailed")}
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={onReCreate}>
               <RefreshCw className="h-3.5 w-3.5 mr-1" />
-              重新创建
+              {tp("expanded.recreate")}
             </Button>
           </div>
         </div>
@@ -1058,7 +1062,7 @@ function ExpandedContent({
         <div className="space-y-3">
           <div className="flex items-center gap-2 rounded-lg bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
             <Clock className="h-4 w-4 shrink-0" />
-            排队中...
+            {tp("expanded.queued")}
           </div>
           <Button
             variant="ghost"
@@ -1067,7 +1071,7 @@ function ExpandedContent({
             disabled={isCancelling}
           >
             <XCircle className="h-3.5 w-3.5 mr-1" />
-            {isCancelling ? "取消中..." : "取消"}
+            {isCancelling ? tp("expanded.cancelling") : tp("expanded.cancel")}
           </Button>
         </div>
       )
@@ -1076,7 +1080,7 @@ function ExpandedContent({
       return (
         <div className="flex items-center gap-2 rounded-lg bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
           <XCircle className="h-4 w-4 shrink-0" />
-          已取消
+          {tp("expanded.cancelled")}
         </div>
       )
 
@@ -1108,6 +1112,7 @@ function CardActions({
   isDeleting: boolean
   isCancelling: boolean
 }) {
+  const tp = useTranslations("appProjects")
   const router = useRouter()
 
   // For collapsed cards, show contextual action + delete
@@ -1120,7 +1125,7 @@ function CardActions({
         variant="ghost"
         size="icon-xs"
         onClick={onRename}
-        title="重命名"
+        title={tp("card.rename")}
       >
         <Pencil className="h-3.5 w-3.5 text-muted-foreground hover:text-primary" />
       </Button>
@@ -1139,7 +1144,7 @@ function CardActions({
               size="icon-xs"
               onClick={onDelete}
               disabled={isDeleting}
-              title="删除"
+              title={tp("card.delete")}
             >
               <Trash2 className="h-3.5 w-3.5 text-muted-foreground hover:text-red-400" />
             </Button>
@@ -1214,6 +1219,7 @@ function RenameJobDialogForm({
   onCancel: () => void
 }) {
   const t = useTranslations("app")
+  const tp = useTranslations("appProjects")
   const [value, setValue] = useState(() => getJobDisplayTitle(t, job))
 
   const trimmed = value.trim()
@@ -1224,13 +1230,13 @@ function RenameJobDialogForm({
   return (
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>重命名任务</DialogTitle>
+          <DialogTitle>{tp("rename.title")}</DialogTitle>
           <DialogDescription>
-            最多约 12 个中文字符。与已有任务重名时会自动追加随机后缀。
+            {tp("rename.description")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label htmlFor="rename-input">新任务名</Label>
+          <Label htmlFor="rename-input">{tp("rename.label")}</Label>
           <Input
             id="rename-input"
             value={value}
@@ -1247,22 +1253,22 @@ function RenameJobDialogForm({
           />
           {hasBadChar && (
             <p className="text-xs text-red-500">
-              不能包含 {'<'} {'>'} 引号 / \ 或空字符
+              {tp("rename.badChar", { lt: "<", gt: ">" })}
             </p>
           )}
           {tooLong && (
-            <p className="text-xs text-red-500">名称过长（超过 60 个字符）</p>
+            <p className="text-xs text-red-500">{tp("rename.tooLong")}</p>
           )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onCancel} disabled={submitting}>
-            取消
+            {tp("rename.cancel")}
           </Button>
           <Button
             onClick={() => canSubmit && onConfirm(trimmed)}
             disabled={!canSubmit}
           >
-            {submitting ? "保存中…" : "保存"}
+            {submitting ? tp("rename.saving") : tp("rename.save")}
           </Button>
         </DialogFooter>
       </DialogContent>
