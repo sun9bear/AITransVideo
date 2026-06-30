@@ -1,0 +1,17 @@
+{
+  "loading": "Loading voice selection...",
+  "loadFailed": "Failed to load",
+  "title": "Studio voice selection",
+  "desc": "Choose a Doubao 2.0 voice for each speaker, or choose \"Auto-match\" to let the system pick based on speaker characteristics.",
+  "selectPrompt": "-- Select a voice --",
+  "autoMatch": "Auto-match (system picks by speaker characteristics)",
+  "female": "Female",
+  "male": "Male",
+  "other": "Other",
+  "mustSelect": "Required",
+  "submitting": "Submitting...",
+  "confirmContinue": "Confirm and continue",
+  "selectForSpeakers": "Please choose a voice or \"Auto-match\" for these speakers: {names}",
+  "submitSuccess": "Voice confirmed",
+  "submitFailed": "Voice confirmation failed: {msg}"
+}

@@ -742,4 +742,38 @@ assert.equal(
   "appTranslationFormConsent.smart.attestation 全角：/；{cost} 占位符漂移（红线 R1，付费克隆 attestation）",
 )
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b 字节一致 + en seo 双源同步 全部通过")
+// 12) UI-06 part2 W3a（Studio 审校面板）：appTranslationReview / appVoiceReview /
+//     appSmartAutoDecision 三 namespace 的内联中文迁入字典后，默认 zh 值必须与改造前组件源
+//     【逐字节】相同（红线 R1）。钉死标点/全半角/特殊符号（✕ U+2715 / ▶ U+25B6 / 、U+3001 /
+//     … U+2026 / 全角 ：（） / 半角冒号空格）/占位符最敏感的代表串：
+const zhVr = JSON.parse(readFileSync(path.join(root, "messages/zh/appVoiceReview.json"), "utf8"))
+assert.equal(zhVr.desc, "请为每个说话人选择豆包 2.0 音色，或选择「自动匹配」由系统根据说话人特征自动选择。", "appVoiceReview.desc 全角直角引号「」/标点漂移（红线 R1）")
+assert.equal(zhVr.selectForSpeakers, "请为以下说话人选择音色或\"自动匹配\"：{names}", "appVoiceReview.selectForSpeakers 半角双引号/全角冒号/占位符漂移（红线 R1）")
+assert.equal(zhVr.autoMatch, "自动匹配（系统根据说话人特征选择）", "appVoiceReview.autoMatch 全角括号漂移（红线 R1）")
+assert.equal(zhVr.submitFailed, "音色确认失败: {msg}", "appVoiceReview.submitFailed 半角冒号/占位符漂移（红线 R1）")
+
+const zhTrv = JSON.parse(readFileSync(path.join(root, "messages/zh/appTranslationReview.json"), "utf8"))
+assert.equal(zhTrv.confirmHint, "确认翻译与配音文本，共 {count} 条。", "appTranslationReview.confirmHint 占位符/标点漂移（红线 R1）")
+assert.equal(zhTrv.cancelSplit, "✕ 取消拆分", "appTranslationReview.cancelSplit ✕ U+2715 漂移（红线 R1）")
+assert.equal(zhTrv.playSource, "▶ 播放原文", "appTranslationReview.playSource ▶ U+25B6 漂移（红线 R1）")
+assert.equal(zhTrv.segmentLabel, "片段 {id}", "appTranslationReview.segmentLabel 占位符/空格漂移（红线 R1，id 是 content）")
+assert.equal(zhTrv.splitSourcePos, "原文拆分位置（{pos}）", "appTranslationReview.splitSourcePos 全角括号/占位符漂移（红线 R1）")
+assert.equal(zhTrv.splitFailed, "拆分失败: {msg}", "appTranslationReview.splitFailed 半角冒号/占位符漂移（红线 R1）")
+assert.equal(zhTrv.pageInfo, "第 {current} / {total} 页", "appTranslationReview.pageInfo 占位符/半角斜杠/空格漂移（红线 R1）")
+assert.equal(zhTrv.showRange, "显示 {from}-{to} / {total}", "appTranslationReview.showRange 占位符/半角斜杠/连字符漂移（红线 R1）")
+
+const zhSad = JSON.parse(readFileSync(path.join(root, "messages/zh/appSmartAutoDecision.json"), "utf8"))
+assert.equal(zhSad.loading, "正在加载智能版决策摘要…", "appSmartAutoDecision.loading 全角省略号 … 漂移（红线 R1）")
+assert.equal(zhSad.loadFailed, "智能版决策摘要加载失败：{msg}", "appSmartAutoDecision.loadFailed 全角冒号/占位符漂移（红线 R1）")
+assert.equal(zhSad.billingPolicy, "计费策略：", "appSmartAutoDecision.billingPolicy 全角冒号漂移（红线 R1）")
+assert.equal(zhSad.listSeparator, "、", "appSmartAutoDecision.listSeparator 顿号 、U+3001 漂移（红线 R1，join 分隔符）")
+assert.equal(zhSad.excludedItem, "{id}（{reason}）", "appSmartAutoDecision.excludedItem 全角括号/占位符漂移（红线 R1）")
+assert.equal(zhSad.voiceId, "音色 ID", "appSmartAutoDecision.voiceId 空格漂移（红线 R1）")
+assert.equal(zhSad.notApproved, "未通过：{check}", "appSmartAutoDecision.notApproved 全角冒号/占位符漂移（红线 R1）")
+assert.equal(zhSad.status.completed, "已完成", "appSmartAutoDecision.status.completed 漂移（红线 R1）")
+assert.equal(zhSad.status.downgraded, "已转人工", "appSmartAutoDecision.status.downgraded 漂移（红线 R1）")
+assert.equal(zhSad.status.refunded, "已退款", "appSmartAutoDecision.status.refunded 漂移（红线 R1）")
+assert.equal(zhSad.policy.full, "正常计费", "appSmartAutoDecision.policy.full 漂移（红线 R1）")
+assert.equal(zhSad.minutes, "分钟", "appSmartAutoDecision.minutes 漂移（红线 R1）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b+W3a 字节一致 + en seo 双源同步 全部通过")

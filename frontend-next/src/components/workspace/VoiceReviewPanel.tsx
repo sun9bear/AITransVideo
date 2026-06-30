@@ -1,8 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useState } from 'react'
+import { useTranslations } from 'next-intl'
 import { toast } from 'sonner'
 
+import { useApiErrorMessage } from '@/lib/api/error-localization'
 import { approveVoiceReview } from '@/lib/api/reviews'
 import { getJob } from '@/lib/api/jobs'
 import type { ApiWebUiStateResponse } from '@/types/api'
@@ -34,6 +36,8 @@ interface VoiceReviewPanelProps {
 // ---------------------------------------------------------------------------
 
 export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
+  const tv = useTranslations('appVoiceReview')
+  const localizeError = useApiErrorMessage()
   const [speakers, setSpeakers] = useState<Speaker[]>([])
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([])
   const [selections, setSelections] = useState<Record<string, string>>({})
@@ -130,7 +134,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
     const missing = speakers.filter(s => !selections[s.speakerId])
     if (missing.length > 0) {
       const names = missing.map(s => s.speakerName).join(', ')
-      alert(`请为以下说话人选择音色或"自动匹配"：${names}`)
+      alert(tv('selectForSpeakers', { names }))
       return
     }
 
@@ -142,15 +146,14 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
         voiceIdA: selections['speaker_a'] || null,
         voiceIdB: selections['speaker_b'] || null,
       })
-      toast.success('音色确认成功')
+      toast.success(tv('submitSuccess'))
       onAdvanced(result.job)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      toast.error(`音色确认失败: ${msg}`)
+      toast.error(tv('submitFailed', { msg: localizeError(err) }))
     } finally {
       setIsSubmitting(false)
     }
-  }, [jobId, projectDir, speakers, selections, onAdvanced])
+  }, [jobId, projectDir, speakers, selections, onAdvanced, tv, localizeError])
 
   // --- Render ---
 
@@ -158,7 +161,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
     return (
       <section className="surface-card p-8 text-center">
         <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
-        <h3 className="text-lg font-semibold text-foreground">加载音色选择...</h3>
+        <h3 className="text-lg font-semibold text-foreground">{tv('loading')}</h3>
       </section>
     )
   }
@@ -166,7 +169,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
   if (error) {
     return (
       <section className="surface-card p-6 border border-red-200 dark:border-red-500/20">
-        <h3 className="text-lg font-semibold text-red-700 dark:text-red-400">加载失败</h3>
+        <h3 className="text-lg font-semibold text-red-700 dark:text-red-400">{tv('loadFailed')}</h3>
         <p className="mt-2 text-sm text-red-600 dark:text-red-400/80">{error}</p>
       </section>
     )
@@ -179,9 +182,9 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
 
   return (
     <section className="surface-card p-6">
-      <h3 className="text-lg font-semibold text-foreground mb-1">工作台音色选择</h3>
+      <h3 className="text-lg font-semibold text-foreground mb-1">{tv('title')}</h3>
       <p className="text-sm text-muted-foreground mb-6">
-        请为每个说话人选择豆包 2.0 音色，或选择「自动匹配」由系统根据说话人特征自动选择。
+        {tv('desc')}
       </p>
 
       <div className="space-y-6">
@@ -195,24 +198,24 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
               value={selections[speaker.speakerId] ?? ''}
               onChange={(e) => handleSelect(speaker.speakerId, e.target.value)}
             >
-              <option value="">-- 请选择音色 --</option>
-              <option value="auto">自动匹配（系统根据说话人特征选择）</option>
+              <option value="">{tv('selectPrompt')}</option>
+              <option value="auto">{tv('autoMatch')}</option>
               {femaleVoices.length > 0 && (
-                <optgroup label="女声">
+                <optgroup label={tv('female')}>
                   {femaleVoices.map(v => (
                     <option key={v.voiceId} value={v.voiceId}>{v.displayName}</option>
                   ))}
                 </optgroup>
               )}
               {maleVoices.length > 0 && (
-                <optgroup label="男声">
+                <optgroup label={tv('male')}>
                   {maleVoices.map(v => (
                     <option key={v.voiceId} value={v.voiceId}>{v.displayName}</option>
                   ))}
                 </optgroup>
               )}
               {otherVoices.length > 0 && (
-                <optgroup label="其他">
+                <optgroup label={tv('other')}>
                   {otherVoices.map(v => (
                     <option key={v.voiceId} value={v.voiceId}>{v.displayName}</option>
                   ))}
@@ -220,7 +223,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
               )}
             </select>
             {!selections[speaker.speakerId] && (
-              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">必须选择</p>
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{tv('mustSelect')}</p>
             )}
           </div>
         ))}
@@ -232,7 +235,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
           disabled={isSubmitting}
           onClick={handleSubmit}
         >
-          {isSubmitting ? '提交中...' : '确认并继续'}
+          {isSubmitting ? tv('submitting') : tv('confirmContinue')}
         </button>
       </div>
     </section>
