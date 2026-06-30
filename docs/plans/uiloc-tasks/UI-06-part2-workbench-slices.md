@@ -49,9 +49,9 @@
 |---|---|---|---|---|
 | **W1 任务详情→结果/下载** | `workspace/[jobId]/page` + ResultMediaCard + SmartPreviewResultCard + SmartPreviewConfirmDialog + JianyingDraftPathDialog | ~143 | **干净** | 「看到并下载我的成片（英文）」——UI-09 错误层在此兑现 |
 | **W2a 上传/提交表单 chrome** | TranslationForm（**非 consent 部分**：模式选择/字段/按钮/扣费门 toast）+ NewTranslationDialog + translations/new | ~100 | 半（consent 隔离到 W2b） | 漏斗**入口**，en 用户才能开任务 |
-| **W2b 1023 consent / 免费档授权文案** | TranslationForm consent blocks（L78/163-173/590/973-1004） | ~25 | **HARD（counsel）** | 法务文案，须 owner+counsel 签（类比 UI-03c） |
+| **W2b 1023 consent / 免费档授权文案** | TranslationForm consent blocks（L78/163-173/590/973-1004） | ~25 | **Claude 把关**（owner 后续完善） | 法务文案，忠实翻译 + 标疑点（见 §2 owner 决策） |
 | **W3 交互审校（Studio）** | VoiceSelectionPanel/SmartAutoDecisionPanel/TranslationReviewPanel/VoiceReviewPanel/SpeakerAudioAuditModal/EditPageSpeaker* | ~176 | — | Studio 复核步骤，体量大 |
-| **W4 语音克隆面** | CosyVoiceCloneModal/VoiceCloneModal/CosyVoiceSegmentPicker/CosyVoiceConsentModal | ~108 | **HARD（克隆授权 counsel）** | 克隆 UI，consent 文案须 counsel |
+| **W4 语音克隆面** | CosyVoiceCloneModal/VoiceCloneModal/CosyVoiceSegmentPicker/CosyVoiceConsentModal | ~108 | **Claude 把关**（owner 后续完善） | 克隆 UI + consent 文案，忠实翻译 + 标疑点 |
 | **W5 post-edit** | components/workspace/edit/* | ~85 | — | gated 高级功能；建议 out-of-scope（见 §6） |
 
 ### 推荐序（绕开法务阻塞先交付价值）
@@ -63,17 +63,23 @@
 > 备选：若 owner 认为「漏斗入口」优先级高于「拿结果」，可 **W2a 先行**（en 用户先能开任务），
 > W1 紧随。两者都不碰 W2b/W4 的法务文案。**入口（W2a）vs 出口（W1）谁先 = owner 决策点（§6 Q1）。**
 
-## 2. 法务敏感面处理（硬约束）
+## 2. 法务敏感面处理
 
-- **W2b / W4 的 consent / 克隆授权文案 = HARD 人审单元**：与已签的 [UI-03c](UI-03c-legal-pages.md)
-  同级。**Claude 先做忠实翻译第一遍 + 标疑点，counsel/owner 终签**。疑点同 UI-03c：中文锚《民法典》
-  1023 +「由我自行承担」责任转移；海外应改 US right-of-publicity / EU GDPR voice-as-biometric
-  市场化表述——译文是**忠实翻译非市场化法务文本**。
-- **隔离手法**：W2a/W3 等普通 chrome 切片**不得**夹带 consent 文案；consent 字符串在 W2b/W4 才迁，
-  且迁法可选 **(a) bilingual zh-anchored**（UI-03c 先例，对 legal 有意 R1 豁免）或 **(b) 保持 consent/
-  克隆 UI 在现有 flag（`NEXT_PUBLIC_ENABLE_FREE_TIER` 等）后**，公共 en 漏斗默认不渲染 → 不阻塞 W2a。
-- **付费 API 硬约束不变**：clone/consent 入口在 counsel 口径 + flag 双 gate 前保持关闭；纯本地化**不**
-  改任何 clone 触发条件（CLAUDE.md「付费 API 不能自动调用」+「CosyVoice 免费克隆澄清边界」原样）。
+> **Owner 决策（2026-06-30）**：项目目前**无真实付费用户、风险低**——consent / 克隆授权文案
+> **由 Claude 把关**（忠实翻译 + 标疑点），**不阻塞 counsel**；owner 后续自行完善。故 W2b/W4
+> **不再是 counsel-blocked 硬单元**，可与父片一起 ship。
+
+- **Claude 把关标准**：consent 文案做**忠实 en 翻译**（不是市场化法务文本），并在 PR/本 doc **显式
+  标疑点**——中文锚《民法典》1023 +「肖像权/声音权纠纷由我自行承担」责任转移；海外语境应改
+  US right-of-publicity / EU GDPR voice-as-biometric 表述。这些疑点**留 owner 后续完善**，不阻塞上线。
+- **仍保留隔离手法**（便于 owner 后续单独迭代法务文案、让法务面在 PR 里可被单独 review）：普通 chrome
+  切片（W2a/W3）**不夹带** consent 文案；consent 串在 W2b/W4 才迁。迁法默认 **dict 化 en 译文**（zh
+  verbatim 照搬 = R1）；若某段富 JSX 难 dict 化，可沿 [UI-03c](UI-03c-legal-pages.md) **bilingual
+  zh-anchored** 先例。
+- **付费 API 硬约束不变（与法务把关正交、不放松）**：纯本地化**不**改任何 clone 触发条件 / gate /
+  flag；consent **勾选与否仍驱动后端 server-confirmed gate**，前端只译文案不动逻辑（CLAUDE.md「付费
+  API 不能自动调用」+「CosyVoice 免费克隆澄清边界」**原样**）。这条是钱/账户红线，**不在**「法务由
+  Claude 把关」的放宽范围内。
 
 ## 3. UI-09 错误层接入（每片随带）
 
@@ -121,9 +127,8 @@
 
 ## 7. 待项目主拍板（执行前）
 
-- **Q1 切片序**：W1（拿结果，法务干净）先，还是 W2a（漏斗入口）先？
-- **Q2 法务口径**：W2b/W4 consent en 文案——(a) 等 counsel 签市场化 en，还是 (b) 先 bilingual zh-anchored
-  上线（UI-03c 先例）？在 counsel 给口径前，consent/克隆 UI 是否保持 flag 关闭即可？
+- **Q1 切片序**：W1（拿结果，法务干净）先，还是 W2（漏斗入口，含 consent）先？*（法务已不阻塞 → 两者皆可起步；推荐仍 W1 先建立模式 + 兑现 UI-09，W2 紧随）*
+- ~~**Q2 法务口径**~~ → **已定（§2 owner 决策）**：Claude 把关、忠实翻译 + 标疑点，不等 counsel，owner 后续完善。付费 API 红线不在放宽范围内。
 - **Q3 W5 post-edit**：`components/workspace/edit/*`（~85 CJK，gated）译还是判 out-of-scope？
 - **Q4 W3 审校切片粒度**：176 CJK / 6 文件，是否再拆（如 VoiceSelectionPanel 单独一片）？
 - **Q5 部署**：各片合 main 后，prod 暴露 /en 工作台给登录用户仍需 owner 部署（Via-154）——同 part1 部署门。
