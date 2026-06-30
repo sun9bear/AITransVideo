@@ -699,4 +699,47 @@ assert.equal(
 )
 assert.equal(zhTf.upload.failed, "上传失败", "appTranslationForm.upload.failed 漂移（红线 R1）")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a 字节一致 + en seo 双源同步 全部通过")
+// 11) UI-06 part2 W2b（consent/法务文案）：appTranslationFormConsent namespace 的内联中文迁入字典后，
+//     默认 zh 值必须与改造前 TranslationForm 源【逐字节】相同（红线 R1）。这是**法务/声音授权文案**
+//     （《民法典》1023 等），漂移即默认 zh 法务渲染回归——逐条钉死（全部 pin，不抽样）。en 为 Claude
+//     把关的忠实翻译（疑点见 PR），逻辑/门控不在本守卫范围（不变）。
+const zhTfc = JSON.parse(readFileSync(path.join(root, "messages/zh/appTranslationFormConsent.json"), "utf8"))
+assert.equal(
+  zhTfc.youtubeRightsHint,
+  "仅用于翻译您本人或已获授权的视频内容；使用前请确认拥有合法授权，不得用于侵权用途。",
+  "appTranslationFormConsent.youtubeRightsHint 全角分号/标点漂移（红线 R1，法务）",
+)
+assert.equal(zhTfc.free.title, "声音授权声明（必读必勾）", "appTranslationFormConsent.free.title 全角括号漂移（红线 R1，法务）")
+assert.equal(
+  zhTfc.free.attestation,
+  "我确认：我已获得该视频内容及其中所有说话人声音的合法授权，或该使用属于法律允许的范围；因使用本服务声音克隆功能产生的肖像权 / 声音权纠纷由我自行承担。",
+  "appTranslationFormConsent.free.attestation 《民法典》1023 声音授权 attestation 漂移（红线 R1，法务核心，全角：，；/半角斜杠/责任转移措辞 verbatim）",
+)
+assert.equal(zhTfc.free.validation, "请先阅读并勾选免费版声音授权声明。", "appTranslationFormConsent.free.validation 漂移（红线 R1，法务）")
+assert.equal(zhTfc.express.title, "自动克隆主说话人音色", "appTranslationFormConsent.express.title 漂移（红线 R1，克隆 opt-in）")
+assert.equal(zhTfc.express.experimental, "实验性", "appTranslationFormConsent.express.experimental 漂移（红线 R1）")
+assert.equal(
+  zhTfc.express.desc,
+  "勾选后，系统会用视频中占比最高的说话人的一小段语音（约 10–20 秒）克隆一个临时音色用于本次配音，让主说话人的声音更贴近原片。",
+  "appTranslationFormConsent.express.desc en-dash 10–20/全角括号/标点漂移（红线 R1，克隆 opt-in）",
+)
+assert.equal(
+  zhTfc.express.bullet1,
+  "· 该音色为本次任务临时使用，不进入你的永久音色库；系统后续会按清理策略处理",
+  "appTranslationFormConsent.express.bullet1 间隔号 ·/全角分号 ；漂移（红线 R1）",
+)
+assert.equal(zhTfc.express.bullet2, "· 会占用一次音色克隆配额", "appTranslationFormConsent.express.bullet2 间隔号 · 漂移（红线 R1）")
+assert.equal(zhTfc.express.bullet3, "· 失败时自动改用预设音色，不影响配音完成", "appTranslationFormConsent.express.bullet3 间隔号 · 漂移（红线 R1）")
+assert.equal(
+  zhTfc.express.validation,
+  "快捷版 CosyVoice 需要先确认自动克隆主说话人音色。",
+  "appTranslationFormConsent.express.validation 漂移（红线 R1，克隆 opt-in 校验）",
+)
+assert.equal(zhTfc.smart.title, "确认智能版自动克隆扣点", "appTranslationFormConsent.smart.title 漂移（红线 R1，付费克隆 consent）")
+assert.equal(
+  zhTfc.smart.attestation,
+  "我确认：如果本次智能版需要自动新克隆主说话人音色，将额外预扣 {cost}；未发生新克隆或任务未消耗该克隆时会释放。",
+  "appTranslationFormConsent.smart.attestation 全角：/；{cost} 占位符漂移（红线 R1，付费克隆 attestation）",
+)
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b 字节一致 + en seo 双源同步 全部通过")

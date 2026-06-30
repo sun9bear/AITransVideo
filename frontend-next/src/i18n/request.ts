@@ -33,6 +33,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
     appJianyingDraft,
     appSmartPreviewResult,
     appTranslationForm,
+    appTranslationFormConsent,
     errors,
   ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
@@ -53,6 +54,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
     import(`../../messages/${locale}/appJianyingDraft.json`),
     import(`../../messages/${locale}/appSmartPreviewResult.json`),
     import(`../../messages/${locale}/appTranslationForm.json`),
+    import(`../../messages/${locale}/appTranslationFormConsent.json`),
     import(`../../messages/${locale}/errors.json`),
   ])
 
@@ -77,6 +79,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
       appJianyingDraft: appJianyingDraft.default,
       appSmartPreviewResult: appSmartPreviewResult.default,
       appTranslationForm: appTranslationForm.default,
+      appTranslationFormConsent: appTranslationFormConsent.default,
       errors: errors.default,
     },
   }

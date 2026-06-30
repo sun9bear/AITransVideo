@@ -1,0 +1,21 @@
+{
+  "youtubeRightsHint": "Only for translating content you own or are authorized to use; before using it, confirm you hold lawful authorization, and do not use it for any infringing purpose.",
+  "free": {
+    "title": "Voice authorization statement (please read and check)",
+    "attestation": "I confirm that I have obtained lawful authorization for this video content and for all speakers' voices in it, or that this use falls within what the law permits; I bear any portrait-rights / voice-rights disputes arising from my use of this service's voice-cloning feature.",
+    "validation": "Please read and check the free-tier voice authorization statement first."
+  },
+  "express": {
+    "title": "Auto-clone the main speaker's voice",
+    "experimental": "Experimental",
+    "desc": "When checked, the system uses a short clip (about 10–20 seconds) of the most-featured speaker's voice to clone a temporary voice for this dubbing, making the main speaker sound closer to the original.",
+    "bullet1": "· This voice is temporary for this task only and won't enter your permanent voice library; the system handles it later per the cleanup policy",
+    "bullet2": "· It uses one voice-cloning quota",
+    "bullet3": "· On failure it automatically falls back to a preset voice without affecting dubbing",
+    "validation": "For Express CosyVoice, please confirm auto-cloning the main speaker's voice first."
+  },
+  "smart": {
+    "title": "Confirm the Smart auto-clone charge",
+    "attestation": "I confirm that if this Smart job needs to newly auto-clone the main speaker's voice, an additional {cost} will be pre-charged; it is released if no new clone happens or the task does not consume it."
+  }
+}
