@@ -55,7 +55,7 @@
 | 单元 | 文档 | 状态 | 母方案 Phase | 工时 | 门 |
 |---|---|---|---|---|---|
 | UI-05 | [App 中央字典本地化](UI-05-central-dictionaries.md) | ✅ | Phase 2 · T2.1 | M | [PR #81](https://github.com/sun9bear/AITransVideo/pull/81) 已合并（squash `efa840ed`） |
-| UI-06 | [always-on 用户页](UI-06-app-user-flows.md) | ◐ | Phase 2 · T2.2 | L | **part1 账户页 [PR #85](https://github.com/sun9bear/AITransVideo/pull/85) 已合并（squash `99511f6d`）**（projects/voices/settings/help/notifications/billing，332 key）；**part2 核心工作台**（TranslationForm 含1023 consent + workspace 审校路径）待做、需与 UI-09 同期 |
+| UI-06 | [always-on 用户页](UI-06-app-user-flows.md) | ◐ | Phase 2 · T2.2 | L | **part1 账户页 [PR #85](https://github.com/sun9bear/AITransVideo/pull/85) 已合并（squash `99511f6d`）**（projects/voices/settings/help/notifications/billing，332 key）；**part2 核心工作台**拆薄切片方案见 [UI-06-part2-workbench-slices](UI-06-part2-workbench-slices.md)（W1-W5：625 CJK/21 文件按旅程分片，法务面 W2b/W4 隔离待 counsel；UI-09 错误层底座已合）；待 owner 拍切片序+法务口径（§7 Q1-Q5） |
 | UI-07 | [Intl 格式器参数化](UI-07-intl-formatters.md) | ✅ | Phase 2 · T2.3 | S | [PR #84](https://github.com/sun9bear/AITransVideo/pull/84) 已合并（squash `fe14353b`） |
 
 ### Wave U-C — Phase 3 共享 UI + 错误层（**枚举占位，§9.2 决策门**）
