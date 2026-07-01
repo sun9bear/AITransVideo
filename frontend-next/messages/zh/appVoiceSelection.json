@@ -1,0 +1,69 @@
+{
+  "loading": "加载音色选择...",
+  "title": "音色选择",
+  "desc": "请为每位说话人选择预设音色或克隆专属音色，确认后继续生成配音。",
+  "expiredBanner": "检测到 {count} 个音色已失效，已从选项中移除。请重新选择音色。",
+  "provider": {
+    "volcengine": "豆包"
+  },
+  "cpsTier": {
+    "mid": "中",
+    "slow": "慢",
+    "fast": "快"
+  },
+  "optionLabelCps": "{base} · {cps}字/秒({tier})",
+  "badge": {
+    "strong": "★ 强匹配",
+    "sameNamed": "● 同视频同名",
+    "same": "● 同视频",
+    "crossNamed": "○ 跨视频同名",
+    "maybe": "○ 可能匹配"
+  },
+  "segDuration": "{count} 段 · {dur}s",
+  "status": {
+    "noSegments": "无片段",
+    "cloned": "已克隆",
+    "selected": "已选择",
+    "pending": "待选择"
+  },
+  "selectVoice": "-- 选择音色 --",
+  "optgroup": {
+    "personalStrong": "个人音色 · 强匹配 (不扣点)",
+    "personalMaybe": "个人音色 · 可能匹配 (需要确认)",
+    "otherPersonal": "其他个人音色",
+    "cosyClones": "我的 CosyVoice 克隆音色",
+    "smartRec": "🎯 智能推荐 (按匹配度排序)",
+    "female": "女声 ({count})",
+    "male": "男声 ({count})",
+    "other": "其他 ({count})"
+  },
+  "recAuto": "★ 自动匹配",
+  "recRank": "#{rank} 推荐",
+  "checkOriginal": "核对原音",
+  "previewing": "试听中...",
+  "preview": "试听",
+  "cloning": "克隆中...",
+  "cloneVoice": "克隆音色",
+  "quality": {
+    "premium": "高级音质",
+    "flagship": "旗舰音质",
+    "standard": "标准音质"
+  },
+  "creditsPerMinute": "{credits} 点/分钟",
+  "voiceExpired": "音色已失效，请重新选择",
+  "configuredCount": "{done} / {total} 说话人已配置音色",
+  "confirming": "确认中...",
+  "confirmSelection": "确认音色选择",
+  "warnIntro": "以下说话人的音色语速和原视频差异较大：",
+  "warnOutro": "这可能导致配音听感不自然。是否继续？",
+  "warnSpeaker": "{name}：选定音色 {voiceCps} 字/秒，比原说话人需要的 {targetCps} 字/秒{fast} {pct}%，配音可能需要大幅{direction}。",
+  "cmp": {
+    "faster": "快",
+    "slower": "慢"
+  },
+  "dir": {
+    "slowDown": "减速",
+    "speedUp": "加速"
+  },
+  "speedWarnTitle": "语速差异提醒"
+}

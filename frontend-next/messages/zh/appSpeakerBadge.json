@@ -1,0 +1,9 @@
+{
+  "status": {
+    "pending_segments": "待归属段落",
+    "inferring": "音色画像推断中...",
+    "ready": "音色画像就绪",
+    "failed": "推断失败"
+  },
+  "retry": "重试"
+}

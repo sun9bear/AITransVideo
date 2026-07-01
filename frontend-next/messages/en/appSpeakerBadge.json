@@ -1,0 +1,9 @@
+{
+  "status": {
+    "pending_segments": "Awaiting assignment",
+    "inferring": "Inferring voice profile...",
+    "ready": "Voice profile ready",
+    "failed": "Inference failed"
+  },
+  "retry": "Retry"
+}

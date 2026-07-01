@@ -776,4 +776,57 @@ assert.equal(zhSad.status.refunded, "已退款", "appSmartAutoDecision.status.re
 assert.equal(zhSad.policy.full, "正常计费", "appSmartAutoDecision.policy.full 漂移（红线 R1）")
 assert.equal(zhSad.minutes, "分钟", "appSmartAutoDecision.minutes 漂移（红线 R1）")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b+W3a 字节一致 + en seo 双源同步 全部通过")
+// 13) UI-06 part2 W3b（Studio 音色选择 + 说话人管理）：appVoiceSelection / appSpeakerAudit /
+//     appSpeakerCreate / appSpeakerBadge 四 namespace 的内联中文迁入字典后，默认 zh 值必须与改造前
+//     组件源【逐字节】相同（红线 R1）。钉死跨模板拼接（warnSpeaker）、特殊符号（★ U+2605 / 🎯 /
+//     em-dash — / 「」U+300C-D）、全角括号（）、占位符最敏感的代表串：
+const zhVs = JSON.parse(readFileSync(path.join(root, "messages/zh/appVoiceSelection.json"), "utf8"))
+assert.equal(
+  zhVs.desc,
+  "请为每位说话人选择预设音色或克隆专属音色，确认后继续生成配音。",
+  "appVoiceSelection.desc 漂移（红线 R1）",
+)
+assert.equal(
+  zhVs.expiredBanner,
+  "检测到 {count} 个音色已失效，已从选项中移除。请重新选择音色。",
+  "appVoiceSelection.expiredBanner 占位符/标点漂移（红线 R1）",
+)
+assert.equal(zhVs.optionLabelCps, "{base} · {cps}字/秒({tier})", "appVoiceSelection.optionLabelCps 间隔号 ·/半角括号/占位符漂移（红线 R1）")
+assert.equal(zhVs.badge.strong, "★ 强匹配", "appVoiceSelection.badge.strong ★ U+2605 漂移（红线 R1）")
+assert.equal(zhVs.segDuration, "{count} 段 · {dur}s", "appVoiceSelection.segDuration 间隔号 ·/占位符/空格漂移（红线 R1）")
+assert.equal(zhVs.optgroup.smartRec, "🎯 智能推荐 (按匹配度排序)", "appVoiceSelection.optgroup.smartRec 🎯/半角括号漂移（红线 R1）")
+assert.equal(zhVs.creditsPerMinute, "{credits} 点/分钟", "appVoiceSelection.creditsPerMinute 半角斜杠/占位符漂移（红线 R1）")
+assert.equal(zhVs.configuredCount, "{done} / {total} 说话人已配置音色", "appVoiceSelection.configuredCount 占位符/半角斜杠/空格漂移（红线 R1）")
+// warnSpeaker：原为 3 段模板字面量 + 拼接（L699-702），迁为单 ICU 后【渲染逐字节相同】。
+assert.equal(
+  zhVs.warnSpeaker,
+  "{name}：选定音色 {voiceCps} 字/秒，比原说话人需要的 {targetCps} 字/秒{fast} {pct}%，配音可能需要大幅{direction}。",
+  "appVoiceSelection.warnSpeaker 跨模板拼接 ICU/全角：，/占位符漂移（红线 R1，渲染须与原三段拼接逐字节一致）",
+)
+
+const zhSpa = JSON.parse(readFileSync(path.join(root, "messages/zh/appSpeakerAudit.json"), "utf8"))
+assert.equal(zhSpa.title, "核对原音 —", "appSpeakerAudit.title em-dash — 漂移（红线 R1，标题拼接说话人名）")
+assert.equal(zhSpa.countPrefix, "共", "appSpeakerAudit.countPrefix 漂移（红线 R1，nested span 前缀）")
+assert.equal(zhSpa.countSuffix, "段", "appSpeakerAudit.countSuffix 漂移（红线 R1，nested span 后缀）")
+assert.equal(zhSpa.segmentFallback, "片段 {id}", "appSpeakerAudit.segmentFallback 占位符/空格漂移（红线 R1，id 是 content）")
+assert.equal(
+  zhSpa.readOnlyHint,
+  "试听原音以核对说话人归属。需修改归属或保留原音请到「翻译修改」Tab 在段落上操作。",
+  "appSpeakerAudit.readOnlyHint 全角直角引号「」/句号漂移（红线 R1）",
+)
+
+const zhScr = JSON.parse(readFileSync(path.join(root, "messages/zh/appSpeakerCreate.json"), "utf8"))
+assert.equal(
+  zhScr.description,
+  "为 S2 漏检的说话人新建一个条目。创建后请到段落下拉里把属于这个说话人的段都改归属， 后台会自动跑一次音色画像推断（约 5-15 秒）。",
+  "appSpeakerCreate.description JSX 折叠空格/全角括号（约 …）/半角连字符 5-15 漂移（红线 R1）",
+)
+assert.equal(zhScr.placeholder, "例：桑达尔·皮查伊", "appSpeakerCreate.placeholder 全角冒号：/间隔号 ·（人名示例，content）漂移（红线 R1）")
+assert.equal(zhScr.nameConflictServer, "已存在同名说话人，请改一个名字", "appSpeakerCreate.nameConflictServer 全角逗号漂移（红线 R1）")
+
+const zhSpb = JSON.parse(readFileSync(path.join(root, "messages/zh/appSpeakerBadge.json"), "utf8"))
+assert.equal(zhSpb.status.inferring, "音色画像推断中...", "appSpeakerBadge.status.inferring 半角三点漂移（红线 R1）")
+assert.equal(zhSpb.status.ready, "音色画像就绪", "appSpeakerBadge.status.ready 漂移（红线 R1）")
+assert.equal(zhSpb.retry, "重试", "appSpeakerBadge.retry 漂移（红线 R1）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b+W3a+W3b 字节一致 + en seo 双源同步 全部通过")

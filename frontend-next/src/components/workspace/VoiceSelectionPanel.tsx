@@ -1,9 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslations } from 'next-intl'
 
 import { useConfirmDialog } from '@/components/ui/confirm-dialog'
-import { getErrorMessage } from '@/lib/api/errors'
+import { useApiErrorMessage } from '@/lib/api/error-localization'
 import { getJob } from '@/lib/api/jobs'
 import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import {
@@ -125,37 +126,38 @@ const PROVIDER_TAB_ORDER = ['minimax', 'cosyvoice', 'volcengine'] as const
 const PROVIDER_SHORT_LABELS: Record<string, string> = {
   minimax: 'MiniMax',
   cosyvoice: 'CosyVoice',
-  volcengine: '豆包',
 }
 
+type VoiceSelectionTranslator = ReturnType<typeof useTranslations<'appVoiceSelection'>>
+
 /** Build a dropdown label including speed calibration info when available. */
-function formatVoiceOptionLabel(v: AvailableVoice): string {
+function formatVoiceOptionLabel(t: VoiceSelectionTranslator, v: AvailableVoice): string {
   const base = v.label || v.voiceId
   const cps = v.charsPerSecond
   if (cps == null) {
     return base
   }
-  let tier = '中'
-  if (cps < 3.5) tier = '慢'
-  else if (cps >= 4.5) tier = '快'
-  return `${base} · ${cps.toFixed(1)}字/秒(${tier})`
+  let tier = t('cpsTier.mid')
+  if (cps < 3.5) tier = t('cpsTier.slow')
+  else if (cps >= 4.5) tier = t('cpsTier.fast')
+  return t('optionLabelCps', { base, cps: cps.toFixed(1), tier })
 }
 
 /** Phase 2: short badge for personal-voice candidate match scope.
  *  Strong same-source = "★ 强匹配"; medium same-source = "● 同视频";
  *  cross-source named = "○ 跨视频同名". */
-function matchScopeBadge(scope: VoiceMatchScope): string {
+function matchScopeBadge(t: VoiceSelectionTranslator, scope: VoiceMatchScope): string {
   switch (scope) {
     case 'same_source_strong':
-      return '★ 强匹配'
+      return t('badge.strong')
     case 'same_source_named':
-      return '● 同视频同名'
+      return t('badge.sameNamed')
     case 'same_source_speaker_id_changed':
-      return '● 同视频'
+      return t('badge.same')
     case 'cross_source_named_person':
-      return '○ 跨视频同名'
+      return t('badge.crossNamed')
     default:
-      return '○ 可能匹配'
+      return t('badge.maybe')
   }
 }
 
@@ -209,6 +211,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   const [expiredVoiceIds, setExpiredVoiceIds] = useState<string[]>([])
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
+  const t = useTranslations('appVoiceSelection')
+  const localizeError = useApiErrorMessage()
 
   // Load review payload
   useEffect(() => {
@@ -470,7 +474,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         setVoiceCandidates(candidateMap)
         setVoiceStates(initialStates)
       } catch (err) {
-        if (!cancelled) setError(getErrorMessage(err))
+        if (!cancelled) setError(localizeError(err))
       } finally {
         if (!cancelled) setIsLoading(false)
       }
@@ -478,7 +482,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
 
     load()
     return () => { cancelled = true }
-  }, [jobId])
+  }, [jobId, localizeError])
 
   const handleProviderChange = useCallback((speakerId: string, provider: string) => {
     setVoiceStates((prev) => {
@@ -607,7 +611,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       })
 
       if (result.expired) {
-        setPreviewError((p) => ({ ...p, [speakerId]: '音色已失效，请重新选择' }))
+        setPreviewError((p) => ({ ...p, [speakerId]: t('voiceExpired') }))
         setVoiceStates((prev) => ({
           ...prev,
           [speakerId]: { ...prev[speakerId], voiceId: '', voiceSource: 'catalog', voiceReuse: false },
@@ -630,11 +634,11 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         previewAudioRef.current = audio
       }
     } catch (err) {
-      setPreviewError((p) => ({ ...p, [speakerId]: getErrorMessage(err) }))
+      setPreviewError((p) => ({ ...p, [speakerId]: localizeError(err) }))
     } finally {
       setPreviewLoading((p) => ({ ...p, [speakerId]: false }))
     }
-  }, [voiceStates, jobId, speakers])
+  }, [voiceStates, jobId, speakers, t, localizeError])
 
   useEffect(() => {
     return () => {
@@ -694,19 +698,24 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       const deviation = Math.abs(voiceCps - targetCps) / targetCps
       if (deviation > 0.30) {
         const pct = Math.round(deviation * 100)
-        const fast = voiceCps > targetCps ? '快' : '慢'
+        const fast = voiceCps > targetCps ? t('cmp.faster') : t('cmp.slower')
         mismatchWarnings.push(
-          `${sp.speakerName}：选定音色 ${voiceCps.toFixed(1)} 字/秒，` +
-          `比原说话人需要的 ${targetCps.toFixed(1)} 字/秒${fast} ${pct}%，` +
-          `配音可能需要大幅${voiceCps > targetCps ? '减速' : '加速'}。`
+          t('warnSpeaker', {
+            name: sp.speakerName,
+            voiceCps: voiceCps.toFixed(1),
+            targetCps: targetCps.toFixed(1),
+            fast,
+            pct,
+            direction: voiceCps > targetCps ? t('dir.slowDown') : t('dir.speedUp'),
+          }),
         )
       }
     }
     if (mismatchWarnings.length > 0) {
-      const msg = '以下说话人的音色语速和原视频差异较大：\n\n' +
+      const msg = t('warnIntro') + '\n\n' +
         mismatchWarnings.join('\n') +
-        '\n\n这可能导致配音听感不自然。是否继续？'
-      const confirmed = await confirm({ title: '语速差异提醒', description: msg })
+        '\n\n' + t('warnOutro')
+      const confirmed = await confirm({ title: t('speedWarnTitle'), description: msg })
       if (!confirmed) return
     }
 
@@ -730,12 +739,12 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       await approveVoiceSelection(jobId, approvals)
       onAdvanced()
     } catch (err) {
-      setError(getErrorMessage(err))
+      setError(localizeError(err))
     } finally {
       setIsSubmitting(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced, fallbackVoices, providerMap, hasMultiProvider, confirm])
+  }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced, fallbackVoices, providerMap, hasMultiProvider, confirm, t, localizeError])
 
   // Helper: get available voices for a speaker's currently selected provider
   function getVoicesForSpeaker(speakerId: string): AvailableVoice[] {
@@ -783,7 +792,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     return (
       <section className="surface-card p-8 text-center">
         <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-[color:var(--cinnabar)] border-t-transparent" />
-        <h3 className="text-lg font-semibold text-foreground">加载音色选择...</h3>
+        <h3 className="text-lg font-semibold text-foreground">{t('loading')}</h3>
       </section>
     )
   }
@@ -806,15 +815,15 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         {expiredVoiceIds.length > 0 ? (
           <div className="rounded-lg border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/8 p-3">
             <p className="text-sm text-[color:var(--cinnabar)]">
-              检测到 {expiredVoiceIds.length} 个音色已失效，已从选项中移除。请重新选择音色。
+              {t('expiredBanner', { count: expiredVoiceIds.length })}
             </p>
           </div>
         ) : null}
 
         {/* Header */}
         <div className="space-y-1">
-          <h2 className="text-lg font-semibold text-foreground">音色选择</h2>
-          <p className="text-sm text-slate-500">请为每位说话人选择预设音色或克隆专属音色，确认后继续生成配音。</p>
+          <h2 className="text-lg font-semibold text-foreground">{t('title')}</h2>
+          <p className="text-sm text-slate-500">{t('desc')}</p>
         </div>
 
         {/* Speaker list */}
@@ -826,12 +835,12 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             const showClone = canSpeakerClone(sp.speakerId)
             const hasNoSegments = sp.segmentCount <= 0
             const statusLabel = hasNoSegments
-              ? '无片段'
+              ? t('status.noSegments')
               : state?.voiceSource === 'cloned'
-                ? '已克隆'
+                ? t('status.cloned')
                 : state?.voiceId
-                  ? '已选择'
-                  : '待选择'
+                  ? t('status.selected')
+                  : t('status.pending')
             const statusColor = hasNoSegments
               ? 'text-muted-foreground'
               : state?.voiceSource === 'cloned'
@@ -853,7 +862,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-foreground text-sm">{sp.speakerName}</span>
                       <span className="text-xs text-slate-400">{sp.speakerId}</span>
-                      <span className="text-xs text-slate-400">{sp.segmentCount} 段 · {sp.totalDurationS.toFixed(1)}s</span>
+                      <span className="text-xs text-slate-400">{t('segDuration', { count: sp.segmentCount, dur: sp.totalDurationS.toFixed(1) })}</span>
                       {sp.speakerRoleLabel ? (
                         <span className="rounded px-1.5 py-0.5 text-xs font-medium border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 text-[color:var(--ochre)]">
                           {sp.speakerRoleLabel}
@@ -881,7 +890,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                               onClick={() => handleProviderChange(sp.speakerId, prov)}
                               type="button"
                             >
-                              {PROVIDER_SHORT_LABELS[prov] ?? prov}
+                              {prov === 'volcengine' ? t('provider.volcengine') : (PROVIDER_SHORT_LABELS[prov] ?? prov)}
                             </button>
                           )
                         })}
@@ -895,7 +904,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         onChange={(e) => handleVoiceChange(sp.speakerId, e.target.value)}
                         value={state?.voiceId ?? ''}
                       >
-                        <option value="">-- 选择音色 --</option>
+                        <option value="">{t('selectVoice')}</option>
                         {/* Phase 2 (plan 2026-05-17): personal-voice candidates
                            ordered above official recommendations per candidate
                            priority. Only meaningful for MiniMax (personal voices
@@ -910,7 +919,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           const showAuto = auto && !expiredVoiceIds.includes(auto.voiceId)
                           if (!showAuto || !auto) return null
                           return (
-                            <optgroup label="个人音色 · 强匹配 (不扣点)">
+                            <optgroup label={t('optgroup.personalStrong')}>
                               <option value={auto.voiceId}>
                                 {`★ ${auto.label}${formatCandidateSourceHint(auto)}`}
                               </option>
@@ -925,10 +934,10 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                               && !expiredVoiceIds.includes(c.voiceId))
                           if (list.length === 0) return null
                           return (
-                            <optgroup label="个人音色 · 可能匹配 (需要确认)">
+                            <optgroup label={t('optgroup.personalMaybe')}>
                               {list.map((c) => (
                                 <option key={`pvc-${c.voiceId}`} value={c.voiceId}>
-                                  {`${matchScopeBadge(c.matchScope)} ${c.label}${formatCandidateSourceHint(c)}`}
+                                  {`${matchScopeBadge(t, c.matchScope)} ${c.label}${formatCandidateSourceHint(c)}`}
                                 </option>
                               ))}
                             </optgroup>
@@ -950,7 +959,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           )
                           if (others.length === 0) return null
                           return (
-                            <optgroup label="其他个人音色">
+                            <optgroup label={t('optgroup.otherPersonal')}>
                               {others.map((v) => (
                                 <option key={v.voiceId} value={v.voiceId}>
                                   {v.label || v.voiceId}
@@ -984,7 +993,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           })
                           if (cosyClones.length === 0) return null
                           return (
-                            <optgroup label="我的 CosyVoice 克隆音色">
+                            <optgroup label={t('optgroup.cosyClones')}>
                               {cosyClones.map((v) => (
                                 <option key={`cosy-clone-${v.voiceId}`} value={v.voiceId}>
                                   {v.label || v.voiceId}
@@ -1005,15 +1014,15 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           }
                           if (recIds.length === 0) return null
                           return (
-                            <optgroup label="🎯 智能推荐 (按匹配度排序)">
+                            <optgroup label={t('optgroup.smartRec')}>
                               {recIds.map((vid, i) => {
                                 const v = voiceById.get(vid)
                                 const fallbackLabel =
                                   vid === provMatch.voiceId
                                     ? provMatch.label
                                     : provMatch.backups.find((b) => b.voiceId === vid)?.label || vid
-                                const baseLabel = v ? formatVoiceOptionLabel(v) : fallbackLabel
-                                const prefix = i === 0 ? '★ 自动匹配' : `#${i + 1} 推荐`
+                                const baseLabel = v ? formatVoiceOptionLabel(t, v) : fallbackLabel
+                                const prefix = i === 0 ? t('recAuto') : t('recRank', { rank: i + 1 })
                                 return (
                                   <option key={`rec-${vid}`} value={vid}>
                                     {`${prefix} · ${baseLabel}`}
@@ -1031,18 +1040,18 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           return (
                             <>
                               {femaleVoices.length > 0 ? (
-                                <optgroup label={`女声 (${femaleVoices.length})`}>
-                                  {femaleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(v)}</option>)}
+                                <optgroup label={t('optgroup.female', { count: femaleVoices.length })}>
+                                  {femaleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(t, v)}</option>)}
                                 </optgroup>
                               ) : null}
                               {maleVoices.length > 0 ? (
-                                <optgroup label={`男声 (${maleVoices.length})`}>
-                                  {maleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(v)}</option>)}
+                                <optgroup label={t('optgroup.male', { count: maleVoices.length })}>
+                                  {maleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(t, v)}</option>)}
                                 </optgroup>
                               ) : null}
                               {otherVoices.length > 0 ? (
-                                <optgroup label={`其他 (${otherVoices.length})`}>
-                                  {otherVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(v)}</option>)}
+                                <optgroup label={t('optgroup.other', { count: otherVoices.length })}>
+                                  {otherVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(t, v)}</option>)}
                                 </optgroup>
                               ) : null}
                             </>
@@ -1058,7 +1067,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           onClick={() => { void handlePreview(sp.speakerId) }}
                           type="button"
                         >
-                          {previewLoading[sp.speakerId] ? '试听中...' : '试听'}
+                          {previewLoading[sp.speakerId] ? t('previewing') : t('preview')}
                         </button>
                       ) : null}
 
@@ -1068,7 +1077,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         onClick={() => setAuditModalSpeaker(sp.speakerId)}
                         type="button"
                       >
-                        核对原音
+                        {t('checkOriginal')}
                       </button>
 
                       {showClone ? (
@@ -1091,7 +1100,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           }}
                           type="button"
                         >
-                          {state?.isCloning ? '克隆中...' : '克隆音色'}
+                          {state?.isCloning ? t('cloning') : t('cloneVoice')}
                         </button>
                       ) : null}
                     </div>
@@ -1108,15 +1117,15 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                               <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'turbo' ? 'border-[color:var(--cinnabar)]' : 'border-muted-foreground/40'}`}>
                                 {model === 'turbo' ? <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" /> : null}
                               </span>
-                              <span className="text-xs text-foreground">高级音质</span>
-                              <span className="text-xs text-slate-400">{cpm.minimax_turbo} 点/分钟</span>
+                              <span className="text-xs text-foreground">{t('quality.premium')}</span>
+                              <span className="text-xs text-slate-400">{t('creditsPerMinute', { credits: cpm.minimax_turbo })}</span>
                             </label>
                             <label className="flex items-center gap-1.5 cursor-pointer" onClick={() => setVoiceStates((prev) => ({ ...prev, [sp.speakerId]: { ...prev[sp.speakerId], minimaxModel: 'hd' } }))}>
                               <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'hd' ? 'border-[color:var(--cinnabar)]' : 'border-muted-foreground/40'}`}>
                                 {model === 'hd' ? <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" /> : null}
                               </span>
-                              <span className="text-xs text-foreground">旗舰音质</span>
-                              <span className="text-xs text-slate-400">{cpm.minimax_hd} 点/分钟</span>
+                              <span className="text-xs text-foreground">{t('quality.flagship')}</span>
+                              <span className="text-xs text-slate-400">{t('creditsPerMinute', { credits: cpm.minimax_hd })}</span>
                             </label>
                           </div>
                         )
@@ -1127,8 +1136,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                           <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-[color:var(--cinnabar)]">
                             <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" />
                           </span>
-                          <span className="text-xs text-foreground">标准音质</span>
-                          <span className="text-xs text-slate-400">{pts} 点/分钟</span>
+                          <span className="text-xs text-foreground">{t('quality.standard')}</span>
+                          <span className="text-xs text-slate-400">{t('creditsPerMinute', { credits: pts })}</span>
                         </div>
                       ) : null
                     })() : null}
@@ -1152,7 +1161,10 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         {/* Footer */}
         <div className="flex items-center justify-between pt-2 border-t border-border">
           <span className="text-xs text-slate-400">
-            {speakers.filter((sp) => sp.segmentCount > 0 && voiceStates[sp.speakerId]?.voiceId).length} / {speakers.filter((sp) => sp.segmentCount > 0).length} 说话人已配置音色
+            {t('configuredCount', {
+              done: speakers.filter((sp) => sp.segmentCount > 0 && voiceStates[sp.speakerId]?.voiceId).length,
+              total: speakers.filter((sp) => sp.segmentCount > 0).length,
+            })}
           </span>
           <button
             className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1160,7 +1172,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             onClick={() => { void handleSubmit() }}
             type="button"
           >
-            {isSubmitting ? '确认中...' : '确认音色选择'}
+            {isSubmitting ? t('confirming') : t('confirmSelection')}
           </button>
         </div>
       </section>

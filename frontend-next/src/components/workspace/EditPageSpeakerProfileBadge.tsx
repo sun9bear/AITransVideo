@@ -1,5 +1,7 @@
 "use client"
 
+import { useTranslations } from "next-intl"
+
 import type { EditingSpeaker } from "@/lib/api/editing"
 import { Badge } from "@/components/ui/badge"
 
@@ -16,12 +18,15 @@ interface Props {
 
 const STATUS_MAP: Record<
   EditingSpeaker["profile_status"],
-  { text: string; variant: "default" | "secondary" | "outline" | "destructive" }
+  {
+    key: Parameters<ReturnType<typeof useTranslations<"appSpeakerBadge">>>[0]
+    variant: "default" | "secondary" | "outline" | "destructive"
+  }
 > = {
-  pending_segments: { text: "待归属段落", variant: "outline" },
-  inferring: { text: "音色画像推断中...", variant: "secondary" },
-  ready: { text: "音色画像就绪", variant: "default" },
-  failed: { text: "推断失败", variant: "destructive" },
+  pending_segments: { key: "status.pending_segments", variant: "outline" },
+  inferring: { key: "status.inferring", variant: "secondary" },
+  ready: { key: "status.ready", variant: "default" },
+  failed: { key: "status.failed", variant: "destructive" },
 }
 
 /**
@@ -35,6 +40,7 @@ const STATUS_MAP: Record<
  * for the raw error string.
  */
 export function EditPageSpeakerProfileBadge({ speaker, onRetry }: Props) {
+  const t = useTranslations("appSpeakerBadge")
   if (speaker.source === "baseline") return null
 
   const meta = STATUS_MAP[speaker.profile_status]
@@ -42,14 +48,14 @@ export function EditPageSpeakerProfileBadge({ speaker, onRetry }: Props) {
 
   return (
     <span className="inline-flex items-center gap-2">
-      <Badge variant={meta.variant}>{meta.text}</Badge>
+      <Badge variant={meta.variant}>{t(meta.key)}</Badge>
       {speaker.profile_status === "failed" && onRetry && (
         <button
           type="button"
           onClick={onRetry}
           className="text-xs text-blue-500 hover:underline"
         >
-          重试
+          {t("retry")}
         </button>
       )}
       {speaker.profile_status === "failed" && speaker.profile_error && (

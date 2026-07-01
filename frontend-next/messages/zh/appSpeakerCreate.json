@@ -1,0 +1,11 @@
+{
+  "title": "新增说话人",
+  "description": "为 S2 漏检的说话人新建一个条目。创建后请到段落下拉里把属于这个说话人的段都改归属， 后台会自动跑一次音色画像推断（约 5-15 秒）。",
+  "placeholder": "例：桑达尔·皮查伊",
+  "nameConflictServer": "已存在同名说话人，请改一个名字",
+  "nameConflictLocal": "已有同名说话人",
+  "createFailed": "创建失败，请重试",
+  "cancel": "取消",
+  "creating": "创建中...",
+  "create": "创建"
+}

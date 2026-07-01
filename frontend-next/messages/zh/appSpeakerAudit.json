@@ -1,0 +1,14 @@
+{
+  "title": "核对原音 —",
+  "countPrefix": "共",
+  "countSuffix": "段",
+  "totalLabel": "总时长",
+  "sortHint": "按时间排序，修改后会立即保存。",
+  "loading": "加载原音片段...",
+  "empty": "当前说话人没有待核对片段",
+  "segmentFallback": "片段 {id}",
+  "keepOriginal": "保留原音",
+  "readOnlyHint": "试听原音以核对说话人归属。需修改归属或保留原音请到「翻译修改」Tab 在段落上操作。",
+  "editHint": "可修改说话人归属，也可让片段跳过翻译配音并保留原音。",
+  "close": "关闭"
+}

@@ -26,6 +26,10 @@ import appTranslationFormConsent from "../messages/zh/appTranslationFormConsent.
 import appTranslationReview from "../messages/zh/appTranslationReview.json"
 import appVoiceReview from "../messages/zh/appVoiceReview.json"
 import appSmartAutoDecision from "../messages/zh/appSmartAutoDecision.json"
+import appVoiceSelection from "../messages/zh/appVoiceSelection.json"
+import appSpeakerAudit from "../messages/zh/appSpeakerAudit.json"
+import appSpeakerCreate from "../messages/zh/appSpeakerCreate.json"
+import appSpeakerBadge from "../messages/zh/appSpeakerBadge.json"
 import errors from "../messages/zh/errors.json"
 import { routing } from "./i18n/routing"
 
@@ -52,6 +56,10 @@ type Messages = {
   appTranslationReview: typeof appTranslationReview
   appVoiceReview: typeof appVoiceReview
   appSmartAutoDecision: typeof appSmartAutoDecision
+  appVoiceSelection: typeof appVoiceSelection
+  appSpeakerAudit: typeof appSpeakerAudit
+  appSpeakerCreate: typeof appSpeakerCreate
+  appSpeakerBadge: typeof appSpeakerBadge
   errors: typeof errors
 }
 
