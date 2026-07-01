@@ -1,0 +1,43 @@
+{
+  "loading": "Loading the Smart decision summary…",
+  "loadFailed": "Failed to load the Smart decision summary: {msg}",
+  "inFlight": "The Smart job hasn't reached a final state yet; the decision summary will appear after it completes or hands off to a human.",
+  "title": "Smart decision summary",
+  "generatedAt": "Generated at {time}",
+  "billingPolicy": "Billing policy: ",
+  "reason": "Reason: ",
+  "speakerRecognition": "Speaker recognition",
+  "mainSpeakerCount": "Main speaker count: ",
+  "mainSpeakers": "Main speakers: ",
+  "listSeparator": ", ",
+  "excluded": "Excluded: ",
+  "excludedItem": "{id} ({reason})",
+  "voiceDecisions": "Voice decisions",
+  "speaker": "Speaker",
+  "decision": "Decision",
+  "voiceId": "Voice ID",
+  "translationReview": "Translation review",
+  "autoApproved": "Auto-approved",
+  "notApproved": "Not approved: {check}",
+  "unknownCheck": "unknown check",
+  "retryStats": "Retry stats",
+  "rewriteRetry": "Rewrite retries",
+  "resynthesize": "Re-synthesis",
+  "budgetRemaining": "Budget remaining",
+  "times": "times",
+  "minutes": "min",
+  "handoffHistory": "Exception history",
+  "cloned": "Cloned",
+  "preset": "Preset",
+  "status": {
+    "completed": "Completed",
+    "downgraded": "Handed to human",
+    "refunded": "Refunded"
+  },
+  "policy": {
+    "full": "Normal billing",
+    "partial": "Partial billing",
+    "refund": "Full refund",
+    "pending": "Pending settlement"
+  }
+}

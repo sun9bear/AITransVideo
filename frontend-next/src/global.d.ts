@@ -23,6 +23,9 @@ import appJianyingDraft from "../messages/zh/appJianyingDraft.json"
 import appSmartPreviewResult from "../messages/zh/appSmartPreviewResult.json"
 import appTranslationForm from "../messages/zh/appTranslationForm.json"
 import appTranslationFormConsent from "../messages/zh/appTranslationFormConsent.json"
+import appTranslationReview from "../messages/zh/appTranslationReview.json"
+import appVoiceReview from "../messages/zh/appVoiceReview.json"
+import appSmartAutoDecision from "../messages/zh/appSmartAutoDecision.json"
 import errors from "../messages/zh/errors.json"
 import { routing } from "./i18n/routing"
 
@@ -46,6 +49,9 @@ type Messages = {
   appSmartPreviewResult: typeof appSmartPreviewResult
   appTranslationForm: typeof appTranslationForm
   appTranslationFormConsent: typeof appTranslationFormConsent
+  appTranslationReview: typeof appTranslationReview
+  appVoiceReview: typeof appVoiceReview
+  appSmartAutoDecision: typeof appSmartAutoDecision
   errors: typeof errors
 }
 

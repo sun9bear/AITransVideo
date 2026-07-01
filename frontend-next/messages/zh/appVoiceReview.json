@@ -1,0 +1,17 @@
+{
+  "loading": "加载音色选择...",
+  "loadFailed": "加载失败",
+  "title": "工作台音色选择",
+  "desc": "请为每个说话人选择豆包 2.0 音色，或选择「自动匹配」由系统根据说话人特征自动选择。",
+  "selectPrompt": "-- 请选择音色 --",
+  "autoMatch": "自动匹配（系统根据说话人特征选择）",
+  "female": "女声",
+  "male": "男声",
+  "other": "其他",
+  "mustSelect": "必须选择",
+  "submitting": "提交中...",
+  "confirmContinue": "确认并继续",
+  "selectForSpeakers": "请为以下说话人选择音色或\"自动匹配\"：{names}",
+  "submitSuccess": "音色确认成功",
+  "submitFailed": "音色确认失败: {msg}"
+}

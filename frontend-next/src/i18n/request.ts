@@ -34,6 +34,9 @@ export default getRequestConfig(async ({ requestLocale }) => {
     appSmartPreviewResult,
     appTranslationForm,
     appTranslationFormConsent,
+    appTranslationReview,
+    appVoiceReview,
+    appSmartAutoDecision,
     errors,
   ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
@@ -55,6 +58,9 @@ export default getRequestConfig(async ({ requestLocale }) => {
     import(`../../messages/${locale}/appSmartPreviewResult.json`),
     import(`../../messages/${locale}/appTranslationForm.json`),
     import(`../../messages/${locale}/appTranslationFormConsent.json`),
+    import(`../../messages/${locale}/appTranslationReview.json`),
+    import(`../../messages/${locale}/appVoiceReview.json`),
+    import(`../../messages/${locale}/appSmartAutoDecision.json`),
     import(`../../messages/${locale}/errors.json`),
   ])
 
@@ -80,6 +86,9 @@ export default getRequestConfig(async ({ requestLocale }) => {
       appSmartPreviewResult: appSmartPreviewResult.default,
       appTranslationForm: appTranslationForm.default,
       appTranslationFormConsent: appTranslationFormConsent.default,
+      appTranslationReview: appTranslationReview.default,
+      appVoiceReview: appVoiceReview.default,
+      appSmartAutoDecision: appSmartAutoDecision.default,
       errors: errors.default,
     },
   }

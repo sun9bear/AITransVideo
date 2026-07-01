@@ -1,8 +1,9 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslations } from 'next-intl'
 
-import { getErrorMessage } from '@/lib/api/errors'
+import { useApiErrorMessage } from '@/lib/api/error-localization'
 import {
   approveTranslationReview,
   getTranslationReview,
@@ -31,6 +32,8 @@ interface TranslationReviewPanelProps {
 /* ---------- Main Component ---------- */
 
 export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewPanelProps) {
+  const tr = useTranslations('appTranslationReview')
+  const localizeError = useApiErrorMessage()
   const [resource, setResource] = useState<TranslationReviewResource | null>(null)
   const [segments, setSegments] = useState<TranslationSegmentState>({})
   const [segmentSpeakers, setSegmentSpeakers] = useState<Record<string, string>>({})
@@ -94,14 +97,14 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
 
         setPageError(null)
       } catch (error) {
-        if (!cancelled) setPageError(getErrorMessage(error))
+        if (!cancelled) setPageError(localizeError(error))
       } finally {
         if (!cancelled) setIsLoading(false)
       }
     }
     void load()
     return () => { cancelled = true }
-  }, [jobId])
+  }, [jobId, localizeError])
 
   // Compute eligible preview segments: for each speaker, first 2 segments with duration > 5s
   const eligiblePreviewSegments = useMemo(() => {
@@ -139,14 +142,14 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
         audioRef.current.src = `data:audio/wav;base64,${result.sourceAudioBase64}`
         void audioRef.current.play()
       } else {
-        setPreviewError((prev) => ({ ...prev, [segmentId]: '原文音频提取失败，请确认项目源音频存在' }))
+        setPreviewError((prev) => ({ ...prev, [segmentId]: tr('previewSourceFailed') }))
       }
     } catch (error) {
-      setPreviewError((prev) => ({ ...prev, [segmentId]: getErrorMessage(error) }))
+      setPreviewError((prev) => ({ ...prev, [segmentId]: localizeError(error) }))
     } finally {
       setPreviewingSegmentId(null)
     }
-  }, [jobId, resource])
+  }, [jobId, resource, tr, localizeError])
 
   const handlePreviewSegment = useCallback(async (segmentId: string) => {
     if (!resource) return
@@ -155,7 +158,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
     const spk = segmentSpeakers[segmentId] ?? item.speakerId
     const voiceId = speakerVoices[spk]?.voiceId
     if (!voiceId) {
-      setPreviewError((prev) => ({ ...prev, [segmentId]: '请先为该说话人选择音色' }))
+      setPreviewError((prev) => ({ ...prev, [segmentId]: tr('selectVoiceFirst') }))
       return
     }
     const currentSegment = segments[segmentId]
@@ -176,11 +179,11 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
         audioRef.current.play()
       }
     } catch (error) {
-      setPreviewError((prev) => ({ ...prev, [segmentId]: getErrorMessage(error) }))
+      setPreviewError((prev) => ({ ...prev, [segmentId]: localizeError(error) }))
     } finally {
       setPreviewingSegmentId(null)
     }
-  }, [jobId, resource, segmentSpeakers, speakerVoices, segments])
+  }, [jobId, resource, segmentSpeakers, speakerVoices, segments, tr, localizeError])
 
   const totalItems = resource?.items.length ?? 0
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize))
@@ -212,20 +215,20 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
       })
       onAdvanced()
     } catch (error) {
-      setSubmitError(getErrorMessage(error))
+      setSubmitError(localizeError(error))
     } finally {
       setIsSubmitting(false)
     }
   }
 
   if (isLoading && !resource) {
-    return <PanelLoading message="正在读取翻译审核内容..." />
+    return <PanelLoading message={tr('loadingReview')} />
   }
   if (pageError && !resource) {
     return <PanelError message={pageError} />
   }
   if (!resource) {
-    return <PanelError message="当前没有可展示的翻译审核内容。" />
+    return <PanelError message={tr('noContent')} />
   }
 
   return (
@@ -235,7 +238,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
       {/* Action bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          确认翻译与配音文本，共 {resource.items.length} 条。
+          {tr('confirmHint', { count: resource.items.length })}
         </p>
         <button
           className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:opacity-50"
@@ -243,7 +246,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
           onClick={() => { void handleApprove() }}
           type="button"
         >
-          {isSubmitting ? '提交中...' : '确认并继续'}
+          {isSubmitting ? tr('submitting') : tr('confirmContinue')}
         </button>
       </div>
 
@@ -254,8 +257,8 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
         <section className="surface-card p-4">
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold text-foreground">说话人确认</h3>
-              <span className="text-xs text-muted-foreground">确认每位说话人的名字，可直接修改</span>
+              <h3 className="text-sm font-semibold text-foreground">{tr('speakerConfirm')}</h3>
+              <span className="text-xs text-muted-foreground">{tr('speakerConfirmHint')}</span>
             </div>
             <div className="flex flex-wrap gap-3">
               {resource.speakerOptions.map((option, index) => (
@@ -306,7 +309,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
               <article key={item.segmentId} className="rounded-2xl border border-border bg-card p-5">
                 {/* Header: segment id + speaker + actions */}
                 <div className="flex flex-wrap items-center gap-3">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">片段 {item.segmentId}</p>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{tr('segmentLabel', { id: item.segmentId })}</p>
                   {resource.speakerOptions.length > 1 ? (
                     <select
                       className="form-input min-w-[140px] py-1 text-sm font-semibold"
@@ -322,7 +325,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                     </select>
                   ) : (
                     <input
-                      aria-label="修改说话人名字"
+                      aria-label={tr('editSpeakerNameAria')}
                       className="form-input min-w-[140px] py-1 text-sm font-semibold"
                       onChange={(event) => {
                         const speakerId = item.speakerId
@@ -356,7 +359,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       }}
                       type="button"
                     >
-                      {splittingSegmentId === item.segmentId ? '✕ 取消拆分' : '拆分'}
+                      {splittingSegmentId === item.segmentId ? tr('cancelSplit') : tr('split')}
                     </button>
                   </div>
                 </div>
@@ -369,15 +372,15 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                 {/* Source text + play source button */}
                 <div className="mt-3">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-medium text-muted-foreground">原文</span>
+                    <span className="text-xs font-medium text-muted-foreground">{tr('sourceText')}</span>
                     <button
                       className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-400 transition hover:bg-sky-500/20 hover:border-sky-500/50 disabled:opacity-50"
                       disabled={isPreviewingThis}
                       onClick={() => { void handlePreviewSource(item.segmentId) }}
                       type="button"
-                      title="播放该段的原始音频（用于核对发言人）"
+                      title={tr('playSourceTitle')}
                     >
-                      {isPreviewingThis ? '加载中...' : '▶ 播放原文'}
+                      {isPreviewingThis ? tr('loading') : tr('playSource')}
                     </button>
                   </div>
                   {/* 双色语义：源文=朱砂 / 译文=群青（plan 2026-06-11 Task 2，仅外层容器装饰边线） */}
@@ -389,7 +392,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                 {/* Translation textarea + preview tts button */}
                 <div className="mt-3">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-medium text-muted-foreground">译文</span>
+                    <span className="text-xs font-medium text-muted-foreground">{tr('translation')}</span>
                   </div>
                   <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5" style={{ borderLeft: "3px solid var(--ultramarine)" }}>
                     <textarea
@@ -408,9 +411,9 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                 {/* Split panel */}
                 {splittingSegmentId === item.segmentId ? (
                   <div className="mt-3 rounded-xl border-2 border-amber-500/20 bg-amber-500/5 p-4 space-y-4">
-                    <p className="text-sm font-semibold text-foreground">拆分片段 {item.segmentId}</p>
+                    <p className="text-sm font-semibold text-foreground">{tr('splitSegment', { id: item.segmentId })}</p>
                     <div className="space-y-2">
-                      <p className="form-label">原文拆分位置（{splitSourcePos}）</p>
+                      <p className="form-label">{tr('splitSourcePos', { pos: splitSourcePos })}</p>
                       <input className="w-full" max={(item.sourceText || '').length} min={1} onChange={(e) => setSplitSourcePos(Number(e.currentTarget.value))} type="range" value={splitSourcePos} />
                       <div className="grid grid-cols-2 gap-2 text-xs">
                         <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="text-foreground/70">{(item.sourceText || '').slice(0, splitSourcePos)}</p></div>
@@ -418,7 +421,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       </div>
                     </div>
                     <div className="space-y-2">
-                      <p className="form-label">译文拆分位置（{splitCnPos}）</p>
+                      <p className="form-label">{tr('splitCnPos', { pos: splitCnPos })}</p>
                       <input className="w-full" max={(current.cnText || '').length} min={1} onChange={(e) => setSplitCnPos(Number(e.currentTarget.value))} type="range" value={splitCnPos} />
                       <div className="grid grid-cols-2 gap-2 text-xs">
                         <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="text-foreground/70">{(current.cnText || '').slice(0, splitCnPos)}</p></div>
@@ -427,13 +430,13 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <label className="space-y-1">
-                        <span className="form-label">片段 A 发言人</span>
+                        <span className="form-label">{tr('segmentASpeaker')}</span>
                         <select className="form-input text-sm" onChange={(e) => setSplitSpeakerA(e.currentTarget.value)} value={splitSpeakerA}>
                           {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}
                         </select>
                       </label>
                       <label className="space-y-1">
-                        <span className="form-label">片段 B 发言人</span>
+                        <span className="form-label">{tr('segmentBSpeaker')}</span>
                         <select className="form-input text-sm" onChange={(e) => setSplitSpeakerB(e.currentTarget.value)} value={splitSpeakerB}>
                           {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}
                         </select>
@@ -461,10 +464,10 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                           onAdvanced()
                           return
                         }
-                        setSubmitError('拆分未生效。')
-                      } catch (error) { setSubmitError(`拆分失败: ${getErrorMessage(error)}`) } finally { setIsSplitting(false) }
+                        setSubmitError(tr('splitNoEffect'))
+                      } catch (error) { setSubmitError(tr('splitFailed', { msg: localizeError(error) })) } finally { setIsSplitting(false) }
                     }} type="button">
-                      {isSplitting ? '拆分中...' : '确认拆分'}
+                      {isSplitting ? tr('splitting') : tr('confirmSplit')}
                     </button>
                   </div>
                 ) : null}
@@ -521,19 +524,20 @@ function Pagination({
   totalItems: number; totalPages: number;
   onPageChange: (p: number) => void; onPageSizeChange: (s: number) => void;
 }) {
+  const tr = useTranslations('appTranslationReview')
   return (
     <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-      <span>第 {currentPage} / {totalPages} 页</span>
-      <span>显示 {Math.min((currentPage - 1) * pageSize + 1, totalItems)}-{Math.min(currentPage * pageSize, totalItems)} / {totalItems}</span>
+      <span>{tr('pageInfo', { current: currentPage, total: totalPages })}</span>
+      <span>{tr('showRange', { from: Math.min((currentPage - 1) * pageSize + 1, totalItems), to: Math.min(currentPage * pageSize, totalItems), total: totalItems })}</span>
       <label className="flex items-center gap-2">
-        <span>每页</span>
+        <span>{tr('perPage')}</span>
         <select className="form-input min-w-[96px] py-2" onChange={(e) => onPageSizeChange(Number(e.currentTarget.value))} value={pageSize}>
           {pageSizeOptions.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
         </select>
       </label>
       <div className="flex gap-2">
-        <button className="secondary-button px-4 py-2" disabled={currentPage <= 1} onClick={() => { onPageChange(Math.max(1, currentPage - 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">上一页</button>
-        <button className="secondary-button px-4 py-2" disabled={currentPage >= totalPages} onClick={() => { onPageChange(Math.min(totalPages, currentPage + 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">下一页</button>
+        <button className="secondary-button px-4 py-2" disabled={currentPage <= 1} onClick={() => { onPageChange(Math.max(1, currentPage - 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">{tr('prevPage')}</button>
+        <button className="secondary-button px-4 py-2" disabled={currentPage >= totalPages} onClick={() => { onPageChange(Math.min(totalPages, currentPage + 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">{tr('nextPage')}</button>
       </div>
     </div>
   )

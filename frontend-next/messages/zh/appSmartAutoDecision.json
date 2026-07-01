@@ -1,0 +1,43 @@
+{
+  "loading": "正在加载智能版决策摘要…",
+  "loadFailed": "智能版决策摘要加载失败：{msg}",
+  "inFlight": "智能版尚未到达终态，决策摘要将在完成或转人工后显示。",
+  "title": "智能版决策摘要",
+  "generatedAt": "生成于 {time}",
+  "billingPolicy": "计费策略：",
+  "reason": "原因：",
+  "speakerRecognition": "说话人识别",
+  "mainSpeakerCount": "主说话人数量：",
+  "mainSpeakers": "主说话人：",
+  "listSeparator": "、",
+  "excluded": "已排除：",
+  "excludedItem": "{id}（{reason}）",
+  "voiceDecisions": "音色决策",
+  "speaker": "说话人",
+  "decision": "决策",
+  "voiceId": "音色 ID",
+  "translationReview": "翻译审核",
+  "autoApproved": "自动通过",
+  "notApproved": "未通过：{check}",
+  "unknownCheck": "未知检查",
+  "retryStats": "重试统计",
+  "rewriteRetry": "改写重试",
+  "resynthesize": "重新合成",
+  "budgetRemaining": "剩余预算",
+  "times": "次",
+  "minutes": "分钟",
+  "handoffHistory": "异常历史",
+  "cloned": "克隆",
+  "preset": "预设",
+  "status": {
+    "completed": "已完成",
+    "downgraded": "已转人工",
+    "refunded": "已退款"
+  },
+  "policy": {
+    "full": "正常计费",
+    "partial": "部分计费",
+    "refund": "全额退款",
+    "pending": "待结算"
+  }
+}
