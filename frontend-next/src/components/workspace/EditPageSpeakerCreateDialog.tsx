@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useTranslations } from "next-intl"
 import {
   Dialog,
   DialogContent,
@@ -37,6 +38,7 @@ export function EditPageSpeakerCreateDialog({
   onClose,
   onCreated,
 }: EditPageSpeakerCreateDialogProps) {
+  const t = useTranslations("appSpeakerCreate")
   const [name, setName] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -56,9 +58,9 @@ export function EditPageSpeakerCreateDialog({
       onClose()
     } catch (e: unknown) {
       if (e instanceof DisplayNameConflict) {
-        setError("已存在同名说话人，请改一个名字")
+        setError(t("nameConflictServer"))
       } else {
-        setError("创建失败，请重试")
+        setError(t("createFailed"))
       }
     } finally {
       setSubmitting(false)
@@ -77,17 +79,16 @@ export function EditPageSpeakerCreateDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>新增说话人</DialogTitle>
+          <DialogTitle>{t("title")}</DialogTitle>
           <DialogDescription>
-            为 S2 漏检的说话人新建一个条目。创建后请到段落下拉里把属于这个说话人的段都改归属，
-            后台会自动跑一次音色画像推断（约 5-15 秒）。
+            {t("description")}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="例：桑达尔·皮查伊"
+            placeholder={t("placeholder")}
             maxLength={40}
             autoFocus
             onKeyDown={(e) => {
@@ -109,7 +110,7 @@ export function EditPageSpeakerCreateDialog({
               className="text-sm text-red-500"
               role="alert"
             >
-              {localConflict ? "已有同名说话人" : error}
+              {localConflict ? t("nameConflictLocal") : error}
             </p>
           )}
         </div>
@@ -119,10 +120,10 @@ export function EditPageSpeakerCreateDialog({
             onClick={onClose}
             disabled={submitting}
           >
-            取消
+            {t("cancel")}
           </Button>
           <Button onClick={handleSubmit} disabled={!canSubmit}>
-            {submitting ? "创建中..." : "创建"}
+            {submitting ? t("creating") : t("create")}
           </Button>
         </DialogFooter>
       </DialogContent>

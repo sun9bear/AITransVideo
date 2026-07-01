@@ -1,0 +1,14 @@
+{
+  "title": "Check original audio —",
+  "countPrefix": "Total",
+  "countSuffix": "segments",
+  "totalLabel": "Total duration",
+  "sortHint": "Sorted by time; changes save immediately.",
+  "loading": "Loading original audio segments...",
+  "empty": "This speaker has no segments to check",
+  "segmentFallback": "Segment {id}",
+  "keepOriginal": "Keep original audio",
+  "readOnlyHint": "Play the original audio to verify speaker attribution. To change attribution or keep the original audio, use the \"Translation edits\" tab on each segment.",
+  "editHint": "You can change speaker attribution, or let a segment skip dubbing and keep its original audio.",
+  "close": "Close"
+}

@@ -37,6 +37,10 @@ export default getRequestConfig(async ({ requestLocale }) => {
     appTranslationReview,
     appVoiceReview,
     appSmartAutoDecision,
+    appVoiceSelection,
+    appSpeakerAudit,
+    appSpeakerCreate,
+    appSpeakerBadge,
     errors,
   ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
@@ -61,6 +65,10 @@ export default getRequestConfig(async ({ requestLocale }) => {
     import(`../../messages/${locale}/appTranslationReview.json`),
     import(`../../messages/${locale}/appVoiceReview.json`),
     import(`../../messages/${locale}/appSmartAutoDecision.json`),
+    import(`../../messages/${locale}/appVoiceSelection.json`),
+    import(`../../messages/${locale}/appSpeakerAudit.json`),
+    import(`../../messages/${locale}/appSpeakerCreate.json`),
+    import(`../../messages/${locale}/appSpeakerBadge.json`),
     import(`../../messages/${locale}/errors.json`),
   ])
 
@@ -89,6 +97,10 @@ export default getRequestConfig(async ({ requestLocale }) => {
       appTranslationReview: appTranslationReview.default,
       appVoiceReview: appVoiceReview.default,
       appSmartAutoDecision: appSmartAutoDecision.default,
+      appVoiceSelection: appVoiceSelection.default,
+      appSpeakerAudit: appSpeakerAudit.default,
+      appSpeakerCreate: appSpeakerCreate.default,
+      appSpeakerBadge: appSpeakerBadge.default,
       errors: errors.default,
     },
   }

@@ -1,0 +1,11 @@
+{
+  "title": "Add speaker",
+  "description": "Create an entry for a speaker that S2 missed. After creating it, open the segment dropdown and reassign every segment belonging to this speaker; the backend will automatically run a voice-profile inference (about 5-15 seconds).",
+  "placeholder": "e.g. Sundar Pichai",
+  "nameConflictServer": "A speaker with this name already exists; please use a different name",
+  "nameConflictLocal": "Duplicate speaker name",
+  "createFailed": "Failed to create, please try again",
+  "cancel": "Cancel",
+  "creating": "Creating...",
+  "create": "Create"
+}

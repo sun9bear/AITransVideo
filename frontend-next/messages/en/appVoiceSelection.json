@@ -1,0 +1,69 @@
+{
+  "loading": "Loading voice selection...",
+  "title": "Voice selection",
+  "desc": "Choose a preset voice or clone a dedicated voice for each speaker, then confirm to continue generating the dub.",
+  "expiredBanner": "Detected {count} expired voice(s); they have been removed from the options. Please choose a voice again.",
+  "provider": {
+    "volcengine": "Doubao"
+  },
+  "cpsTier": {
+    "mid": "Med",
+    "slow": "Slow",
+    "fast": "Fast"
+  },
+  "optionLabelCps": "{base} · {cps} cps ({tier})",
+  "badge": {
+    "strong": "★ Strong match",
+    "sameNamed": "● Same video, same name",
+    "same": "● Same video",
+    "crossNamed": "○ Cross-video, same name",
+    "maybe": "○ Possible match"
+  },
+  "segDuration": "{count} seg · {dur}s",
+  "status": {
+    "noSegments": "No segments",
+    "cloned": "Cloned",
+    "selected": "Selected",
+    "pending": "To select"
+  },
+  "selectVoice": "-- Select a voice --",
+  "optgroup": {
+    "personalStrong": "Personal voices · Strong match (no charge)",
+    "personalMaybe": "Personal voices · Possible match (confirm)",
+    "otherPersonal": "Other personal voices",
+    "cosyClones": "My CosyVoice cloned voices",
+    "smartRec": "🎯 Smart recommendations (by match)",
+    "female": "Female ({count})",
+    "male": "Male ({count})",
+    "other": "Other ({count})"
+  },
+  "recAuto": "★ Auto match",
+  "recRank": "#{rank} Rec",
+  "checkOriginal": "Check original audio",
+  "previewing": "Previewing...",
+  "preview": "Preview",
+  "cloning": "Cloning...",
+  "cloneVoice": "Clone voice",
+  "quality": {
+    "premium": "Premium quality",
+    "flagship": "Flagship quality",
+    "standard": "Standard quality"
+  },
+  "creditsPerMinute": "{credits} credits/min",
+  "voiceExpired": "This voice has expired; please choose again",
+  "configuredCount": "{done} / {total} speakers have a voice configured",
+  "confirming": "Confirming...",
+  "confirmSelection": "Confirm voice selection",
+  "warnIntro": "The following speakers' voices differ substantially in pace from the source video:",
+  "warnOutro": "This may make the dub sound unnatural. Continue?",
+  "warnSpeaker": "{name}: the selected voice runs at {voiceCps} cps, {pct}% {fast} than the {targetCps} cps the original speaker needs, so the dub may need to {direction} substantially.",
+  "cmp": {
+    "faster": "faster",
+    "slower": "slower"
+  },
+  "dir": {
+    "slowDown": "slow down",
+    "speedUp": "speed up"
+  },
+  "speedWarnTitle": "Speed mismatch warning"
+}

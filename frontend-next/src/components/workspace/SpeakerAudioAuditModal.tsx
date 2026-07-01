@@ -9,8 +9,9 @@
 // 播放 + 段信息显示。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslations } from 'next-intl'
 
-import { getErrorMessage } from '@/lib/api/errors'
+import { useApiErrorMessage } from '@/lib/api/error-localization'
 import { formatTimecode } from '@/lib/format'
 import {
   getSpeakerAudioSegments,
@@ -51,6 +52,8 @@ export function SpeakerAudioAuditModal({
   const [updatingDubbingModeSegmentId, setUpdatingDubbingModeSegmentId] = useState<number | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [playingSegmentId, setPlayingSegmentId] = useState<number | null>(null)
+  const t = useTranslations('appSpeakerAudit')
+  const localizeError = useApiErrorMessage()
 
   useEffect(() => {
     let cancelled = false
@@ -63,14 +66,14 @@ export function SpeakerAudioAuditModal({
           setSegments([...result.segments].sort((a, b) => a.startMs - b.startMs))
         }
       } catch (err) {
-        if (!cancelled) setError(getErrorMessage(err))
+        if (!cancelled) setError(localizeError(err))
       } finally {
         if (!cancelled) setIsLoading(false)
       }
     }
     load()
     return () => { cancelled = true }
-  }, [jobId, speaker.speakerId])
+  }, [jobId, speaker.speakerId, localizeError])
 
   const playSegment = useCallback((seg: SpeakerAudioSegment) => {
     if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
@@ -102,11 +105,11 @@ export function SpeakerAudioAuditModal({
         setPlayingSegmentId(null)
       }
     } catch (err) {
-      setError(getErrorMessage(err))
+      setError(localizeError(err))
     } finally {
       setReassigningSegmentId(null)
     }
-  }, [jobId, onReassigned, playingSegmentId, reassigningSegmentId, speaker.speakerId])
+  }, [jobId, onReassigned, playingSegmentId, reassigningSegmentId, speaker.speakerId, localizeError])
 
   const handleDubbingModeChange = useCallback(async (seg: SpeakerAudioSegment, keepOriginal: boolean) => {
     if (updatingDubbingModeSegmentId) return
@@ -133,11 +136,11 @@ export function SpeakerAudioAuditModal({
       setSegments((prev) => prev.map((item) => (
         item.segmentId === seg.segmentId ? { ...item, dubbingMode: seg.dubbingMode } : item
       )))
-      setError(getErrorMessage(err))
+      setError(localizeError(err))
     } finally {
       setUpdatingDubbingModeSegmentId(null)
     }
-  }, [jobId, speaker.speakerId, updatingDubbingModeSegmentId])
+  }, [jobId, speaker.speakerId, updatingDubbingModeSegmentId, localizeError])
 
   useEffect(() => {
     return () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null } }
@@ -151,21 +154,21 @@ export function SpeakerAudioAuditModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl bg-card border border-border shadow-xl">
         <div className="flex items-center justify-between p-4 border-b border-border">
-          <h3 className="text-base font-semibold text-foreground">核对原音 — {speaker.speakerName}</h3>
+          <h3 className="text-base font-semibold text-foreground">{t('title')} {speaker.speakerName}</h3>
           <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
           </button>
         </div>
         <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
-          <span className="text-xs text-slate-500">共 <span className="font-medium text-foreground">{segments.length}</span> 段</span>
-          <span className="text-xs text-slate-500">总时长 <span className="font-medium text-foreground">{totalDuration.toFixed(1)}s</span></span>
-          <span className="text-xs text-slate-400">按时间排序，修改后会立即保存。</span>
+          <span className="text-xs text-slate-500">{t('countPrefix')} <span className="font-medium text-foreground">{segments.length}</span> {t('countSuffix')}</span>
+          <span className="text-xs text-slate-500">{t('totalLabel')} <span className="font-medium text-foreground">{totalDuration.toFixed(1)}s</span></span>
+          <span className="text-xs text-slate-400">{t('sortHint')}</span>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-1">
           {isLoading ? (
-            <div className="text-center py-8 text-sm text-slate-400">加载原音片段...</div>
+            <div className="text-center py-8 text-sm text-slate-400">{t('loading')}</div>
           ) : segments.length === 0 ? (
-            <div className="text-center py-8 text-sm text-slate-400">当前说话人没有待核对片段</div>
+            <div className="text-center py-8 text-sm text-slate-400">{t('empty')}</div>
           ) : segments.map((seg) => {
             const isPlaying = playingSegmentId === seg.segmentId
             const isReassigning = reassigningSegmentId === seg.segmentId
@@ -176,7 +179,7 @@ export function SpeakerAudioAuditModal({
                   {isPlaying ? <svg className="h-3 w-3 text-[color:var(--cinnabar)]" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
                 </button>
                 <span className="w-12 shrink-0 text-xs tabular-nums text-slate-400">{formatTimecode(seg.startMs)}</span>
-                <span className="min-w-0 flex-1 truncate text-xs text-foreground">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
+                <span className="min-w-0 flex-1 truncate text-xs text-foreground">{seg.sourceText || t('segmentFallback', { id: seg.segmentId })}</span>
                 <span className="w-12 shrink-0 text-right text-xs text-slate-400">{seg.durationS.toFixed(1)}s</span>
                 {readOnly ? null : (
                   <>
@@ -188,7 +191,7 @@ export function SpeakerAudioAuditModal({
                         onChange={(event) => { void handleDubbingModeChange(seg, event.target.checked) }}
                         type="checkbox"
                       />
-                      保留原音
+                      {t('keepOriginal')}
                     </label>
                     <select
                       className="h-8 w-[150px] shrink-0 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-xs text-foreground disabled:opacity-50"
@@ -211,12 +214,12 @@ export function SpeakerAudioAuditModal({
         <div className="flex items-center justify-between p-4 border-t border-border">
           <span className="text-xs text-slate-400">
             {readOnly
-              ? '试听原音以核对说话人归属。需修改归属或保留原音请到「翻译修改」Tab 在段落上操作。'
-              : '可修改说话人归属，也可让片段跳过翻译配音并保留原音。'}
+              ? t('readOnlyHint')
+              : t('editHint')}
           </span>
           <div className="flex items-center gap-2">
             {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[280px] truncate">{error}</span> : null}
-            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" onClick={onClose} type="button">关闭</button>
+            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" onClick={onClose} type="button">{t('close')}</button>
           </div>
         </div>
       </div>
