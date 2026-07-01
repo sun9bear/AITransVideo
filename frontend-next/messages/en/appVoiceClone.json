@@ -1,0 +1,33 @@
+{
+  "reuseConfidence": {
+    "strong": "Same video / same speaker",
+    "medium": "Same video / matching speaker name",
+    "weak": "Same video / speaker id may have changed",
+    "default": "Reusable candidate"
+  },
+  "title": "Clone voice — {speakerName}",
+  "checkingPersonalLibrary": "Checking your personal voice library...",
+  "foundReusableVoice": "Found a reusable voice: {label}",
+  "reuseNoCost": "Reusing does not consume clone credits",
+  "originalSampleSuffix": " · original sample {seconds}",
+  "reuseThisVoice": "Reuse this voice",
+  "autoSelect": "Auto-select",
+  "autoSelectHint": "Automatically selects the longest segments first, up to a total of < 300s",
+  "selectedCountPrefix": "Selected",
+  "selectedCountSuffix": "segments",
+  "totalDurationLabel": "Total duration",
+  "needAtLeast10s": "At least 10s required",
+  "exceeds300s": "Cannot exceed 300s",
+  "meetsRequirement": "Meets requirement",
+  "loadingSegments": "Loading audio segments...",
+  "noSegmentsAvailable": "No audio segments available",
+  "segmentFallback": "Segment {id}",
+  "recloneCostCredits": "Re-cloning will consume {credits} credits",
+  "recloneCostUnknown": "Re-cloning will consume clone credits",
+  "cloneCostCredits": "Clone cost: {credits} credits",
+  "creditsInfoUnavailable": "Credit info is currently unavailable",
+  "cancel": "Cancel",
+  "cloning": "Cloning...",
+  "reclone": "Re-clone",
+  "startClone": "Start clone"
+}

@@ -1,0 +1,50 @@
+{
+  "targetModel": {
+    "flash": {
+      "label": "Flash (recommended)",
+      "description": "DashScope cosyvoice-v3.5-flash · low-latency international endpoint · ¥0.01/use"
+    },
+    "plus": {
+      "label": "Plus",
+      "description": "DashScope cosyvoice-v3.5-plus · full voice coverage · ¥0.01/use"
+    }
+  },
+  "gateLoadFailed": "Failed to read clone authorization status",
+  "fileErrorFormat": "Only WAV / MP3 / M4A formats are supported",
+  "fileErrorTooLarge": "File exceeds the 10MB limit (currently {size}MB)",
+  "cloneSuccessToast": "Clone succeeded and was added to your personal voice library",
+  "cloneFailedDefault": "Clone failed, please try again later",
+  "segmentsNotOwnedError": "The selected segments don't belong to the current speaker; please reselect",
+  "dialogTitle": "Clone the voice of \"{speakerName}\"",
+  "dialogDescription": "After cloning, the CosyVoice voice will appear in your personal voice library and can be reused in later tasks.",
+  "gateLoading": "Reading clone authorization status...",
+  "gateDenied": "This account is not on the CosyVoice clone allowlist. Contact an admin to request access.",
+  "gateGaDisabledSuffix": " General availability has not been enabled yet.",
+  "speakerNameLabel": "Voice name",
+  "speakerNamePlaceholder": "e.g. Narrator Li",
+  "targetModelLabel": "Target model",
+  "sampleSourceLabel": "Sample source",
+  "uploadFileTitle": "Upload an audio file",
+  "uploadFileHint": "WAV (PCM 16-bit) / MP3 / M4A · 3-60 seconds · ≤10 MB · ≥16 kHz · clear solo reading, no background music / other voices",
+  "selectedFile": "Selected: {name} ({size} KB)",
+  "segmentsSourceTitle": "Use transcript segments from the current task",
+  "segmentsSourceHint": "Check segments of 3-60 seconds; the backend stitches them into a sample (10-20 seconds recommended).",
+  "cancel": "Cancel",
+  "cloning": "Cloning...",
+  "submitClone": "Submit clone",
+  "errorCode": {
+    "unauthenticated": "Please sign in first",
+    "forbiddenNotInAllowlist": "This account is not on the CosyVoice clone allowlist",
+    "cloneFeatureDisabled": "CosyVoice cloning is not currently enabled",
+    "consentRequired": "You must confirm the authorization terms before submitting",
+    "consentOutdated": "The authorization terms have been updated; please read and check them again",
+    "invalidTargetModel": "Invalid target model",
+    "quotaExceeded": "You've reached the limit for personal cloned voices; please delete some first",
+    "clientSampleSourceMutex": "Choose only one sample source (file or segments)",
+    "clientMissingSampleFile": "Please select an audio file",
+    "clientMissingSourceSegments": "Please select at least one segment as a sample",
+    "clientMissingSourceJobId": "Missing source_job_id",
+    "clientConsentRequired": "Missing authorization confirmation",
+    "clientConsentOutdated": "The authorization version doesn't match; please refresh the page"
+  }
+}

@@ -829,4 +829,64 @@ assert.equal(zhSpb.status.inferring, "音色画像推断中...", "appSpeakerBadg
 assert.equal(zhSpb.status.ready, "音色画像就绪", "appSpeakerBadge.status.ready 漂移（红线 R1）")
 assert.equal(zhSpb.retry, "重试", "appSpeakerBadge.retry 漂移（红线 R1）")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b+W3a+W3b 字节一致 + en seo 双源同步 全部通过")
+// 14) UI-06 part2 W4a（音色克隆 modal 三件套）：appCosyClone / appVoiceClone /
+//     appCosySegments 三 namespace 的内联中文迁入字典后，默认 zh 值必须与改造前
+//     组件源【逐字节】相同（红线 R1）。appVoiceClone 是 MiniMax 旧 clone modal
+//     的命名空间（G6.1.5 / G_MX.2 守卫要求该文件永不含 "cosyvoice" 字面量，
+//     namespace 名与 key/value 均不得出现 cosyvoice）。钉死标点/全半角/间隔号/
+//     em-dash/直角引号/占位符最敏感的代表串：
+const zhCc = JSON.parse(readFileSync(path.join(root, "messages/zh/appCosyClone.json"), "utf8"))
+assert.equal(zhCc.targetModel.flash.label, "Flash（推荐）", "appCosyClone.targetModel.flash.label 全角括号漂移（红线 R1）")
+assert.equal(
+  zhCc.targetModel.flash.description,
+  "DashScope cosyvoice-v3.5-flash · 国际端点延迟低 · ¥0.01/次",
+  "appCosyClone.targetModel.flash.description 间隔号 ·/¥ 漂移（红线 R1）",
+)
+assert.equal(zhCc.dialogTitle, "克隆「{speakerName}」的声音", "appCosyClone.dialogTitle 全角直角引号「」/占位符漂移（红线 R1）")
+assert.equal(
+  zhCc.dialogDescription,
+  "CosyVoice 克隆音色后会出现在你的个人音色库，可在后续任务中复用。",
+  "appCosyClone.dialogDescription 漂移（红线 R1）",
+)
+assert.equal(zhCc.fileErrorTooLarge, "文件超过 10MB 上限（当前 {size}MB）", "appCosyClone.fileErrorTooLarge 全角括号/占位符漂移（红线 R1）")
+assert.equal(zhCc.selectedFile, "已选择：{name} ({size} KB)", "appCosyClone.selectedFile 全角冒号/占位符漂移（红线 R1）")
+assert.equal(
+  zhCc.uploadFileHint,
+  "WAV (PCM 16-bit) / MP3 / M4A · 3-60 秒 · ≤10 MB · ≥16 kHz · 本人清晰朗读，无背景音乐 / 多人声",
+  "appCosyClone.uploadFileHint 间隔号 ·/≤/≥漂移（红线 R1，JSX 折叠空格渲染须逐字节一致）",
+)
+assert.equal(zhCc.cancel, "取消", "appCosyClone.cancel 漂移（红线 R1）")
+assert.equal(zhCc.errorCode.forbiddenNotInAllowlist, "当前账号未在 CosyVoice 克隆灰度名单中", "appCosyClone.errorCode.forbiddenNotInAllowlist 漂移（红线 R1）")
+
+const zhVc = JSON.parse(readFileSync(path.join(root, "messages/zh/appVoiceClone.json"), "utf8"))
+assert.equal(zhVc.reuseConfidence.strong, "同一视频 / 同一说话人", "appVoiceClone.reuseConfidence.strong 半角斜杠漂移（红线 R1）")
+assert.equal(zhVc.title, "克隆音色 — {speakerName}", "appVoiceClone.title em-dash —/占位符漂移（红线 R1）")
+assert.equal(zhVc.foundReusableVoice, "发现可复用音色：{label}", "appVoiceClone.foundReusableVoice 全角冒号/占位符漂移（红线 R1）")
+assert.equal(zhVc.originalSampleSuffix, " · 原样本 {seconds}", "appVoiceClone.originalSampleSuffix 间隔号 ·/前导空格/占位符漂移（红线 R1）")
+assert.equal(zhVc.autoSelectHint, "从最长片段开始自动勾选，总时长 < 300s", "appVoiceClone.autoSelectHint 漂移（红线 R1，&lt; JSX 实体渲染为字面 <）")
+assert.equal(zhVc.selectedCountPrefix, "已选", "appVoiceClone.selectedCountPrefix 漂移（红线 R1，nested span 前缀）")
+assert.equal(zhVc.selectedCountSuffix, "段", "appVoiceClone.selectedCountSuffix 漂移（红线 R1，nested span 后缀）")
+assert.equal(zhVc.segmentFallback, "片段 {id}", "appVoiceClone.segmentFallback 占位符/空格漂移（红线 R1）")
+assert.equal(zhVc.recloneCostCredits, "重新克隆会消耗 {credits} 点", "appVoiceClone.recloneCostCredits 占位符/空格漂移（红线 R1）")
+assert.equal(zhVc.cloneCostCredits, "克隆费用：{credits} 点", "appVoiceClone.cloneCostCredits 全角冒号/占位符漂移（红线 R1）")
+// G6.1.5 / G_MX.2 守卫要求 VoiceCloneModal.tsx（appVoiceClone 消费方）永不含
+// "cosyvoice" 字面量；镜像校验 namespace 字典本身也不得意外引入该字面量。
+assert.ok(
+  !JSON.stringify(zhVc).toLowerCase().includes("cosyvoice"),
+  "appVoiceClone.json 不得含 'cosyvoice' 字面量（G6.1.5 / G_MX.2 MiniMax modal 隔离红线）",
+)
+
+const zhCs = JSON.parse(readFileSync(path.join(root, "messages/zh/appCosySegments.json"), "utf8"))
+assert.equal(zhCs.tooShort, "还需 {needSec}s 才能克隆（最少 {min}s）", "appCosySegments.tooShort 全角括号/占位符漂移（红线 R1）")
+assert.equal(zhCs.tooLong, "已超出 {overSec}s（最多 {max}s）", "appCosySegments.tooLong 全角括号/占位符漂移（红线 R1）")
+assert.equal(
+  zhCs.emptyHint,
+  "勾选 {min}-{max} 秒的段作为 克隆样本（推荐 {recMin}-{recMax} 秒效果最好）",
+  "appCosySegments.emptyHint 全角括号/占位符/JSX 折叠空格漂移（红线 R1，渲染须与原多行 JSX 逐字节一致）",
+)
+assert.equal(zhCs.okStatus, "✓ 已选 {count} 段 · 共 {sec}s", "appCosySegments.okStatus ✓ U+2713/间隔号 ·/占位符漂移（红线 R1）")
+assert.equal(zhCs.okStatusRecommendSuffix, " · 建议落到 {recMin}-{recMax}s", "appCosySegments.okStatusRecommendSuffix 间隔号 ·/前导空格/占位符漂移（红线 R1）")
+assert.equal(zhCs.loadErrorHint, "可改用「上传音频文件」模式，或稍后重试。", "appCosySegments.loadErrorHint 全角直角引号「」漂移（红线 R1）")
+assert.equal(zhCs.shortSingleHint, "单段较短，建议组合多段拼到 3 秒以上", "appCosySegments.shortSingleHint 漂移（红线 R1）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b+W3a+W3b+W4a 字节一致 + en seo 双源同步 全部通过")

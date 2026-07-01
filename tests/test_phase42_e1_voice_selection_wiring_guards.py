@@ -565,17 +565,24 @@ def test_e1_p2_cosyvoice_personal_optgroup_present_in_both_selectors():
     for path in (VOICE_SELECTION_PANEL, VOICE_MODIFY_TAB):
         src = _strip_comments(path.read_text(encoding="utf-8"))
 
-        # 1. Label must appear in JSX
-        assert "我的 CosyVoice 克隆音色" in src, (
-            f"{path.name} is missing the `我的 CosyVoice 克隆音色` optgroup "
-            f"label. Without it the new voice id from a successful clone "
-            f"won't surface in the dropdown."
+        # 1. The optgroup must be present. Locale-aware anchor (uiloc UI-06
+        #    part2 W3b/W4): localized files reference the message key
+        #    `optgroup.cosyClones` (label={t('optgroup.cosyClones')}); files
+        #    not yet migrated still carry the inline `我的 CosyVoice 克隆音色`
+        #    label. Accept either — the point of this guard is the optgroup +
+        #    its provider gate/filter, not the surface string.
+        idx = src.find("我的 CosyVoice 克隆音色")
+        if idx < 0:
+            idx = src.find("optgroup.cosyClones")
+        assert idx >= 0, (
+            f"{path.name} is missing the CosyVoice personal-clone optgroup "
+            f"(neither inline label `我的 CosyVoice 克隆音色` nor localized key "
+            f"`optgroup.cosyClones` found). Without it the new voice id from a "
+            f"successful clone won't surface in the dropdown."
         )
 
-        # 2. The optgroup must be inside an IIFE gated on cosyvoice provider
-        # Search for the optgroup label region, then check the 600 chars
-        # before it for the provider gate.
-        idx = src.find("我的 CosyVoice 克隆音色")
+        # 2. The optgroup must be inside an IIFE gated on cosyvoice provider.
+        # Check the chars before the anchor for the provider gate.
         window = src[max(0, idx - 1200): idx]
         assert re.search(
             r"currentProvider\s*!==\s*['\"]cosyvoice['\"]\s*\)\s*return\s+null",
@@ -611,9 +618,16 @@ def test_e1_p2_minimax_optgroups_unchanged_by_cosyvoice_addition():
     """
     for path in (VOICE_SELECTION_PANEL, VOICE_MODIFY_TAB):
         src = _strip_comments(path.read_text(encoding="utf-8"))
-        # "其他个人音色" must still be gated on MiniMax.
+        # "其他个人音色" optgroup must still be gated on MiniMax. Locale-aware
+        # anchor (uiloc W3b/W4): localized files use the key
+        # `optgroup.otherPersonal`; not-yet-migrated files keep the literal.
         idx = src.find("其他个人音色")
-        assert idx >= 0, f"{path.name} missing legacy MiniMax `其他个人音色` optgroup"
+        if idx < 0:
+            idx = src.find("optgroup.otherPersonal")
+        assert idx >= 0, (
+            f"{path.name} missing legacy MiniMax personal-voice optgroup "
+            f"(neither `其他个人音色` nor `optgroup.otherPersonal` found)"
+        )
         window = src[max(0, idx - 1200): idx]
         assert re.search(
             r"currentProvider\s*!==\s*['\"]minimax['\"]\s*\)\s*return\s+null",

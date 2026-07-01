@@ -7,8 +7,9 @@
 // (speakerId / speakerName) plus the cost.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslations } from 'next-intl'
 
-import { getErrorMessage } from '@/lib/api/errors'
+import { useApiErrorMessage } from '@/lib/api/error-localization'
 import {
   cloneVoiceForSelection,
   getSpeakerAudioSegments,
@@ -17,11 +18,13 @@ import {
   type VoiceReuseMatchResponse,
 } from '@/lib/api/voiceSelection'
 
-function formatReuseConfidence(confidence: VoiceReuseMatchResponse['confidence']): string {
-  if (confidence === 'strong') return '同一视频 / 同一说话人'
-  if (confidence === 'medium') return '同一视频 / 说话人名称相同'
-  if (confidence === 'weak') return '同一视频 / 说话人编号可能变化'
-  return '可复用候选'
+type VoiceCloneTranslator = ReturnType<typeof useTranslations<'appVoiceClone'>>
+
+function formatReuseConfidence(t: VoiceCloneTranslator, confidence: VoiceReuseMatchResponse['confidence']): string {
+  if (confidence === 'strong') return t('reuseConfidence.strong')
+  if (confidence === 'medium') return t('reuseConfidence.medium')
+  if (confidence === 'weak') return t('reuseConfidence.weak')
+  return t('reuseConfidence.default')
 }
 
 function formatSeconds(value: number | null): string | null {
@@ -44,6 +47,8 @@ interface VoiceCloneModalProps {
 }
 
 export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProvider, onClose, onComplete }: VoiceCloneModalProps) {
+  const t = useTranslations('appVoiceClone')
+  const localizeError = useApiErrorMessage()
   const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [isLoading, setIsLoading] = useState(true)
@@ -62,14 +67,14 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
         const result = await getSpeakerAudioSegments(jobId, speaker.speakerId)
         if (!cancelled) setSegments(result.segments)
       } catch (err) {
-        if (!cancelled) setError(getErrorMessage(err))
+        if (!cancelled) setError(localizeError(err))
       } finally {
         if (!cancelled) setIsLoading(false)
       }
     }
     load()
     return () => { cancelled = true }
-  }, [jobId, speaker.speakerId])
+  }, [jobId, speaker.speakerId, localizeError])
 
   useEffect(() => {
     let cancelled = false
@@ -140,11 +145,11 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
       const result = await cloneVoiceForSelection({ jobId, speakerId: speaker.speakerId, segmentIds: Array.from(selectedIds) })
       onComplete(speaker.speakerId, result.voiceId)
     } catch (err) {
-      setError(getErrorMessage(err))
+      setError(localizeError(err))
     } finally {
       setIsCloning(false)
     }
-  }, [isCloning, meetsMinDuration, exceedsMaxDuration, jobId, speaker.speakerId, selectedIds, onComplete])
+  }, [isCloning, meetsMinDuration, exceedsMaxDuration, jobId, speaker.speakerId, selectedIds, onComplete, localizeError])
 
   const handleReuse = useCallback(() => {
     if (!reuseMatch?.voice?.voiceId) return
@@ -159,7 +164,7 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl bg-card border border-border shadow-xl">
         <div className="flex items-center justify-between p-4 border-b border-border">
-          <h3 className="text-base font-semibold text-foreground">克隆音色 — {speaker.speakerName}</h3>
+          <h3 className="text-base font-semibold text-foreground">{t('title', { speakerName: speaker.speakerName })}</h3>
           <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
           </button>
@@ -167,19 +172,19 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
         {isCheckingReuse || (reuseMatch?.matched && reuseMatch.voice) ? (
           <div className="border-b border-border px-4 py-3">
             {isCheckingReuse ? (
-              <p className="text-xs text-slate-500">正在检查个人音色库...</p>
+              <p className="text-xs text-slate-500">{t('checkingPersonalLibrary')}</p>
             ) : reuseMatch?.matched && reuseMatch.voice ? (
               <div className="rounded-lg border border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/10 p-3">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 space-y-1">
-                    <p className="text-sm font-medium text-foreground">发现可复用音色：{reuseMatch.voice.label || reuseMatch.voice.voiceId}</p>
+                    <p className="text-sm font-medium text-foreground">{t('foundReusableVoice', { label: reuseMatch.voice.label || reuseMatch.voice.voiceId })}</p>
                     <p className="text-xs text-slate-500">
-                      {formatReuseConfidence(reuseMatch.confidence)}
+                      {formatReuseConfidence(t, reuseMatch.confidence)}
                       {reuseMatch.voice.sourceVideoTitle ? ` · ${reuseMatch.voice.sourceVideoTitle}` : ''}
                     </p>
                     <p className="text-xs text-slate-500">
-                      复用不会消耗克隆点数
-                      {formatSeconds(reuseMatch.voice.cloneSampleSeconds) ? ` · 原样本 ${formatSeconds(reuseMatch.voice.cloneSampleSeconds)}` : ''}
+                      {t('reuseNoCost')}
+                      {formatSeconds(reuseMatch.voice.cloneSampleSeconds) ? t('originalSampleSuffix', { seconds: formatSeconds(reuseMatch.voice.cloneSampleSeconds) as string }) : ''}
                       {reuseMatch.voice.provider ? ` · ${reuseMatch.voice.provider}` : ''}
                     </p>
                   </div>
@@ -188,7 +193,7 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
                     onClick={handleReuse}
                     type="button"
                   >
-                    复用此音色
+                    {t('reuseThisVoice')}
                   </button>
                 </div>
               </div>
@@ -196,19 +201,19 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
           </div>
         ) : null}
         <div className="flex items-center gap-3 p-4 border-b border-slate-100 dark:border-slate-800">
-          <button className="h-7 rounded px-3 text-xs font-medium transition border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20" onClick={autoSelect} type="button">自动选择</button>
-          <span className="text-xs text-slate-400">从最长片段开始自动勾选，总时长 &lt; 300s</span>
+          <button className="h-7 rounded px-3 text-xs font-medium transition border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20" onClick={autoSelect} type="button">{t('autoSelect')}</button>
+          <span className="text-xs text-slate-400">{t('autoSelectHint')}</span>
         </div>
         <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
-          <span className="text-xs text-slate-500">已选 <span className="font-medium text-foreground">{selectedIds.size}</span> 段</span>
-          <span className="text-xs text-slate-500">总时长 <span className={`font-medium ${exceedsMaxDuration ? 'text-[color:var(--cinnabar)]' : meetsMinDuration ? 'text-[color:var(--bamboo)]' : 'text-[color:var(--ochre)]'}`}>{selectedDuration.toFixed(1)}s</span></span>
-          {!meetsMinDuration ? <span className="text-xs text-[color:var(--ochre)]">至少需要 10s</span> : exceedsMaxDuration ? <span className="text-xs text-[color:var(--cinnabar)]">不能超过 300s</span> : <span className="text-xs text-[color:var(--bamboo)]">满足要求</span>}
+          <span className="text-xs text-slate-500">{t('selectedCountPrefix')} <span className="font-medium text-foreground">{selectedIds.size}</span> {t('selectedCountSuffix')}</span>
+          <span className="text-xs text-slate-500">{t('totalDurationLabel')} <span className={`font-medium ${exceedsMaxDuration ? 'text-[color:var(--cinnabar)]' : meetsMinDuration ? 'text-[color:var(--bamboo)]' : 'text-[color:var(--ochre)]'}`}>{selectedDuration.toFixed(1)}s</span></span>
+          {!meetsMinDuration ? <span className="text-xs text-[color:var(--ochre)]">{t('needAtLeast10s')}</span> : exceedsMaxDuration ? <span className="text-xs text-[color:var(--cinnabar)]">{t('exceeds300s')}</span> : <span className="text-xs text-[color:var(--bamboo)]">{t('meetsRequirement')}</span>}
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-1">
           {isLoading ? (
-            <div className="text-center py-8 text-sm text-slate-400">加载音频片段...</div>
+            <div className="text-center py-8 text-sm text-slate-400">{t('loadingSegments')}</div>
           ) : segments.length === 0 ? (
-            <div className="text-center py-8 text-sm text-slate-400">没有可用的音频片段</div>
+            <div className="text-center py-8 text-sm text-slate-400">{t('noSegmentsAvailable')}</div>
           ) : segments.map((seg) => {
             const isSelected = selectedIds.has(seg.segmentId)
             const isPlaying = playingSegmentId === seg.segmentId
@@ -220,7 +225,7 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
                 <button className="h-7 w-7 rounded-full border border-border flex items-center justify-center shrink-0 hover:bg-muted transition" onClick={(e) => { e.stopPropagation(); playSegment(seg) }} type="button">
                   {isPlaying ? <svg className="h-3 w-3 text-[color:var(--cinnabar)]" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
                 </button>
-                <span className="flex-1 text-xs text-foreground truncate">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
+                <span className="flex-1 text-xs text-foreground truncate">{seg.sourceText || t('segmentFallback', { id: seg.segmentId })}</span>
                 <span className="text-xs text-slate-400 shrink-0">{seg.durationS.toFixed(1)}s</span>
               </div>
             )
@@ -229,13 +234,13 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProv
         <div className="flex items-center justify-between p-4 border-t border-border">
           <span className="text-xs text-slate-400">
             {reuseMatch?.matched
-              ? cloneCostCredits > 0 ? `重新克隆会消耗 ${cloneCostCredits} 点` : '重新克隆会消耗克隆点数'
-              : cloneCostCredits > 0 ? `克隆费用：${cloneCostCredits} 点` : '扣点信息暂不可用'}
+              ? cloneCostCredits > 0 ? t('recloneCostCredits', { credits: cloneCostCredits }) : t('recloneCostUnknown')
+              : cloneCostCredits > 0 ? t('cloneCostCredits', { credits: cloneCostCredits }) : t('creditsInfoUnavailable')}
           </span>
           <div className="flex items-center gap-2">
             {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[200px] truncate">{error}</span> : null}
-            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" disabled={isCloning} onClick={onClose} type="button">取消</button>
-            <button className="h-8 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? '克隆中...' : reuseMatch?.matched ? '重新克隆' : '开始克隆'}</button>
+            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" disabled={isCloning} onClick={onClose} type="button">{t('cancel')}</button>
+            <button className="h-8 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? t('cloning') : reuseMatch?.matched ? t('reclone') : t('startClone')}</button>
           </div>
         </div>
       </div>

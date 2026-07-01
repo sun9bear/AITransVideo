@@ -18,6 +18,7 @@
 //   再次检查该字段（属于 wiring 层职责）。
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { useLocale, useTranslations } from "next-intl"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -97,18 +98,22 @@ type SubmitState =
   | { kind: "loading" }
   | { kind: "error"; message: string; code: string | null }
 
-const TARGET_MODEL_INFO: Record<
-  CosyvoiceTargetModel,
-  { label: string; description: string }
-> = {
-  "cosyvoice-v3.5-flash": {
-    label: "Flash（推荐）",
-    description: "DashScope cosyvoice-v3.5-flash · 国际端点延迟低 · ¥0.01/次",
-  },
-  "cosyvoice-v3.5-plus": {
-    label: "Plus",
-    description: "DashScope cosyvoice-v3.5-plus · 完整音色覆盖 · ¥0.01/次",
-  },
+type CosyCloneTranslator = ReturnType<typeof useTranslations<"appCosyClone">>
+
+function getTargetModelInfo(
+  t: CosyCloneTranslator,
+  model: CosyvoiceTargetModel,
+): { label: string; description: string } {
+  if (model === "cosyvoice-v3.5-plus") {
+    return {
+      label: t("targetModel.plus.label"),
+      description: t("targetModel.plus.description"),
+    }
+  }
+  return {
+    label: t("targetModel.flash.label"),
+    description: t("targetModel.flash.description"),
+  }
 }
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 // 10 MB hard cap (matches plan)
@@ -123,6 +128,9 @@ export function CosyVoiceCloneModal({
   sourceSegmentIds,
   onSuccess,
 }: CosyVoiceCloneModalProps) {
+  const t = useTranslations("appCosyClone")
+  const locale = useLocale()
+
   // -------------------------------------------------------------------------
   // segments-mode 可用性闸
   // -------------------------------------------------------------------------
@@ -195,7 +203,7 @@ export function CosyVoiceCloneModal({
       .catch((err: unknown) => {
         if (cancelled) return
         const msg =
-          err instanceof Error ? err.message : "无法读取克隆授权状态"
+          err instanceof Error ? err.message : t("gateLoadFailed")
         setGateError(msg)
       })
       .finally(() => {
@@ -204,7 +212,7 @@ export function CosyVoiceCloneModal({
     return () => {
       cancelled = true
     }
-  }, [open])
+  }, [open, t])
 
   // Reset form when modal closes so reopening starts fresh.
   // sampleMode always resets to "file" (the safe default per Codex P2 二轮);
@@ -241,19 +249,19 @@ export function CosyVoiceCloneModal({
       lowerName.endsWith(".mp3") ||
       lowerName.endsWith(".m4a")
     if (!okExt) {
-      setFileError("仅支持 WAV / MP3 / M4A 三种格式")
+      setFileError(t("fileErrorFormat"))
       setSampleFile(null)
       return
     }
     if (file.size > MAX_FILE_SIZE_BYTES) {
       setFileError(
-        `文件超过 10MB 上限（当前 ${(file.size / 1024 / 1024).toFixed(2)}MB）`,
+        t("fileErrorTooLarge", { size: (file.size / 1024 / 1024).toFixed(2) }),
       )
       setSampleFile(null)
       return
     }
     setSampleFile(file)
-  }, [])
+  }, [t])
 
   // -------------------------------------------------------------------------
   // Submit gate (前置校验 → 弹 ConsentModal → 用户再次确认才发 API)
@@ -308,14 +316,14 @@ export function CosyVoiceCloneModal({
           sourceSegmentIds:
             sampleMode === "segments" ? selectedSegmentIds : undefined,
         })
-        toast.success("克隆成功，已加入个人音色库")
+        toast.success(t("cloneSuccessToast"))
         setSubmitState({ kind: "idle" })
         onSuccess(voice)
       } catch (err: unknown) {
-        let message = "克隆失败，请稍后重试"
+        let message = t("cloneFailedDefault")
         let code: string | null = null
         if (err instanceof CosyvoiceCloneApiError) {
-          message = describeCloneError(err)
+          message = describeCloneError(t, locale, err)
           code = err.code
         } else if (err instanceof Error) {
           message = err.message
@@ -333,6 +341,7 @@ export function CosyVoiceCloneModal({
       defaultSourceJobId,
       selectedSegmentIds,
       onSuccess,
+      t,
     ],
   )
 
@@ -348,7 +357,7 @@ export function CosyVoiceCloneModal({
       if (!allOwned) {
         setSubmitState({
           kind: "error",
-          message: "选段不属于当前说话人，请重新选择",
+          message: t("segmentsNotOwnedError"),
           code: "client_segments_not_subset",
         })
         return
@@ -375,16 +384,16 @@ export function CosyVoiceCloneModal({
       >
         <DialogContent className="w-[calc(100vw-2rem)] max-w-xl overflow-x-hidden sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>克隆「{speakerName}」的声音</DialogTitle>
+            <DialogTitle>{t("dialogTitle", { speakerName })}</DialogTitle>
             <DialogDescription>
-              CosyVoice 克隆音色后会出现在你的个人音色库，可在后续任务中复用。
+              {t("dialogDescription")}
             </DialogDescription>
           </DialogHeader>
 
           {/* Gate state */}
           {gateLoading && (
             <p className="text-xs text-muted-foreground">
-              正在读取克隆授权状态...
+              {t("gateLoading")}
             </p>
           )}
           {gateError && (
@@ -394,9 +403,9 @@ export function CosyVoiceCloneModal({
           )}
           {gate && !gate.can_access_clone && (
             <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-              当前账号未在 CosyVoice 克隆灰度名单中。如需开通请联系管理员。
+              {t("gateDenied")}
               {gate.general_availability_enabled === false &&
-                " 全员开放尚未开启。"}
+                t("gateGaDisabledSuffix")}
             </div>
           )}
 
@@ -404,13 +413,13 @@ export function CosyVoiceCloneModal({
             <div className="min-w-0 space-y-4 py-2">
               {/* Speaker name */}
               <div className="space-y-2">
-                <Label htmlFor="cosyvoice-clone-speaker-name">音色名称</Label>
+                <Label htmlFor="cosyvoice-clone-speaker-name">{t("speakerNameLabel")}</Label>
                 <input
                   id="cosyvoice-clone-speaker-name"
                   type="text"
                   value={editableSpeakerName}
                   onChange={(e) => setEditableSpeakerName(e.target.value)}
-                  placeholder="例如：旁白小李"
+                  placeholder={t("speakerNamePlaceholder")}
                   className="w-full min-w-0 rounded-md border border-border bg-background px-3 py-2 text-sm"
                   disabled={isLoading}
                 />
@@ -418,10 +427,10 @@ export function CosyVoiceCloneModal({
 
               {/* Target model */}
               <div className="space-y-2">
-                <Label>目标模型</Label>
+                <Label>{t("targetModelLabel")}</Label>
                 <div className="space-y-2">
                   {COSYVOICE_TARGET_MODELS.map((model) => {
-                    const info = TARGET_MODEL_INFO[model]
+                    const info = getTargetModelInfo(t, model)
                     return (
                       <label
                         key={model}
@@ -452,7 +461,7 @@ export function CosyVoiceCloneModal({
 
               {/* Sample source */}
               <div className="space-y-2">
-                <Label>样本来源</Label>
+                <Label>{t("sampleSourceLabel")}</Label>
                 <div className="space-y-2">
                   <label
                     data-sample-mode="file"
@@ -474,11 +483,10 @@ export function CosyVoiceCloneModal({
                     />
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium text-foreground">
-                        上传音频文件
+                        {t("uploadFileTitle")}
                       </p>
                       <p className="text-xs text-muted-foreground mt-0.5">
-                        WAV (PCM 16-bit) / MP3 / M4A · 3-60 秒 · ≤10 MB · ≥16 kHz ·
-                        本人清晰朗读，无背景音乐 / 多人声
+                        {t("uploadFileHint")}
                       </p>
                       {sampleMode === "file" && (
                         <div className="mt-2 space-y-1">
@@ -493,8 +501,10 @@ export function CosyVoiceCloneModal({
                           />
                           {sampleFile && (
                             <p className="text-xs text-muted-foreground">
-                              已选择：{sampleFile.name} (
-                              {(sampleFile.size / 1024).toFixed(1)} KB)
+                              {t("selectedFile", {
+                                name: sampleFile.name,
+                                size: (sampleFile.size / 1024).toFixed(1),
+                              })}
                             </p>
                           )}
                           {fileError && (
@@ -533,10 +543,10 @@ export function CosyVoiceCloneModal({
                       />
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-foreground">
-                          从当前任务转写选段
+                          {t("segmentsSourceTitle")}
                         </p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          勾选 3-60 秒的段，由后端自动拼成样本（推荐 10-20 秒）。
+                          {t("segmentsSourceHint")}
                         </p>
                         {sampleMode === "segments" && (
                           <div className="mt-2 min-w-0 overflow-hidden">
@@ -573,13 +583,13 @@ export function CosyVoiceCloneModal({
 
           <DialogFooter>
             <Button variant="outline" onClick={onClose} disabled={isLoading}>
-              取消
+              {t("cancel")}
             </Button>
             <Button
               onClick={handleSubmitClick}
               disabled={!canRequestConsent || isLoading}
             >
-              {isLoading ? "克隆中..." : "提交克隆"}
+              {isLoading ? t("cloning") : t("submitClone")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -595,47 +605,63 @@ export function CosyVoiceCloneModal({
 }
 
 // ---------------------------------------------------------------------------
-// Error code → user-facing Chinese message
+// Error code → user-facing localized message
 // ---------------------------------------------------------------------------
 
-function describeCloneError(err: CosyvoiceCloneApiError): string {
-  // Try to read the FastAPI HTTPException `detail.message` if present —
-  // backend already provides Chinese explanations for each known code.
-  if (err.detail && typeof err.detail === "object" && "detail" in err.detail) {
-    const inner = (err.detail as { detail?: unknown }).detail
-    if (inner && typeof inner === "object" && "message" in inner) {
-      const msg = (inner as { message?: unknown }).message
-      if (typeof msg === "string" && msg.trim() !== "") return msg
+function describeCloneError(
+  t: CosyCloneTranslator,
+  locale: string,
+  err: CosyvoiceCloneApiError,
+): string {
+  // Backend FastAPI HTTPException `detail.message` (Chinese) if present.
+  const backendMessage: string | null = (() => {
+    if (err.detail && typeof err.detail === "object" && "detail" in err.detail) {
+      const inner = (err.detail as { detail?: unknown }).detail
+      if (inner && typeof inner === "object" && "message" in inner) {
+        const msg = (inner as { message?: unknown }).message
+        if (typeof msg === "string" && msg.trim() !== "") return msg
+      }
     }
-  }
+    return null
+  })()
+  // zh: keep the backend's Chinese explanation verbatim so the default zh
+  // experience is byte-identical to before uiloc (R1). en: prefer the localized
+  // per-code translation so a KNOWN code never surfaces Chinese (uiloc W4a;
+  // CodeX P2). Unknown/dynamic codes fall through to `backendMessage`.
+  if (locale.startsWith("zh") && backendMessage) return backendMessage
   switch (err.code) {
     case "unauthenticated":
-      return "请先登录"
+      return t("errorCode.unauthenticated")
     case "forbidden_not_in_allowlist":
-      return "当前账号未在 CosyVoice 克隆灰度名单中"
+      return t("errorCode.forbiddenNotInAllowlist")
     case "clone_feature_disabled":
-      return "CosyVoice 克隆能力当前未启用"
+      return t("errorCode.cloneFeatureDisabled")
     case "consent_required":
-      return "需要确认授权条款后才能提交"
+      return t("errorCode.consentRequired")
     case "consent_outdated":
-      return "授权条款已升级，请重新阅读并勾选"
+      return t("errorCode.consentOutdated")
     case "invalid_target_model":
-      return "目标模型不合法"
+      return t("errorCode.invalidTargetModel")
+    // Backend returns `voice_quota_exceeded` (gateway/cosyvoice_clone/api.py);
+    // keep the legacy `quota_exceeded` alias too (@codex bot W4a review).
+    case "voice_quota_exceeded":
     case "quota_exceeded":
-      return "已达个人克隆音色数量上限，请先删除部分音色"
+      return t("errorCode.quotaExceeded")
     case "client_sample_source_mutex":
-      return "样本来源（文件 / 段落）只能二选一"
+      return t("errorCode.clientSampleSourceMutex")
     case "client_missing_sample_file":
-      return "请选择音频文件"
+      return t("errorCode.clientMissingSampleFile")
     case "client_missing_source_segments":
-      return "请选择至少一个段落作为样本"
+      return t("errorCode.clientMissingSourceSegments")
     case "client_missing_source_job_id":
-      return "缺少 source_job_id"
+      return t("errorCode.clientMissingSourceJobId")
     case "client_consent_required":
-      return "缺少授权确认"
+      return t("errorCode.clientConsentRequired")
     case "client_consent_outdated":
-      return "授权版本不匹配，请刷新页面"
+      return t("errorCode.clientConsentOutdated")
     default:
-      return err.message || "克隆失败，请稍后重试"
+      // Unknown / dynamic code — surface the backend's own explanation if
+      // present, else a generic localized message.
+      return backendMessage ?? (err.message || t("cloneFailedDefault"))
   }
 }

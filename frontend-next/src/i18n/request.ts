@@ -41,6 +41,9 @@ export default getRequestConfig(async ({ requestLocale }) => {
     appSpeakerAudit,
     appSpeakerCreate,
     appSpeakerBadge,
+    appCosyClone,
+    appVoiceClone,
+    appCosySegments,
     errors,
   ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
@@ -69,6 +72,9 @@ export default getRequestConfig(async ({ requestLocale }) => {
     import(`../../messages/${locale}/appSpeakerAudit.json`),
     import(`../../messages/${locale}/appSpeakerCreate.json`),
     import(`../../messages/${locale}/appSpeakerBadge.json`),
+    import(`../../messages/${locale}/appCosyClone.json`),
+    import(`../../messages/${locale}/appVoiceClone.json`),
+    import(`../../messages/${locale}/appCosySegments.json`),
     import(`../../messages/${locale}/errors.json`),
   ])
 
@@ -101,6 +107,9 @@ export default getRequestConfig(async ({ requestLocale }) => {
       appSpeakerAudit: appSpeakerAudit.default,
       appSpeakerCreate: appSpeakerCreate.default,
       appSpeakerBadge: appSpeakerBadge.default,
+      appCosyClone: appCosyClone.default,
+      appVoiceClone: appVoiceClone.default,
+      appCosySegments: appCosySegments.default,
       errors: errors.default,
     },
   }
