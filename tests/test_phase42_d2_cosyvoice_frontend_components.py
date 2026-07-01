@@ -460,27 +460,20 @@ def test_d2_consent_modal_cancel_button_uses_reset_path():
         re.search(r"const\s+resetAndClose\s*=\s*\(\)\s*=>", code) is not None
     ), "ConsentModal 必须定义 resetAndClose helper"
 
-    # 2. 找 "取消" Button —— 抓含它的 JSX 节点（开 Button 标签 → 文案 → 闭标签）
-    # 取消 button 一定含 ``取消`` literal，向前回溯找 onClick 属性
-    cancel_idx = code.find("取消\n          </Button>")
-    if cancel_idx < 0:
-        # 兼容紧凑写法 / 单行
-        cancel_idx = code.find("取消")
-    assert cancel_idx >= 0, "ConsentModal 找不到 '取消' button"
-
-    # 向前 600 字符窗口里看 onClick 属性
-    window = code[max(0, cancel_idx - 600) : cancel_idx]
-    # 必须含 onClick={resetAndClose}
+    # 2. 取消按钮必须经 resetAndClose 路径 dismiss，不允许直接 onClick={onClose}。
+    #    Locale-agnostic（uiloc W4b：取消 文案已迁 t("cancel")，不能再靠 `取消`
+    #    字面量定位按钮）：断言 onClick={resetAndClose} 存在，且全文件**无任何**
+    #    onClick={onClose}（cancel button + X/overlay/Esc 都必须走 resetAndClose /
+    #    handleOpenChange，绝不裸调 onClose 绕过 checkbox reset）。
     assert (
-        re.search(r"onClick=\{\s*resetAndClose\s*\}", window) is not None
+        re.search(r"onClick=\{\s*resetAndClose\s*\}", code) is not None
     ), (
         "ConsentModal 取消按钮必须 onClick={resetAndClose} —— "
         "不允许直接 onClick={onClose}（会绕过 checkbox reset）。"
     )
-    # 必须**不**含 onClick={onClose}（防止漏改）
     assert (
-        re.search(r"onClick=\{\s*onClose\s*\}", window) is None
+        re.search(r"onClick=\{\s*onClose\s*\}", code) is None
     ), (
-        "ConsentModal 取消按钮不允许 onClick={onClose} —— "
-        "必须经 resetAndClose 路径。详见 PR #14 Codex P2 二轮。"
+        "ConsentModal 不允许任何 onClick={onClose} —— dismissal 必须经 "
+        "resetAndClose 路径。详见 PR #14 Codex P2 二轮 + uiloc W4b。"
     )
