@@ -6,7 +6,8 @@
 > **W2b consent/法务文案 ✅ 已合并 main（[PR #89](https://github.com/sun9bear/AITransVideo/pull/89) squash `f5e3526e`，2026-06-30）**——13 consent 串→独立 appTranslationFormConsent、**TranslationForm 完全本地化**、Claude 把关忠实翻译+疑点已标、门控零改；
 > **W3a Studio 审校决策面板 ✅ 已合并 main（[PR #90](https://github.com/sun9bear/AITransVideo/pull/90) squash `056d6748`，2026-06-30）**——W3 按 §7 Q4 拆 W3a+W3b；本片 TranslationReviewPanel/SmartAutoDecisionPanel/VoiceReviewPanel ~90 CJK、UI-09 5 routings、helper 线程化；
 > **W3b Studio 音色选择+说话人管理 ✅ 已合并 main（[PR #91](https://github.com/sun9bear/AITransVideo/pull/91) squash `c716f825`，2026-07-01）**——VoiceSelectionPanel(60)+SpeakerAudioAuditModal(12)+EditPageSpeaker*(14) ~86 CJK→4 namespace（appVoiceSelection/appSpeakerAudit/appSpeakerCreate/appSpeakerBadge），**含 CosyVoice 克隆门逻辑零改**（付费红线）、UI-09 6 routings、模块级 helper/STATUS_MAP typed-key 线程化；5-lens 对抗 0 finding + CodeX 无回归；
-> W4/W5 + errors.code.* 跟进单 待做（下一片：W4 克隆 modal[含 consent，Claude 把关] / W5 post-edit / errors.code.*）。这是 [UI-06](UI-06-app-user-flows.md) 的
+> **W4a 克隆 modal + 段选择器 ✅ 已合并 main（[PR #92](https://github.com/sun9bear/AITransVideo/pull/92) squash `d25e1468`，2026-07-01）**——CosyVoiceCloneModal/VoiceCloneModal/CosyVoiceSegmentPicker ~91 CJK→3 namespace，克隆门逻辑零改+provider 隔离（phase42 D2/E1/E2 49/49），describeCloneError locale-conditional 修 CodeX+@codex 两个 P2 错误码本地化（zh 字节不变）；W4 按 W4a+W4b 拆片（consent 隔离）；
+> W4b/W5 + errors.code.* 跟进单 待做（下一片：W4b=CosyVoiceConsentModal 法务 consent + guard-13 修[Claude 把关] / W5 post-edit / errors.code.*）。这是 [UI-06](UI-06-app-user-flows.md) 的
 > part2——把英文「一路做到核心工作台」（母方案 [§9.2 Q2=是](../2026-06-25-ui-page-locale-switch-plan.md)，
 > 备海外）。part1（常驻账户页 332 key）已合（[PR #85](https://github.com/sun9bear/AITransVideo/pull/85)）；
 > 错误显示底座 [UI-09](UI-09-client-error-layer.md) 已合（[PR #86](https://github.com/sun9bear/AITransVideo/pull/86)）。
