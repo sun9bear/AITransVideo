@@ -1,0 +1,23 @@
+{
+  "title": "Voice cloning authorization",
+  "description": "To create your dedicated cloned voice, we need a sample of your own voice. Before continuing, please read and check all three items below. While any item is unchecked, the \"Start cloning\" button stays disabled.",
+  "checkbox": {
+    "source": {
+      "title": "I confirm: the voice sample I am providing is my own voice, or I have obtained written authorization from the voice owner to use it for voice cloning and subsequent TTS synthesis.",
+      "detail": "I understand: cloning another person's voice without the voice owner's explicit consent (including celebrities, public figures, family, or friends) constitutes infringement, and this platform has the right to disable the voice at any time and to reserve the right to pursue legal liability."
+    },
+    "data_flow": {
+      "title": "I agree: the voice sample will be uploaded to Alibaba Cloud's speech-synthesis service located within mainland China for processing, in order to generate a synthetic voice resembling mine.",
+      "detail": "Sample data: used only for this clone-voice generation and subsequent TTS synthesis; processed on Alibaba Cloud servers within mainland China (as of 2026-05, primarily the \"North China 2 - Beijing\" region in our testing; this platform does not fix a single region); the relay node is located in Wuhan, within mainland China; the original sample is deleted within 24 hours after cloning, while the generated voice_id is retained in your personal voice library for you to manage yourself; this platform will not proactively use the sample to train general-purpose AI models, nor proactively share it with unrelated third parties or use it for commercial advertising; Alibaba Cloud acts as a third-party processor, and its specific rules for handling the sample data are governed by Alibaba Cloud's terms of service / data processing agreement."
+    },
+    "consequences": {
+      "title": "I understand and agree: consequences of violations and the right to withdraw — when the platform receives a complaint the voice will be disabled and investigated; impersonating another person's voice may lead to an account ban.",
+      "detail": "If the platform receives a complaint from a voice owner or a report from a third party, my cloned voice will be immediately disabled and investigated; related features may be suspended during the investigation. If impersonation of another person's voice is confirmed, this platform has the right to ban my account and to cooperate with the relevant authorities in accordance with the law; I bear the resulting legal liability myself. I may delete cloned voices at any time on the \"Personal voice library\" page; once deleted, a voice can no longer be used for new TTS synthesis, while previously synthesized videos are unaffected."
+    }
+  },
+  "paidApiLabel": "Paid-API notice: ",
+  "paidApiBody": "Clicking \"Start cloning\" will send one voice-clone request to DashScope CosyVoice (about ¥0.01 + ¥0.005 for preview each time). Failures are not retried — retrying requires you to submit again.",
+  "cancel": "Cancel",
+  "startClone": "Start cloning",
+  "confirmAllTip": "Please confirm all three terms above first"
+}

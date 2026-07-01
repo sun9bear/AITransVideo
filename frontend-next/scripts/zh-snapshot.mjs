@@ -889,4 +889,57 @@ assert.equal(zhCs.okStatusRecommendSuffix, " · 建议落到 {recMin}-{recMax}s"
 assert.equal(zhCs.loadErrorHint, "可改用「上传音频文件」模式，或稍后重试。", "appCosySegments.loadErrorHint 全角直角引号「」漂移（红线 R1）")
 assert.equal(zhCs.shortSingleHint, "单段较短，建议组合多段拼到 3 秒以上", "appCosySegments.shortSingleHint 漂移（红线 R1）")
 
-console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b+W3a+W3b+W4a 字节一致 + en seo 双源同步 全部通过")
+// 15) UI-06 part2 W4b（CosyVoice 克隆授权 consent modal）：appCosyConsent namespace 的内联中文
+//     迁入字典后，默认 zh 值必须与改造前 CosyVoiceConsentModal 源【逐字节】相同（红线 R1）。这是
+//     **声纹生物特征法务 consent**（version-pinned modal_version="2026-05-25-v1"），漂移即默认 zh
+//     法务渲染回归——**逐条钉死全部 13 串**（不抽样）。en 为 Claude 把关的忠实翻译（法务疑点见 PR：
+//     en consent 挂 zh-anchored modal_version）；modal_version / CONSENT_MODAL_VERSION 逻辑不在本守卫
+//     范围（未动，phase42 D2 守卫另测）。
+const zhCon = JSON.parse(readFileSync(path.join(root, "messages/zh/appCosyConsent.json"), "utf8"))
+assert.equal(zhCon.title, "声音克隆授权确认", "appCosyConsent.title 漂移（红线 R1，法务）")
+assert.equal(
+  zhCon.description,
+  "为了创建您专属的克隆音色，我们需要您本人的声音样本。在继续之前， 请确认以下三项内容并勾选。任一未勾选时，「开始克隆」按钮将保持禁用。",
+  "appCosyConsent.description JSX 折叠空格/全角直角引号「」漂移（红线 R1，法务）",
+)
+assert.equal(
+  zhCon.checkbox.source.title,
+  "我确认：本次提供的声音样本是我本人的声音，或者我已获得声音所有人的书面授权用于声音克隆和后续 TTS 合成。",
+  "appCosyConsent.checkbox.source.title 声音授权 attestation 漂移（红线 R1，法务核心）",
+)
+assert.equal(
+  zhCon.checkbox.source.detail,
+  "我理解：未经声音所有人明确同意而克隆他人声音（含名人、公众人物、家人、朋友）属于侵权行为，本平台有权随时停用该音色并保留追究法律责任的权利。",
+  "appCosyConsent.checkbox.source.detail 侵权/法律责任措辞漂移（红线 R1，法务核心）",
+)
+assert.equal(
+  zhCon.checkbox.data_flow.title,
+  "我同意：声音样本将上传至中国境内的阿里云语音合成服务进行处理，用于生成与我声音相似的合成音色。",
+  "appCosyConsent.checkbox.data_flow.title 数据流向 consent 漂移（红线 R1，法务核心）",
+)
+assert.equal(
+  zhCon.checkbox.data_flow.detail,
+  "样本数据：用途仅用于本次克隆音色生成与后续 TTS 合成；处理位置为中国境内的阿里云服务器（2026-05 实测以「华北 2 - 北京」为主，本平台不固定单一 region）；中转节点位于中国境内武汉；克隆完成后 24 小时内删除原始样本，克隆出的 voice_id 保留在个人音色库由用户自主管理；本平台不会主动将样本用于训练通用 AI 模型，也不会主动与无关第三方共享或用于商业广告投放；阿里云作为第三方处理方，其对样本数据的具体处理规则以阿里云服务条款 / 数据处理协议为准。",
+  "appCosyConsent.checkbox.data_flow.detail 数据处理披露（阿里云/华北2-北京/武汉/24h 删除/全角；分号）漂移（红线 R1，法务核心）",
+)
+assert.equal(
+  zhCon.checkbox.consequences.title,
+  "我了解并同意：违规后果与退出权 —— 平台收到投诉时音色将被停用、调查；冒用他人声音可能导致账号封禁。",
+  "appCosyConsent.checkbox.consequences.title em-dash ——/全角标点漂移（红线 R1，法务核心）",
+)
+assert.equal(
+  zhCon.checkbox.consequences.detail,
+  "如平台收到声音所有人投诉或第三方举报，我的克隆音色将被立即停用、调查；调查期间相关功能可能暂停。如确认存在冒用他人声音的行为，本平台有权封禁我的账号，并依法配合相关部门调查；由此产生的法律责任由我本人承担。我可随时在「个人音色库」页面删除已克隆的音色；删除后音色不可用于新的 TTS 合成，已合成的历史视频不受影响。",
+  "appCosyConsent.checkbox.consequences.detail 违规后果/退出权全文漂移（红线 R1，法务核心）",
+)
+assert.equal(zhCon.paidApiLabel, "付费 API 提示：", "appCosyConsent.paidApiLabel 全角冒号漂移（红线 R1）")
+assert.equal(
+  zhCon.paidApiBody,
+  "点击「开始克隆」后将向 DashScope CosyVoice 发起一次音色克隆请求 （每次约 ¥0.01 + ¥0.005 试听）。失败不重试 — 重试需您主动再次提交。",
+  "appCosyConsent.paidApiBody 付费提示（¥0.01/¥0.005/全角括号/破折号 —）漂移（红线 R1）",
+)
+assert.equal(zhCon.cancel, "取消", "appCosyConsent.cancel 漂移（红线 R1）")
+assert.equal(zhCon.startClone, "开始克隆", "appCosyConsent.startClone 漂移（红线 R1）")
+assert.equal(zhCon.confirmAllTip, "请先确认上述全部三项条款", "appCosyConsent.confirmAllTip 漂移（红线 R1）")
+
+console.log("[zh-snapshot] OK — 默认 zh 不变量 + site.ts inert + auth/marketing/seo/app/errors/工作台 W1+W2a+W2b+W3a+W3b+W4a+W4b 字节一致 + en seo 双源同步 全部通过")
