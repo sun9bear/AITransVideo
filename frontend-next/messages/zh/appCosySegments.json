@@ -1,0 +1,16 @@
+{
+  "loadFailedDefault": "加载段列表失败，请稍后重试",
+  "tooShort": "还需 {needSec}s 才能克隆（最少 {min}s）",
+  "tooLong": "已超出 {overSec}s（最多 {max}s）",
+  "loadingSegments": "加载当前说话人的转写段...",
+  "loadErrorHint": "可改用「上传音频文件」模式，或稍后重试。",
+  "noSegmentsHint": "当前说话人没有可拼段。请改用「上传音频文件」模式克隆。",
+  "emptyHint": "勾选 {min}-{max} 秒的段作为 克隆样本（推荐 {recMin}-{recMax} 秒效果最好）",
+  "okStatus": "✓ 已选 {count} 段 · 共 {sec}s",
+  "okStatusRecommendSuffix": " · 建议落到 {recMin}-{recMax}s",
+  "segmentAriaLabel": "选段 {id}",
+  "stop": "停止",
+  "preview": "试听",
+  "segmentFallback": "片段 {id}",
+  "shortSingleHint": "单段较短，建议组合多段拼到 3 秒以上"
+}

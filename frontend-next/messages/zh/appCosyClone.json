@@ -1,0 +1,50 @@
+{
+  "targetModel": {
+    "flash": {
+      "label": "Flash（推荐）",
+      "description": "DashScope cosyvoice-v3.5-flash · 国际端点延迟低 · ¥0.01/次"
+    },
+    "plus": {
+      "label": "Plus",
+      "description": "DashScope cosyvoice-v3.5-plus · 完整音色覆盖 · ¥0.01/次"
+    }
+  },
+  "gateLoadFailed": "无法读取克隆授权状态",
+  "fileErrorFormat": "仅支持 WAV / MP3 / M4A 三种格式",
+  "fileErrorTooLarge": "文件超过 10MB 上限（当前 {size}MB）",
+  "cloneSuccessToast": "克隆成功，已加入个人音色库",
+  "cloneFailedDefault": "克隆失败，请稍后重试",
+  "segmentsNotOwnedError": "选段不属于当前说话人，请重新选择",
+  "dialogTitle": "克隆「{speakerName}」的声音",
+  "dialogDescription": "CosyVoice 克隆音色后会出现在你的个人音色库，可在后续任务中复用。",
+  "gateLoading": "正在读取克隆授权状态...",
+  "gateDenied": "当前账号未在 CosyVoice 克隆灰度名单中。如需开通请联系管理员。",
+  "gateGaDisabledSuffix": " 全员开放尚未开启。",
+  "speakerNameLabel": "音色名称",
+  "speakerNamePlaceholder": "例如：旁白小李",
+  "targetModelLabel": "目标模型",
+  "sampleSourceLabel": "样本来源",
+  "uploadFileTitle": "上传音频文件",
+  "uploadFileHint": "WAV (PCM 16-bit) / MP3 / M4A · 3-60 秒 · ≤10 MB · ≥16 kHz · 本人清晰朗读，无背景音乐 / 多人声",
+  "selectedFile": "已选择：{name} ({size} KB)",
+  "segmentsSourceTitle": "从当前任务转写选段",
+  "segmentsSourceHint": "勾选 3-60 秒的段，由后端自动拼成样本（推荐 10-20 秒）。",
+  "cancel": "取消",
+  "cloning": "克隆中...",
+  "submitClone": "提交克隆",
+  "errorCode": {
+    "unauthenticated": "请先登录",
+    "forbiddenNotInAllowlist": "当前账号未在 CosyVoice 克隆灰度名单中",
+    "cloneFeatureDisabled": "CosyVoice 克隆能力当前未启用",
+    "consentRequired": "需要确认授权条款后才能提交",
+    "consentOutdated": "授权条款已升级，请重新阅读并勾选",
+    "invalidTargetModel": "目标模型不合法",
+    "quotaExceeded": "已达个人克隆音色数量上限，请先删除部分音色",
+    "clientSampleSourceMutex": "样本来源（文件 / 段落）只能二选一",
+    "clientMissingSampleFile": "请选择音频文件",
+    "clientMissingSourceSegments": "请选择至少一个段落作为样本",
+    "clientMissingSourceJobId": "缺少 source_job_id",
+    "clientConsentRequired": "缺少授权确认",
+    "clientConsentOutdated": "授权版本不匹配，请刷新页面"
+  }
+}

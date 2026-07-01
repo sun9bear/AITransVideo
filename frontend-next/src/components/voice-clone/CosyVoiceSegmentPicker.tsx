@@ -36,6 +36,7 @@
 //      test_e2_modal_three_to_sixty_second_threshold_literal cross-file 校验）。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 
 import {
   getSpeakerAudioSegments,
@@ -133,6 +134,8 @@ export function CosyVoiceSegmentPicker({
   preloadedSegments,
   disabled = false,
 }: CosyVoiceSegmentPickerProps) {
+  const t = useTranslations("appCosySegments")
+
   // ---------------------------------------------------------------------------
   // 段加载（speakerId/jobId 变化时重新拉）
   // ---------------------------------------------------------------------------
@@ -180,7 +183,7 @@ export function CosyVoiceSegmentPicker({
         const msg =
           err instanceof Error
             ? err.message
-            : "加载段列表失败，请稍后重试"
+            : t("loadFailedDefault")
         setLoadError(msg)
         // 失败时回传空数组 —— 父 modal subset assert 一定不通过，提交按钮
         // 保持 disabled，避免用户误以为"什么都没选也能提交"。
@@ -193,7 +196,7 @@ export function CosyVoiceSegmentPicker({
     return () => {
       cancelled = true
     }
-  }, [jobId, speakerId, preloadedSegments])
+  }, [jobId, speakerId, preloadedSegments, t])
 
   // ---------------------------------------------------------------------------
   // 选择 toggle —— 严格 `number[]`，去重，无 string 漂移
@@ -255,14 +258,20 @@ export function CosyVoiceSegmentPicker({
       const needSec = (MIN_DURATION_MS - totalSelectedMs) / 1000
       return {
         kind: "too_short" as const,
-        message: `还需 ${needSec.toFixed(1)}s 才能克隆（最少 ${MIN_DURATION_MS / 1000}s）`,
+        message: t("tooShort", {
+          needSec: needSec.toFixed(1),
+          min: MIN_DURATION_MS / 1000,
+        }),
       }
     }
     if (totalSelectedMs > MAX_DURATION_MS) {
       const overSec = (totalSelectedMs - MAX_DURATION_MS) / 1000
       return {
         kind: "too_long" as const,
-        message: `已超出 ${overSec.toFixed(1)}s（最多 ${MAX_DURATION_MS / 1000}s）`,
+        message: t("tooLong", {
+          overSec: overSec.toFixed(1),
+          max: MAX_DURATION_MS / 1000,
+        }),
       }
     }
     const inRecommended =
@@ -272,7 +281,7 @@ export function CosyVoiceSegmentPicker({
       kind: "ok" as const,
       inRecommended,
     }
-  }, [selectedSegmentIds.length, totalSelectedMs])
+  }, [selectedSegmentIds.length, totalSelectedMs, t])
 
   // ---------------------------------------------------------------------------
   // 试听 —— 同时只允许一段播放（参考 VoiceSelectionPanel 模式）
@@ -316,7 +325,7 @@ export function CosyVoiceSegmentPicker({
   if (isLoading) {
     return (
       <div className="min-w-0 rounded-lg border border-border bg-muted/20 p-4 text-sm text-muted-foreground">
-        加载当前说话人的转写段...
+        {t("loadingSegments")}
       </div>
     )
   }
@@ -326,7 +335,7 @@ export function CosyVoiceSegmentPicker({
       <div className="min-w-0 space-y-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
         <p>{loadError}</p>
         <p className="text-muted-foreground">
-          可改用「上传音频文件」模式，或稍后重试。
+          {t("loadErrorHint")}
         </p>
       </div>
     )
@@ -335,7 +344,7 @@ export function CosyVoiceSegmentPicker({
   if (segments.length === 0) {
     return (
       <div className="min-w-0 rounded-lg border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
-        当前说话人没有可拼段。请改用「上传音频文件」模式克隆。
+        {t("noSegmentsHint")}
       </div>
     )
   }
@@ -356,17 +365,25 @@ export function CosyVoiceSegmentPicker({
       >
         {durationStatus.kind === "empty" && (
           <span>
-            勾选 {MIN_DURATION_MS / 1000}-{MAX_DURATION_MS / 1000} 秒的段作为
-            克隆样本（推荐 {RECOMMENDED_MIN_MS / 1000}-
-            {RECOMMENDED_MAX_MS / 1000} 秒效果最好）
+            {t("emptyHint", {
+              min: MIN_DURATION_MS / 1000,
+              max: MAX_DURATION_MS / 1000,
+              recMin: RECOMMENDED_MIN_MS / 1000,
+              recMax: RECOMMENDED_MAX_MS / 1000,
+            })}
           </span>
         )}
         {durationStatus.kind === "ok" && (
           <span>
-            ✓ 已选 {selectedSegmentIds.length} 段 · 共{" "}
-            {(totalSelectedMs / 1000).toFixed(1)}s
+            {t("okStatus", {
+              count: selectedSegmentIds.length,
+              sec: (totalSelectedMs / 1000).toFixed(1),
+            })}
             {!durationStatus.inRecommended &&
-              ` · 建议落到 ${RECOMMENDED_MIN_MS / 1000}-${RECOMMENDED_MAX_MS / 1000}s`}
+              t("okStatusRecommendSuffix", {
+                recMin: RECOMMENDED_MIN_MS / 1000,
+                recMax: RECOMMENDED_MAX_MS / 1000,
+              })}
           </span>
         )}
         {(durationStatus.kind === "too_short" ||
@@ -398,14 +415,14 @@ export function CosyVoiceSegmentPicker({
                   onChange={() => toggleSegment(seg.segmentId)}
                   disabled={disabled}
                   className="mt-1 h-4 w-4 shrink-0"
-                  aria-label={`选段 ${seg.segmentId}`}
+                  aria-label={t("segmentAriaLabel", { id: seg.segmentId })}
                 />
                 <button
                   type="button"
                   onClick={() => playSegment(seg)}
                   disabled={disabled}
                   className="h-7 w-7 shrink-0 rounded-full border border-border flex items-center justify-center hover:bg-muted transition disabled:opacity-50"
-                  aria-label={isPlaying ? "停止" : "试听"}
+                  aria-label={isPlaying ? t("stop") : t("preview")}
                 >
                   {isPlaying ? (
                     <svg
@@ -431,9 +448,9 @@ export function CosyVoiceSegmentPicker({
                 </span>
                 <span
                   className="min-w-0 flex-1 overflow-hidden break-words text-xs leading-5 text-foreground"
-                  title={seg.sourceText || `片段 ${seg.segmentId}`}
+                  title={seg.sourceText || t("segmentFallback", { id: seg.segmentId })}
                 >
-                  {seg.sourceText || `片段 ${seg.segmentId}`}
+                  {seg.sourceText || t("segmentFallback", { id: seg.segmentId })}
                 </span>
                 <span
                   className={
@@ -444,7 +461,7 @@ export function CosyVoiceSegmentPicker({
                   }
                   title={
                     isShortSingle
-                      ? "单段较短，建议组合多段拼到 3 秒以上"
+                      ? t("shortSingleHint")
                       : undefined
                   }
                 >

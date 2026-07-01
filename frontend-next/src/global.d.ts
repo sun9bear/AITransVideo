@@ -30,6 +30,9 @@ import appVoiceSelection from "../messages/zh/appVoiceSelection.json"
 import appSpeakerAudit from "../messages/zh/appSpeakerAudit.json"
 import appSpeakerCreate from "../messages/zh/appSpeakerCreate.json"
 import appSpeakerBadge from "../messages/zh/appSpeakerBadge.json"
+import appCosyClone from "../messages/zh/appCosyClone.json"
+import appVoiceClone from "../messages/zh/appVoiceClone.json"
+import appCosySegments from "../messages/zh/appCosySegments.json"
 import errors from "../messages/zh/errors.json"
 import { routing } from "./i18n/routing"
 
@@ -60,6 +63,9 @@ type Messages = {
   appSpeakerAudit: typeof appSpeakerAudit
   appSpeakerCreate: typeof appSpeakerCreate
   appSpeakerBadge: typeof appSpeakerBadge
+  appCosyClone: typeof appCosyClone
+  appVoiceClone: typeof appVoiceClone
+  appCosySegments: typeof appCosySegments
   errors: typeof errors
 }
 

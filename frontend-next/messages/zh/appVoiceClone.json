@@ -1,0 +1,33 @@
+{
+  "reuseConfidence": {
+    "strong": "同一视频 / 同一说话人",
+    "medium": "同一视频 / 说话人名称相同",
+    "weak": "同一视频 / 说话人编号可能变化",
+    "default": "可复用候选"
+  },
+  "title": "克隆音色 — {speakerName}",
+  "checkingPersonalLibrary": "正在检查个人音色库...",
+  "foundReusableVoice": "发现可复用音色：{label}",
+  "reuseNoCost": "复用不会消耗克隆点数",
+  "originalSampleSuffix": " · 原样本 {seconds}",
+  "reuseThisVoice": "复用此音色",
+  "autoSelect": "自动选择",
+  "autoSelectHint": "从最长片段开始自动勾选，总时长 < 300s",
+  "selectedCountPrefix": "已选",
+  "selectedCountSuffix": "段",
+  "totalDurationLabel": "总时长",
+  "needAtLeast10s": "至少需要 10s",
+  "exceeds300s": "不能超过 300s",
+  "meetsRequirement": "满足要求",
+  "loadingSegments": "加载音频片段...",
+  "noSegmentsAvailable": "没有可用的音频片段",
+  "segmentFallback": "片段 {id}",
+  "recloneCostCredits": "重新克隆会消耗 {credits} 点",
+  "recloneCostUnknown": "重新克隆会消耗克隆点数",
+  "cloneCostCredits": "克隆费用：{credits} 点",
+  "creditsInfoUnavailable": "扣点信息暂不可用",
+  "cancel": "取消",
+  "cloning": "克隆中...",
+  "reclone": "重新克隆",
+  "startClone": "开始克隆"
+}

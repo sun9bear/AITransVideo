@@ -1,0 +1,16 @@
+{
+  "loadFailedDefault": "Failed to load the segment list, please try again later",
+  "tooShort": "{needSec}s more needed to clone (minimum {min}s)",
+  "tooLong": "Exceeds by {overSec}s (maximum {max}s)",
+  "loadingSegments": "Loading this speaker's transcript segments...",
+  "loadErrorHint": "You can switch to \"upload an audio file\" mode instead, or try again later.",
+  "noSegmentsHint": "This speaker has no segments to combine. Switch to \"upload an audio file\" mode to clone.",
+  "emptyHint": "Check segments of {min}-{max} seconds as the clone sample (recommended {recMin}-{recMax} seconds for best results)",
+  "okStatus": "✓ {count} segments selected · {sec}s total",
+  "okStatusRecommendSuffix": " · recommended range is {recMin}-{recMax}s",
+  "segmentAriaLabel": "Segment {id}",
+  "stop": "Stop",
+  "preview": "Preview",
+  "segmentFallback": "Segment {id}",
+  "shortSingleHint": "This single segment is short; consider combining multiple segments to reach 3+ seconds"
+}
