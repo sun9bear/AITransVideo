@@ -1230,7 +1230,7 @@ function RenameJobDialogForm({
   const canSubmit = !submitting && !!trimmed && !tooLong && !hasBadChar
 
   return (
-      <DialogContent className="max-w-md">
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{tp("rename.title")}</DialogTitle>
           <DialogDescription>

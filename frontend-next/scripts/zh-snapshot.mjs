@@ -716,24 +716,36 @@ assert.equal(
   "appTranslationFormConsent.free.attestation 《民法典》1023 声音授权 attestation 漂移（红线 R1，法务核心，全角：，；/半角斜杠/责任转移措辞 verbatim）",
 )
 assert.equal(zhTfc.free.validation, "请先阅读并勾选免费版声音授权声明。", "appTranslationFormConsent.free.validation 漂移（红线 R1，法务）")
+// —— express 段 2026-07-02 有意更新（plan 2026-07-02-frontend-ux-conversion-optimization
+//    §P0-3(b)：真 opt-in + 文案压缩 + 细则折叠）：desc/bullets 换新值重钉；validation 键随
+//    强制校验一并删除（后端 SOFT gate，不勾=预设音色照常跑，express 不再有必勾项）。
 assert.equal(zhTfc.express.title, "自动克隆主说话人音色", "appTranslationFormConsent.express.title 漂移（红线 R1，克隆 opt-in）")
 assert.equal(zhTfc.express.experimental, "实验性", "appTranslationFormConsent.express.experimental 漂移（红线 R1）")
 assert.equal(
   zhTfc.express.desc,
-  "勾选后，系统会用视频中占比最高的说话人的一小段语音（约 10–20 秒）克隆一个临时音色用于本次配音，让主说话人的声音更贴近原片。",
-  "appTranslationFormConsent.express.desc en-dash 10–20/全角括号/标点漂移（红线 R1，克隆 opt-in）",
+  "勾选后将临时克隆主说话人音色用于本次配音（免费），让声音更贴近原片；失败自动改用预设音色。",
+  "appTranslationFormConsent.express.desc 全角括号/分号漂移（红线 R1，克隆 opt-in，2026-07-02 压缩版）",
 )
+assert.equal(zhTfc.express.detailsToggle, "详情", "appTranslationFormConsent.express.detailsToggle 漂移（红线 R1）")
 assert.equal(
   zhTfc.express.bullet1,
-  "· 该音色为本次任务临时使用，不进入你的永久音色库；系统后续会按清理策略处理",
-  "appTranslationFormConsent.express.bullet1 间隔号 ·/全角分号 ；漂移（红线 R1）",
+  "· 取视频中占比最高说话人的约 10–20 秒语音进行克隆",
+  "appTranslationFormConsent.express.bullet1 间隔号 ·/en-dash 10–20 漂移（红线 R1）",
 )
-assert.equal(zhTfc.express.bullet2, "· 会占用一次音色克隆配额", "appTranslationFormConsent.express.bullet2 间隔号 · 漂移（红线 R1）")
-assert.equal(zhTfc.express.bullet3, "· 失败时自动改用预设音色，不影响配音完成", "appTranslationFormConsent.express.bullet3 间隔号 · 漂移（红线 R1）")
+assert.equal(
+  zhTfc.express.bullet2,
+  "· 该音色仅本次任务临时使用，不进入你的永久音色库，会占用一次克隆配额；系统后续按清理策略处理",
+  "appTranslationFormConsent.express.bullet2 间隔号 ·/全角分号 ；漂移（红线 R1）",
+)
+assert.equal(
+  zhTfc.express.bullet3,
+  "· 克隆失败时自动改用预设音色，不影响配音完成",
+  "appTranslationFormConsent.express.bullet3 间隔号 · 漂移（红线 R1）",
+)
 assert.equal(
   zhTfc.express.validation,
-  "快捷版 CosyVoice 需要先确认自动克隆主说话人音色。",
-  "appTranslationFormConsent.express.validation 漂移（红线 R1，克隆 opt-in 校验）",
+  undefined,
+  "appTranslationFormConsent.express.validation 应已随强制校验删除（2026-07-02 P0-3(b)），复活即回归",
 )
 assert.equal(zhTfc.smart.title, "确认智能版自动克隆扣点", "appTranslationFormConsent.smart.title 漂移（红线 R1，付费克隆 consent）")
 assert.equal(
