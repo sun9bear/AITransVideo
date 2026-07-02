@@ -73,16 +73,17 @@
 |---|---|---|---|---|
 | CM-01 topup 购买链路 | ✅ 已合并+**已部署+已激活**（2026-07-02，项目主授权） | PR #94（基线 bump，74a5614b）+ PR #95 | 91e5ee3c | 外审：5-lens 对抗（P1+2×P2+P3 全修）+ CodeX CLI 两轮（P2 全修，第三轮限额→主模型终审兜底）+ @codex bot（3×P2 全修）；33 新测试 + 377 回归绿。生产：alembic 044 已应用、gateway/next 镜像重建换血（顺带上线已合并的 uiloc 工作台 EN + credits #77 修复）、`topup.enabled=true` 已翻（2026-07-02T04:32Z）。回滚物料：`backups/cm01-pre-20260702.tar.gz` + `gateway.pre-cm01/`/`frontend-next.pre-cm01/` 源目录 + `aivideotrans-gateway:pre-cm01`/`aivideotrans-next-backup:pre-cm01` 镜像 tag + `backups/pricing_runtime.pre-topup-20260702.json`；**hotfix PR #96（5ed531ac，2026-07-02 05:35Z 已上线）**：geo 交集空时回退 SKU 渠道（never-filter-to-zero），修复海外出口浏览器 topup 卡变砖 |
 | CM-02 langpair 测试漂移 | ✅ 已合并（2026-07-02） | PR #97 | d716a9ea | 判定=测试维护漂移（express 默认 cosyvoice clone-only，consent 闸按已评审设计前置语言闸），零生产代码改动；2 测试路由 express→mimo 隔离 + 1 文档化测试钉闸序；10 个语言测试文件 215 全过；CodeX CLI 1×P3 与 @codex bot 1×P2 同点已修（before-forward 断言真实化）；闸序观察已上报 owner（如需语言闸前置另立单元） |
-| CM-03 zh→en 校准+人评包 | ✅ 材料包已合并（2026-07-02）；**待 owner 触发跑批（Phase B）** | PR #99 | 见 merge | 校准脚本（双开关付费红线+AST 守卫 26 例）+人评 rubric+E2E runbook；外审三轮全收敛：CLI P1 路由镜像（实证 deepseek）/CLI P2 estimate-run 互斥/bot P1 循环测量（改走管线自带无约束 translate_probe，其 docstring 即为去循环设计）；跑批命令与费用预估见 docs/runbooks/2026-07-02-zh-en-pre-allowlist-gate.md |
+| CM-03 zh→en 校准+人评包 | ✅ **全闭环**（材料包合并 + Phase B 跑批完成 + 决策入库，2026-07-02） | PR #99 + #100（报告/决策，a259c55a） | bd1f974b | 校准脚本（双开关付费红线+AST 守卫 26 例）+人评 rubric+E2E runbook；外审三轮全收敛（CLI P1 路由镜像/CLI P2 estimate-run 互斥/bot P1 循环测量→translate_probe）。**Phase B（owner 授权触发）**：真金 E2E 3 任务 + 校准跑批（路由实证 gemini_31_flash_lite，费用 <$0.03）→ **决策=维持 natural_length_ratio 0.55**（n=3 语域分化：加权 pooled 0.36 vs 无权 p50 0.62，主效应=语速依赖 0.30-0.70；报告 docs/reports/20260702T101719Z-*）；机器三维全过（保真 4.33/wrong-script 0/漂移≈0%）+ owner 听感口头过；剩 runbook §2 正式签字 |
+| （衍生）zh→en 产物层双修 | ✅ 已合并+**已部署**（2026-07-02T11:45Z） | PR #101 + PR #102（前置基线 bump #103→2d3dbcda） | 6e92d6ba / 3f72a73e | E2E 发现的 2 个 GA 前必修 bug，chip 会话交付+主模型二轮收敛：**#101** 报告 target_language 穿透+en 镜像闸+cue 空白比较（二轮=glossary 豁免只取值侧+边界容忍正则）；**#102** 字幕别名谎名（非 zh 配音停发 subtitles_zh/en.srt，neutral source/target 唯一真名；二轮=再生路径 heal-first-delete-second 治愈旧 manifest 后才删别名）。部署=app 镜像重建+gateway 同步重启，smoke 全绿；3 个测试任务 manifest 各治愈 4 指针+清 2 陈旧别名。回滚 tag `aivideotrans-app:pre-subfix`。⚠️ 修复前生成的 3 份报告中 target_language/text_mismatch issue 为假阳性 |
 | CM-04 support 英文化 | ✅ 已合并+已部署（2026-07-02T07:52Z） | PR #98 | 3299cfb4 | appSupport 37 keys zh/en；R1 双重验证（zh-snapshot §16 钉死字面量 + 主模型对照迁移前源码）；cjk-baseline 严格只减（-45 行/4 文件清空）；admin 豁免未动；CodeX CLI 0 finding + @codex bot 1 P2 已修（非 zh locale 不被服务端中文 config 压过，UI-BE-01 边界代码注释标记）；UILOC INDEX 已登记；Sonnet 5 子 agent 执行+主模型终审；范围外发现=unauthHelp 死文案（建议跟进单） |
 
 ## 4. 项目主待办（工程干不了的）
 
 1. **真金终验**：PayPal 小额买+退各一单（验 webhook 闭环）、微信真钱一单——一直欠着，建议最先做。
-2. **生产翻旗**（对应单元合并后）：`TopupConfig.enabled`（CM-01 后）；`language_pairs_enabled`+allowlist、`voice_catalog_target_language_filter_enabled`（CM-03 人评过后）。
+2. **生产翻旗**（对应单元合并后）：~~`TopupConfig.enabled`~~（✅ 已翻 2026-07-02）；`language_pairs_enabled` allowlist 放宽、`voice_catalog_target_language_filter_enabled`（人评签字后）。
 3. **SEO 部署门**：/en 对爬虫开放，走 Via-154 部署（建议 CM-04 合并后）。
 4. **运营双轮启动**：dogfooding demo 内容（每周 2-3 条，B站/小红书/抖音 + 英文版 YouTube Shorts/Reddit）+ 淘宝/闲鱼"视频翻译配音代做"服务单。
-5. **CM-03 跑批显式触发 + 人评执行**（费用估算会先给出）。
+5. ~~**CM-03 跑批显式触发 + 人评执行**~~（✅ 跑批+机器三维+听感口头过均完成 2026-07-02；剩 runbook §2 正式签字。建议顺手：新建一个 zh→en 任务端到端验收 #101/#102 修复——output/ 应只有 subtitles_source/target/bilingual/subtitles.srt，报告无 target_language 误标）。
 6. **确认暂缓清单**：Wave C/D、uiloc W5、UI-BE-01 后端中文、USD 订阅续费——本方案默认暂缓，如有异议请指出。
 
 ## 4.5 CM-01 部署事故记录（2026-07-02 04:31–04:50Z，已闭环）
