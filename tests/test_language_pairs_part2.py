@@ -279,10 +279,14 @@ class TestCreatePathLanguageGate:
         with patch(
             "admin_settings.load_settings",
             return_value=_real_admin(enabled=False, express_tts_provider="mimo"),
-        ), patch("job_intercept.proxy_request", new_callable=AsyncMock):
+        ), patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
             resp = _run(intercept_create_job(req, _make_db(), _user(role="user")))
         assert resp.status_code == 403
         assert json.loads(resp.body)["error"] == "language_pair_not_allowed"
+        # CodeX review (CM-02 P3): the test name promises "before forward" —
+        # assert it (the original binding was unused; the right F841 fix is
+        # this assertion, not dropping the mock handle).
+        proxy.assert_not_called()
 
     def test_express_cosyvoice_consent_gate_precedes_language_gate(self):
         """文档化测试（CM-02）：express+cosyvoice（clone-only）的 consent 闸
