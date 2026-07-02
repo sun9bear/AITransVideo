@@ -165,9 +165,17 @@ export function TopupPurchaseCard({
       ),
     [checkoutConfig],
   )
-  const availableProviders = (selectedPackage?.providers ?? []).filter((code) =>
+  const skuProviders = selectedPackage?.providers ?? []
+  const geoFilteredProviders = skuProviders.filter((code) =>
     checkoutConfig ? visibleOperationalCodes.has(code) : true,
   )
+  // Never filter to zero (mirrors checkout-config's §7.5 invariant): when the
+  // geo intersection leaves nothing, fall back to the SKU's chargeable rails —
+  // geo visibility is a recommendation, not a capability limit (WeChat Native
+  // QR is scanned by the WeChat app; browser egress geo must not brick the
+  // card — a CN owner browsing via an overseas proxy hit exactly this).
+  const availableProviders =
+    geoFilteredProviders.length > 0 ? geoFilteredProviders : skuProviders
   const gatewayPick =
     checkoutConfig?.recommended_provider ?? checkoutConfig?.default_provider ?? ""
   const selectedProvider =
