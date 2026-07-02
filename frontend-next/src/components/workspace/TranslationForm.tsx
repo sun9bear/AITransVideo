@@ -173,9 +173,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     sourceValidationError ??
     (!hasAnyServiceMode ? tForm("validation.noModes") : null) ??
     serviceModeUnavailableError ??
-    (serviceMode === "express" && expressAutoCloneAvailable && !expressAutoVoiceClone
-      ? tConsent("express.validation")
-      : null) ??
     (serviceMode === "free" && !freeVoiceRightsConfirmed
       ? tConsent("free.validation")
       : null)
@@ -221,7 +218,6 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const planCardBaseClass = "relative rounded-xl border-2 p-4 text-left transition"
   const planCardSelectedClass = `${planCardBaseClass} border-transparent`
   const planCardIdleClass = `${planCardBaseClass} border-border bg-muted/20 hover:border-primary/30`
-  const planCardDisabledClass = `${planCardBaseClass} border-border bg-muted/20 opacity-60 cursor-not-allowed`
   const selectedPlanStyle = {
     borderColor: "color-mix(in oklab, var(--primary) 52%, transparent)",
     backgroundColor: "color-mix(in oklab, var(--primary) 7%, transparent)",
@@ -340,12 +336,13 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   // Phase 4.3a PR3 (spec §2.6): consent must never linger as true. Leaving
   // Express, or losing availability, force-resets the checkbox to false so a
   // stale opt-in can't ride into a later submit / a non-express job.
+  // fe-ux P0-3(b)：真 opt-in——不再自动勾选（勾选=用户物理动作，与
+  // express_consent.py 契约"用户显式勾选 = True"对齐）；不勾 → CosyVoice
+  // 预设音色照常跑（后端 SOFT gate），提交不再被挡。
   useEffect(() => {
     if (serviceMode !== "express" || !expressAutoCloneAvailable) {
       setExpressAutoVoiceClone(false)
-      return
     }
-    setExpressAutoVoiceClone(true)
   }, [serviceMode, expressAutoCloneAvailable])
 
   // Phase 2a LAUNCH GATE: leaving free mode clears the attestation so a stale
@@ -707,52 +704,48 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           <div className="space-y-3">
             <span className="text-xs font-medium text-muted-foreground block">{tForm("plan.label")}</span>
             <div className="grid gap-3">
-              {/* Express mode */}
-              <button
-                type="button"
-                className={!expressAllowed ? planCardDisabledClass : serviceMode === "express" ? planCardSelectedClass : planCardIdleClass}
-                style={expressAllowed && serviceMode === "express" ? selectedPlanStyle : undefined}
-                disabled={!expressAllowed || isBlockedByConcurrency || submitState === "submitting"}
-                onClick={() => {
-                  if (expressAllowed) setServiceMode("express")
-                }}
-              >
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-semibold text-foreground">{tForm("plan.express.name")}</span>
-                  <span
-                    className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
-                    style={{
-                      backgroundColor: "color-mix(in oklab, var(--bamboo) 14%, transparent)",
-                      color: "var(--bamboo)",
-                      border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
-                    }}
-                  >
-                    Express
-                  </span>
-                  {!expressAllowed ? (
-                    <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                      {tForm("plan.offline")}
-                    </span>
-                  ) : null}
-                </div>
-                <p className="text-xs text-muted-foreground leading-relaxed">{tForm("plan.express.desc")}</p>
-                {serviceMode === "express" && (
-                  <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
-                    <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                  </div>
-                )}
-              </button>
-
-              {/* Free mode — Phase 2a, gated by NEXT_PUBLIC_ENABLE_FREE_TIER */}
-              {freeTierEnabled && (
+              {/* Express mode — fe-ux P0-2：admin 下线的模式整卡隐藏（"已下线"
+                * 灰卡对用户零行动价值）；"升级解锁"锁卡（Studio/Smart 分支）保留。 */}
+              {expressAllowed && (
                 <button
                   type="button"
-                  className={!freeAllowed ? planCardDisabledClass : serviceMode === "free" ? planCardSelectedClass : planCardIdleClass}
-                  style={freeAllowed && serviceMode === "free" ? selectedPlanStyle : undefined}
-                  disabled={!freeAllowed || isBlockedByConcurrency || submitState === "submitting"}
-                  onClick={() => {
-                    if (freeAllowed) setServiceMode("free")
-                  }}
+                  className={serviceMode === "express" ? planCardSelectedClass : planCardIdleClass}
+                  style={serviceMode === "express" ? selectedPlanStyle : undefined}
+                  disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  onClick={() => setServiceMode("express")}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-sm font-semibold text-foreground">{tForm("plan.express.name")}</span>
+                    <span
+                      className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                      style={{
+                        backgroundColor: "color-mix(in oklab, var(--bamboo) 14%, transparent)",
+                        color: "var(--bamboo)",
+                        border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
+                      }}
+                    >
+                      Express
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{tForm("plan.express.desc")}</p>
+                  {serviceMode === "express" && (
+                    <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                      <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </div>
+                  )}
+                </button>
+              )}
+
+              {/* Free mode — Phase 2a, gated by NEXT_PUBLIC_ENABLE_FREE_TIER。
+                * fe-ux P0-2：admin 关闭（!freeAllowed）时整卡隐藏，不再渲染
+                * "已下线"灰卡。 */}
+              {freeTierEnabled && freeAllowed && (
+                <button
+                  type="button"
+                  className={serviceMode === "free" ? planCardSelectedClass : planCardIdleClass}
+                  style={serviceMode === "free" ? selectedPlanStyle : undefined}
+                  disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  onClick={() => setServiceMode("free")}
                 >
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-sm font-semibold text-foreground">{tForm("plan.free.name")}</span>
@@ -763,15 +756,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                         color: "var(--bamboo)",
                         border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
                       }}
-                      >
-                        Free
-                      </span>
-                      {!freeAllowed ? (
-                        <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                          {tForm("plan.offline")}
-                        </span>
-                      ) : null}
-                    </div>
+                    >
+                      Free
+                    </span>
+                  </div>
                   <p className="text-xs text-muted-foreground leading-relaxed">{tForm("plan.free.desc")}</p>
                   {serviceMode === "free" && (
                     <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
@@ -811,6 +799,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </div>
                     )}
                   </button>
+                ) : studioRolloutOffline ? (
+                  // fe-ux P0-2：对有套餐资格者，admin 全体下线 → 整卡隐藏。
+                  // （已知局限：未购用户因 entitlements 单列表无法区分"全体下线 vs
+                  // 套餐未含"，仍走下方升级锁卡——待 Q8 的 runtime_disabled_modes
+                  // 字段落地后一并隐藏，见 plan 2026-07-02 §P0-2。）
+                  null
                 ) : (
                   <div className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed">
                     <div className="flex items-center gap-2 mb-2">
@@ -827,11 +821,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">{tForm("plan.studio.desc")}</p>
-                    {studioRolloutOffline ? (
-                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
-                        {tForm("plan.offline")}
-                      </div>
-                    ) : entitlements?.ui.allow_upgrade ? (
+                    {entitlements?.ui.allow_upgrade ? (
                       <Link
                         href="/settings/billing"
                         className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"
@@ -909,6 +899,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       {tForm("plan.smart.tryPreview")}
                     </button>
                   </div>
+                ) : smartRolloutOffline ? (
+                  // fe-ux P0-2：同 Studio——全体下线整卡隐藏（局限同上，见 Q8）。
+                  null
                 ) : (
                   <div className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed">
                     <div className="flex items-center gap-2 mb-2">
@@ -925,11 +918,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">{tForm("plan.smart.desc")}</p>
-                    {smartRolloutOffline ? (
-                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
-                        {tForm("plan.offline")}
-                      </div>
-                    ) : entitlements?.ui.allow_upgrade ? (
+                    {entitlements?.ui.allow_upgrade ? (
                       <Link
                         href="/settings/billing"
                         className="absolute top-3 right-3 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary transition-colors hover:bg-primary/20"
@@ -945,6 +934,11 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                 )
               })()}
             </div>
+            {/* fe-ux P0-2 空态兜底：全部模式被 admin 下线时给一行可见提示
+              *（提交侧 validation.noModes 已有拦截，这里补展示层）。 */}
+            {entitlements && !hasAnyServiceMode ? (
+              <p className="text-xs text-muted-foreground">{tForm("validation.noModes")}</p>
+            ) : null}
             {/* Quota info for free users */}
             {entitlements?.plan_code === "free" && entitlements.limits.free_jobs_quota_remaining != null && (
               <p className="text-xs text-muted-foreground">
@@ -1011,7 +1005,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           {/* Phase 4.3a PR3: Express auto-clone consent checkbox. Renders ONLY
               when express mode AND the server reports availability (admin flag +
               allowlist; fail-closed). Default unchecked (opt-in). Copy must not
-              promise a deletion deadline — the cleanup sweeper is Phase 4.3b. */}
+              promise a deletion deadline — the cleanup sweeper is Phase 4.3b.
+              fe-ux P0-3(b)：真 opt-in（不勾 → 预设音色照常跑）；细则收进
+              <details>（放在 label 外，避免展开点击误触 checkbox）。 */}
           {serviceMode === "express" && expressAutoCloneAvailable ? (
             <section
               className="rounded-xl border p-4"
@@ -1045,13 +1041,18 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   <span className="block text-xs leading-relaxed text-muted-foreground">
                     {tConsent("express.desc")}
                   </span>
-                  <span className="block space-y-0.5 text-xs leading-relaxed text-muted-foreground">
-                    <span className="block">{tConsent("express.bullet1")}</span>
-                    <span className="block">{tConsent("express.bullet2")}</span>
-                    <span className="block">{tConsent("express.bullet3")}</span>
-                  </span>
                 </span>
               </label>
+              <details className="mt-2 pl-7">
+                <summary className="cursor-pointer list-none text-xs text-muted-foreground/80 underline underline-offset-2 transition hover:text-foreground">
+                  {tConsent("express.detailsToggle")}
+                </summary>
+                <div className="mt-1.5 space-y-0.5 text-xs leading-relaxed text-muted-foreground">
+                  <p>{tConsent("express.bullet1")}</p>
+                  <p>{tConsent("express.bullet2")}</p>
+                  <p>{tConsent("express.bullet3")}</p>
+                </div>
+              </details>
             </section>
           ) : null}
 

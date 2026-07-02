@@ -381,3 +381,8 @@ commit 管线（alignment / publish 阶段代码）**永不**调用 `tts_generat
 - Next.js 16 + React 19 + TypeScript strict + Tailwind v4 + shadcn/ui
 - API client is a thin `fetch` wrapper — no axios, no react-query
 - 响应式设计：桌面 + 手机 web 通用
+- **覆盖 `DialogContent` 宽度只有两种合法写法**（plan 2026-07-02 fe-ux §2.4）：
+  ① 成对覆盖 `w-[calc(100vw-2rem)] max-w-* sm:max-w-*`（先例 `CosyVoiceCloneModal.tsx`）；
+  ② 仅带断点前缀覆盖如 `sm:max-w-lg`、不写裸 `max-w-*`（先例 `JianyingDraftPathDialog.tsx`）。
+  **禁止**只写裸 `max-w-*`：tailwind-merge 会清掉基类的移动端留白 `max-w-[calc(100%-2rem)]`，
+  却压不过带前缀的 `sm:max-w-sm`——桌面端弹窗会被钳到 384px（2026-07-02 新建翻译弹窗事故根因）。

@@ -30,18 +30,25 @@ export function NewTranslationDialog({
   const t = useTranslations("appTranslationForm")
   return (
     <Dialog open={open} onOpenChange={(value) => onOpenChange(value)}>
-      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+      {/* 宽度覆盖必须成对写 max-w-* + sm:max-w-*（CLAUDE.md Dialog 宽度约定）：
+          裸 max-w-lg 会被 tailwind-merge 吃掉基类的移动端留白 max-w-[calc(100%-2rem)]，
+          却压不过带断点前缀的 sm:max-w-sm —— 曾导致桌面端弹窗实际只有 384px。
+          w-[calc(100vw-2rem)] 补回移动端留白；dvh 规避移动端动态工具栏遮挡；
+          flex + 内层滚动让标题与关闭按钮常驻可见（不随长表单滚出视野）。 */}
+      <DialogContent className="flex max-h-[85dvh] w-[calc(100vw-2rem)] max-w-lg flex-col overflow-hidden sm:max-w-xl md:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("dialog.title")}</DialogTitle>
         </DialogHeader>
         {/* Key on `open` forces fresh mount each time dialog opens,
             resetting showSuccess without needing setState in useEffect */}
         {open && (
-          <DialogBody
-            onOpenChange={onOpenChange}
-            onJobCreated={onJobCreated}
-            initialSourceUrl={initialSourceUrl}
-          />
+          <div className="-mx-4 min-h-0 overflow-y-auto px-4 pb-1">
+            <DialogBody
+              onOpenChange={onOpenChange}
+              onJobCreated={onJobCreated}
+              initialSourceUrl={initialSourceUrl}
+            />
+          </div>
         )}
       </DialogContent>
     </Dialog>
