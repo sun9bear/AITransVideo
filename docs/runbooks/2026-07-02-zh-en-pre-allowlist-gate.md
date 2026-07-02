@@ -71,8 +71,12 @@ segments (lines) : 7
 CJK chars total  : 167
 all chars total  : 184
 ------------------------------------------------------------------------
-model            : gemini-3.1-pro-preview
-pricing source   : public pricing trackers, checked 2026-07-02 ($2.00/M in, $12.00/M out; standard non-batch rate, conservative upper bound)
+pricing model    : gemini-3.1-pro-preview (conservative UPPER bound)
+pricing source   : public pricing trackers, checked 2026-07-02 ($2.00/M in, $12.00/M out; standard non-batch rate)
+actual engine    : decided at --run time by llm_registry routing (mode=studio, task=translate;
+                   flat default is deepseek -- far cheaper than the Gemini rate above -- and an
+                   admin override in admin_settings.json may apply). The real model is printed
+                   by --run and recorded in the report; this table prices the WORST case.
 est. input tokens  : ~513
 est. output tokens : ~256
 est. input cost    : $0.0010
@@ -92,10 +96,23 @@ explicitly pass BOTH switches:
 通常比这个 3 句话的样例长，预计仍在几美分到几毛美元量级——真实数字以每次
 `--estimate` 的实际输出为准，不要凭这个示例外推大语料）。
 
+> **预估表是"最坏情况"报价**：真实引擎由 llm_registry 按生产 Studio 同款路由
+> 决定（task=translate 平面默认 `deepseek`=deepseek-v4-flash，约 $0.14/$0.28
+> 每百万 token，比表里 Gemini 价便宜一个数量级；admin 在
+> `admin_settings.json::prompt_models["studio"]["translate"]` 的覆盖优先）。
+> 真实模型以 `--run` 开头打印的 `[route] ...` 行和报告里的
+> `effective_translate_route` 字段为准。
+
 ### 1.3 Owner 触发真实跑批（唯一涉费用步骤）
 
-**前置条件**：`GEMINI_API_KEY` 环境变量已设置（跟管线生产环境同一把 key 即可，
-本地开发环境变量或 `.env` 里已有的那个）。
+**前置条件**：
+1. `GEMINI_API_KEY` 已设置（`GeminiTranslator` 构造必需 + registry fallback 链
+   里有 Gemini 候选）。
+2. **实际路由到的 provider 的 key 也要设置**——默认路由是 `deepseek`
+   （`deepseek-v4-flash`），需要 `DEEPSEEK_API_KEY`；若 admin 覆盖了
+   `prompt_models["studio"]["translate"]`，按覆盖后的模型对应 env（脚本开跑前
+   会自查：路由模型的 key 缺失时直接报错退出，不会跑到一半逐 clip 失败）。
+   跟管线生产环境同一批 key 即可（`.env` 里已有的那些）。
 
 ```bash
 python scripts/calibrate_zh_en_ratio.py --corpus data/cm03_corpus \
@@ -105,15 +122,24 @@ python scripts/calibrate_zh_en_ratio.py --corpus data/cm03_corpus \
 - **两个开关缺一都会被拦截**（非零退出 + 打印费用警告，不产生任何调用）：
   - 只给 `--run`：打印 `[blocked] --run was passed WITHOUT --i-approve-paid-llm-calls`。
   - 只给 `--i-approve-paid-llm-calls`：打印 `[blocked] ... WITHOUT --run`。
+  - `--estimate` 与 `--run` **互斥**：同给（无论是否带 approve）一律 exit 2，
+    显式的离线请求绝不落入付费分支。
 - 两个开关都给：脚本对语料里每个 clip 调用与管线**同一个** `GeminiTranslator.translate()`
-  入口（`services.gemini.translator`），实测 `target_word_count / source_cjk_chars`
-  的 ratio 分布，并按 clip 分别汇总 + pooled 汇总。
+  入口（`services.gemini.translator`），并镜像 process.py 的
+  `translator._service_mode = "studio"` 注入——**引擎选择与生产 Studio zh→en
+  任务完全一致**（llm_registry 路由：默认 deepseek、admin 覆盖生效、同一条
+  fallback 链）。开跑第一行会打印实际生效路由，务必核对：
+  ```
+  [route] task=translate service_mode=studio -> model=deepseek (api_model_id=deepseek-v4-flash, provider=deepseek); fallbacks=['gemini', 'gemini_31_flash_lite', 'mimo_v25', 'mimo_omni']
+  ```
+  实测 `target_word_count / source_cjk_chars` 的 ratio 分布，按 clip 分别汇总
+  + pooled 汇总。
 - 单个 clip 失败（网络错误/API 报错等）会被记录并跳过，不中断整批；**全部 clip
   都失败**才会以非零退出（report 里 `"fatal": true`）。
 - 产物：`docs/reports/{timestamp}-cm03-zh-en-ratio-calibration.json` +
   同名 `.md`（`--output-dir` 可覆盖默认 `docs/reports`）。Markdown 报告含
-  pooled p10/p25/p50/p75/p90/mean + 每 clip 明细 + 结论（`maintain_0.55` /
-  `update_ratio` + 建议值）。
+  实际生效路由（`effective_translate_route`）、pooled p10/p25/p50/p75/p90/mean
+  + 每 clip 明细 + 结论（`maintain_0.55` / `update_ratio` + 建议值）。
 
 ---
 

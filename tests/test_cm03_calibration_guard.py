@@ -115,6 +115,34 @@ def test_approval_flag_without_run_is_blocked(corpus_dir: Path, capsys) -> None:
     assert "blocked" in captured.err.lower()
 
 
+def test_estimate_with_both_paid_switches_is_blocked(corpus_dir: Path, capsys) -> None:
+    """Fail-closed (CodeX P2): --estimate is an explicit offline request —
+    combining it with the full paid double-switch must exit 2 WITHOUT entering
+    run_calibration and WITHOUT importing the paid translator module."""
+    sys.modules.pop("services.gemini.translator", None)
+    exit_code = main(
+        [
+            "--corpus",
+            str(corpus_dir),
+            "--estimate",
+            "--run",
+            "--i-approve-paid-llm-calls",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "mutually exclusive" in captured.err
+    assert "services.gemini.translator" not in sys.modules
+
+
+def test_estimate_plus_run_without_approval_also_blocked(corpus_dir: Path, capsys) -> None:
+    """The contradiction check must win regardless of the approval flag."""
+    exit_code = main(["--corpus", str(corpus_dir), "--estimate", "--run"])
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "mutually exclusive" in captured.err
+
+
 def test_run_alone_never_imports_gemini_translator(corpus_dir: Path, capsys) -> None:
     """Belt-and-suspenders: even if the blocked branch had a bug, assert the
     paid translator module was not imported as a side effect of a blocked
@@ -286,6 +314,51 @@ def test_run_calibration_imports_pipeline_word_counter() -> None:
     translator module the pipeline uses, not hand-roll its own CJK regex."""
     src = SCRIPT_PATH.read_text(encoding="utf-8")
     assert "from services.gemini.translator import _count_source_words" in src
+
+
+def test_run_path_mirrors_process_py_service_mode_injection() -> None:
+    """CodeX P1: production Studio zh->en sets `translator._service_mode`
+    right after constructing GeminiTranslator (process.py), which is what
+    activates llm_registry model routing for task=translate (default deepseek
+    + admin override). The calibration run path must inject the SAME attribute
+    with the Studio mode, or it would silently measure a different LLM than
+    production and produce a wrong natural_length_ratio.
+
+    Both sides of the mirror are pinned: if process.py ever stops using
+    `_service_mode` as the routing activation mechanism, this test fails too,
+    flagging that the calibration script needs to re-mirror the new mechanism.
+    """
+    script_src = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "translator._service_mode = CALIBRATION_SERVICE_MODE" in script_src, (
+        "calibration script no longer injects _service_mode on the translator -- "
+        "the --run path would fall back to the legacy (non-registry) LLM path and "
+        "measure a different engine than production Studio zh->en"
+    )
+    assert 'CALIBRATION_SERVICE_MODE = "studio"' in script_src, (
+        "calibration must mirror the Studio lane (zh->en first release is Studio-only)"
+    )
+
+    process_src = (REPO_ROOT / "src" / "pipeline" / "process.py").read_text(encoding="utf-8")
+    assert "translator._service_mode = job_service_mode" in process_src, (
+        "process.py no longer injects _service_mode after constructing the "
+        "translator -- the routing-activation mechanism changed, so the "
+        "calibration script's mirror (and this guard) must be updated to match"
+    )
+
+    translator_src = (REPO_ROOT / "src" / "services" / "gemini" / "translator.py").read_text(encoding="utf-8")
+    assert 'getattr(self, "_service_mode", None)' in translator_src, (
+        "translator.py no longer reads _service_mode to activate llm_registry routing -- update the calibration mirror"
+    )
+
+
+def test_run_calibration_resolves_effective_route_via_llm_registry() -> None:
+    """The run path must resolve (and surface) the effective task=translate
+    model through the same llm_registry entry points production uses, so the
+    operator can verify which engine the ratio was measured on."""
+    src = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "get_prompt_model" in src
+    assert '"translate"' in src
+    assert "effective_translate_route" in src
 
 
 def test_count_cjk_chars_matches_pipeline_range_check() -> None:

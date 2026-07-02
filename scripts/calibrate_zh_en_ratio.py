@@ -21,9 +21,20 @@ modes:
   the corpus and computing the real ratio distribution. Requires BOTH
   ``--run`` AND ``--i-approve-paid-llm-calls`` to be passed together;
   either one alone is a no-op that prints the cost estimate and a
-  warning, then exits non-zero. This mirrors the two-switch pattern the
-  project uses everywhere a paid external API is one command away from
-  being invoked accidentally in a batch/loop context.
+  warning, then exits non-zero. ``--estimate`` and ``--run`` are
+  mutually exclusive — passing both exits 2 before anything else runs
+  (an explicit offline request must never resolve into a paid call).
+  This mirrors the two-switch pattern the project uses everywhere a
+  paid external API is one command away from being invoked accidentally
+  in a batch/loop context.
+
+The engine measured by ``--run`` is resolved through the SAME
+``llm_registry`` routing a production Studio zh->en job uses
+(``_service_mode="studio"``, task=translate: flat default ``deepseek``,
+``admin_settings.json::prompt_models["studio"]["translate"]`` override
+wins when set, registry fallback chain applies). The effective route is
+printed at run start and recorded in the report so the operator can
+verify what was actually measured.
 
 Usage:
     # Offline cost estimate only (default; safe to run anytime).
@@ -70,7 +81,12 @@ if str(SRC_ROOT) not in sys.path:
 
 #: Must match services.gemini.translator.DEFAULT_MODEL_NAME. Checked via a
 #: guard test (tests/test_cm03_calibration_guard.py) so this constant can't
-#: silently drift from the pipeline's actual translation model.
+#: silently drift from the translator's constructor default. NOTE: this is
+#: the --estimate PRICING anchor (worst case) and the constructor default —
+#: the engine that actually translates in --run mode is decided by
+#: llm_registry routing (mode=studio, task=translate; flat default deepseek,
+#: admin override may apply), exactly like production Studio zh->en. The
+#: real route is printed at run time and recorded in the report.
 CALIBRATION_MODEL_NAME = "gemini-3.1-pro-preview"
 
 #: USD per 1,000,000 tokens. Source: public pricing trackers (pricepertoken.com,
@@ -295,11 +311,14 @@ def format_estimate_report(corpus_dir: Path, stats: CorpusStats, cost: CostEstim
         f"CJK chars total  : {stats.total_cjk_chars}",
         f"all chars total  : {stats.total_chars}",
         "-" * 72,
-        f"model            : {CALIBRATION_MODEL_NAME}",
+        f"pricing model    : {CALIBRATION_MODEL_NAME} (conservative UPPER bound)",
         f"pricing source   : public pricing trackers, checked 2026-07-02 "
         f"(${GEMINI_INPUT_USD_PER_MILLION_TOKENS:.2f}/M in, "
-        f"${GEMINI_OUTPUT_USD_PER_MILLION_TOKENS:.2f}/M out; standard non-batch rate, "
-        f"conservative upper bound)",
+        f"${GEMINI_OUTPUT_USD_PER_MILLION_TOKENS:.2f}/M out; standard non-batch rate)",
+        "actual engine    : decided at --run time by llm_registry routing (mode=studio, task=translate;",
+        "                   flat default is deepseek -- far cheaper than the Gemini rate above -- and an",
+        "                   admin override in admin_settings.json may apply). The real model is printed",
+        "                   by --run and recorded in the report; this table prices the WORST case.",
         f"est. input tokens  : ~{cost.input_tokens:,}",
         f"est. output tokens : ~{cost.output_tokens:,}",
         f"est. input cost    : ${cost.input_usd:.4f}",
@@ -361,23 +380,63 @@ def _build_transcript_lines(clip: Clip) -> list[Any]:
     return lines
 
 
+#: The service mode whose LLM routing the calibration must mirror. zh->en
+#: first release is Studio-only (v3 plan §6 DoD), so the ratio must be
+#: measured on the exact engine a production Studio zh->en job would use.
+CALIBRATION_SERVICE_MODE = "studio"
+
+
 def _build_translator(api_key: str) -> Any:
     """Construct GeminiTranslator the same way process.py does (translator_kwargs
     shape mirrored from src/pipeline/process.py:3293-3311), minus the pipeline
-    plumbing (llm_router / usage meter / prompt overrides) this standalone
-    calibration run doesn't need."""
+    plumbing (usage meter / prompt overrides) this standalone calibration run
+    doesn't need."""
     from services.gemini.translator import GeminiTranslator
 
     translator = GeminiTranslator(
         api_key=api_key,
         model_name=CALIBRATION_MODEL_NAME,
     )
+    # Mirror process.py:3312 — `translator._service_mode = job_service_mode`.
+    # This is what activates llm_registry-based model selection inside
+    # _call_task_with_fallback (task s3_translate -> prompt_key "translate"),
+    # i.e. the flat default `deepseek` plus any admin override in
+    # admin_settings.json::prompt_models["studio"]["translate"] plus the
+    # registry fallback chain. WITHOUT this line the translator would take the
+    # legacy Gemini path and the calibration would measure a DIFFERENT engine
+    # than production Studio zh->en (CodeX P1 finding, 2026-07-02).
+    translator._service_mode = CALIBRATION_SERVICE_MODE
     # Mirror process.py:3317-3318 — seed the language pair on the translator
     # instance itself so _count_cn_chars() (target-script-aware counting)
     # dispatches to the Latin/word-count branch instead of the CJK default.
     translator._translate_source_language = "zh-CN"
     translator._translate_target_language = "en"
     return translator
+
+
+def _resolve_effective_translate_route() -> dict[str, Any]:
+    """Resolve the SAME task=translate routing a production Studio zh->en job
+    would get, so the operator can verify which engine the calibration is
+    actually measuring. Imported lazily — only the --run path calls this."""
+    from services.llm_registry import (
+        MODEL_REGISTRY,
+        get_fallback_candidates,
+        get_prompt_model,
+        resolve_model_id,
+    )
+
+    model_name = get_prompt_model(CALIBRATION_SERVICE_MODE, "translate")
+    info = MODEL_REGISTRY.get(model_name, {})
+    fallbacks = get_fallback_candidates(model_name, requires_audio=False)
+    return {
+        "service_mode": CALIBRATION_SERVICE_MODE,
+        "prompt_key": "translate",
+        "model_name": model_name,
+        "api_model_id": resolve_model_id(model_name),
+        "provider": str(info.get("provider", "")),
+        "api_key_env": str(info.get("api_key_env", "")),
+        "fallback_candidates": list(fallbacks),
+    }
 
 
 def run_calibration(corpus_dir: Path, clips: list[Clip], output_dir: Path) -> int:
@@ -388,11 +447,31 @@ def run_calibration(corpus_dir: Path, clips: list[Clip], output_dir: Path) -> in
 
     from services.gemini.translator import _count_source_words
     from services.language_registry import LANG_EN, LANG_ZH_CN
+    from services.llm_registry import get_api_key
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         print(
-            "[error] GEMINI_API_KEY is not set. The real calibration run needs it to call the paid translation API.",
+            "[error] GEMINI_API_KEY is not set. GeminiTranslator requires it at "
+            "construction time (and it backs the registry fallback chain).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve and surface the EXACT engine this run will use — the same
+    # llm_registry routing (mode=studio, task=translate, admin overrides
+    # included) a production Studio zh->en job resolves (CodeX P1).
+    route = _resolve_effective_translate_route()
+    print(
+        "[route] task=translate service_mode={service_mode} -> model={model_name} "
+        "(api_model_id={api_model_id}, provider={provider}); fallbacks={fallback_candidates}".format(**route)
+    )
+    if route["provider"] and route["provider"] != "gemini" and not get_api_key(route["model_name"]):
+        print(
+            f"[error] the effective translate route is {route['model_name']} "
+            f"(provider={route['provider']}) but its API key is not configured "
+            f"(check {route['api_key_env']} or admin settings). Refusing to start "
+            "a run that would fail per-clip.",
             file=sys.stderr,
         )
         return 1
@@ -448,10 +527,10 @@ def run_calibration(corpus_dir: Path, clips: list[Clip], output_dir: Path) -> in
             f"[fatal] all {len(clip_results)} clip(s) failed calibration translation; no ratio data produced.",
             file=sys.stderr,
         )
-        _write_reports(corpus_dir, clip_results, output_dir, fatal=True)
+        _write_reports(corpus_dir, clip_results, output_dir, route=route, fatal=True)
         return 1
 
-    _write_reports(corpus_dir, clip_results, output_dir, fatal=False)
+    _write_reports(corpus_dir, clip_results, output_dir, route=route, fatal=False)
     return 0
 
 
@@ -485,6 +564,7 @@ def _write_reports(
     clip_results: list[ClipRatioResult],
     output_dir: Path,
     *,
+    route: dict[str, Any],
     fatal: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -524,7 +604,12 @@ def _write_reports(
     report: dict[str, Any] = {
         "generated_at_utc": timestamp,
         "corpus_dir": str(corpus_dir),
-        "model": CALIBRATION_MODEL_NAME,
+        # The engine that ACTUALLY produced the translations — resolved from
+        # the same llm_registry routing production Studio zh->en uses
+        # (admin overrides included). The Gemini model constant above it is
+        # only the constructor default / estimate pricing anchor.
+        "effective_translate_route": route,
+        "estimate_pricing_model": CALIBRATION_MODEL_NAME,
         "current_provisional_ratio": CURRENT_PROVISIONAL_RATIO,
         "deviation_threshold": RATIO_DEVIATION_THRESHOLD,
         "clip_count": len(clip_results),
@@ -556,7 +641,10 @@ def _write_reports(
         "",
         f"- Generated: {timestamp}",
         f"- Corpus: `{corpus_dir}`",
-        f"- Model: `{CALIBRATION_MODEL_NAME}`",
+        "- Effective translate route (same llm_registry routing as production "
+        f"Studio zh->en, admin overrides included): `{route['model_name']}` "
+        f"(api_model_id=`{route['api_model_id']}`, provider=`{route['provider']}`, "
+        f"fallbacks={route['fallback_candidates']})",
         f"- Clips: {len(clip_results)} ({len(failed)} failed)",
         "",
         "## Pooled ratio distribution (target word count / source CJK char count)",
@@ -639,7 +727,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--estimate",
         action="store_true",
         help="Offline cost estimate only. This is the default behavior; the flag exists "
-        "for explicitness in scripted/documented invocations.",
+        "for explicitness in scripted/documented invocations. Mutually exclusive "
+        "with --run (giving both exits 2 without any paid call).",
     )
     parser.add_argument(
         "--run",
@@ -666,6 +755,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    # Fail-closed (CodeX P2): --estimate is an explicit statement of "offline
+    # only" intent — combining it with --run is contradictory and must never
+    # resolve in favor of the paid branch. Checked FIRST, before any corpus
+    # I/O, so the contradiction can't reach run_calibration regardless of
+    # what other flags are present.
+    if args.estimate and args.run:
+        print(
+            "[blocked] --estimate and --run are mutually exclusive. --estimate "
+            "explicitly requests the offline path; refusing to enter the paid "
+            "run. Drop --estimate if you intend a real calibration run.",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         clips = load_corpus(args.corpus)
