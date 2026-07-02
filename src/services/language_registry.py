@@ -268,7 +268,12 @@ SUPPORTED_LANGUAGE_PAIRS: dict[str, LanguagePairProfile] = {
         adapted_paid_capabilities=frozenset(),
         is_default=False,
         pipeline_ready=True,  # allowlisted canary; paid capabilities still fail closed.
-        natural_length_ratio=0.55,  # provisional; re-measure in Phase 0 (plan §3.4)
+        # Measured & KEPT (CM-03 Phase B, 2026-07-02): constraint-free probe on
+        # 3 real clips shows the natural ratio is register-dependent (fast 口播
+        # ≈0.30 … short punchy ≈0.70; slow speech ≈0.62) — 0.55 is the
+        # mass-weighted cross-register compromise; rewrite/DSP absorb variance.
+        # Evidence: docs/reports/20260702T101719Z-cm03-zh-en-ratio-calibration.md
+        natural_length_ratio=0.55,
     ),
 }
 

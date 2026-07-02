@@ -245,7 +245,15 @@ def test_default_pair_ratio_is_exactly_1_8() -> None:
     assert SUPPORTED_LANGUAGE_PAIRS["en->zh-CN"].natural_length_ratio == 1.8
 
 
-def test_zh_en_ratio_is_provisional_0_55() -> None:
+def test_zh_en_ratio_is_measured_and_kept_0_55() -> None:
+    # CM-03 Phase B (2026-07-02): measured via the constraint-free probe on 3
+    # real production clips — natural ratio is strongly register-dependent
+    # (0.30 fast 口播 … 0.70 short punchy; slow speech ≈0.62). 0.55 sits in the
+    # mass-weighted middle and is KEPT as the cross-register compromise prior;
+    # the rewrite/DSP chain absorbs per-clip variance. Evidence + decision:
+    # docs/reports/20260702T101719Z-cm03-zh-en-ratio-calibration.md (Phase B
+    # 决策附录). Changing this constant requires re-running the calibration on
+    # a broader corpus, not just editing the assertion.
     assert SUPPORTED_LANGUAGE_PAIRS["zh-CN->en"].natural_length_ratio == 0.55
 
 

@@ -1,0 +1,91 @@
+{
+  "generated_at_utc": "20260702T101719Z",
+  "corpus_dir": "/tmp/cm03_corpus",
+  "effective_translate_route": {
+    "service_mode": "studio",
+    "prompt_key": "translate",
+    "model_name": "gemini_31_flash_lite",
+    "api_model_id": "gemini-3.1-flash-lite",
+    "provider": "gemini",
+    "api_key_env": "",
+    "fallback_candidates": [
+      "mimo_omni"
+    ]
+  },
+  "constraint_neutralized": true,
+  "measurement_entry": "GeminiTranslator.translate_probe",
+  "length_constraint_mode": "none (probe template omits target_chars/min_chars/max_chars entirely)",
+  "estimate_pricing_model": "gemini-3.1-pro-preview",
+  "current_provisional_ratio": 0.55,
+  "deviation_threshold": 0.1,
+  "clip_count": 3,
+  "failed_clip_count": 0,
+  "failed_clips": [],
+  "pooled_stats": {
+    "p10": 0.363670418795803,
+    "p25": 0.46056172828280995,
+    "p50": 0.6220472440944882,
+    "p75": 0.6588497090037658,
+    "p90": 0.6809311879493324,
+    "mean": 0.5389252101595544,
+    "n": 3.0
+  },
+  "per_clip_stats": {
+    "clip1_caodewang.txt": {
+      "p10": 0.6220472440944882,
+      "p25": 0.6220472440944882,
+      "p50": 0.6220472440944882,
+      "p75": 0.6220472440944882,
+      "p90": 0.6220472440944882,
+      "mean": 0.6220472440944882,
+      "n": 1.0
+    },
+    "clip2_daihuo.txt": {
+      "p10": 0.29907621247113164,
+      "p25": 0.29907621247113164,
+      "p50": 0.29907621247113164,
+      "p75": 0.29907621247113164,
+      "p90": 0.29907621247113164,
+      "mean": 0.29907621247113164,
+      "n": 1.0
+    },
+    "clip3_tugaiqi.txt": {
+      "p10": 0.6956521739130435,
+      "p25": 0.6956521739130435,
+      "p50": 0.6956521739130435,
+      "p75": 0.6956521739130435,
+      "p90": 0.6956521739130435,
+      "mean": 0.6956521739130435,
+      "n": 1.0
+    }
+  },
+  "clip_results": [
+    {
+      "clip_name": "clip1_caodewang.txt",
+      "segment_count": 1,
+      "source_cjk_chars": 127,
+      "target_word_count": 79,
+      "ratio": 0.6220472440944882,
+      "error": null
+    },
+    {
+      "clip_name": "clip2_daihuo.txt",
+      "segment_count": 2,
+      "source_cjk_chars": 866,
+      "target_word_count": 259,
+      "ratio": 0.29907621247113164,
+      "error": null
+    },
+    {
+      "clip_name": "clip3_tugaiqi.txt",
+      "segment_count": 1,
+      "source_cjk_chars": 69,
+      "target_word_count": 48,
+      "ratio": 0.6956521739130435,
+      "error": null
+    }
+  ],
+  "conclusion": "update_ratio",
+  "recommendation": "Pooled p50 (0.62) deviates from provisional 0.55 by 13% (> 10% threshold) -- recommend UPDATING natural_length_ratio to 0.62. This affects two downstream consumers: (1) translator.py length budget (_estimate_dynamic_target_chars / _count_cn_chars retry gate) and (2) process.py voice-speed cps metadata (target_chars_per_second).",
+  "fatal": false
+}
