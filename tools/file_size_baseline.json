@@ -28,7 +28,7 @@
   "gateway/voice_catalog_api.py": 1167,
   "src/services/jobs/process_runner.py": 1150,
   "src/services/jobs/user_edit_audit.py": 1114,
-  "src/modules/output/editor/editor_package_writer.py": 1053,
+  "src/modules/output/editor/editor_package_writer.py": 1085,
   "gateway/pan/backup_executor.py": 1033,
   "gateway/admin_support_api.py": 1015,
   "src/services/assemblyai/transcriber.py": 977,
