@@ -22,6 +22,7 @@ _process_payment_event behavior already covered by test_billing.py /
 test_billing_idempotency.py; the settle-side bucket probe here is the
 belt-and-braces layer.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -111,9 +112,8 @@ def _default_payment_env(monkeypatch):
 # pricing fixtures
 # ---------------------------------------------------------------------------
 
-def _payload_with_topup(
-    *, enabled: bool = True, usd_on_1000: int | None = None
-) -> PricingPayload:
+
+def _payload_with_topup(*, enabled: bool = True, usd_on_1000: int | None = None) -> PricingPayload:
     payload = build_default_pricing_payload()
     payload.topup.enabled = enabled
     if usd_on_1000 is not None:
@@ -123,15 +123,18 @@ def _payload_with_topup(
 
 def _patch_pricing(monkeypatch, payload: PricingPayload) -> None:
     monkeypatch.setattr(
-        pricing_runtime, "get_runtime_pricing",
+        pricing_runtime,
+        "get_runtime_pricing",
         lambda force_reload=False: payload,
     )
 
 
 def _make_user(*, plan_code="free", uid=None):
     return SimpleNamespace(
-        id=uid or uuid.uuid4(), email="user@test.com",
-        role="user", plan_code=plan_code,
+        id=uid or uuid.uuid4(),
+        email="user@test.com",
+        role="user",
+        plan_code=plan_code,
     )
 
 
@@ -140,7 +143,12 @@ def _make_user(*, plan_code="free", uid=None):
 # ---------------------------------------------------------------------------
 
 _TABLES = [
-    User, PaymentOrder, CreditsBucket, CreditsLedger, Subscription, AdminAuditLog,
+    User,
+    PaymentOrder,
+    CreditsBucket,
+    CreditsLedger,
+    Subscription,
+    AdminAuditLog,
 ]
 
 
@@ -163,25 +171,41 @@ async def _add_user(db: AsyncSession, *, plan_code="free") -> User:
 
 
 def _topup_order_row(
-    *, user_id, code="topup_1000", status="pending",
-    credits_snapshot: int | None = 1000, paid_at=None,
+    *,
+    user_id,
+    code="topup_1000",
+    status="pending",
+    credits_snapshot: int | None = 1000,
+    paid_at=None,
 ) -> PaymentOrder:
     metadata = {"checkout_surface": "pc_web"}
     if credits_snapshot is not None:
         metadata["topup_credits_snapshot"] = credits_snapshot
     return PaymentOrder(
-        id=uuid.uuid4(), user_id=user_id, provider="fake",
-        order_kind="topup", target_plan_code=code, billing_period="one_time",
-        amount_cny=3900, status=status, paid_at=paid_at,
+        id=uuid.uuid4(),
+        user_id=user_id,
+        provider="fake",
+        order_kind="topup",
+        target_plan_code=code,
+        billing_period="one_time",
+        amount_cny=3900,
+        status=status,
+        paid_at=paid_at,
         metadata_json=metadata,
     )
 
 
 def _plan_order_row(*, user_id, plan="plus", paid_at=None) -> PaymentOrder:
     return PaymentOrder(
-        id=uuid.uuid4(), user_id=user_id, provider="fake",
-        order_kind="plan", target_plan_code=plan, billing_period="monthly",
-        amount_cny=9900, status="paid", paid_at=paid_at,
+        id=uuid.uuid4(),
+        user_id=user_id,
+        provider="fake",
+        order_kind="plan",
+        target_plan_code=plan,
+        billing_period="monthly",
+        amount_cny=9900,
+        status="paid",
+        paid_at=paid_at,
         metadata_json={},
     )
 
@@ -189,6 +213,7 @@ def _plan_order_row(*, user_id, plan="plus", paid_at=None) -> PaymentOrder:
 # ---------------------------------------------------------------------------
 # pricing_schema validator
 # ---------------------------------------------------------------------------
+
 
 class TestPricingSchemaTopup:
     def test_default_payload_validates_and_usd_defaults_none(self):
@@ -198,14 +223,10 @@ class TestPricingSchemaTopup:
 
     def _payload_with_packages(self, packages):
         payload = build_default_pricing_payload()
-        return payload.model_copy(
-            update={"topup": TopupConfig(enabled=False, packages=packages)}
-        ).model_dump()
+        return payload.model_copy(update={"topup": TopupConfig(enabled=False, packages=packages)}).model_dump()
 
     def test_rejects_code_without_prefix(self):
-        raw = self._payload_with_packages(
-            [TopupPackage(code="pack_1000", credits=1000, price_cny_fen=3900)]
-        )
+        raw = self._payload_with_packages([TopupPackage(code="pack_1000", credits=1000, price_cny_fen=3900)])
         with pytest.raises(ValueError, match="must start with"):
             PricingPayload.model_validate(raw)
 
@@ -241,9 +262,7 @@ class TestPricingSchemaTopup:
         # CodeX CLI P2: PaymentOrder.target_plan_code / BillingInvoice.plan_code
         # are String(16) — an over-long SKU must fail at config time, not at
         # checkout flush on PostgreSQL.
-        raw = self._payload_with_packages(
-            [TopupPackage(code="topup_12345678901", credits=1000, price_cny_fen=3900)]
-        )
+        raw = self._payload_with_packages([TopupPackage(code="topup_12345678901", credits=1000, price_cny_fen=3900)])
         assert len("topup_12345678901") > 16
         with pytest.raises(ValueError, match="exceeds 16"):
             PricingPayload.model_validate(raw)
@@ -255,9 +274,7 @@ class TestPricingSchemaTopup:
             PricingPayload.model_validate(raw)
 
     def test_rejects_non_positive_credits_or_price(self):
-        raw = self._payload_with_packages(
-            [TopupPackage(code="topup_bad", credits=0, price_cny_fen=3900)]
-        )
+        raw = self._payload_with_packages([TopupPackage(code="topup_bad", credits=0, price_cny_fen=3900)])
         with pytest.raises(ValueError, match="positive credits"):
             PricingPayload.model_validate(raw)
 
@@ -265,6 +282,7 @@ class TestPricingSchemaTopup:
 # ---------------------------------------------------------------------------
 # GET /api/billing/topup/packages
 # ---------------------------------------------------------------------------
+
 
 class TestListPackages:
     def test_requires_login(self, monkeypatch):
@@ -294,7 +312,8 @@ class TestListPackages:
     def test_paypal_rail_requires_usd_price(self, monkeypatch):
         _patch_pricing(monkeypatch, _payload_with_topup(usd_on_1000=599))
         monkeypatch.setattr(
-            billing_topup, "is_provider_operational",
+            billing_topup,
+            "is_provider_operational",
             lambda code: code in ("paypal", "fake"),
         )
         out = _run(list_topup_packages(user=_make_user()))
@@ -315,14 +334,13 @@ class TestListPackages:
 # POST /api/billing/topup/orders
 # ---------------------------------------------------------------------------
 
+
 class TestCreateTopupOrder:
     def _req(self, code="topup_1000", provider="fake"):
         return CreateTopupOrderRequest(topup_code=code, provider=provider)
 
     def _create(self, db, user, *, code="topup_1000", provider="fake"):
-        return create_topup_order(
-            self._req(code=code, provider=provider), db=db, user=user, request=None
-        )
+        return create_topup_order(self._req(code=code, provider=provider), db=db, user=user, request=None)
 
     def test_requires_login(self, monkeypatch):
         _patch_pricing(monkeypatch, _payload_with_topup())
@@ -366,9 +384,7 @@ class TestCreateTopupOrder:
 
     def test_paypal_without_usd_price_400(self, monkeypatch):
         _patch_pricing(monkeypatch, _payload_with_topup(usd_on_1000=None))
-        monkeypatch.setattr(
-            billing_topup, "is_provider_operational", lambda code: True
-        )
+        monkeypatch.setattr(billing_topup, "is_provider_operational", lambda code: True)
         with pytest.raises(HTTPException) as exc:
             _run(self._create(None, _make_user(), provider="paypal"))
         assert exc.value.status_code == 400
@@ -383,9 +399,7 @@ class TestCreateTopupOrder:
             async with sm() as db:
                 user = await _add_user(db)
                 out = await self._create(db, user)
-                row = (
-                    await db.execute(select(PaymentOrder))
-                ).scalars().one()
+                row = (await db.execute(select(PaymentOrder))).scalars().one()
                 return out, row
 
         out, row = _run(go())
@@ -405,6 +419,7 @@ class TestCreateTopupOrder:
 # settle_topup_paid (real sqlite)
 # ---------------------------------------------------------------------------
 
+
 class TestSettleTopupPaid:
     def test_grants_bucket_and_ledger_without_touching_plan(self):
         async def go():
@@ -417,15 +432,9 @@ class TestSettleTopupPaid:
                 updated = await settle_topup_paid(db, order=order)
                 await db.commit()
 
-                bucket = (
-                    await db.execute(select(CreditsBucket))
-                ).scalars().one()
-                ledger = (
-                    await db.execute(select(CreditsLedger))
-                ).scalars().one()
-                fresh_user = (
-                    await db.execute(select(User).where(User.id == user.id))
-                ).scalars().one()
+                bucket = (await db.execute(select(CreditsBucket))).scalars().one()
+                ledger = (await db.execute(select(CreditsLedger))).scalars().one()
+                fresh_user = (await db.execute(select(User).where(User.id == user.id))).scalars().one()
                 return updated, bucket, ledger, fresh_user, order
 
         updated, bucket, ledger, user, order = _run(go())
@@ -450,9 +459,7 @@ class TestSettleTopupPaid:
                 first = await settle_topup_paid(db, order=order)
                 second = await settle_topup_paid(db, order=order)
                 await db.commit()
-                buckets = (
-                    await db.execute(select(CreditsBucket))
-                ).scalars().all()
+                buckets = (await db.execute(select(CreditsBucket))).scalars().all()
                 return first, second, buckets
 
         first, second, buckets = _run(go())
@@ -472,9 +479,7 @@ class TestSettleTopupPaid:
                 db.add(order)
                 await db.flush()
                 updated = await settle_topup_paid(db, order=order)
-                bucket = (
-                    await db.execute(select(CreditsBucket))
-                ).scalars().one_or_none()
+                bucket = (await db.execute(select(CreditsBucket))).scalars().one_or_none()
                 return updated, bucket
 
         updated, bucket = _run(go())
@@ -494,9 +499,7 @@ class TestSettleTopupPaid:
                 db.add(order)
                 await db.flush()
                 updated = await settle_topup_paid(db, order=order)
-                buckets = (
-                    await db.execute(select(CreditsBucket))
-                ).scalars().all()
+                buckets = (await db.execute(select(CreditsBucket))).scalars().all()
                 return updated, buckets, order
 
         updated, buckets, order = _run(go())
@@ -509,6 +512,7 @@ class TestSettleTopupPaid:
 # refund recall (real sqlite)
 # ---------------------------------------------------------------------------
 
+
 class TestRefundRecall:
     def test_topup_refund_revokes_bucket_keeps_plan(self):
         async def go():
@@ -516,22 +520,17 @@ class TestRefundRecall:
             async with sm() as db:
                 user = await _add_user(db, plan_code="plus")
                 order = _topup_order_row(
-                    user_id=user.id, status="refunded",
+                    user_id=user.id,
+                    status="refunded",
                     paid_at=datetime.now(UTC),
                 )
                 db.add(order)
                 await db.flush()
                 await settle_topup_paid(db, order=order)
-                await billing._recall_entitlements_for_refund(
-                    db, order=order, now=datetime.now(UTC)
-                )
+                await billing._recall_entitlements_for_refund(db, order=order, now=datetime.now(UTC))
                 await db.commit()
-                bucket = (
-                    await db.execute(select(CreditsBucket))
-                ).scalars().one()
-                fresh_user = (
-                    await db.execute(select(User).where(User.id == user.id))
-                ).scalars().one()
+                bucket = (await db.execute(select(CreditsBucket))).scalars().one()
+                fresh_user = (await db.execute(select(User).where(User.id == user.id))).scalars().one()
                 return bucket, fresh_user
 
         bucket, user = _run(go())
@@ -542,6 +541,7 @@ class TestRefundRecall:
         """THE CM-01 red-line test: with a paid topup order on file, refunding
         the user's plan order must fall back to "free" — the topup SKU code
         must never be promoted into user.plan_code."""
+
         async def go():
             sm = await _make_sessionmaker()
             async with sm() as db:
@@ -550,17 +550,15 @@ class TestRefundRecall:
                 plan_order = _plan_order_row(user_id=user.id, paid_at=now)
                 plan_order.status = "refunded"
                 topup_order = _topup_order_row(
-                    user_id=user.id, status="paid", paid_at=now,
+                    user_id=user.id,
+                    status="paid",
+                    paid_at=now,
                 )
                 db.add_all([plan_order, topup_order])
                 await db.flush()
-                await billing._recall_entitlements_for_refund(
-                    db, order=plan_order, now=now
-                )
+                await billing._recall_entitlements_for_refund(db, order=plan_order, now=now)
                 await db.commit()
-                fresh_user = (
-                    await db.execute(select(User).where(User.id == user.id))
-                ).scalars().one()
+                fresh_user = (await db.execute(select(User).where(User.id == user.id))).scalars().one()
                 return fresh_user
 
         user = _run(go())
@@ -570,6 +568,7 @@ class TestRefundRecall:
     def test_plan_refund_still_falls_back_to_remaining_plan_order(self):
         """Existing behavior preserved: a real remaining paid plan order still
         wins the fallback (the order_kind filter only excludes topup)."""
+
         async def go():
             sm = await _make_sessionmaker()
             async with sm() as db:
@@ -579,17 +578,15 @@ class TestRefundRecall:
                 refunded.status = "refunded"
                 remaining = _plan_order_row(user_id=user.id, plan="plus", paid_at=now)
                 topup_order = _topup_order_row(
-                    user_id=user.id, status="paid", paid_at=now,
+                    user_id=user.id,
+                    status="paid",
+                    paid_at=now,
                 )
                 db.add_all([refunded, remaining, topup_order])
                 await db.flush()
-                await billing._recall_entitlements_for_refund(
-                    db, order=refunded, now=now
-                )
+                await billing._recall_entitlements_for_refund(db, order=refunded, now=now)
                 await db.commit()
-                fresh_user = (
-                    await db.execute(select(User).where(User.id == user.id))
-                ).scalars().one()
+                fresh_user = (await db.execute(select(User).where(User.id == user.id))).scalars().one()
                 return fresh_user
 
         user = _run(go())
@@ -600,17 +597,16 @@ class TestRefundRecall:
 # wiring guards (source-level)
 # ---------------------------------------------------------------------------
 
+
 class TestWiringGuards:
     def test_billing_dispatches_topup_before_subscription_upsert(self):
         import inspect
 
         src = inspect.getsource(billing._process_payment_event)
-        assert "is_topup_order(order)" in src, (
-            "CM-01 regression: paid settle no longer dispatches topup orders"
+        assert "is_topup_order(order)" in src, "CM-01 regression: paid settle no longer dispatches topup orders"
+        assert src.index("is_topup_order(order)") < src.index("upsert_active_subscription"), (
+            "topup dispatch must run before the plan/subscription branch"
         )
-        assert src.index("is_topup_order(order)") < src.index(
-            "upsert_active_subscription"
-        ), "topup dispatch must run before the plan/subscription branch"
 
     def test_refund_fallback_filters_plan_lane(self):
         import inspect
@@ -625,8 +621,7 @@ class TestWiringGuards:
     def test_billing_topup_never_imports_billing(self):
         src = (Path(_GATEWAY_DIR) / "billing_topup.py").read_text(encoding="utf-8")
         assert "import billing\n" not in src and "from billing import" not in src, (
-            "billing imports billing_topup for the settle hook; the reverse "
-            "import would be a cycle"
+            "billing imports billing_topup for the settle hook; the reverse import would be a cycle"
         )
 
     def test_topup_rails_exclude_unpriced_providers(self):

@@ -25,6 +25,7 @@ Design invariants:
 
 This module must NOT import billing (billing imports us for the settle hook).
 """
+
 from __future__ import annotations
 
 import functools
@@ -81,8 +82,7 @@ def _providers_for_package(pkg) -> list[str]:
         if not is_provider_operational(code):
             continue
         if code == "paypal" and not (
-            isinstance(getattr(pkg, "price_usd_cents", None), int)
-            and pkg.price_usd_cents > 0
+            isinstance(getattr(pkg, "price_usd_cents", None), int) and pkg.price_usd_cents > 0
         ):
             continue
         available.append(code)
@@ -145,20 +145,12 @@ async def create_topup_order(
     except KeyError:
         raise HTTPException(status_code=400, detail=f"不支持的支付渠道: {body.provider}")
     if body.provider not in TOPUP_ALLOWED_PROVIDERS:
-        raise HTTPException(
-            status_code=400, detail=f"支付渠道 {body.provider} 暂不支持点数充值"
-        )
+        raise HTTPException(status_code=400, detail=f"支付渠道 {body.provider} 暂不支持点数充值")
     if not is_provider_operational(body.provider):
-        raise HTTPException(
-            status_code=501, detail=f"支付渠道 {body.provider} 尚未接入"
-        )
-    if body.provider == "paypal" and not (
-        isinstance(pkg.price_usd_cents, int) and pkg.price_usd_cents > 0
-    ):
+        raise HTTPException(status_code=501, detail=f"支付渠道 {body.provider} 尚未接入")
+    if body.provider == "paypal" and not (isinstance(pkg.price_usd_cents, int) and pkg.price_usd_cents > 0):
         # Fail-closed: no USD list price → PayPal cannot charge this SKU.
-        raise HTTPException(
-            status_code=400, detail=f"点数包 {pkg.code} 未发布美元价格，暂不支持 PayPal"
-        )
+        raise HTTPException(status_code=400, detail=f"点数包 {pkg.code} 未发布美元价格，暂不支持 PayPal")
 
     checkout_surface = detect_checkout_surface(
         body.checkout_surface,
@@ -200,8 +192,7 @@ async def create_topup_order(
         )
     except Exception as exc:
         await db.rollback()
-        logger.error("Provider %s topup checkout failed for order %s: %s",
-                     body.provider, order.id, exc)
+        logger.error("Provider %s topup checkout failed for order %s: %s", body.provider, order.id, exc)
         raise HTTPException(status_code=502, detail=f"支付渠道创建 checkout 失败: {exc}")
 
     order.checkout_url = checkout.checkout_url
@@ -215,9 +206,15 @@ async def create_topup_order(
     order.status = "pending"
     await db.commit()
 
-    logger.info("Topup order %s created via %s for user %s: %s (%d credits) ¥%.2f",
-                order.id, body.provider, user.id,
-                pkg.code, pkg.credits, pkg.price_cny_fen / 100)
+    logger.info(
+        "Topup order %s created via %s for user %s: %s (%d credits) ¥%.2f",
+        order.id,
+        body.provider,
+        user.id,
+        pkg.code,
+        pkg.credits,
+        pkg.price_cny_fen / 100,
+    )
 
     return {
         "order_id": str(order.id),
@@ -252,16 +249,19 @@ async def settle_topup_paid(db: AsyncSession, *, order: PaymentOrder) -> bool:
     Returns True when credits were granted (entitlements_updated semantics).
     """
     existing = (
-        await db.execute(
-            select(CreditsBucket).where(
-                CreditsBucket.related_order_id == order.id,
-                CreditsBucket.bucket_type == "topup",
+        (
+            await db.execute(
+                select(CreditsBucket).where(
+                    CreditsBucket.related_order_id == order.id,
+                    CreditsBucket.bucket_type == "topup",
+                )
             )
         )
-    ).scalars().first()
+        .scalars()
+        .first()
+    )
     if existing is not None:
-        logger.info("Topup order %s already granted bucket %s, skipping",
-                    order.id, existing.id)
+        logger.info("Topup order %s already granted bucket %s, skipping", order.id, existing.id)
         return False
 
     code = order.target_plan_code
@@ -275,14 +275,18 @@ async def settle_topup_paid(db: AsyncSession, *, order: PaymentOrder) -> bool:
                 "TOPUP_GRANT_FAILED order=%s user=%s code=%s: no credits "
                 "snapshot and package missing from config — paid order left "
                 "ungranted, manual re-drive required",
-                order.id, order.user_id, code,
+                order.id,
+                order.user_id,
+                code,
             )
             metadata[_GRANT_FAILED_KEY] = "no_credit_amount"
             order.metadata_json = metadata
             return False
         logger.warning(
-            "Topup order %s missing credits snapshot; granting current "
-            "config amount %d for %s", order.id, credits, code,
+            "Topup order %s missing credits snapshot; granting current config amount %d for %s",
+            order.id,
+            credits,
+            code,
         )
 
     from credits_service import shadow_grant
@@ -300,7 +304,11 @@ async def settle_topup_paid(db: AsyncSession, *, order: PaymentOrder) -> bool:
         logger.critical(
             "TOPUP_GRANT_FAILED order=%s user=%s code=%s credits=%d: "
             "shadow_grant failed — paid order left ungranted, manual "
-            "re-drive required", order.id, order.user_id, code, credits,
+            "re-drive required",
+            order.id,
+            order.user_id,
+            code,
+            credits,
         )
         metadata[_GRANT_FAILED_KEY] = "grant_failed"
         order.metadata_json = metadata
@@ -309,6 +317,5 @@ async def settle_topup_paid(db: AsyncSession, *, order: PaymentOrder) -> bool:
     metadata.pop(_GRANT_FAILED_KEY, None)
     metadata[_GRANTED_BUCKET_KEY] = str(bucket.id)
     order.metadata_json = metadata
-    logger.info("Topup order %s settled: %d credits → bucket %s (user %s)",
-                order.id, credits, bucket.id, order.user_id)
+    logger.info("Topup order %s settled: %d credits → bucket %s (user %s)", order.id, credits, bucket.id, order.user_id)
     return True
