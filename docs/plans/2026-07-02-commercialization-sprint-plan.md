@@ -85,6 +85,10 @@
 5. **CM-03 跑批显式触发 + 人评执行**（费用估算会先给出）。
 6. **确认暂缓清单**：Wave C/D、uiloc W5、UI-BE-01 后端中文、USD 订阅续费——本方案默认暂缓，如有异议请指出。
 
+## 4.5 CM-01 部署事故记录（2026-07-02 04:31–04:50Z，已闭环）
+
+next 容器经 root compose 重建后拿到旧 env → next-intl proxy 自转发 `https://localhost:3000` TLS 错误 → 公网全站 500 约 18 分钟。根因=**M1 的 env 修复（`HOSTNAME=localhost`+`NODE_OPTIONS`）当年只落 app/docker-compose.yml、从未同步 root 入口**（feedback_apf_deploy_incident 的 Known Bad Pattern 反向复现）；部署冒烟只打了 127.0.0.1（307）探不出仅在公网转发头下显形的故障。修复：补丁 root compose（备份 `backups/docker-compose.pre-hostfix-20260702.yml`）→ 旧镜像验证公网 200 坐实根因 → CM-01 新镜像上线全 200；root vs 仓库 compose 已对齐零 diff。**新增部署铁律：①生产 recreate 前 diff root compose vs 仓库版对应服务段；②next 冒烟必须打公网 URL。**
+
 ## 5. 风险与红线备忘
 
 - CM-01 是钱路：结算幂等、退款回收、fail-closed 缺价隐藏渠道；**支付渠道之间不自动 fallback**（CLAUDE.md 红线）。
