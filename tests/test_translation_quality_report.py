@@ -5,6 +5,7 @@ from pathlib import Path
 
 from services.translation_quality import (
     build_translation_quality_report,
+    evaluate_en_script_gate,
     evaluate_zh_cn_script_gate,
     write_translation_quality_report,
 )
@@ -85,3 +86,190 @@ def test_translation_quality_report_writer_is_flagged(tmp_path: Path, monkeypatc
     )
     assert payload["schema_version"] == "translation_quality_report_v1"
     assert payload["script_gate_fail_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# zh->en behavior (2026-07-02 fix): report must stamp the job's real target
+# language and dispatch a target-appropriate script gate — the zh-CN gate was
+# flagging normal pure-English dubbing text as latin_dominant/no_cjk_*
+# (prod repro: job_b07c29cf0652411ca0a7e0461648dc7b).
+# ---------------------------------------------------------------------------
+
+
+def test_en_script_gate_accepts_pure_english() -> None:
+    result = evaluate_en_script_gate(
+        "Do you like this kind of content? If so, remember to subscribe."
+    )
+
+    assert result["ok"] is True
+    assert result["reason_codes"] == []
+    assert result["target_language"] == "en"
+    assert result["target_language_full_name"] == "English"
+
+
+def test_en_script_gate_flags_untranslated_chinese() -> None:
+    result = evaluate_en_script_gate("这一段话完全没有被翻译成英文。")
+
+    assert result["ok"] is False
+    assert "cjk_nontrivial" in result["reason_codes"]
+    assert "cjk_dominant" in result["reason_codes"]
+
+
+def test_en_script_gate_allows_glossary_cjk_terms() -> None:
+    result = evaluate_en_script_gate(
+        "The founder of 阿里巴巴集团控股 spoke at the conference.",
+        allowed_cjk_terms={"阿里巴巴集团控股"},
+    )
+
+    assert result["ok"] is True
+
+
+def test_en_target_report_no_false_issues_for_english_dub_script() -> None:
+    payload = build_translation_quality_report(
+        project_id="job_zh_en",
+        target_language="en",
+        segments=[
+            {
+                "segment_id": 1,
+                "speaker_id": "speaker_a",
+                "cn_text": "Do you like this kind of content? If so, subscribe.",
+                "dubbing_mode": "dub",
+            },
+            {
+                "segment_id": 2,
+                "speaker_id": "speaker_a",
+                "cn_text": "This is a perfectly normal English dubbing line.",
+                "dubbing_mode": "dub",
+            },
+        ],
+    )
+
+    assert payload["target_language"] == "en"
+    assert payload["target_language_full_name"] == "English"
+    assert payload["script_gate_supported"] is True
+    assert payload["issue_count"] == 0
+    assert payload["reason_counts"] == {}
+    assert payload["checked_segments"] == 2
+
+
+def test_en_target_alias_normalized_and_cjk_leak_flagged() -> None:
+    payload = build_translation_quality_report(
+        project_id="job_zh_en",
+        target_language="English",  # alias -> canonical "en"
+        segments=[
+            {
+                "segment_id": 1,
+                "speaker_id": "speaker_a",
+                "cn_text": "这一段话完全没有被翻译成英文。",
+                "dubbing_mode": "dub",
+            },
+        ],
+    )
+
+    assert payload["target_language"] == "en"
+    assert payload["issue_count"] == 1
+    assert "cjk_nontrivial" in payload["issues"][0]["reason_codes"]
+
+
+def test_default_target_language_remains_zh_cn() -> None:
+    payload = build_translation_quality_report(
+        project_id="job_legacy",
+        segments=[
+            {
+                "segment_id": 1,
+                "speaker_id": "speaker_a",
+                "cn_text": "This is still English output",
+                "dubbing_mode": "dub",
+            },
+        ],
+    )
+
+    assert payload["target_language"] == "zh-CN"
+    assert payload["target_language_full_name"] == "Chinese (Simplified)"
+    assert payload["issue_count"] == 1  # zh gate still flags latin-only text
+
+
+def test_unknown_target_language_runs_no_gate() -> None:
+    payload = build_translation_quality_report(
+        project_id="job_unknown",
+        target_language="fr",
+        segments=[
+            {
+                "segment_id": 1,
+                "speaker_id": "speaker_a",
+                "cn_text": "Ceci est du texte francais.",
+                "dubbing_mode": "dub",
+            },
+        ],
+    )
+
+    assert payload["target_language"] == "fr"
+    assert payload["script_gate_supported"] is False
+    assert payload["issue_count"] == 0
+    assert payload["checked_segments"] == 1
+
+
+def test_writer_passes_target_language_through(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVT_TRANSLATION_SCRIPT_GATE_SHADOW", "1")
+    project_dir = tmp_path / "job_zh_en"
+    segments = [
+        {
+            "segment_id": 1,
+            "speaker_id": "speaker_a",
+            "cn_text": "Pure English dubbing text with many words here.",
+            "dubbing_mode": "dub",
+        }
+    ]
+
+    assert (
+        write_translation_quality_report(
+            project_dir, segments=segments, target_language="en"
+        )
+        is True
+    )
+
+    payload = json.loads(
+        (project_dir / "reports" / "translation_quality_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["target_language"] == "en"
+    assert payload["issue_count"] == 0
+
+
+def test_translator_report_helper_threads_target_language(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """_maybe_write_translation_quality_report must stamp the pair target."""
+    from services.gemini.translator import (
+        TranslationResult,
+        _maybe_write_translation_quality_report,
+    )
+
+    monkeypatch.setenv("AVT_TRANSLATION_SCRIPT_GATE_SHADOW", "1")
+    output_root = tmp_path / "job_zh_en" / "translation"
+    output_root.mkdir(parents=True)
+    result = TranslationResult(
+        segments=[
+            {
+                "segment_id": 1,
+                "speaker_id": "speaker_a",
+                "cn_text": "Pure English dubbing text with many words here.",
+                "dubbing_mode": "dub",
+            }
+        ],
+        total_segments=1,
+        output_path=str(output_root / "segments.json"),
+    )
+
+    _maybe_write_translation_quality_report(
+        output_root, result, glossary={}, target_language="en"
+    )
+
+    payload = json.loads(
+        (tmp_path / "job_zh_en" / "reports" / "translation_quality_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["target_language"] == "en"
+    assert payload["issue_count"] == 0

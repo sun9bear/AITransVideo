@@ -126,6 +126,22 @@ class _BlockAccumulator:
         )
 
 
+def _text_equivalence_key(text: str) -> str:
+    """Comparison key for the text_mismatch check: normalize(), then drop spaces.
+
+    Cue construction legitimately loses inter-span whitespace: segment_text()
+    spans keep raw boundary whitespace, but SubtitleCue.__post_init__ strips
+    each cue's text. For space-delimited targets (zh->en jobs) the space after
+    sentence punctuation therefore vanishes when cue texts are rejoined —
+    "content?" + "If so..." -> "content?If so..." vs block "content? If so..."
+    — which is NOT a content mismatch. Equality must ignore whitespace
+    entirely; content characters and their order still compare exactly.
+    (normalize() alone is not enough: it collapses whitespace runs to a single
+    space but does not equate "space" with "no space".)
+    """
+    return normalize(text).replace(" ", "")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -142,7 +158,10 @@ def validate_cues(
     Checks performed (plan §8):
 
     Hard errors (severity="error"):
-        text_mismatch       — normalize("".join(cue.text)) != normalize(block.merged_cn_text)
+        text_mismatch       — whitespace-insensitive text equivalence:
+                              "".join(cue.text) != block.merged_cn_text after
+                              normalize() + dropping all spaces (see
+                              _text_equivalence_key)
         timing_overlap      — cue[i].end_ms > cue[i+1].start_ms within same block
         timing_out_of_block — cue's [start_ms, end_ms] not inside [block_start_ms, block_end_ms]
         empty_cue           — cue.text == "" after strip (SubtitleCue already strips in __post_init__)
@@ -239,7 +258,7 @@ def validate_cues(
 
         # --- text_mismatch (block-level) ---
         joined = "".join(c.text for c in sorted_cues)
-        if normalize(joined) != normalize(spec.merged_cn_text):
+        if _text_equivalence_key(joined) != _text_equivalence_key(spec.merged_cn_text):
             acc.text_mismatch = True
             issues.append(
                 ValidationIssue(
