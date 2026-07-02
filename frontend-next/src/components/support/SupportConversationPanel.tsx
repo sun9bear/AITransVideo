@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { useTranslations } from "next-intl"
 
 import {
   createSupportConversation,
@@ -18,11 +19,6 @@ import {
 
 import { SupportHandoffBanner } from "./SupportHandoffBanner"
 import { SupportMessageList } from "./SupportMessageList"
-import {
-  FALLBACK_GREETING,
-  FALLBACK_QUICK_QUESTIONS,
-  SUPPORT_LABELS,
-} from "./support-copy"
 
 type HandoffState = ConversationDetail["handoff_state"]
 
@@ -70,6 +66,7 @@ export function SupportConversationPanel({
   onlineStatus: OnlineStatus | null
   isLoggedIn: boolean
 }) {
+  const t = useTranslations("appSupport")
   const [state, setState] = useState<ConversationState>(INITIAL_STATE)
   const [draft, setDraft] = useState("")
   const [loading, setLoading] = useState(false)
@@ -120,7 +117,7 @@ export function SupportConversationPanel({
           detail.handoff_state === "created" ||
           detail.handoff_state === "requested"
         ) {
-          setRestoreNotice("已恢复你之前的客服对话")
+          setRestoreNotice(t("conversation.restoredNotice"))
         }
       })
       .catch(() => {
@@ -129,7 +126,7 @@ export function SupportConversationPanel({
     return () => {
       cancelled = true
     }
-  }, [visible, state.id, isLoggedIn])
+  }, [visible, state.id, isLoggedIn, t])
 
   const handoffActive =
     state.handoff_state === "requested" || state.handoff_state === "created"
@@ -152,7 +149,7 @@ export function SupportConversationPanel({
       }))
       return created.conversation_id
     } catch (err) {
-      setError(err instanceof Error ? err.message : "创建会话失败")
+      setError(err instanceof Error ? err.message : t("conversation.createFailed"))
       return null
     }
   }
@@ -214,7 +211,7 @@ export function SupportConversationPanel({
       }
       setDraft("")
     } catch (err) {
-      setError(err instanceof Error ? err.message : "发送失败")
+      setError(err instanceof Error ? err.message : t("conversation.sendFailed"))
     } finally {
       setLoading(false)
     }
@@ -252,7 +249,7 @@ export function SupportConversationPanel({
         status: "waiting_human",
       }))
     } catch (err) {
-      setError(err instanceof Error ? err.message : "转人工失败")
+      setError(err instanceof Error ? err.message : t("conversation.handoffFailed"))
     }
   }
 
@@ -369,21 +366,24 @@ export function SupportConversationPanel({
 
   if (!visible) return null
 
+  const fallbackQuickQuestions = t.raw("fallback.quickQuestions") as string[]
   const showQuickQuestions =
     !offline &&
     state.messages.length === 0 &&
-    (quickQuestions ?? FALLBACK_QUICK_QUESTIONS).length > 0
+    (quickQuestions ?? fallbackQuickQuestions).length > 0
 
   // Online indicator: green if anyone online, gray otherwise.
   const onlineDotClass = onlineStatus?.online
     ? "bg-emerald-500"
     : "bg-muted-foreground"
-  const onlineLabel = onlineStatus?.online ? "客服在线" : "运营离线"
+  const onlineLabel = onlineStatus?.online
+    ? t("conversation.onlineLabel")
+    : t("conversation.offlineLabel")
 
   return (
     <section
       role="dialog"
-      aria-label="客服对话"
+      aria-label={t("conversation.dialogAriaLabel")}
       className={
         "fixed z-50 bottom-20 right-4 w-[min(380px,calc(100vw-2rem))] " +
         "sm:bottom-24 sm:right-6 sm:w-[380px] " +
@@ -394,19 +394,19 @@ export function SupportConversationPanel({
       <header className="flex items-start justify-between border-b border-border px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold text-foreground">
-            {SUPPORT_LABELS.panelTitle}
+            {t("labels.panelTitle")}
           </h2>
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <span aria-hidden className={"h-1.5 w-1.5 rounded-full " + onlineDotClass} />
             <span>{onlineLabel}</span>
             <span aria-hidden>·</span>
-            <span>{SUPPORT_LABELS.panelSubtitle}</span>
+            <span>{t("labels.panelSubtitle")}</span>
           </p>
         </div>
         <button
           type="button"
           onClick={onRequestClose}
-          aria-label={SUPPORT_LABELS.closeButton}
+          aria-label={t("labels.closeButton")}
           className="text-xl leading-none text-muted-foreground hover:text-foreground"
         >
           ×
@@ -415,7 +415,7 @@ export function SupportConversationPanel({
 
       {budgetState === "budget_exhausted" ? (
         <div className="border-b border-border bg-yellow-50/50 px-4 py-2 text-xs text-foreground">
-          {SUPPORT_LABELS.budgetExhaustedNote}
+          {t("labels.budgetExhaustedNote")}
         </div>
       ) : null}
 
@@ -427,7 +427,7 @@ export function SupportConversationPanel({
 
       {state.messages.length === 0 && !offline ? (
         <div className="px-4 py-3 text-xs leading-relaxed text-muted-foreground">
-          {greeting || FALLBACK_GREETING}
+          {greeting || t("fallback.greeting")}
         </div>
       ) : null}
 
@@ -437,13 +437,12 @@ export function SupportConversationPanel({
       {offline ? (
         <div className="border-t border-border bg-card/40 px-4 py-3">
           <p className="mb-2 text-xs leading-relaxed text-foreground">
-            {offline.message ||
-              "运营暂未在线，可扫码添加客服微信，我们尽快回复。"}
+            {offline.message || t("conversation.offlineMessageDefault")}
           </p>
           <div className="flex justify-center">
             <img
               src={offline.qr_url}
-              alt="客服微信二维码"
+              alt={t("conversation.offlineQrAlt")}
               className="h-44 w-44 rounded border border-border bg-background object-contain p-1"
             />
           </div>
@@ -452,7 +451,7 @@ export function SupportConversationPanel({
 
       {showQuickQuestions ? (
         <div className="flex flex-wrap gap-2 border-t border-border px-4 py-2">
-          {(quickQuestions ?? FALLBACK_QUICK_QUESTIONS).map((q) => (
+          {(quickQuestions ?? fallbackQuickQuestions).map((q) => (
             <button
               key={q}
               type="button"
@@ -481,14 +480,14 @@ export function SupportConversationPanel({
             onClick={onRequestClose}
             className="flex-1 rounded border border-border bg-card px-3 py-1.5 text-foreground hover:bg-muted"
           >
-            {SUPPORT_LABELS.resolvedButton}
+            {t("labels.resolvedButton")}
           </button>
           <button
             type="button"
             onClick={() => void requestHandoff()}
             className="flex-1 rounded border border-[color:var(--cinnabar,#C73E3A)] bg-[color:var(--cinnabar,#C73E3A)]/10 px-3 py-1.5 text-foreground hover:bg-[color:var(--cinnabar,#C73E3A)]/20"
           >
-            {SUPPORT_LABELS.notResolvedButton}
+            {t("labels.notResolvedButton")}
           </button>
         </div>
       ) : null}
@@ -507,10 +506,10 @@ export function SupportConversationPanel({
           onChange={(event) => setDraft(event.target.value)}
           placeholder={
             offline
-              ? "请在微信继续沟通"
+              ? t("conversation.offlineInputPlaceholder")
               : handoffActive
-                ? SUPPORT_LABELS.handoffWaitingNote
-                : SUPPORT_LABELS.inputPlaceholder
+                ? t("labels.handoffWaitingNote")
+                : t("labels.inputPlaceholder")
           }
           disabled={handoffActive || !!offline}
           rows={2}
@@ -537,7 +536,7 @@ export function SupportConversationPanel({
           }
           className="self-end rounded bg-[color:var(--cinnabar,#C73E3A)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
         >
-          {SUPPORT_LABELS.sendButton}
+          {t("labels.sendButton")}
         </button>
       </form>
     </section>

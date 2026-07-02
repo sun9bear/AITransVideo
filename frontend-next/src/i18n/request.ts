@@ -45,6 +45,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
     appVoiceClone,
     appCosySegments,
     appCosyConsent,
+    appSupport,
     errors,
   ] = await Promise.all([
     import(`../../messages/${locale}/common.json`),
@@ -77,6 +78,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
     import(`../../messages/${locale}/appVoiceClone.json`),
     import(`../../messages/${locale}/appCosySegments.json`),
     import(`../../messages/${locale}/appCosyConsent.json`),
+    import(`../../messages/${locale}/appSupport.json`),
     import(`../../messages/${locale}/errors.json`),
   ])
 
@@ -113,6 +115,7 @@ export default getRequestConfig(async ({ requestLocale }) => {
       appVoiceClone: appVoiceClone.default,
       appCosySegments: appCosySegments.default,
       appCosyConsent: appCosyConsent.default,
+      appSupport: appSupport.default,
       errors: errors.default,
     },
   }

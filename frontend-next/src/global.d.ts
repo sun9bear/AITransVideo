@@ -34,6 +34,7 @@ import appCosyClone from "../messages/zh/appCosyClone.json"
 import appVoiceClone from "../messages/zh/appVoiceClone.json"
 import appCosySegments from "../messages/zh/appCosySegments.json"
 import appCosyConsent from "../messages/zh/appCosyConsent.json"
+import appSupport from "../messages/zh/appSupport.json"
 import errors from "../messages/zh/errors.json"
 import { routing } from "./i18n/routing"
 
@@ -68,6 +69,7 @@ type Messages = {
   appVoiceClone: typeof appVoiceClone
   appCosySegments: typeof appCosySegments
   appCosyConsent: typeof appCosyConsent
+  appSupport: typeof appSupport
   errors: typeof errors
 }
 

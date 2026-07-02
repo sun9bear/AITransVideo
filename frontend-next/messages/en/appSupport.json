@@ -1,0 +1,51 @@
+{
+  "labels": {
+    "launcherLabel": "Support",
+    "launcherTooltip": "Live chat / Help",
+    "panelTitle": "Support assistant",
+    "panelSubtitle": "AI answers first · escalates to a human if it can't help",
+    "inputPlaceholder": "Describe your question here…",
+    "sendButton": "Send",
+    "resolvedButton": "Resolved",
+    "notResolvedButton": "Not resolved, talk to a human",
+    "closeButton": "Close",
+    "newConversation": "New conversation",
+    "loading": "AI is thinking…",
+    "budgetExhaustedNote": "AI support is busy right now — switched to template replies.",
+    "handoffCreatedNote": "A human support ticket has been created",
+    "handoffFailedNote": "Couldn't escalate to a human. Please try again later or email us directly.",
+    "handoffWaitingNote": "Escalated to a human — our team will reply by email",
+    "unauthHelp": "Sign in so support can see your job and billing context."
+  },
+  "fallback": {
+    "greeting": "Hi! I can help with questions about your trial, plans, exporting Jianying drafts, and job troubleshooting.",
+    "quickQuestions": [
+      "Does the trial auto-charge me?",
+      "How do I export a Jianying draft?",
+      "What if my job fails?",
+      "I need a human"
+    ]
+  },
+  "conversation": {
+    "createFailed": "Couldn't create the conversation",
+    "sendFailed": "Couldn't send the message",
+    "handoffFailed": "Couldn't escalate to a human",
+    "dialogAriaLabel": "Support conversation",
+    "onlineLabel": "Support is online",
+    "offlineLabel": "Support is offline",
+    "restoredNotice": "Restored your previous support conversation",
+    "offlineMessageDefault": "No one is online right now. Scan the QR code to add us on WeChat and we'll reply as soon as we can.",
+    "offlineQrAlt": "Support WeChat QR code",
+    "offlineInputPlaceholder": "Please continue the conversation on WeChat"
+  },
+  "messageList": {
+    "emptyHint": "No messages yet. Ask us anything.",
+    "humanBadge": "✦ Support",
+    "thinking": "AI is thinking…"
+  },
+  "handoffBanner": {
+    "recommended": "We recommend talking to a human. Tap \"Talk to a human\" below.",
+    "createdPrefix": ": ",
+    "closed": "This ticket is closed. Start a new conversation if you need more help."
+  }
+}

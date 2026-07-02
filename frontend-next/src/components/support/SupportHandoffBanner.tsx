@@ -1,6 +1,6 @@
 "use client"
 
-import { SUPPORT_LABELS } from "./support-copy"
+import { useTranslations } from "next-intl"
 
 /**
  * Persistent banner shown after a handoff has been requested or created.
@@ -14,38 +14,41 @@ export function SupportHandoffBanner({
 }: {
   state: "none" | "recommended" | "requested" | "created" | "failed" | "closed"
 }) {
+  const t = useTranslations("appSupport")
   if (state === "none") return null
   if (state === "recommended") {
     return (
       <div className="border-t border-border bg-yellow-50/40 px-4 py-2 text-xs text-foreground">
-        {"建议转人工客服处理。点下方「转人工」按钮即可。"}
+        {t("handoffBanner.recommended")}
       </div>
     )
   }
   if (state === "requested") {
     return (
       <div className="border-t border-border bg-yellow-50/60 px-4 py-2 text-xs text-foreground">
-        {SUPPORT_LABELS.handoffWaitingNote}
+        {t("labels.handoffWaitingNote")}
       </div>
     )
   }
   if (state === "created") {
     return (
       <div className="border-t border-border bg-green-50/60 px-4 py-2 text-xs text-foreground">
-        {SUPPORT_LABELS.handoffCreatedNote}：{SUPPORT_LABELS.handoffWaitingNote}
+        {t("labels.handoffCreatedNote")}
+        {t("handoffBanner.createdPrefix")}
+        {t("labels.handoffWaitingNote")}
       </div>
     )
   }
   if (state === "failed") {
     return (
       <div className="border-t border-border bg-red-50/40 px-4 py-2 text-xs text-foreground">
-        {SUPPORT_LABELS.handoffFailedNote}
+        {t("labels.handoffFailedNote")}
       </div>
     )
   }
   return (
     <div className="border-t border-border bg-card px-4 py-2 text-xs text-muted-foreground">
-      {"工单已关闭，如需继续咨询可开新对话。"}
+      {t("handoffBanner.closed")}
     </div>
   )
 }
