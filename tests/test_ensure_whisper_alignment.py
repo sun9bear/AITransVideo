@@ -14,6 +14,7 @@ files are whisper-aligned. Idempotent + cache-aware:
 
 Returns a small status dict for caller logging / event emission.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -50,14 +51,13 @@ def _write_silence_wav(path: Path, duration_ms: int = 1000):
         w.writeframes(b"\x00\x00" * n_frames)
 
 
-def _build_minimal_project(tmp_path: Path, *, n_segments: int = 2,
-                           cues_source: str = "semantic_block_v2") -> Path:
+def _build_minimal_project(tmp_path: Path, *, n_segments: int = 2, cues_source: str = "semantic_block_v2") -> Path:
     """Build a project_dir resembling what publish stage produces:
-      editor/segments.json (full DubbingSegment-style records)
-      tts/segment_*_aligned.wav (per-segment audio)
-      output/subtitles_zh.srt (Chinese SRT)
-      output/subtitle_cues.json (cue list with ``source`` per cue)
-      output/subtitle_quality_report.json
+    editor/segments.json (full DubbingSegment-style records)
+    tts/segment_*_aligned.wav (per-segment audio)
+    output/subtitles_zh.srt (Chinese SRT)
+    output/subtitle_cues.json (cue list with ``source`` per cue)
+    output/subtitle_quality_report.json
     """
     project_dir = tmp_path / "project"
 
@@ -68,26 +68,29 @@ def _build_minimal_project(tmp_path: Path, *, n_segments: int = 2,
     for i in range(1, n_segments + 1):
         wav = tts_dir / f"segment_{i:03d}_aligned.wav"
         _write_silence_wav(wav, duration_ms=1000 + i * 100)
-        segs.append({
-            "segment_id": str(i),
-            "speaker_id": "A",
-            "display_name": "A",
-            "voice_id": "v",
-            "start_ms": (i - 1) * 1000,
-            "end_ms": i * 1000,
-            "target_duration_ms": 1000,
-            "source_text": f"src{i}",
-            "cn_text": f"文本{i}",
-            "tts_input_cn_text": f"文本{i}",
-            "actual_duration_ms": 1000,
-            "alignment_method": "direct",
-            "tts_audio_path": str(wav),
-            "aligned_audio_path": str(wav),
-            "dubbing_mode": "dub",
-        })
+        segs.append(
+            {
+                "segment_id": str(i),
+                "speaker_id": "A",
+                "display_name": "A",
+                "voice_id": "v",
+                "start_ms": (i - 1) * 1000,
+                "end_ms": i * 1000,
+                "target_duration_ms": 1000,
+                "source_text": f"src{i}",
+                "cn_text": f"文本{i}",
+                "tts_input_cn_text": f"文本{i}",
+                "actual_duration_ms": 1000,
+                "alignment_method": "direct",
+                "tts_audio_path": str(wav),
+                "aligned_audio_path": str(wav),
+                "dubbing_mode": "dub",
+            }
+        )
     (project_dir / "editor").mkdir(parents=True, exist_ok=True)
     (project_dir / "editor" / "segments.json").write_text(
-        json.dumps(segs, ensure_ascii=False), encoding="utf-8",
+        json.dumps(segs, ensure_ascii=False),
+        encoding="utf-8",
     )
 
     # output/ stage produced by publish
@@ -95,19 +98,21 @@ def _build_minimal_project(tmp_path: Path, *, n_segments: int = 2,
     output_dir.mkdir(parents=True, exist_ok=True)
     cues = []
     for i in range(1, n_segments + 1):
-        cues.append({
-            "cue_id": f"segment_{i:03d}_cue_01",
-            "block_id": f"segment_{i:03d}",
-            "speaker_id": "A",
-            "speaker_name": "A",
-            "text": f"文本{i}",
-            "en_text": f"src{i}",
-            "start_ms": (i - 1) * 1000,
-            "end_ms": i * 1000,
-            "source": cues_source,  # proportional or whisper-aligned
-            "needs_review": False,
-            "review_reason": None,
-        })
+        cues.append(
+            {
+                "cue_id": f"segment_{i:03d}_cue_01",
+                "block_id": f"segment_{i:03d}",
+                "speaker_id": "A",
+                "speaker_name": "A",
+                "text": f"文本{i}",
+                "en_text": f"src{i}",
+                "start_ms": (i - 1) * 1000,
+                "end_ms": i * 1000,
+                "source": cues_source,  # proportional or whisper-aligned
+                "needs_review": False,
+                "review_reason": None,
+            }
+        )
     cues_payload = {
         "schema_version": "subtitle_cues_v2",
         "project_id": "test-project",
@@ -124,7 +129,7 @@ def _build_minimal_project(tmp_path: Path, *, n_segments: int = 2,
     # SRT files: simple placeholder content matching cue count
     srt_lines = []
     for i, c in enumerate(cues, start=1):
-        srt_lines.append(f"{i}\n00:00:0{i-1},000 --> 00:00:0{i},000\n{c['text']}\n")
+        srt_lines.append(f"{i}\n00:00:0{i - 1},000 --> 00:00:0{i},000\n{c['text']}\n")
     srt = "\n".join(srt_lines)
     (output_dir / "subtitles_zh.srt").write_text(srt, encoding="utf-8")
     (output_dir / "subtitles.srt").write_text(srt, encoding="utf-8")
@@ -139,7 +144,8 @@ def _build_minimal_project(tmp_path: Path, *, n_segments: int = 2,
 
 
 def test_returns_already_aligned_when_cues_are_whisper_with_matching_fingerprint(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Cues already carry whisper source AND fingerprint matches the
     current aligned WAV bytes AND stamped model matches admin model
@@ -147,15 +153,18 @@ def test_returns_already_aligned_when_cues_are_whisper_with_matching_fingerprint
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({
-            "whisper_alignment_enabled": True,
-            "whisper_alignment_model": "small",
-        }),
+        json.dumps(
+            {
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_model": "small",
+            }
+        ),
         encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(
-        tmp_path, n_segments=2,
+        tmp_path,
+        n_segments=2,
         cues_source="semantic_block_v2_whisper_aligned",
     )
     # Add fingerprint matching current WAV bytes + stamped model.
@@ -166,8 +175,7 @@ def test_returns_already_aligned_when_cues_are_whisper_with_matching_fingerprint
     cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
     cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
     cues_payload["alignment_model"] = "small"
-    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
-                         encoding="utf-8")
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     from services.subtitles.ensure_whisper_alignment import (
         ensure_whisper_aligned_subtitles,
@@ -195,7 +203,8 @@ def test_no_op_when_admin_disables_whisper(tmp_path, monkeypatch):
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": False}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": False}),
+        encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
@@ -224,7 +233,8 @@ def test_no_op_when_env_capability_off(tmp_path, monkeypatch):
     monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
@@ -249,7 +259,8 @@ def test_no_op_when_env_capability_off(tmp_path, monkeypatch):
 
 
 def test_regenerates_cues_and_srts_when_gates_open_and_proportional(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Both gates open + existing cues are proportional → run whisper,
     rewrite cue JSON + 4 SRT files + quality report. Stamp fingerprint
@@ -257,7 +268,8 @@ def test_regenerates_cues_and_srts_when_gates_open_and_proportional(
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
@@ -288,8 +300,7 @@ def test_regenerates_cues_and_srts_when_gates_open_and_proportional(
     assert "alignment_fingerprint" in payload
 
     # All 4 SRT files updated
-    for n in ("subtitles_zh.srt", "subtitles.srt",
-              "subtitles_en.srt", "subtitles_bilingual.srt"):
+    for n in ("subtitles_zh.srt", "subtitles.srt", "subtitles_en.srt", "subtitles_bilingual.srt"):
         assert (project_dir / "output" / n).is_file()
 
 
@@ -300,7 +311,8 @@ def test_prf_regenerate_writes_script_neutral_source_target_srt(tmp_path, monkey
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
 
@@ -315,12 +327,12 @@ def test_prf_regenerate_writes_script_neutral_source_target_srt(tmp_path, monkey
     out = project_dir / "output"
     assert (out / "subtitles_target.srt").is_file()
     assert (out / "subtitles_source.srt").is_file()
-    assert (out / "subtitles_target.srt").read_text(encoding="utf-8") == (
-        out / "subtitles_zh.srt"
-    ).read_text(encoding="utf-8")
-    assert (out / "subtitles_source.srt").read_text(encoding="utf-8") == (
-        out / "subtitles_en.srt"
-    ).read_text(encoding="utf-8")
+    assert (out / "subtitles_target.srt").read_text(encoding="utf-8") == (out / "subtitles_zh.srt").read_text(
+        encoding="utf-8"
+    )
+    assert (out / "subtitles_source.srt").read_text(encoding="utf-8") == (out / "subtitles_en.srt").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_prf_non_zh_segments_bypass_whisper_in_deliverable(tmp_path, monkeypatch):
@@ -330,7 +342,8 @@ def test_prf_non_zh_segments_bypass_whisper_in_deliverable(tmp_path, monkeypatch
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
 
@@ -354,17 +367,15 @@ def test_prf_non_zh_segments_bypass_whisper_in_deliverable(tmp_path, monkeypatch
         ensure_whisper_aligned_subtitles(project_dir)
 
     assert whisper_calls == [], (
-        "non-zh deliverable must bypass the zh whisper char-DTW; "
-        f"got {len(whisper_calls)} call(s)."
+        f"non-zh deliverable must bypass the zh whisper char-DTW; got {len(whisper_calls)} call(s)."
     )
-    payload = json.loads(
-        (project_dir / "output" / "subtitle_cues.json").read_text(encoding="utf-8")
-    )
+    payload = json.loads((project_dir / "output" / "subtitle_cues.json").read_text(encoding="utf-8"))
     assert all("whisper" not in c["source"].lower() for c in payload["cues"])
 
 
 def test_non_zh_regenerate_suppresses_legacy_alias_srt_and_stamps_roles(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Alias honesty (2026-07-02): for a zh->en dub (target_language='en' stamp) the
     deliverable regenerate path must NOT write the legacy language-named
@@ -375,7 +386,8 @@ def test_non_zh_regenerate_suppresses_legacy_alias_srt_and_stamps_roles(
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
 
@@ -410,9 +422,9 @@ def test_non_zh_regenerate_suppresses_legacy_alias_srt_and_stamps_roles(
     # Script-neutral + compat files present with the correct languages.
     assert "English dub line" in (out / "subtitles_target.srt").read_text(encoding="utf-8")
     assert "中文源文" in (out / "subtitles_source.srt").read_text(encoding="utf-8")
-    assert (out / "subtitles.srt").read_text(encoding="utf-8") == (
-        out / "subtitles_target.srt"
-    ).read_text(encoding="utf-8")
+    assert (out / "subtitles.srt").read_text(encoding="utf-8") == (out / "subtitles_target.srt").read_text(
+        encoding="utf-8"
+    )
     assert (out / "subtitles_bilingual.srt").is_file()
 
     # subtitle_cues.json stamped so JSON consumers can resolve the legacy
@@ -422,15 +434,132 @@ def test_non_zh_regenerate_suppresses_legacy_alias_srt_and_stamps_roles(
     assert payload["cue_field_roles"] == {"text": "target", "en_text": "source"}
 
 
+def _stamp_zh_en_segments(project_dir) -> None:
+    seg_path = project_dir / "editor" / "segments.json"
+    segs = json.loads(seg_path.read_text(encoding="utf-8"))
+    for s in segs:
+        s["target_language"] = "en"
+        s["cn_text"] = f"English dub line {s['segment_id']}"
+        s["tts_input_cn_text"] = s["cn_text"]
+        s["source_text"] = f"中文源文{s['segment_id']}"
+    seg_path.write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+
+
+def test_non_zh_regenerate_heals_prefix_manifest_then_removes_aliases(
+    tmp_path,
+    monkeypatch,
+):
+    """@codex review P1/P2: a job published BEFORE the alias fix still has
+    manifest role pointers naming the alias files; the regenerate path must
+    retarget those pointers to the script-neutral files (basename swap only —
+    the recorded path root, e.g. a container path, is preserved) before the
+    aliases are deleted, so the download resolver / materials-pack role keys
+    keep resolving. Unrelated manifest content stays untouched."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
+    )
+    project_dir = _build_minimal_project(tmp_path, n_segments=2)
+    _stamp_zh_en_segments(project_dir)
+
+    container_out = "/opt/aivideotrans/app/projects/uid/job_x/output"
+    manifest_path = project_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "artifact_index": {
+                    "editor.subtitles": f"{container_out}/subtitles_zh.srt",
+                    "editor.subtitles_en": f"{container_out}/subtitles_en.srt",
+                    "editor.subtitles_bilingual": f"{container_out}/subtitles_bilingual.srt",
+                },
+                "primary_outputs": {
+                    "editor": {
+                        "subtitles_path": f"{container_out}/subtitles_zh.srt",
+                        "subtitles_en_path": f"{container_out}/subtitles_en.srt",
+                    }
+                },
+                "deliverables": [{"filename": "video_zh.mp4"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    from services.subtitles.ensure_whisper_alignment import ensure_whisper_aligned_subtitles
+
+    with patch(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        return_value=[{"start_ms": 0, "end_ms": 800, "text": "x"}],
+    ):
+        status = ensure_whisper_aligned_subtitles(project_dir)
+    assert status["action"] == "regenerated"
+
+    out = project_dir / "output"
+    assert not (out / "subtitles_zh.srt").exists()
+    assert not (out / "subtitles_en.srt").exists()
+
+    healed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ai = healed["artifact_index"]
+    # Basename swapped; container path root preserved verbatim.
+    assert ai["editor.subtitles"] == f"{container_out}/subtitles_target.srt"
+    assert ai["editor.subtitles_en"] == f"{container_out}/subtitles_source.srt"
+    assert ai["editor.subtitles_bilingual"] == f"{container_out}/subtitles_bilingual.srt"
+    eo = healed["primary_outputs"]["editor"]
+    assert eo["subtitles_path"] == f"{container_out}/subtitles_target.srt"
+    assert eo["subtitles_en_path"] == f"{container_out}/subtitles_source.srt"
+    # Deliverable filenames (R2 correspondence) deliberately untouched.
+    assert healed["deliverables"] == [{"filename": "video_zh.mp4"}]
+
+
+def test_non_zh_regenerate_keeps_aliases_when_manifest_unhealable(
+    tmp_path,
+    monkeypatch,
+):
+    """Fail-safe: if the manifest cannot be read/parsed, the stale alias files
+    must be KEPT so whatever the manifest points at keeps resolving."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
+    )
+    project_dir = _build_minimal_project(tmp_path, n_segments=2)
+    _stamp_zh_en_segments(project_dir)
+
+    manifest_path = project_dir / "manifest.json"
+    manifest_path.write_text("{not valid json", encoding="utf-8")
+
+    from services.subtitles.ensure_whisper_alignment import ensure_whisper_aligned_subtitles
+
+    with patch(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        return_value=[{"start_ms": 0, "end_ms": 800, "text": "x"}],
+    ):
+        status = ensure_whisper_aligned_subtitles(project_dir)
+    assert status["action"] == "regenerated"
+
+    out = project_dir / "output"
+    # Aliases kept (fail-safe), neutral files still written and honest.
+    assert (out / "subtitles_zh.srt").is_file()
+    assert (out / "subtitles_en.srt").is_file()
+    assert "English dub line" in (out / "subtitles_target.srt").read_text(encoding="utf-8")
+    # Manifest left exactly as it was.
+    assert manifest_path.read_text(encoding="utf-8") == "{not valid json"
+
+
 def test_default_pair_regenerate_keeps_alias_srt_and_omits_role_stamp(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """GA default (no target_language stamp): byte-identical legacy behavior —
     zh/en alias files still written, no target_language/cue_field_roles stamp."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
 
@@ -456,7 +585,8 @@ def test_default_pair_regenerate_keeps_alias_srt_and_omits_role_stamp(
 
 
 def test_regenerates_when_fingerprint_mismatches_current_audio(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Old whisper-aligned cues + fingerprint references different audio
     bytes (e.g. user edited a segment and re-TTS'd) → re-run whisper.
@@ -465,19 +595,20 @@ def test_regenerates_when_fingerprint_mismatches_current_audio(
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(
-        tmp_path, n_segments=2,
+        tmp_path,
+        n_segments=2,
         cues_source="semantic_block_v2_whisper_aligned",
     )
     # Stamp a stale fingerprint
     cues_path = project_dir / "output" / "subtitle_cues.json"
     payload = json.loads(cues_path.read_text(encoding="utf-8"))
     payload["alignment_fingerprint"] = "stale_fingerprint_no_longer_matches"
-    cues_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                         encoding="utf-8")
+    cues_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     from services.subtitles.ensure_whisper_alignment import (
         ensure_whisper_aligned_subtitles,
@@ -501,14 +632,16 @@ def test_regenerates_when_fingerprint_mismatches_current_audio(
 
 
 def test_returns_skipped_no_segments_when_editor_segments_missing(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """No editor/segments.json on disk → can't regenerate, return
     skipped status (don't crash)."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
 
     project_dir = tmp_path / "project"
@@ -524,7 +657,8 @@ def test_returns_skipped_no_segments_when_editor_segments_missing(
 
 
 def test_returns_skipped_no_cues_when_subtitle_cues_missing(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """editor/segments.json present but output/subtitle_cues.json missing
     (publish never ran for this project) → still regenerate from scratch.
@@ -533,7 +667,8 @@ def test_returns_skipped_no_cues_when_subtitle_cues_missing(
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(tmp_path, n_segments=2)
@@ -563,9 +698,8 @@ def _expected_fingerprint(project_dir: Path) -> str:
     from services.subtitles.ensure_whisper_alignment import (
         _compute_alignment_fingerprint,
     )
-    segs = json.loads(
-        (project_dir / "editor" / "segments.json").read_text(encoding="utf-8")
-    )
+
+    segs = json.loads((project_dir / "editor" / "segments.json").read_text(encoding="utf-8"))
     return _compute_alignment_fingerprint(segs)
 
 
@@ -590,7 +724,8 @@ def _expected_fingerprint(project_dir: Path) -> str:
 
 
 def test_regenerates_when_wav_overwritten_under_stale_sidecar(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Setup mimics a real edit-commit/re-TTS round:
       1. project ran ensure once → cues are whisper-aligned + fingerprint
@@ -607,11 +742,13 @@ def test_regenerates_when_wav_overwritten_under_stale_sidecar(
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({"whisper_alignment_enabled": True}),
+        encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(
-        tmp_path, n_segments=2,
+        tmp_path,
+        n_segments=2,
         cues_source="semantic_block_v2_whisper_aligned",
     )
 
@@ -621,8 +758,7 @@ def test_regenerates_when_wav_overwritten_under_stale_sidecar(
     cues_path = project_dir / "output" / "subtitle_cues.json"
     cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
     cues_payload["alignment_fingerprint"] = old_fp
-    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
-                         encoding="utf-8")
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Pre-seed the C5 sidecar files with the OLD hash. This is what the
     # whisper subprocess wrapper writes after a successful run.
@@ -630,13 +766,18 @@ def test_regenerates_when_wav_overwritten_under_stale_sidecar(
     for wav_path in sorted(tts_dir.glob("segment_*_aligned.wav")):
         old_hash = hashlib.sha256(wav_path.read_bytes()).hexdigest()
         sidecar = wav_path.with_name(f"{wav_path.name}.whisper_small_zh.json")
-        sidecar.write_text(json.dumps({
-            "version": 1,
-            "content_hash": old_hash,
-            "model": "small",
-            "language": "zh",
-            "words": [{"start_ms": 0, "end_ms": 100, "text": "stale"}],
-        }), encoding="utf-8")
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "content_hash": old_hash,
+                    "model": "small",
+                    "language": "zh",
+                    "words": [{"start_ms": 0, "end_ms": 100, "text": "stale"}],
+                }
+            ),
+            encoding="utf-8",
+        )
 
     # (2) Now overwrite ONE WAV's bytes (simulating re-TTS for that
     # segment). The sidecar stays — it carries the stale H1.
@@ -706,15 +847,18 @@ def test_ensure_regenerates_when_admin_model_changes(tmp_path, monkeypatch):
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({
-            "whisper_alignment_enabled": True,
-            "whisper_alignment_model": "small",
-        }),
+        json.dumps(
+            {
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_model": "small",
+            }
+        ),
         encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(
-        tmp_path, n_segments=2,
+        tmp_path,
+        n_segments=2,
         cues_source="semantic_block_v2_whisper_aligned",
     )
     cues_path = project_dir / "output" / "subtitle_cues.json"
@@ -723,15 +867,16 @@ def test_ensure_regenerates_when_admin_model_changes(tmp_path, monkeypatch):
     # model=small — the audio is unchanged.
     cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
     cues_payload["alignment_model"] = "small"
-    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
-                         encoding="utf-8")
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Now admin switches to medium.
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({
-            "whisper_alignment_enabled": True,
-            "whisper_alignment_model": "medium",
-        }),
+        json.dumps(
+            {
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_model": "medium",
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -762,7 +907,8 @@ def test_ensure_regenerates_when_admin_model_changes(tmp_path, monkeypatch):
 
 
 def test_ensure_skip_cache_bypasses_already_aligned_fast_path(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """When admin sets ``whisper_alignment_skip_cache=true``, the
     already_aligned fast path must be bypassed — even if cues are
@@ -772,23 +918,25 @@ def test_ensure_skip_cache_bypasses_already_aligned_fast_path(
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({
-            "whisper_alignment_enabled": True,
-            "whisper_alignment_skip_cache": True,  # ← the lever
-        }),
+        json.dumps(
+            {
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_skip_cache": True,  # ← the lever
+            }
+        ),
         encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(
-        tmp_path, n_segments=2,
+        tmp_path,
+        n_segments=2,
         cues_source="semantic_block_v2_whisper_aligned",
     )
     cues_path = project_dir / "output" / "subtitle_cues.json"
     cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
     cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
     cues_payload["alignment_model"] = "small"
-    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
-                         encoding="utf-8")
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     from services.subtitles.ensure_whisper_alignment import (
         ensure_whisper_aligned_subtitles,
@@ -815,7 +963,8 @@ def test_ensure_skip_cache_bypasses_already_aligned_fast_path(
 
 
 def test_ensure_already_aligned_when_model_matches_and_no_skip_cache(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """Sanity / no-regression: when stamped model matches admin model
     AND skip_cache is false AND audio fingerprint matches → fast path
@@ -825,24 +974,26 @@ def test_ensure_already_aligned_when_model_matches_and_no_skip_cache(
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({
-            "whisper_alignment_enabled": True,
-            "whisper_alignment_model": "small",
-            "whisper_alignment_skip_cache": False,
-        }),
+        json.dumps(
+            {
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_model": "small",
+                "whisper_alignment_skip_cache": False,
+            }
+        ),
         encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(
-        tmp_path, n_segments=2,
+        tmp_path,
+        n_segments=2,
         cues_source="semantic_block_v2_whisper_aligned",
     )
     cues_path = project_dir / "output" / "subtitle_cues.json"
     cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
     cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
     cues_payload["alignment_model"] = "small"
-    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
-                         encoding="utf-8")
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     from services.subtitles.ensure_whisper_alignment import (
         ensure_whisper_aligned_subtitles,
@@ -868,13 +1019,18 @@ def test_content_hash_for_wav_returns_actual_bytes_not_sidecar(tmp_path):
 
     # Plant a stale sidecar with a wrong hash
     sidecar = wav.with_name(f"{wav.name}.whisper_small_zh.json")
-    sidecar.write_text(json.dumps({
-        "version": 1,
-        "content_hash": "deadbeef" * 8,  # plausibly-shaped but wrong
-        "model": "small",
-        "language": "zh",
-        "words": [],
-    }), encoding="utf-8")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "content_hash": "deadbeef" * 8,  # plausibly-shaped but wrong
+                "model": "small",
+                "language": "zh",
+                "words": [],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     from services.subtitles.ensure_whisper_alignment import (
         _content_hash_for_wav,
