@@ -300,11 +300,17 @@ class WechatPayProvider:
             raise NotImplementedError(
                 "payment provider wechatpay is not configured; set WECHATPAY_* env vars first"
             )
+        from pricing_schema import TOPUP_CODE_PREFIX
+
+        if target_plan_code.startswith(TOPUP_CODE_PREFIX):
+            description = f"AITrans 点数包 {target_plan_code}"  # CM-01 topup lane
+        else:
+            description = f"AITrans 套餐 {target_plan_code}/{billing_period}"
         code_url, out_trade_no = create_native_order(
             config,
             order_id=order_id,
             amount_fen=amount_cny,
-            description=f"AITrans 套餐 {target_plan_code}/{billing_period}",
+            description=description,
         )
         return CheckoutResult(
             checkout_url="",

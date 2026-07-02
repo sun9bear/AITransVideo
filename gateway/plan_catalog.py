@@ -313,6 +313,47 @@ def valid_target_plan_codes() -> set[str]:
     return {code for code, plan in _get_runtime_plans().items() if plan.price is not None}
 
 
+# --- Topup packages (CM-01) --------------------------------------------------
+
+
+def get_topup_config():
+    """Return the runtime TopupConfig (enabled flag + package list)."""
+    from pricing_runtime import get_runtime_pricing
+
+    return get_runtime_pricing().topup
+
+
+def get_topup_package(code: str, *, include_inactive: bool = False):
+    """Return the purchasable TopupPackage for ``code``, or ``None``.
+
+    Purchase-path lookup: requires ``topup.enabled is True`` (strict, mirrors
+    admin-flag hygiene) and ``active`` unless ``include_inactive``.
+    Settlement must NOT use this — a paid order settles by its metadata
+    snapshot even if the package was disabled after checkout (see
+    billing_topup.settle_topup_paid).
+    """
+    topup = get_topup_config()
+    if topup.enabled is not True:
+        return None
+    for pkg in topup.packages:
+        if pkg.code == code and (pkg.active or include_inactive):
+            return pkg
+    return None
+
+
+def find_topup_package_any(code: str):
+    """Settlement-side lookup: search packages ignoring enabled/active.
+
+    Fallback for a paid order whose credits snapshot is missing — the order
+    was legitimately created earlier, so a later disable must not change what
+    it grants. Returns ``None`` only when the code vanished from config.
+    """
+    for pkg in get_topup_config().packages:
+        if pkg.code == code:
+            return pkg
+    return None
+
+
 def is_user_in_active_trial(user) -> bool:
     """Return True if the user is currently within a valid trial window.
 

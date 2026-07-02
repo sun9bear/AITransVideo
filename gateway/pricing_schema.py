@@ -47,10 +47,21 @@ class CreditsConfig(BaseModel):
     voice_clone_cost_credits: int = 600
 
 
+# Topup SKU codes must carry this prefix (CM-01): the settle/refund lanes in
+# billing.py discriminate on PaymentOrder.order_kind, and the prefix is the
+# defense-in-depth convention that keeps topup codes disjoint from plan codes
+# (enforced in PricingPayload.validate_cross_refs below).
+TOPUP_CODE_PREFIX = "topup_"
+
+
 class TopupPackage(BaseModel):
     code: str
     credits: int
     price_cny_fen: int
+    # PayPal lane USD list price (USD cents), set independently of CNY like
+    # plans.*.price_usd_cents (plan 2026-06-26 §5 option c). None → PayPal is
+    # fail-closed hidden for this package; never derived from CNY by FX.
+    price_usd_cents: int | None = None
     active: bool = True
     sort_order: int = 0
 
@@ -112,6 +123,31 @@ class PricingPayload(BaseModel):
                     f"(reachable modes: {sorted(reachable_modes)}). "
                     f"Either remove '{mode}' from bucket_priority, or add "
                     f"it to at least one plan's allowed_service_modes."
+                )
+
+        # CM-01 topup lane: package codes must be prefixed and disjoint from
+        # plan codes. billing settle/refund discriminates on order_kind, but a
+        # topup code that collides with a plan code (or vice versa) would make
+        # order rows ambiguous to every human and admin-panel reader — reject
+        # at config-validation time, before any order can be created.
+        seen_topup_codes: set[str] = set()
+        for pkg in self.topup.packages:
+            if not pkg.code.startswith(TOPUP_CODE_PREFIX):
+                raise ValueError(
+                    f"topup package code '{pkg.code}' must start with "
+                    f"'{TOPUP_CODE_PREFIX}'"
+                )
+            if pkg.code in self.plans:
+                raise ValueError(
+                    f"topup package code '{pkg.code}' collides with a plan code"
+                )
+            if pkg.code in seen_topup_codes:
+                raise ValueError(f"duplicate topup package code '{pkg.code}'")
+            seen_topup_codes.add(pkg.code)
+            if pkg.credits <= 0 or pkg.price_cny_fen <= 0:
+                raise ValueError(
+                    f"topup package '{pkg.code}' must have positive credits "
+                    f"and price_cny_fen"
                 )
         return self
 

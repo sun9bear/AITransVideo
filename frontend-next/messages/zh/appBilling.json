@@ -131,5 +131,21 @@
     "pollExhausted": "确认超时。若你已完成支付,可关闭本窗口,到账后账单页会自动更新。",
     "waiting": "等待支付确认…支付完成后本窗口会自动更新",
     "scanHint": "请打开手机微信,用「扫一扫」扫描上方二维码完成支付。 二维码不支持长按识别。"
+  },
+  "topup": {
+    "title": "点数充值",
+    "subtitle": "按需购买点数包，无需订阅。点数用于视频翻译配音等功能消耗。",
+    "packageLabel": "选择点数包",
+    "packageCredits": "{credits} 点",
+    "providerLabel": "支付方式",
+    "amountDue": "应付金额",
+    "pay": "立即购买",
+    "submitting": "正在创建订单…",
+    "redirecting": "正在跳转支付页…",
+    "paidToast": "充值成功，点数已到账",
+    "errorCreateOrder": "创建充值订单失败",
+    "errorNoCheckoutUrl": "支付渠道未返回结账链接",
+    "usdNotice": "PayPal 按美元定价收款：{amount}",
+    "footnote": "点数长期有效，消耗顺序在订阅赠点之后。支付成功后点数自动到账，可在上方余额明细中查看。"
   }
 }
