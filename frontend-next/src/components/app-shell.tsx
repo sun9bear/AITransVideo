@@ -2,7 +2,7 @@
 
 import { Link } from "@/i18n/navigation"
 import { usePathname } from "@/i18n/navigation"
-import { useLocale } from "next-intl"
+import { useLocale, useTranslations } from "next-intl"
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
@@ -14,6 +14,7 @@ import {
 } from "@/lib/api/claim"
 import { WORKSPACE_THEME_STORAGE_KEY } from "@/lib/theme"
 import { Button } from "@/components/ui/button"
+import { CreditsPill } from "@/components/billing/credits-pill"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
 import { SupportWidget } from "@/components/support/SupportWidget"
 import { AdminPresenceSwitcher } from "@/components/support/AdminPresenceSwitcher"
@@ -58,8 +59,15 @@ import {
   FileSearch,
 } from "lucide-react"
 
+/** common namespace 的强类型 translator / key（同 TranslationForm 的 W2a 模式）。 */
+type CommonTranslator = ReturnType<typeof useTranslations<"common">>
+type CommonMessageKey = Parameters<CommonTranslator>[0]
+
 type NavItem = {
-  label: string
+  /** 既有硬编码中文 label（cjk 基线豁免存量，待整体迁移）。 */
+  label?: string
+  /** 新/改 label 走 common.json catalog（cjk-guard 红线：新串必须 message key）。 */
+  labelKey?: CommonMessageKey
   href: string
   icon: typeof Video
 }
@@ -81,6 +89,9 @@ const navGroups: NavGroup[] = [
   {
     label: "资源",
     items: [
+      // fe-ux P0-4：付费入口改名"套餐与点数"并提升到"资源"分组第一位
+      //（原"账户 > 账单管理"埋两层、命名是对账语义）。label 走 catalog。
+      { labelKey: "nav.billing", href: "/settings/billing", icon: CreditCard },
       { label: "用量统计", href: "/usage", icon: BarChart3 },
     ],
   },
@@ -88,7 +99,6 @@ const navGroups: NavGroup[] = [
     label: "账户",
     items: [
       { label: "通知", href: "/notifications", icon: Bell },
-      { label: "账单管理", href: "/settings/billing", icon: CreditCard },
       { label: "账户设置", href: "/settings", icon: User },
       { label: "帮助中心", href: "/help", icon: HelpCircle },
     ],
@@ -124,6 +134,9 @@ const navGroups: NavGroup[] = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const locale = useLocale()
+  const tCommon = useTranslations("common")
+  // labelKey 优先（catalog 化的新 label），否则回落既有硬编码 label。
+  const navLabel = (item: NavItem) => (item.labelKey ? tCommon(item.labelKey) : item.label ?? "")
   const { user, error: sessionError, refresh: refreshSession } = useSession()
   // Live unread count drives the sidebar "通知" badge. The hook polls
   // every 30s when the tab is visible and skips while hidden, so the
@@ -286,13 +299,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         ? "bg-primary/15 text-primary font-medium"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground"
                     }`}
-                    title={isCollapsed ? item.label : undefined}
+                    title={isCollapsed ? navLabel(item) : undefined}
                     onClick={onNavigate}
                   >
                     <Icon className={`h-4 w-4 shrink-0 ${isActive ? "text-primary" : ""}`} />
                     {!isCollapsed && (
                       <span className="flex flex-1 items-center justify-between truncate">
-                        <span className="truncate">{item.label}</span>
+                        <span className="truncate">{navLabel(item)}</span>
                         {showNotifBadge ? (
                           <span
                             aria-hidden
@@ -427,10 +440,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Button>
             {/* Breadcrumb-style page indicator */}
             <span className="truncate text-sm font-medium text-foreground font-heading">
-              {pathname.startsWith("/workspace/") ? "工作区" : navGroups.flatMap(g => g.items).find(i => pathname.startsWith(i.href))?.label || "AITrans.Video"}
+              {(() => {
+                if (pathname.startsWith("/workspace/")) return "工作区"
+                const active = navGroups.flatMap(g => g.items).find(i => pathname.startsWith(i.href))
+                return active ? navLabel(active) : "AITrans.Video"
+              })()}
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-3">
+            {/* fe-ux P0-4：常驻余额 pill——任意工作台页 1 击直达套餐与点数；
+                低余额（<600）高亮为"充值"CTA。fail-quiet，不阻塞顶栏。 */}
+            <CreditsPill isAuthenticated={user !== null} />
             <LocaleSwitcher />
             {/* Notification bell — visible to all logged-in users. Polls
                 unread count every 30s, flashes tab title when new

@@ -38,5 +38,13 @@
     "ariaEn": "切换到英文界面",
     "labelZh": "中",
     "labelEn": "EN"
+  },
+  "nav": {
+    "billing": "套餐与点数"
+  },
+  "creditsPill": {
+    "balance": "{n} 点",
+    "topUp": "充值",
+    "aria": "点数余额，前往套餐与点数页"
   }
 }

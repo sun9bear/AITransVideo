@@ -38,5 +38,13 @@
     "ariaEn": "Switch to English",
     "labelZh": "中",
     "labelEn": "EN"
+  },
+  "nav": {
+    "billing": "Plans & Credits"
+  },
+  "creditsPill": {
+    "balance": "{n} pts",
+    "topUp": "Top up",
+    "aria": "Credit balance — go to Plans & Credits"
   }
 }
