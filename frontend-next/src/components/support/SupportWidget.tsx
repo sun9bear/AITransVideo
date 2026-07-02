@@ -2,6 +2,7 @@
 
 import { usePathname } from "@/i18n/navigation"
 import { useCallback, useEffect, useState } from "react"
+import { useLocale, useTranslations } from "next-intl"
 
 import { useSession } from "@/components/providers/session-provider"
 import {
@@ -14,7 +15,7 @@ import { usePollingTask } from "@/lib/react/usePollingTask"
 
 import { SupportConversationPanel } from "./SupportConversationPanel"
 import { SupportLauncher } from "./SupportLauncher"
-import { ENTRYPOINT_FROM_PATH, FALLBACK_GREETING } from "./support-copy"
+import { ENTRYPOINT_FROM_PATH } from "./support-copy"
 
 /**
  * Top-level support widget — laucher + panel.
@@ -35,6 +36,15 @@ import { ENTRYPOINT_FROM_PATH, FALLBACK_GREETING } from "./support-copy"
  */
 export function SupportWidget() {
   const pathname = usePathname()
+  const t = useTranslations("appSupport")
+  const locale = useLocale()
+  // UI-BE-01 boundary (@codex review CM-04 P2): /api/support/config serves
+  // zh-only greeting/quick_questions today (request carries no locale), and
+  // the values are always truthy — so on non-zh locales the server copy must
+  // NOT win over the localized fallbacks, or /en opens with Chinese intro
+  // text. Once the config API becomes locale-aware (UI-BE-01), restore
+  // server preference for all locales.
+  const preferServerCopy = locale.startsWith("zh")
   const { user, loading: sessionLoading } = useSession()
   const [config, setConfig] = useState<SupportConfig | null>(null)
   const [onlineStatus, setOnlineStatus] = useState<OnlineStatus | null>(null)
@@ -108,8 +118,12 @@ export function SupportWidget() {
       <SupportConversationPanel
         visible={open}
         onRequestClose={() => setOpen(false)}
-        greeting={config.greeting || FALLBACK_GREETING}
-        quickQuestions={config.quick_questions}
+        greeting={
+          preferServerCopy && config.greeting
+            ? config.greeting
+            : t("fallback.greeting")
+        }
+        quickQuestions={preferServerCopy ? config.quick_questions : null}
         entrypoint={ENTRYPOINT_FROM_PATH(pathname)}
         pageUrl={pathname ?? ""}
         jobId={jobId}

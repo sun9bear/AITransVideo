@@ -1,0 +1,51 @@
+{
+  "labels": {
+    "launcherLabel": "客服",
+    "launcherTooltip": "在线客服 / 帮助",
+    "panelTitle": "客服小助手",
+    "panelSubtitle": "AI 优先回答 · 解决不了会转人工",
+    "inputPlaceholder": "在这里描述你的问题…",
+    "sendButton": "发送",
+    "resolvedButton": "已解决",
+    "notResolvedButton": "没解决，转人工",
+    "closeButton": "关闭",
+    "newConversation": "开新对话",
+    "loading": "AI 正在思考…",
+    "budgetExhaustedNote": "AI 客服繁忙，已切换到模板回复。",
+    "handoffCreatedNote": "已创建人工工单",
+    "handoffFailedNote": "转人工失败，请稍后再试或直接发邮件",
+    "handoffWaitingNote": "已转人工，运营会通过邮件回复你",
+    "unauthHelp": "登录后可以让客服读取你的任务和账单上下文。"
+  },
+  "fallback": {
+    "greeting": "你好，我可以帮你解答试用、套餐、导出剪映草稿和任务排障问题。",
+    "quickQuestions": [
+      "试用会自动扣费吗？",
+      "怎么导出剪映草稿？",
+      "任务失败怎么办？",
+      "我要找人工客服"
+    ]
+  },
+  "conversation": {
+    "createFailed": "创建会话失败",
+    "sendFailed": "发送失败",
+    "handoffFailed": "转人工失败",
+    "dialogAriaLabel": "客服对话",
+    "onlineLabel": "客服在线",
+    "offlineLabel": "运营离线",
+    "restoredNotice": "已恢复你之前的客服对话",
+    "offlineMessageDefault": "运营暂未在线，可扫码添加客服微信，我们尽快回复。",
+    "offlineQrAlt": "客服微信二维码",
+    "offlineInputPlaceholder": "请在微信继续沟通"
+  },
+  "messageList": {
+    "emptyHint": "还没有对话记录。问点什么吧。",
+    "humanBadge": "✦ 客服",
+    "thinking": "AI 正在思考…"
+  },
+  "handoffBanner": {
+    "recommended": "建议转人工客服处理。点下方「转人工」按钮即可。",
+    "createdPrefix": "：",
+    "closed": "工单已关闭，如需继续咨询可开新对话。"
+  }
+}

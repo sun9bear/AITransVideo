@@ -1,6 +1,6 @@
 "use client"
 
-import { SUPPORT_LABELS } from "./support-copy"
+import { useTranslations } from "next-intl"
 
 /**
  * Floating button that opens the SupportWidget panel.
@@ -18,11 +18,12 @@ export function SupportLauncher({
   onToggle: () => void
   unreadHint?: boolean
 }) {
+  const t = useTranslations("appSupport")
   return (
     <button
       type="button"
-      aria-label={SUPPORT_LABELS.launcherTooltip}
-      title={SUPPORT_LABELS.launcherTooltip}
+      aria-label={t("labels.launcherTooltip")}
+      title={t("labels.launcherTooltip")}
       onClick={onToggle}
       className={
         "fixed z-50 bottom-4 right-4 sm:bottom-6 sm:right-6 " +
@@ -49,7 +50,7 @@ export function SupportLauncher({
           ) : null}
         </span>
       )}
-      <span className="sr-only">{SUPPORT_LABELS.launcherLabel}</span>
+      <span className="sr-only">{t("labels.launcherLabel")}</span>
     </button>
   )
 }

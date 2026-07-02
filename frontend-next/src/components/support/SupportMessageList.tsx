@@ -1,5 +1,7 @@
 "use client"
 
+import { useTranslations } from "next-intl"
+
 import type { SupportMessageView } from "@/lib/api/support"
 
 /**
@@ -17,6 +19,7 @@ export function SupportMessageList({
   messages: SupportMessageView[]
   loading?: boolean
 }) {
+  const t = useTranslations("appSupport")
   return (
     <ol
       role="log"
@@ -25,7 +28,7 @@ export function SupportMessageList({
     >
       {messages.length === 0 && !loading ? (
         <li className="text-xs text-muted-foreground/70">
-          {"还没有对话记录。问点什么吧。"}
+          {t("messageList.emptyHint")}
         </li>
       ) : null}
 
@@ -40,7 +43,7 @@ export function SupportMessageList({
           <div className="max-w-[85%]">
             {msg.sender === "human" ? (
               <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
-                ✦ 客服
+                {t("messageList.humanBadge")}
               </p>
             ) : null}
             <div
@@ -63,7 +66,7 @@ export function SupportMessageList({
 
       {loading ? (
         <li className="self-start text-xs italic text-muted-foreground/70">
-          {"AI 正在思考…"}
+          {t("messageList.thinking")}
         </li>
       ) : null}
     </ol>
