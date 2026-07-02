@@ -171,10 +171,22 @@ def _filename_for(artifact_key: str, base: str, local_path: Path) -> str:
         return f"{name}_poster.jpg"
     if artifact_key == "editor.dubbed_audio_complete":
         return f"{name}.wav"
-    if artifact_key == "editor.subtitles":
-        return f"{name}_zh.srt"
-    if artifact_key == "editor.subtitles_en":
-        return f"{name}_en.srt"
+    if artifact_key in ("editor.subtitles", "editor.subtitles_en"):
+        # These are ROLE keys (TARGET dub / SOURCE). For a non-default language
+        # pair they point at the script-neutral subtitles_target/source.srt
+        # files (the lying subtitles_zh/en.srt aliases aren't emitted), so
+        # derive the Save-As suffix from the actual on-disk name — otherwise a
+        # zh->en SOURCE download would save as "{title}_en.srt" full of
+        # Chinese. Unknown names keep the legacy key-based suffix (old jobs).
+        by_name = {
+            "subtitles_zh.srt": "_zh",
+            "subtitles_en.srt": "_en",
+            "subtitles_target.srt": "_target",
+            "subtitles_source.srt": "_source",
+        }.get(local_path.name)
+        if by_name is not None:
+            return f"{name}{by_name}.srt"
+        return f"{name}_zh.srt" if artifact_key == "editor.subtitles" else f"{name}_en.srt"
     if artifact_key == "editor.subtitles_bilingual":
         return f"{name}_bilingual.srt"
     if artifact_key == "editor.subtitles_target":

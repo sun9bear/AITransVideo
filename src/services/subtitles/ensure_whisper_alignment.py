@@ -24,6 +24,7 @@ Returns a status dict for caller logging:
                        was actually spawned during this call
   ``blocks_processed``: int — set when ``action == "regenerated"``
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -85,6 +86,7 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
     # "publish" both permit (only "manual" blocks here). Mirrors what
     # _regenerate_whisper_cues passes to build_subtitle_cues_for_blocks.
     from modules.subtitles.cue_pipeline import _whisper_align_enabled
+
     if not _whisper_align_enabled(context="deliverable"):
         return EnsureStatus(
             action="skipped_admin_disabled",
@@ -104,7 +106,8 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
         segs = json.loads(seg_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         logger.warning(
-            "ensure_whisper: editor/segments.json unreadable (%s); skipping", exc,
+            "ensure_whisper: editor/segments.json unreadable (%s); skipping",
+            exc,
         )
         return EnsureStatus(
             action="skipped_no_segments",
@@ -128,6 +131,7 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
     #   - skip_cache=true: bypass fast path entirely
     #   - model: stamp current model into payload + compare on fast-path read
     from services.admin_settings import read_whisper_alignment_settings
+
     admin = read_whisper_alignment_settings()
 
     # ---- Fast path: existing cues already whisper-aligned + matches fp + matches model ----
@@ -143,18 +147,8 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
             cues = payload.get("cues", [])
             stamped_fp = payload.get("alignment_fingerprint")
             stamped_model = payload.get("alignment_model")
-            all_whisper = (
-                cues
-                and all(
-                    _WHISPER_SOURCE_PREFIX in str(c.get("source", ""))
-                    for c in cues
-                )
-            )
-            if (
-                all_whisper
-                and stamped_fp == expected_fp
-                and stamped_model == admin.model
-            ):
+            all_whisper = cues and all(_WHISPER_SOURCE_PREFIX in str(c.get("source", "")) for c in cues)
+            if all_whisper and stamped_fp == expected_fp and stamped_model == admin.model:
                 return EnsureStatus(
                     action="already_aligned",
                     whisper_invoked=False,
@@ -163,7 +157,10 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
 
     # ---- Slow path: regenerate via cue pipeline with whisper enabled ----
     blocks_processed = _regenerate_whisper_cues(
-        project_dir, segs, expected_fp, model=admin.model,
+        project_dir,
+        segs,
+        expected_fp,
+        model=admin.model,
     )
     return EnsureStatus(
         action="regenerated",
@@ -264,7 +261,10 @@ def _regenerate_whisper_cues(
     from core.models import SemanticBlock, SubtitleLine
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
     from modules.subtitles.srt_writer import (
-        write_zh_srt, write_en_srt, write_bilingual_srt,
+        legacy_zh_en_alias_files_enabled,
+        write_bilingual_srt,
+        write_en_srt,
+        write_zh_srt,
     )
 
     blocks: list[SemanticBlock] = []
@@ -288,51 +288,51 @@ def _regenerate_whisper_cues(
             except (TypeError, ValueError):
                 continue
 
-        blocks.append(SemanticBlock(
-            block_id=f"segment_{sid_int:03d}",
-            speaker_id=str(seg.get("speaker_id") or ""),
-            speaker_name=seg.get("display_name"),
-            original_srt_indices=original_indices,
-            first_start_ms=int(seg.get("start_ms") or 0),
-            last_end_ms=int(seg.get("end_ms") or 0),
-            target_duration_ms=int(seg.get("target_duration_ms") or 0),
-            merged_cn_text=cn_text,
-            tts_input_cn_text=tts_input,
-            actual_audio_duration_ms=int(seg.get("actual_duration_ms") or 0),
-            rewrite_count=int(seg.get("rewrite_count") or 0),
-            tts_audio_path=str(seg.get("tts_audio_path") or "") or None,
-            aligned_audio_path=str(aligned_path) if aligned_path else None,
-            status="completed",
-            alignment_method=seg.get("alignment_method") or "direct",
-            needs_review=bool(seg.get("needs_review")),
-            dubbing_mode=str(seg.get("dubbing_mode") or "dub"),
-        ))
-        lines.append(SubtitleLine(
-            index=sid_int,
-            start_ms=int(seg.get("start_ms") or 0),
-            end_ms=int(seg.get("end_ms") or 0),
-            speaker_id=str(seg.get("speaker_id") or ""),
-            speaker_name=seg.get("display_name"),
-            en_text=str(seg.get("source_text") or ""),
-            cn_text=cn_text,
-        ))
+        blocks.append(
+            SemanticBlock(
+                block_id=f"segment_{sid_int:03d}",
+                speaker_id=str(seg.get("speaker_id") or ""),
+                speaker_name=seg.get("display_name"),
+                original_srt_indices=original_indices,
+                first_start_ms=int(seg.get("start_ms") or 0),
+                last_end_ms=int(seg.get("end_ms") or 0),
+                target_duration_ms=int(seg.get("target_duration_ms") or 0),
+                merged_cn_text=cn_text,
+                tts_input_cn_text=tts_input,
+                actual_audio_duration_ms=int(seg.get("actual_duration_ms") or 0),
+                rewrite_count=int(seg.get("rewrite_count") or 0),
+                tts_audio_path=str(seg.get("tts_audio_path") or "") or None,
+                aligned_audio_path=str(aligned_path) if aligned_path else None,
+                status="completed",
+                alignment_method=seg.get("alignment_method") or "direct",
+                needs_review=bool(seg.get("needs_review")),
+                dubbing_mode=str(seg.get("dubbing_mode") or "dub"),
+            )
+        )
+        lines.append(
+            SubtitleLine(
+                index=sid_int,
+                start_ms=int(seg.get("start_ms") or 0),
+                end_ms=int(seg.get("end_ms") or 0),
+                speaker_id=str(seg.get("speaker_id") or ""),
+                speaker_name=seg.get("display_name"),
+                en_text=str(seg.get("source_text") or ""),
+                cn_text=cn_text,
+            )
+        )
 
     # PR-F: derive the dub target language from the stamped segments (PR-E slice 6)
     # so a non-zh deliverable bypasses the zh-only whisper char-DTW exactly like the
     # publish path. Legacy jobs without the stamp resolve to None → whisper path
     # unchanged (byte-identical for the en->zh default).
-    _target_language = next(
-        (s.get("target_language") for s in segs if s.get("target_language")), None
-    )
+    _target_language = next((s.get("target_language") for s in segs if s.get("target_language")), None)
 
     # D-5: context="deliverable" tells the trigger gate this is the
     # post-publish deliverable handoff. trigger ∈ {"publish",
     # "deliverable"} both permit; "manual" blocks (the helper
     # already short-circuited above on the same gate, so this
     # primarily documents intent).
-    result = build_subtitle_cues_for_blocks(
-        blocks, lines, context="deliverable", target_language=_target_language
-    )
+    result = build_subtitle_cues_for_blocks(blocks, lines, context="deliverable", target_language=_target_language)
 
     output_dir = project_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -341,19 +341,21 @@ def _regenerate_whisper_cues(
     # subtitle_cues.json with the fingerprint stamped
     cues_serialized = []
     for c in result.cues:
-        cues_serialized.append({
-            "cue_id": c.cue_id,
-            "block_id": c.block_id,
-            "speaker_id": c.speaker_id,
-            "speaker_name": c.speaker_name,
-            "text": c.text,
-            "en_text": c.en_text,
-            "start_ms": c.start_ms,
-            "end_ms": c.end_ms,
-            "source": c.source,
-            "needs_review": c.needs_review,
-            "review_reason": c.review_reason,
-        })
+        cues_serialized.append(
+            {
+                "cue_id": c.cue_id,
+                "block_id": c.block_id,
+                "speaker_id": c.speaker_id,
+                "speaker_name": c.speaker_name,
+                "text": c.text,
+                "en_text": c.en_text,
+                "start_ms": c.start_ms,
+                "end_ms": c.end_ms,
+                "source": c.source,
+                "needs_review": c.needs_review,
+                "review_reason": c.review_reason,
+            }
+        )
     cues_payload = {
         "schema_version": "subtitle_cues_v2",
         "project_id": project_id,
@@ -366,6 +368,13 @@ def _regenerate_whisper_cues(
         "alignment_model": model,
         "cues": cues_serialized,
     }
+    # Non-default pair: stamp field semantics — cue "text" is always the dub
+    # TARGET and "en_text" always the SOURCE (legacy naming; for zh->en the
+    # en_text field carries Chinese). Default en->zh omits the stamp
+    # (byte-identical). Mirrors OutputDispatcher._write_subtitle_cues_json.
+    if not legacy_zh_en_alias_files_enabled(_target_language):
+        cues_payload["target_language"] = _target_language
+        cues_payload["cue_field_roles"] = {"text": "target", "en_text": "source"}
     (output_dir / "subtitle_cues.json").write_text(
         json.dumps(cues_payload, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -374,8 +383,11 @@ def _regenerate_whisper_cues(
     # quality report
     issues_serialized = [
         {
-            "block_id": i.block_id, "cue_id": i.cue_id,
-            "code": i.code, "severity": i.severity, "message": i.message,
+            "block_id": i.block_id,
+            "cue_id": i.cue_id,
+            "code": i.code,
+            "severity": i.severity,
+            "message": i.message,
         }
         for i in result.report.issues
     ]
@@ -385,18 +397,20 @@ def _regenerate_whisper_cues(
         d = bool(getattr(s, "text_audio_drift", False))
         if d:
             drift_count += 1
-        summaries_serialized.append({
-            "block_id": s.block_id,
-            "cue_count": s.cue_count,
-            "text_mismatch": s.text_mismatch,
-            "timing_overlap_count": s.timing_overlap_count,
-            "timing_out_of_block_count": s.timing_out_of_block_count,
-            "empty_cue_count": s.empty_cue_count,
-            "long_unbreakable_count": s.long_unbreakable_count,
-            "unknown_mixed_token_count": s.unknown_mixed_token_count,
-            "short_display_duration_count": s.short_display_duration_count,
-            "text_audio_drift": d,
-        })
+        summaries_serialized.append(
+            {
+                "block_id": s.block_id,
+                "cue_count": s.cue_count,
+                "text_mismatch": s.text_mismatch,
+                "timing_overlap_count": s.timing_overlap_count,
+                "timing_out_of_block_count": s.timing_out_of_block_count,
+                "empty_cue_count": s.empty_cue_count,
+                "long_unbreakable_count": s.long_unbreakable_count,
+                "unknown_mixed_token_count": s.unknown_mixed_token_count,
+                "short_display_duration_count": s.short_display_duration_count,
+                "text_audio_drift": d,
+            }
+        )
     quality_payload = {
         "schema_version": "subtitle_quality_report_v2",
         "project_id": project_id,
@@ -411,21 +425,109 @@ def _regenerate_whisper_cues(
     )
 
     # SRT files. zh_srt is cue.text (always the dub/TARGET language) and en_srt is
-    # cue.en_text (always the SOURCE) — the "zh"/"en" names are legacy. PR-F mirrors
-    # them under script-neutral subtitles_source/target.srt so non-default pairs expose
-    # the correct language; subtitles.srt stays the target copy (byte-identical for
-    # en->zh). Mirrors EditorPackageWriter._write_source_target_srt_copies.
+    # cue.en_text (always the SOURCE) — the "zh"/"en" names are legacy. The
+    # script-neutral subtitles_source/target.srt (PR-F) are always written;
+    # subtitles.srt stays the target copy (byte-identical for en->zh). The legacy
+    # language-named subtitles_zh/en.srt aliases are only written when honest (zh
+    # dub target) — a zh->en job used to regenerate a subtitles_en.srt full of
+    # Chinese here. Mirrors EditorPackageWriter._write_legacy_alias_srt_files
+    # (incl. removing stale aliases a pre-fix run left behind).
     zh_srt = write_zh_srt(result.cues)
     en_srt = write_en_srt(result.cues)
     bi_srt = write_bilingual_srt(result.cues)
-    (output_dir / "subtitles_zh.srt").write_text(zh_srt, encoding="utf-8")
     (output_dir / "subtitles.srt").write_text(zh_srt, encoding="utf-8")  # target copy
-    (output_dir / "subtitles_en.srt").write_text(en_srt, encoding="utf-8")
     (output_dir / "subtitles_bilingual.srt").write_text(bi_srt, encoding="utf-8")
     (output_dir / "subtitles_target.srt").write_text(zh_srt, encoding="utf-8")
     (output_dir / "subtitles_source.srt").write_text(en_srt, encoding="utf-8")
+    if legacy_zh_en_alias_files_enabled(_target_language):
+        (output_dir / "subtitles_zh.srt").write_text(zh_srt, encoding="utf-8")
+        (output_dir / "subtitles_en.srt").write_text(en_srt, encoding="utf-8")
+    elif _retarget_legacy_alias_manifest_pointers(output_dir):
+        # @codex review P1/P2: this deliverable-time path runs on ALREADY
+        # published jobs whose manifest.json (written pre-fix) may still map
+        # editor.subtitles / editor.subtitles_en (and the primary_outputs
+        # twins) to the alias filenames — deleting the files without healing
+        # the manifest orphans the download resolver and the materials-pack
+        # role-key mapping. Heal-first, delete-second; if the manifest cannot
+        # be healed, KEEP the stale aliases so existing pointers still resolve.
+        (output_dir / "subtitles_zh.srt").unlink(missing_ok=True)
+        (output_dir / "subtitles_en.srt").unlink(missing_ok=True)
 
     return len(result.block_specs)
+
+
+#: Alias filename -> honest script-neutral filename with the same ROLE
+#: (subtitles_zh == cue.text == TARGET; subtitles_en == cue.en_text == SOURCE).
+_ALIAS_POINTER_RETARGETS = {
+    "subtitles_zh.srt": "subtitles_target.srt",
+    "subtitles_en.srt": "subtitles_source.srt",
+}
+
+
+def _retarget_legacy_alias_manifest_pointers(output_dir: Path) -> bool:
+    """Heal a pre-fix manifest before the alias files are removed.
+
+    Surgically retargets ONLY the four known role pointers
+    (``artifact_index["editor.subtitles"/"editor.subtitles_en"]`` and
+    ``primary_outputs.editor.subtitles_path/subtitles_en_path``) whose value
+    ends with an alias filename, swapping just the basename so whatever path
+    root style the manifest recorded (container vs host) is preserved. Other
+    manifest content — including deliverable filenames that already-published
+    R2 objects correspond to — is deliberately untouched.
+
+    Returns True when it is safe to delete the alias files: no manifest
+    exists, or the manifest was read+rewritten (atomically) successfully.
+    Returns False on any read/parse/write failure — the caller then keeps the
+    stale alias files so the unhealed manifest keeps resolving.
+    """
+    manifest_path = output_dir.parent / "manifest.json"
+    if not manifest_path.exists():
+        return True
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        def _swap(value: object) -> tuple[object, bool]:
+            if not isinstance(value, str):
+                return value, False
+            basename = value.replace("\\", "/").rsplit("/", 1)[-1]
+            new_name = _ALIAS_POINTER_RETARGETS.get(basename)
+            if new_name is None:
+                return value, False
+            return value[: len(value) - len(basename)] + new_name, True
+
+        changed = False
+        artifact_index = manifest.get("artifact_index")
+        if isinstance(artifact_index, dict):
+            for key in ("editor.subtitles", "editor.subtitles_en"):
+                new_value, swapped = _swap(artifact_index.get(key))
+                if swapped:
+                    artifact_index[key] = new_value
+                    changed = True
+        editor_outputs = (manifest.get("primary_outputs") or {}).get("editor")
+        if isinstance(editor_outputs, dict):
+            for key in ("subtitles_path", "subtitles_en_path"):
+                new_value, swapped = _swap(editor_outputs.get(key))
+                if swapped:
+                    editor_outputs[key] = new_value
+                    changed = True
+
+        if changed:
+            from utils.atomic_io import atomic_write_json
+
+            atomic_write_json(manifest_path, manifest, sort_keys=True)
+            logger.info(
+                "ensure_whisper_alignment: retargeted legacy subtitle alias manifest pointers in %s",
+                manifest_path,
+            )
+        return True
+    except Exception:
+        logger.warning(
+            "ensure_whisper_alignment: could not heal manifest %s — keeping "
+            "legacy alias files so existing pointers keep resolving",
+            manifest_path,
+            exc_info=True,
+        )
+        return False
 
 
 __all__ = ["ensure_whisper_aligned_subtitles", "EnsureStatus"]

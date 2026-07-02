@@ -27,6 +27,26 @@ from __future__ import annotations
 
 from modules.subtitles.cue_models import SubtitleCue
 
+
+def legacy_zh_en_alias_files_enabled(target_language: str | None) -> bool:
+    """Alias-honesty gate for the legacy language-named SRT filenames.
+
+    ``subtitles_zh.srt`` always holds the dub (TARGET) subtitle and
+    ``subtitles_en.srt`` the SOURCE (== ``write_zh_srt``/``write_en_srt``
+    output — the "zh"/"en" in those function names is the same legacy
+    naming), so the filenames only tell the truth for the GA default
+    en->zh pair. For any non-zh dub target (e.g. zh->en) the writers must
+    stop emitting them and expose only the script-neutral
+    ``subtitles_source/target.srt`` — a zh->en job used to ship a
+    ``subtitles_en.srt`` full of Chinese (2026-07-02 prod report,
+    job b07c29cf0652411ca0a7e0461648dc7b).
+
+    Same discriminator as the cue pipeline's whisper char-DTW bypass
+    (``cue_pipeline.build_subtitle_cues_for_blocks``): ``None`` == legacy
+    en->zh jobs without a stamp → byte-identical default behavior.
+    """
+    return target_language is None or target_language in ("zh-CN", "zh")
+
 # ---------------------------------------------------------------------------
 # Trailing-punctuation strip for display
 # ---------------------------------------------------------------------------

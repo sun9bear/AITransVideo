@@ -245,6 +245,62 @@ def test_dispatcher_skips_script_neutral_keys_when_paths_empty(tmp_path: Path) -
     assert artifact_index.get("editor.subtitles_source") is None
 
 
+def test_dispatcher_forwards_target_language_and_stamps_cue_field_roles(tmp_path: Path) -> None:
+    """Alias honesty (2026-07-02): OutputRequest.target_language reaches the
+    ProjectOutput handed to the editor writer (gates the legacy subtitles_zh/en.srt
+    alias filenames there), and a non-default pair's subtitle_cues.json is stamped
+    with target_language + cue_field_roles so JSON consumers can resolve the legacy
+    text/en_text naming (for zh->en, en_text carries the Chinese SOURCE)."""
+    aligned_audio = tmp_path / "aligned.wav"
+    aligned_audio.write_bytes(b"RIFF")
+    project = _build_localized_project(aligned_audio)
+    artifact_index = ArtifactIndex()
+    fake_backend = _FakeEditorBackend(tmp_path)
+
+    dispatcher = OutputDispatcher(editor_backend=fake_backend)
+    dispatcher.dispatch(
+        project,
+        artifact_index,
+        OutputRequest(
+            targets=[OutputTarget.EDITOR],
+            output_dir=str(tmp_path),
+            target_language="en",
+        ),
+    )
+
+    assert fake_backend.received_outputs[0].target_language == "en"
+
+    payload = json.loads(
+        (tmp_path / "output" / "subtitle_cues.json").read_text(encoding="utf-8")
+    )
+    assert payload["target_language"] == "en"
+    assert payload["cue_field_roles"] == {"text": "target", "en_text": "source"}
+
+
+def test_dispatcher_default_pair_omits_cue_field_roles_stamp(tmp_path: Path) -> None:
+    """GA default (no target_language): subtitle_cues.json stays byte-identical —
+    no target_language / cue_field_roles keys."""
+    aligned_audio = tmp_path / "aligned.wav"
+    aligned_audio.write_bytes(b"RIFF")
+    project = _build_localized_project(aligned_audio)
+    artifact_index = ArtifactIndex()
+    fake_backend = _FakeEditorBackend(tmp_path)
+
+    dispatcher = OutputDispatcher(editor_backend=fake_backend)
+    dispatcher.dispatch(
+        project,
+        artifact_index,
+        OutputRequest(targets=[OutputTarget.EDITOR], output_dir=str(tmp_path)),
+    )
+
+    assert fake_backend.received_outputs[0].target_language is None
+    payload = json.loads(
+        (tmp_path / "output" / "subtitle_cues.json").read_text(encoding="utf-8")
+    )
+    assert "target_language" not in payload
+    assert "cue_field_roles" not in payload
+
+
 def test_subtitle_width_report_is_flagged_and_not_registered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

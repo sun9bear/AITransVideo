@@ -330,9 +330,12 @@ class EditorPackageWriter:
         Routes to canonical-cue path when output.subtitle_cues is non-empty,
         otherwise falls back to the segment-based path.
 
-        Also writes subtitles.srt as a copy of zh for backward compatibility, plus the
-        PR-F script-neutral subtitles_source/target.srt.
-        Returns (zh_path, en_path, bilingual_path, source_path, target_path).
+        Also writes subtitles.srt (TARGET copy) for backward compatibility, plus the
+        PR-F script-neutral subtitles_source/target.srt. The legacy language-named
+        subtitles_zh/en.srt aliases are only emitted when their names are honest
+        (zh dub target — see _write_legacy_alias_srt_files); otherwise the returned
+        zh/en slots carry the script-neutral target/source paths.
+        Returns (zh_slot_path, en_slot_path, bilingual_path, source_path, target_path).
 
         2026-04-21 plan §12 / D8 contract — **do not add caching here**.
         This method is the single convergence point for commit-triggered
@@ -365,25 +368,32 @@ class EditorPackageWriter:
         output_root = self._resolve_output_root(output)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        zh_text = write_zh_srt(output.subtitle_cues)
-        en_text = write_en_srt(output.subtitle_cues)
+        # cue.text is always the dub (TARGET) language and cue.en_text always the
+        # SOURCE — the "zh"/"en" in the writer function names is legacy naming.
+        target_text = write_zh_srt(output.subtitle_cues)
+        source_text = write_en_srt(output.subtitle_cues)
         bilingual_text = write_bilingual_srt(output.subtitle_cues)
 
-        zh_path = self._write_srt_text_to_file(zh_text, output_path=output_root / "subtitles_zh.srt")
-        en_path = self._write_srt_text_to_file(en_text, output_path=output_root / "subtitles_en.srt")
         bilingual_path = self._write_srt_text_to_file(
             bilingual_text, output_path=output_root / "subtitles_bilingual.srt"
         )
+        # PR-F script-neutral names — always written, names always honest.
+        target_path = self._write_srt_text_to_file(
+            target_text, output_path=output_root / "subtitles_target.srt"
+        )
+        source_path = self._write_srt_text_to_file(
+            source_text, output_path=output_root / "subtitles_source.srt"
+        )
 
-        # Backward compat: subtitles.srt = the zh file, which is cue.text == the dub
-        # (TARGET) language regardless of pair (the "zh" name is legacy). So this stays
-        # the target subtitle for non-default pairs too — byte-identical for en->zh.
-        compat_path = output_root / "subtitles.srt"
-        shutil.copy2(zh_path, compat_path)
+        # Backward compat: subtitles.srt = the TARGET (dub) subtitle regardless of
+        # pair — byte-identical for en->zh.
+        shutil.copy2(target_path, output_root / "subtitles.srt")
 
-        # PR-F: script-neutral source/target SRT (see _write_source_target_srt_copies).
-        source_path, target_path = self._write_source_target_srt_copies(
-            output_root, zh_path, en_path
+        zh_path, en_path = self._write_legacy_alias_srt_files(
+            output_root,
+            target_path=target_path,
+            source_path=source_path,
+            target_language=output.target_language,
         )
 
         return (zh_path, en_path, bilingual_path, source_path, target_path)
@@ -405,50 +415,69 @@ class EditorPackageWriter:
         for segment in self._sorted_segments(output):
             all_slices.extend(self._build_subtitle_slices(segment))
 
-        # Write 3 SRT variants
-        zh_path = self._write_srt_file(
-            all_slices, lang="zh", output_path=output_root / "subtitles_zh.srt"
-        )
-        en_path = self._write_srt_file(
-            all_slices, lang="en", output_path=output_root / "subtitles_en.srt"
-        )
+        # slice.zh_text is always the dub (TARGET) text and slice.en_text always the
+        # SOURCE — legacy field naming, same as the canonical-cue path.
         bilingual_path = self._write_srt_file(
             all_slices, lang="bilingual", output_path=output_root / "subtitles_bilingual.srt"
         )
+        # PR-F script-neutral names — always written, names always honest.
+        target_path = self._write_srt_file(
+            all_slices, lang="zh", output_path=output_root / "subtitles_target.srt"
+        )
+        source_path = self._write_srt_file(
+            all_slices, lang="en", output_path=output_root / "subtitles_source.srt"
+        )
 
-        # Backward compat: subtitles.srt = the zh file, which is cue.text == the dub
-        # (TARGET) language regardless of pair (the "zh" name is legacy). So this stays
-        # the target subtitle for non-default pairs too — byte-identical for en->zh.
-        compat_path = output_root / "subtitles.srt"
-        shutil.copy2(zh_path, compat_path)
+        # Backward compat: subtitles.srt = the TARGET (dub) subtitle regardless of
+        # pair — byte-identical for en->zh.
+        shutil.copy2(target_path, output_root / "subtitles.srt")
 
-        # PR-F: script-neutral source/target SRT (see _write_source_target_srt_copies).
-        source_path, target_path = self._write_source_target_srt_copies(
-            output_root, zh_path, en_path
+        zh_path, en_path = self._write_legacy_alias_srt_files(
+            output_root,
+            target_path=target_path,
+            source_path=source_path,
+            target_language=output.target_language,
         )
 
         return (zh_path, en_path, bilingual_path, source_path, target_path)
 
     @staticmethod
-    def _write_source_target_srt_copies(
-        output_root: Path, zh_path: str, en_path: str
+    def _write_legacy_alias_srt_files(
+        output_root: Path,
+        *,
+        target_path: str,
+        source_path: str,
+        target_language: str | None,
     ) -> tuple[str, str]:
-        """PR-F: write script-neutral subtitles_source.srt / subtitles_target.srt.
+        """Write the legacy language-named alias files only when honest.
 
-        Cue text is always the dub (TARGET) language and en_text always the SOURCE,
-        so the zh file always holds the target subtitle and the en file the source —
-        regardless of language pair. We mirror them under script-neutral names so
-        non-default pairs (e.g. zh->en, where the legacy "zh"/"en" filenames no longer
-        describe the content) expose the correct language to downstream consumers.
-        For the GA default (en->zh) these are byte-identical duplicates.
+        ``subtitles_zh.srt`` is always the TARGET (dub) subtitle and
+        ``subtitles_en.srt`` always the SOURCE, so the names only tell the
+        truth for the GA default en->zh pair — a zh->en job used to ship a
+        subtitles_en.srt full of Chinese (2026-07-02 prod report). For a
+        non-zh dub target we stop emitting them (and remove stale copies a
+        pre-fix run may have left) and return the script-neutral paths in
+        their role slots instead, so ProjectOutputResult.subtitles_path
+        (TARGET role) / subtitles_en_path (SOURCE role) and the manifest
+        keys editor.subtitles / editor.subtitles_en keep resolving to
+        honestly-named files. en->zh stays byte-identical.
 
-        Returns (source_path, target_path).
+        Returns (zh_slot_path, en_slot_path).
         """
-        target_path = output_root / "subtitles_target.srt"
-        source_path = output_root / "subtitles_source.srt"
-        shutil.copy2(zh_path, target_path)  # zh file == cue.text == TARGET
-        shutil.copy2(en_path, source_path)  # en file == cue.en_text == SOURCE
-        return (str(source_path), str(target_path))
+        from modules.subtitles.srt_writer import legacy_zh_en_alias_files_enabled
+
+        zh_alias = output_root / "subtitles_zh.srt"
+        en_alias = output_root / "subtitles_en.srt"
+        if legacy_zh_en_alias_files_enabled(target_language):
+            shutil.copy2(target_path, zh_alias)  # zh alias == cue.text == TARGET
+            shutil.copy2(source_path, en_alias)  # en alias == cue.en_text == SOURCE
+            return (
+                str(zh_alias.resolve(strict=False)),
+                str(en_alias.resolve(strict=False)),
+            )
+        zh_alias.unlink(missing_ok=True)
+        en_alias.unlink(missing_ok=True)
+        return (target_path, source_path)
 
     def _write_srt_file(
         self, slices: list[_SubtitleSlice], *, lang: str, output_path: Path

@@ -90,9 +90,15 @@ class ManifestWriter:
                     "dubbed_audio_path": editor_result.dubbed_audio_path,
                     "ambient_audio_path": editor_result.ambient_audio_path,
                     "segments_dir": editor_result.segments_dir,
+                    # subtitles_path / subtitles_en_path are ROLE fields (TARGET
+                    # dub / SOURCE). For a non-default language pair they point at
+                    # the script-neutral subtitles_target/source.srt files (the
+                    # legacy zh/en alias filenames aren't emitted there).
                     "subtitles_path": editor_result.subtitles_path,
                     "subtitles_en_path": editor_result.subtitles_en_path,
                     "subtitles_bilingual_path": editor_result.subtitles_bilingual_path,
+                    "subtitles_source_path": editor_result.subtitles_source_path,
+                    "subtitles_target_path": editor_result.subtitles_target_path,
                     "alignment_report_path": editor_result.alignment_report_path,
                     "jianying_draft_zip": artifact_map.get("editor.jianying_draft_zip"),
                     "jianying_draft_dir": artifact_map.get("editor.jianying_draft_dir"),

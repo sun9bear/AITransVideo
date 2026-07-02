@@ -58,6 +58,13 @@ class SubtitleCue:
 
     All SRT / draft caption / Jianying draft outputs consume this canonical
     cue representation. Text is normalized at creation.
+
+    Field-name caveat (legacy, from the en->zh-only era): ``text`` is always
+    the dub (TARGET) language and ``en_text`` always the SOURCE — regardless
+    of language pair. For a zh->en job ``en_text`` therefore carries the
+    Chinese source. Serialized subtitle_cues.json for non-default pairs is
+    stamped with ``cue_field_roles`` so JSON consumers don't have to know
+    this convention.
     """
 
     cue_id: str

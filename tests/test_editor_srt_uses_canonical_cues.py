@@ -40,7 +40,12 @@ from modules.subtitles.srt_writer import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_output(tmp_path: Path, *, cues: list[SubtitleCue] | None = None) -> ProjectOutput:
+def _make_output(
+    tmp_path: Path,
+    *,
+    cues: list[SubtitleCue] | None = None,
+    target_language: str | None = None,
+) -> ProjectOutput:
     """Build a minimal ProjectOutput with one segment, optionally with cues."""
     # Create a tiny but syntactically valid WAV (RIFF header + minimal data).
     # EditorPackageWriter._copy_segment_files checks file existence; tests
@@ -74,6 +79,8 @@ def _make_output(tmp_path: Path, *, cues: list[SubtitleCue] | None = None) -> Pr
     )
     if cues is not None:
         kwargs["subtitle_cues"] = cues
+    if target_language is not None:
+        kwargs["target_language"] = target_language
     return ProjectOutput(**kwargs)
 
 
@@ -393,3 +400,85 @@ def test_prf_source_target_srt_written_for_segment_path(tmp_path: Path) -> None:
     assert target_path.exists() and source_path.exists()
     assert target_path.read_text(encoding="utf-8") == Path(zh_path).read_text(encoding="utf-8")
     assert source_path.read_text(encoding="utf-8") == Path(en_path).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Alias honesty (2026-07-02): non-zh dub target suppresses the legacy
+# subtitles_zh/en.srt filenames — a zh->en job used to ship subtitles_en.srt
+# full of Chinese source text (prod job b07c29cf0652411ca0a7e0461648dc7b).
+# ---------------------------------------------------------------------------
+
+def test_zh_en_pair_suppresses_legacy_alias_files_canonical_path(tmp_path: Path) -> None:
+    """target_language='en' (zh->en): no subtitles_zh/en.srt on disk; the returned
+    zh/en role slots carry the script-neutral target/source paths with the correct
+    language content (target=English cue.text, source=Chinese cue.en_text)."""
+    cue = _make_cue(text="English dub line", en_text="中文源文台词")
+    output = _make_output(tmp_path, cues=[cue], target_language="en")
+    writer = EditorPackageWriter()
+
+    zh_slot, en_slot, _, source_path, target_path = writer._write_srt(output)
+
+    out_dir = Path(output.output_dir) / "output"
+    assert not (out_dir / "subtitles_zh.srt").exists()
+    assert not (out_dir / "subtitles_en.srt").exists()
+    # Role slots redirect to the honestly-named neutral files.
+    assert Path(zh_slot).name == "subtitles_target.srt"
+    assert Path(en_slot).name == "subtitles_source.srt"
+    assert zh_slot == target_path
+    assert en_slot == source_path
+    # Language content is correct: target=English, source=Chinese.
+    assert "English dub line" in Path(target_path).read_text(encoding="utf-8")
+    assert "中文源文台词" in Path(source_path).read_text(encoding="utf-8")
+    # subtitles.srt compat copy stays the TARGET subtitle.
+    compat = (out_dir / "subtitles.srt").read_text(encoding="utf-8")
+    assert compat == Path(target_path).read_text(encoding="utf-8")
+
+
+def test_zh_en_pair_suppresses_legacy_alias_files_segment_path(tmp_path: Path) -> None:
+    """Segment fallback path honors the same alias gate."""
+    output = _make_output(tmp_path, cues=[], target_language="en")
+    writer = EditorPackageWriter()
+
+    zh_slot, en_slot, _, source_path, target_path = writer._write_srt(output)
+
+    out_dir = Path(output.output_dir) / "output"
+    assert not (out_dir / "subtitles_zh.srt").exists()
+    assert not (out_dir / "subtitles_en.srt").exists()
+    assert Path(zh_slot).name == "subtitles_target.srt"
+    assert Path(en_slot).name == "subtitles_source.srt"
+    assert zh_slot == target_path and en_slot == source_path
+
+
+def test_zh_en_pair_removes_stale_alias_files(tmp_path: Path) -> None:
+    """A pre-fix run left wrong-language alias files on disk; a re-run (e.g.
+    whisper regenerate / commit) must remove them, not leave stale lies behind."""
+    cue = _make_cue(text="English dub line", en_text="中文源文台词")
+    output = _make_output(tmp_path, cues=[cue], target_language="en")
+    out_dir = Path(output.output_dir) / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "subtitles_zh.srt").write_text("stale 英文内容", encoding="utf-8")
+    (out_dir / "subtitles_en.srt").write_text("stale 中文内容", encoding="utf-8")
+
+    EditorPackageWriter()._write_srt(output)
+
+    assert not (out_dir / "subtitles_zh.srt").exists()
+    assert not (out_dir / "subtitles_en.srt").exists()
+
+
+def test_default_pair_keeps_legacy_alias_files(tmp_path: Path) -> None:
+    """GA default (no target_language / zh-CN): byte-identical legacy behavior —
+    zh/en alias files written, role slots point at them."""
+    cue = _make_cue(text="中文配音台词", en_text="English source line")
+    for lang in (None, "zh-CN", "zh"):
+        sub = tmp_path / (lang or "none")
+        output = _make_output(sub, cues=[cue], target_language=lang)
+        zh_slot, en_slot, *_ = EditorPackageWriter()._write_srt(output)
+        out_dir = Path(output.output_dir) / "output"
+        assert Path(zh_slot).name == "subtitles_zh.srt"
+        assert Path(en_slot).name == "subtitles_en.srt"
+        assert (out_dir / "subtitles_zh.srt").read_text(encoding="utf-8") == (
+            out_dir / "subtitles_target.srt"
+        ).read_text(encoding="utf-8")
+        assert (out_dir / "subtitles_en.srt").read_text(encoding="utf-8") == (
+            out_dir / "subtitles_source.srt"
+        ).read_text(encoding="utf-8")
