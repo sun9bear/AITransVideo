@@ -27,6 +27,7 @@ from admin_job_monitor_api import router as admin_job_monitor_router
 from auth_email import router as auth_email_router
 from auth_phone import router as auth_phone_router
 from billing import router as billing_router
+from billing_topup import router as billing_topup_router
 from cost_management import router as cost_management_router
 from credits_observability import router as credits_observability_router
 from credits_read import router as credits_read_router
@@ -606,6 +607,7 @@ app.include_router(s2_monitor_router)
 app.include_router(admin_job_monitor_router)
 app.include_router(admin_billing_router)
 app.include_router(billing_router)
+app.include_router(billing_topup_router)
 app.include_router(cost_management_router)
 app.include_router(credits_observability_router)
 app.include_router(traffic_analytics_router)

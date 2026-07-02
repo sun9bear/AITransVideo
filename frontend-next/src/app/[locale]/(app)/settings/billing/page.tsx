@@ -36,6 +36,7 @@ import { CheckoutCard } from "@/components/billing/checkout-card"
 import { OrderHistory } from "@/components/billing/order-history"
 import { CreditsSummary } from "@/components/billing/credits-summary"
 import { SubscriptionSummary } from "@/components/billing/subscription-summary"
+import { TopupPurchaseCard } from "@/components/billing/topup-purchase-card"
 import { getPlans } from "@/lib/billing/get-plans"
 import { getMySubscription } from "@/lib/billing/get-subscription"
 import { getCheckoutConfig } from "@/lib/billing/get-checkout-config"
@@ -146,7 +147,12 @@ export default function BillingPage() {
       {state.status === "ready" && (
         <>
           <SubscriptionSummary subscription={state.subscription} />
-          <CreditsSummary />
+          {/* key: remount after a settled order so the balance refetches */}
+          <CreditsSummary key={refetchToken} />
+          <TopupPurchaseCard
+            checkoutConfig={state.checkoutConfig}
+            onOrderSettled={handleOrderSettled}
+          />
           <CheckoutCard
             plans={state.plans}
             subscription={state.subscription}

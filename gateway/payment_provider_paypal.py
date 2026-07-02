@@ -279,9 +279,17 @@ def create_order(
     Raises ``ValueError`` if no USD price is published or PayPal returns no
     payer-action link.
     """
-    from plan_catalog import get_price_usd
+    from plan_catalog import get_price_usd, get_topup_package
+    from pricing_schema import TOPUP_CODE_PREFIX
 
-    usd_cents = get_price_usd(target_plan_code, billing_period)
+    if target_plan_code.startswith(TOPUP_CODE_PREFIX):
+        # CM-01 topup lane: independent per-package USD list price. No FX
+        # fallback — a package without price_usd_cents cannot be charged
+        # via PayPal (billing_topup pre-gates this; double-check here).
+        pkg = get_topup_package(target_plan_code)
+        usd_cents = getattr(pkg, "price_usd_cents", None) if pkg is not None else None
+    else:
+        usd_cents = get_price_usd(target_plan_code, billing_period)
     if not usd_cents or usd_cents <= 0:
         raise ValueError(
             f"no PayPal USD price published for {target_plan_code}/{billing_period}"

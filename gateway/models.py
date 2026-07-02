@@ -396,6 +396,10 @@ class PaymentOrder(Base):
         String(128), unique=True, nullable=True
     )
     target_plan_code: Mapped[str] = mapped_column(String(16), nullable=False)
+    # "plan" | "topup" (CM-01, alembic 044). Discriminator so plan-lane queries
+    # (refund fallback etc.) exclude topup orders — a topup code must never be
+    # promoted into user.plan_code. For topup orders target_plan_code = SKU code.
+    order_kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default="plan")
     billing_period: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="monthly"
     )

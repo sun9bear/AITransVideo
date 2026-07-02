@@ -2,7 +2,8 @@
   "period": {
     "monthly": "Monthly",
     "quarterly": "Quarterly",
-    "annual": "Annual"
+    "annual": "Annual",
+    "oneTime": "One-time"
   },
   "provider": {
     "fake": "Test payment",
@@ -131,5 +132,22 @@
     "pollExhausted": "Confirmation timed out. If you've already paid, you can close this window — the billing page will update automatically once the payment arrives.",
     "waiting": "Waiting for payment confirmation… this window updates automatically once you've paid",
     "scanHint": "Open WeChat on your phone and use Scan to scan the QR code above and complete the payment. The QR code can't be recognized by long-press."
+  },
+  "topup": {
+    "title": "Buy credits",
+    "subtitle": "Buy credit packs as you go — no subscription required. Credits are spent on video translation and dubbing.",
+    "packageLabel": "Choose a credit pack",
+    "packageCredits": "{credits} credits",
+    "providerLabel": "Payment method",
+    "amountDue": "Amount due",
+    "pay": "Buy now",
+    "submitting": "Creating order…",
+    "redirecting": "Redirecting to checkout…",
+    "paidToast": "Top-up complete — credits added to your balance",
+    "errorCreateOrder": "Failed to create the top-up order",
+    "errorNoCheckoutUrl": "The payment provider returned no checkout link",
+    "usdNotice": "PayPal charges the USD list price: {amount}",
+    "footnote": "Credits never expire and are consumed after subscription credits. They are added to your balance automatically once payment completes.",
+    "historyLabel": "Credit top-up"
   }
 }

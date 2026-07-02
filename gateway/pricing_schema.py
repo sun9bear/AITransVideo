@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class PlanPriceConfig(BaseModel):
@@ -47,10 +47,21 @@ class CreditsConfig(BaseModel):
     voice_clone_cost_credits: int = 600
 
 
+# Topup SKU codes must carry this prefix (CM-01): the settle/refund lanes in
+# billing.py discriminate on PaymentOrder.order_kind, and the prefix is the
+# defense-in-depth convention that keeps topup codes disjoint from plan codes
+# (enforced in PricingPayload.validate_cross_refs below).
+TOPUP_CODE_PREFIX = "topup_"
+
+
 class TopupPackage(BaseModel):
     code: str
     credits: int
     price_cny_fen: int
+    # PayPal lane USD list price (USD cents), set independently of CNY like
+    # plans.*.price_usd_cents (plan 2026-06-26 §5 option c). None → PayPal is
+    # fail-closed hidden for this package; never derived from CNY by FX.
+    price_usd_cents: int | None = None
     active: bool = True
     sort_order: int = 0
 
@@ -78,7 +89,12 @@ class PricingPayload(BaseModel):
     plans: dict[str, PlanConfig]
     trial: TrialConfig
     credits: CreditsConfig
-    topup: TopupConfig
+    # Default keeps a pre-topup pricing_runtime.json valid (adversarial review
+    # 2026-07-02 P1): without it, a missing key fails whole-payload validation
+    # and pricing_runtime._load_from_file silently falls back to the hardcoded
+    # defaults — wiping admin-published plan prices, not just topup. Mirrors
+    # the PlanConfig.price_usd_cents optionality convention above.
+    topup: TopupConfig = Field(default_factory=TopupConfig)
     cost_model: CostModelConfig
 
     @model_validator(mode="after")
@@ -112,6 +128,44 @@ class PricingPayload(BaseModel):
                     f"(reachable modes: {sorted(reachable_modes)}). "
                     f"Either remove '{mode}' from bucket_priority, or add "
                     f"it to at least one plan's allowed_service_modes."
+                )
+
+        # CM-01 topup lane: package codes must be prefixed and disjoint from
+        # plan codes. billing settle/refund discriminates on order_kind, but a
+        # topup code that collides with a plan code (or vice versa) would make
+        # order rows ambiguous to every human and admin-panel reader — reject
+        # at config-validation time, before any order can be created.
+        # The reverse also holds (adversarial review 2026-07-02 P2): provider
+        # adapters dispatch on the code PREFIX, so a plan named "topup_*"
+        # would silently break that plan's PayPal checkout.
+        for plan_code in self.plans:
+            if plan_code.startswith(TOPUP_CODE_PREFIX):
+                raise ValueError(
+                    f"plan code '{plan_code}' must not start with "
+                    f"'{TOPUP_CODE_PREFIX}' (reserved for topup packages)"
+                )
+        seen_topup_codes: set[str] = set()
+        for pkg in self.topup.packages:
+            if not pkg.code.startswith(TOPUP_CODE_PREFIX):
+                raise ValueError(
+                    f"topup package code '{pkg.code}' must start with "
+                    f"'{TOPUP_CODE_PREFIX}'"
+                )
+            if len(pkg.code) > 16:
+                # PaymentOrder.target_plan_code / BillingInvoice.plan_code are
+                # String(16) — over-long SKUs must fail here, not at checkout
+                # flush on PostgreSQL (CodeX review 2026-07-02 P2).
+                raise ValueError(
+                    f"topup package code '{pkg.code}' exceeds 16 characters "
+                    f"(payment_orders.target_plan_code column limit)"
+                )
+            if pkg.code in seen_topup_codes:
+                raise ValueError(f"duplicate topup package code '{pkg.code}'")
+            seen_topup_codes.add(pkg.code)
+            if pkg.credits <= 0 or pkg.price_cny_fen <= 0:
+                raise ValueError(
+                    f"topup package '{pkg.code}' must have positive credits "
+                    f"and price_cny_fen"
                 )
         return self
 

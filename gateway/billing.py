@@ -29,6 +29,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
+from billing_topup import is_topup_order, settle_topup_paid
 from csrf import require_same_origin_state_change
 from database import get_db
 from payment_provider_alipay import (
@@ -1649,7 +1650,10 @@ async def _process_payment_event(
             db, order=order, settled_at=now, status="paid"
         )
 
-        if user is not None:
+        # CM-01: topup orders grant a credits bucket — never subscription/plan_code.
+        if is_topup_order(order):
+            entitlements_updated = await settle_topup_paid(db, order=order)
+        elif user is not None:
             subscription = await upsert_active_subscription(
                 db, user=user, order=order, paid_at=now
             )
@@ -1932,6 +1936,8 @@ async def _highest_remaining_paid_order_for_user(
         .where(
             PaymentOrder.user_id == order.user_id,
             PaymentOrder.id != order.id,
+            # CM-01: plan-lane only — topup must never reach user.plan_code.
+            PaymentOrder.order_kind == "plan",
             PaymentOrder.status.in_(("paid", "partial_refunded")),
         )
     )
