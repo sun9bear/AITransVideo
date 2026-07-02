@@ -105,13 +105,23 @@ explicitly pass BOTH switches:
 
 ### 1.3 Owner 触发真实跑批（唯一涉费用步骤）
 
+**前置条件 0（最容易踩的坑）：本地 config 必须与生产 admin 配置同步。**
+路由读的是 `AIVIDEOTRANS_CONFIG_DIR/admin_settings.json::prompt_models`，而
+**开发机默认没有这个文件** → 回落 registry 平面默认 `deepseek` → 测的引擎与
+生产不一致（2026-07-02 实测核对：生产三版本 `translate` 均为
+`gemini_31_flash_lite`，即 admin 后台「翻译提示词」下拉的持久化值）。跑批前
+把生产 `/opt/aivideotrans/config/admin_settings.json` 拉到本地 config 目录
+（或把其中 `prompt_models` 段合并进本地文件）。**核对方法**：开跑第一行的
+`[route]` 必须与 admin 后台显示一致（当前应为 `gemini_31_flash_lite`）；若
+显示 `deepseek` 说明本地 config 未同步，**立即停**。
+
 **前置条件**：
 1. `GEMINI_API_KEY` 已设置（`GeminiTranslator` 构造必需 + registry fallback 链
-   里有 Gemini 候选）。
-2. **实际路由到的 provider 的 key 也要设置**——默认路由是 `deepseek`
-   （`deepseek-v4-flash`），需要 `DEEPSEEK_API_KEY`；若 admin 覆盖了
-   `prompt_models["studio"]["translate"]`，按覆盖后的模型对应 env（脚本开跑前
-   会自查：路由模型的 key 缺失时直接报错退出，不会跑到一半逐 clip 失败）。
+   里有 Gemini 候选；当前生产覆盖 `gemini_31_flash_lite` 本身也用它）。
+2. **实际路由到的 provider 的 key 也要设置**——若本地 config 未同步而回落
+   `deepseek`（`deepseek-v4-flash`）会要求 `DEEPSEEK_API_KEY`，但此时应先回
+   前置条件 0 同步 config 而不是补 key（脚本开跑前会自查：路由模型的 key
+   缺失时直接报错退出，不会跑到一半逐 clip 失败）。
    跟管线生产环境同一批 key 即可（`.env` 里已有的那些）。
 
 ```bash
@@ -129,9 +139,11 @@ python scripts/calibrate_zh_en_ratio.py --corpus data/cm03_corpus \
   process.py 的 `translator._service_mode = "studio"` 注入——**引擎选择与生产
   Studio zh→en 任务完全一致**（llm_registry 路由：默认 deepseek、admin 覆盖
   生效、同一条 fallback 链；probe 与正式翻译走同一个 `s3_translate` task）。
-  开跑第一行会打印实际生效路由，务必核对：
+  开跑第一行会打印实际生效路由，**务必与 admin 后台设置核对一致**（下例为
+  config 同步后、生产当前覆盖值 `gemini_31_flash_lite` 的预期形态；若打印
+  `model=deepseek` = 本地 config 未同步生产 prompt_models，见前置条件 0）：
   ```
-  [route] task=translate service_mode=studio -> model=deepseek (api_model_id=deepseek-v4-flash, provider=deepseek); fallbacks=['gemini', 'gemini_31_flash_lite', 'mimo_v25', 'mimo_omni']
+  [route] task=translate service_mode=studio -> model=gemini_31_flash_lite (api_model_id=gemini-3.1-flash-lite, provider=gemini); fallbacks=[...]
   ```
   实测 `target_word_count / source_cjk_chars` 的 ratio 分布，按 clip 分别汇总
   + pooled 汇总。
