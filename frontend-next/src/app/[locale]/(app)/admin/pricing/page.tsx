@@ -990,6 +990,11 @@ function TopupDisplay({ topup }: { topup: TopupConfig }) {
               <span className="text-sm font-mono text-foreground">
                 {fenToYuan(pkg.price_cny_fen)} 元
               </span>
+              {pkg.price_usd_cents != null && pkg.price_usd_cents > 0 && (
+                <span className="text-xs font-mono text-muted-foreground">
+                  ${(pkg.price_usd_cents / 100).toFixed(2)}
+                </span>
+              )}
               {!pkg.active && (
                 <span className="text-xs text-muted-foreground">
                   (已下架)
@@ -1070,6 +1075,13 @@ function TopupEditor({
             label="价格(分)"
             value={pkg.price_cny_fen}
             onChange={(v) => updatePkg(idx, { price_cny_fen: v })}
+          />
+          <NumberInput
+            label="PayPal 美元价(美分, 0=不开)"
+            value={pkg.price_usd_cents ?? 0}
+            onChange={(v) =>
+              updatePkg(idx, { price_usd_cents: v > 0 ? v : null })
+            }
           />
           <NumberInput
             label="排序"

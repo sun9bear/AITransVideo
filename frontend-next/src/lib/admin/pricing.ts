@@ -48,6 +48,11 @@ export interface TopupPackage {
   code: string
   credits: number
   price_cny_fen: number
+  /**
+   * PayPal-lane USD list price (cents), independent of CNY (CM-01).
+   * null/absent → the package is fail-closed hidden from the PayPal rail.
+   */
+  price_usd_cents?: number | null
   active: boolean
   sort_order: number
 }
