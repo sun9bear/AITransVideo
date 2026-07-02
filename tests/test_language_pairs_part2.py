@@ -75,14 +75,28 @@ def _admin_settings(*, enabled=False, allowlist_enabled=True, allowlist=None):
     )
 
 
-def _real_admin(*, enabled=False, allowlist_enabled=True, allowlist=None):
+def _real_admin(
+    *, enabled=False, allowlist_enabled=True, allowlist=None,
+    express_tts_provider=None,
+):
     """A REAL AdminSettings (all other fields defaulted) — required when the
     patched load_settings is also consumed by compute_job_policy, which reads
-    studio_tts_provider / etc."""
+    studio_tts_provider / etc.
+
+    ``express_tts_provider``: CM-02 — the default ("cosyvoice") makes express
+    clone-only (voice_strategy=express_auto_clone), whose consent gate fires
+    BEFORE the language gate (§5 vs §5a in intercept_create_job, shipped
+    behavior). Language-gate tests pass "mimo" to route express to
+    preset_mapping so the subject under test is actually reached.
+    """
+    kwargs = {}
+    if express_tts_provider is not None:
+        kwargs["express_tts_provider"] = express_tts_provider
     return AdminSettings(
         language_pairs_enabled=enabled,
         language_pairs_user_allowlist_enabled=allowlist_enabled,
         language_pairs_allowlist=list(allowlist or []),
+        **kwargs,
     )
 
 
@@ -231,6 +245,12 @@ def _make_db():
 
 
 class TestCreatePathLanguageGate:
+    # CM-02（docs/plans/2026-07-02-commercialization-sprint-plan.md §2）:
+    # express 默认 provider=cosyvoice → clone-only（express_auto_clone），其
+    # consent 闸（§5）先于语言闸（§5a）返回 403 express_clone_consent_required
+    # ——这是 express-clone 单元评审合并的既有生产行为，非本套件的被测对象。
+    # 语言闸测试统一把 express 路由到 preset（mimo）隔离被测点；闸顺序本身由
+    # test_express_cosyvoice_consent_gate_precedes_language_gate 文档化钉住。
     def test_unsupported_pair_returns_400_before_forward(self):
         req = _make_request({
             "service_mode": "express",
@@ -239,7 +259,10 @@ class TestCreatePathLanguageGate:
             "source_language": "klingon",
             "target_language": "zh-CN",
         })
-        with patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
+        with patch(
+            "admin_settings.load_settings",
+            return_value=_real_admin(express_tts_provider="mimo"),
+        ), patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
             resp = _run(intercept_create_job(req, _make_db(), _user()))
         assert resp.status_code == 400
         assert json.loads(resp.body)["error"] == "unsupported_language_pair"
@@ -253,11 +276,34 @@ class TestCreatePathLanguageGate:
             "source_language": "zh-CN",
             "target_language": "en",
         })
-        with patch("admin_settings.load_settings", return_value=_real_admin(enabled=False)), \
-                patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
+        with patch(
+            "admin_settings.load_settings",
+            return_value=_real_admin(enabled=False, express_tts_provider="mimo"),
+        ), patch("job_intercept.proxy_request", new_callable=AsyncMock):
             resp = _run(intercept_create_job(req, _make_db(), _user(role="user")))
         assert resp.status_code == 403
         assert json.loads(resp.body)["error"] == "language_pair_not_allowed"
+
+    def test_express_cosyvoice_consent_gate_precedes_language_gate(self):
+        """文档化测试（CM-02）：express+cosyvoice（clone-only）的 consent 闸
+        目前先于语言闸——对同时缺 consent 且语言对非法的请求，用户先看到
+        express_clone_consent_required。这不是规格保证：若未来有意重排闸序，
+        更新本测试并知会 langpair 侧（勿静默重排，见 CM-02 单元记录）。"""
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+            "estimated_duration_seconds": 60,
+            "source_language": "klingon",
+            "target_language": "zh-CN",
+        })
+        with patch(
+            "admin_settings.load_settings",
+            return_value=_real_admin(express_tts_provider="cosyvoice"),
+        ), patch("job_intercept.proxy_request", new_callable=AsyncMock) as proxy:
+            resp = _run(intercept_create_job(req, _make_db(), _user()))
+        assert resp.status_code == 403
+        assert json.loads(resp.body)["error"] == "express_clone_consent_required"
+        proxy.assert_not_called()
         proxy.assert_not_called()
 
     # NOTE on coverage strategy for the forward + requires_review override:
