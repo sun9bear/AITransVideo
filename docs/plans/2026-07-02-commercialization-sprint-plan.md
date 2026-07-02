@@ -73,7 +73,7 @@
 |---|---|---|---|---|
 | CM-01 topup 购买链路 | ✅ 已合并+**已部署+已激活**（2026-07-02，项目主授权） | PR #94（基线 bump，74a5614b）+ PR #95 | 91e5ee3c | 外审：5-lens 对抗（P1+2×P2+P3 全修）+ CodeX CLI 两轮（P2 全修，第三轮限额→主模型终审兜底）+ @codex bot（3×P2 全修）；33 新测试 + 377 回归绿。生产：alembic 044 已应用、gateway/next 镜像重建换血（顺带上线已合并的 uiloc 工作台 EN + credits #77 修复）、`topup.enabled=true` 已翻（2026-07-02T04:32Z）。回滚物料：`backups/cm01-pre-20260702.tar.gz` + `gateway.pre-cm01/`/`frontend-next.pre-cm01/` 源目录 + `aivideotrans-gateway:pre-cm01`/`aivideotrans-next-backup:pre-cm01` 镜像 tag + `backups/pricing_runtime.pre-topup-20260702.json`；**hotfix PR #96（5ed531ac，2026-07-02 05:35Z 已上线）**：geo 交集空时回退 SKU 渠道（never-filter-to-zero），修复海外出口浏览器 topup 卡变砖 |
 | CM-02 langpair 测试漂移 | ✅ 已合并（2026-07-02） | PR #97 | d716a9ea | 判定=测试维护漂移（express 默认 cosyvoice clone-only，consent 闸按已评审设计前置语言闸），零生产代码改动；2 测试路由 express→mimo 隔离 + 1 文档化测试钉闸序；10 个语言测试文件 215 全过；CodeX CLI 1×P3 与 @codex bot 1×P2 同点已修（before-forward 断言真实化）；闸序观察已上报 owner（如需语言闸前置另立单元） |
-| CM-03 zh→en 校准+人评包 | ☐ 待开始 | | | 跑批需项目主触发 |
+| CM-03 zh→en 校准+人评包 | 🔄 材料包完成待跑批（PR 待合并） | claude/cm03-zh-en-gate-pack | | 交付=`scripts/calibrate_zh_en_ratio.py`（默认离线 estimate，双开关 `--run`+`--i-approve-paid-llm-calls` 才真跑）+ `tests/test_cm03_calibration_guard.py`（19 测试，行为级+AST 级双重把关）+ `docs/runbooks/2026-07-02-zh-en-pre-allowlist-gate.md`（跑批步骤+人评 rubric+生产 E2E 清单+Phase B 收尾说明）；本 PR 零生产代码改动；跑批+人评+ratio 落地需项目主显式触发 |
 | CM-04 support 英文化 | ✅ 已合并+已部署（2026-07-02T07:52Z） | PR #98 | 3299cfb4 | appSupport 37 keys zh/en；R1 双重验证（zh-snapshot §16 钉死字面量 + 主模型对照迁移前源码）；cjk-baseline 严格只减（-45 行/4 文件清空）；admin 豁免未动；CodeX CLI 0 finding + @codex bot 1 P2 已修（非 zh locale 不被服务端中文 config 压过，UI-BE-01 边界代码注释标记）；UILOC INDEX 已登记；Sonnet 5 子 agent 执行+主模型终审；范围外发现=unauthHelp 死文案（建议跟进单） |
 
 ## 4. 项目主待办（工程干不了的）
