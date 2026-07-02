@@ -71,7 +71,7 @@
 
 | 单元 | 状态 | 分支/PR | 合并 commit | 备注 |
 |---|---|---|---|---|
-| CM-01 topup 购买链路 | ✅ 已合并+**已部署+已激活**（2026-07-02，项目主授权） | PR #94（基线 bump，74a5614b）+ PR #95 | 91e5ee3c | 外审：5-lens 对抗（P1+2×P2+P3 全修）+ CodeX CLI 两轮（P2 全修，第三轮限额→主模型终审兜底）+ @codex bot（3×P2 全修）；33 新测试 + 377 回归绿。生产：alembic 044 已应用、gateway/next 镜像重建换血（顺带上线已合并的 uiloc 工作台 EN + credits #77 修复）、`topup.enabled=true` 已翻（2026-07-02T04:32Z）。回滚物料：`backups/cm01-pre-20260702.tar.gz` + `gateway.pre-cm01/`/`frontend-next.pre-cm01/` 源目录 + `aivideotrans-gateway:pre-cm01`/`aivideotrans-next-backup:pre-cm01` 镜像 tag + `backups/pricing_runtime.pre-topup-20260702.json` |
+| CM-01 topup 购买链路 | ✅ 已合并+**已部署+已激活**（2026-07-02，项目主授权） | PR #94（基线 bump，74a5614b）+ PR #95 | 91e5ee3c | 外审：5-lens 对抗（P1+2×P2+P3 全修）+ CodeX CLI 两轮（P2 全修，第三轮限额→主模型终审兜底）+ @codex bot（3×P2 全修）；33 新测试 + 377 回归绿。生产：alembic 044 已应用、gateway/next 镜像重建换血（顺带上线已合并的 uiloc 工作台 EN + credits #77 修复）、`topup.enabled=true` 已翻（2026-07-02T04:32Z）。回滚物料：`backups/cm01-pre-20260702.tar.gz` + `gateway.pre-cm01/`/`frontend-next.pre-cm01/` 源目录 + `aivideotrans-gateway:pre-cm01`/`aivideotrans-next-backup:pre-cm01` 镜像 tag + `backups/pricing_runtime.pre-topup-20260702.json`；**hotfix PR #96（5ed531ac，2026-07-02 05:35Z 已上线）**：geo 交集空时回退 SKU 渠道（never-filter-to-zero），修复海外出口浏览器 topup 卡变砖 |
 | CM-02 langpair 测试漂移 | ☐ 待开始 | | | |
 | CM-03 zh→en 校准+人评包 | ☐ 待开始 | | | 跑批需项目主触发 |
 | CM-04 support 英文化 | ☐ 待开始 | | | 同步 UILOC INDEX |
