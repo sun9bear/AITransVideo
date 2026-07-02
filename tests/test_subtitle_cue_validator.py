@@ -16,7 +16,6 @@ from modules.subtitles.cue_validator import (
     validate_cues,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -458,3 +457,74 @@ def test_block_with_no_cues_empty_text_passes() -> None:
     # normalize("") == normalize("   ") → both become "" → no mismatch
     assert report.validation_status == "passed"
     assert not _issues_by_code(report, "text_mismatch")
+
+
+# ---------------------------------------------------------------------------
+# zh->en behavior (2026-07-02 fix): SubtitleCue strips each cue's text, so
+# rejoining cues loses the space after sentence punctuation for
+# space-delimited targets ("content?" + "If so..." -> "content?If so...").
+# That is NOT a content mismatch — the comparison is whitespace-insensitive.
+# Prod repro: job_3be24ac13f9547fbbbb9ef2c860c5eac.
+# ---------------------------------------------------------------------------
+
+
+def test_en_no_false_text_mismatch_at_punctuation_boundary() -> None:
+    """English cues split at '?' lose the boundary space — not a mismatch."""
+    spec = _make_spec("blk_en", "Do you like this kind of content? If so, subscribe.", 0, 5000)
+    cue1 = _make_cue("blk_en_cue_01", "blk_en", "Do you like this kind of content?", 0, 2500)
+    cue2 = _make_cue("blk_en_cue_02", "blk_en", "If so, subscribe.", 2500, 5000)
+
+    report = validate_cues(block_specs=[spec], cues=[cue1, cue2])
+
+    assert not _issues_by_code(report, "text_mismatch")
+    assert not [i for i in report.issues if i.severity == "error"]
+
+
+def test_en_internal_space_loss_is_detected() -> None:
+    """@codex round-2 P2: boundary tolerance must not extend to spaces INSIDE
+    a cue — "NewYork is great." vs block "New York is great." is a real
+    content corruption (the drop-all-spaces first-round fix masked it)."""
+    spec = _make_spec("blk_en3", "New York is great.", 0, 3000)
+    cue = _make_cue("blk_en3_cue_01", "blk_en3", "NewYork is great.", 0, 3000)
+
+    report = validate_cues(block_specs=[spec], cues=[cue])
+
+    errors = _issues_by_code(report, "text_mismatch")
+    assert len(errors) == 1
+    assert errors[0].block_id == "blk_en3"
+
+
+def test_en_real_text_mismatch_still_detected() -> None:
+    """Whitespace-insensitivity must not mask actual content divergence."""
+    spec = _make_spec("blk_en2", "Do you like this kind of content? If so, subscribe.", 0, 5000)
+    cue1 = _make_cue("blk_en2_cue_01", "blk_en2", "Do you like this kind of content?", 0, 2500)
+    cue2 = _make_cue("blk_en2_cue_02", "blk_en2", "If so, unsubscribe.", 2500, 5000)
+
+    report = validate_cues(block_specs=[spec], cues=[cue1, cue2])
+
+    errors = _issues_by_code(report, "text_mismatch")
+    assert len(errors) == 1
+    assert errors[0].block_id == "blk_en2"
+
+
+def test_en_builder_roundtrip_has_no_text_mismatch() -> None:
+    """Full en round-trip: segment_text -> SubtitleCue strip -> validate_cues."""
+    from modules.subtitles.cue_builder import build_cues_for_block
+
+    en_block_text = "Do you like this kind of content? If so, subscribe."
+    cues = build_cues_for_block(
+        block_id="blk_en3",
+        speaker_id="spk_1",
+        speaker_name=None,
+        cn_text=en_block_text,
+        en_text="",
+        block_start_ms=0,
+        block_end_ms=5000,
+    )
+    assert len(cues) >= 2  # split at the '?' boundary
+
+    spec = _make_spec("blk_en3", en_block_text, 0, 5000)
+    report = validate_cues(block_specs=[spec], cues=cues)
+
+    assert not _issues_by_code(report, "text_mismatch")
+    assert not [i for i in report.issues if i.severity == "error"]

@@ -609,10 +609,14 @@ def segment_text(text: str) -> list[SegmentSpan]:
     unbalanced bracket region.  Mixed-token spans stay whole and get
     needs_review.
 
-    Invariant: normalize("".join(s.text for s in result)) == normalize(text)
-    (checked by T6 validator).  Note: inter-sentence whitespace stripped
-    from span boundaries will be absorbed by normalize()'s whitespace
-    collapsing, so the invariant holds for typical merged_cn_text inputs.
+    Invariant: "".join(s.text for s in result) reproduces *text* exactly
+    (spans are raw chunks).  The T6 validator compares cue texts against
+    block text tolerating whitespace ONLY at cue boundaries (any run,
+    including none — see cue_validator._cue_texts_match_block), because
+    SubtitleCue strips each cue's leading/trailing whitespace — for
+    space-delimited targets the inter-span space at punctuation
+    boundaries is legitimately lost by that strip. Internal spaces are
+    content and still compare exactly.
 
     Returns [] for empty or whitespace-only input.
     """

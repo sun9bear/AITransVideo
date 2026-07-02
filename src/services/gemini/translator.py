@@ -729,6 +729,7 @@ class GeminiTranslator:
                 output_root,
                 result,
                 glossary=effective_glossary,
+                target_language=self._translate_target_language,
             )
             return result
 
@@ -835,6 +836,7 @@ class GeminiTranslator:
             output_root,
             result,
             glossary=effective_glossary,
+            target_language=self._translate_target_language,
         )
         if checkpoint_path.exists():
             checkpoint_path.unlink()
@@ -2964,6 +2966,7 @@ def _maybe_write_translation_quality_report(
     result: TranslationResult,
     *,
     glossary: dict[str, str],
+    target_language: str | None = None,
 ) -> None:
     project_dir = output_root.parent if output_root.name == "translation" else output_root
     try:
@@ -2973,6 +2976,7 @@ def _maybe_write_translation_quality_report(
             project_dir,
             segments=result.segments,
             glossary=glossary,
+            target_language=target_language,
         )
     except Exception as exc:
         print(

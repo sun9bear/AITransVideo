@@ -11,6 +11,7 @@ Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §8
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from modules.subtitles.cue_models import SubtitleCue, normalize
@@ -54,10 +55,10 @@ class ValidationIssue:
     """A single validation finding — either hard error or review tag."""
 
     block_id: str
-    cue_id: str | None       # None for block-level issues (e.g. text_mismatch)
-    code: str                # Issue code string; see plan §8.
-    severity: str            # "error" or "review"
-    message: str             # Human-readable description.
+    cue_id: str | None  # None for block-level issues (e.g. text_mismatch)
+    code: str  # Issue code string; see plan §8.
+    severity: str  # "error" or "review"
+    message: str  # Human-readable description.
 
 
 @dataclass(slots=True, frozen=True)
@@ -86,7 +87,7 @@ class BlockSummary:
 class ValidationReport:
     """Result of validating a set of (block_id → cues) groups."""
 
-    validation_status: str         # "passed" | "needs_review" | "failed"
+    validation_status: str  # "passed" | "needs_review" | "failed"
     issues: list[ValidationIssue]
     block_summaries: list[BlockSummary]
 
@@ -126,6 +127,26 @@ class _BlockAccumulator:
         )
 
 
+def _cue_texts_match_block(cue_texts: list[str], block_text: str) -> bool:
+    """Whitespace-tolerant ONLY at cue boundaries (@codex review round-2 P2).
+
+    Cue construction legitimately loses inter-span whitespace: segment_text()
+    spans keep raw boundary whitespace, but SubtitleCue.__post_init__ strips
+    each cue's text. For space-delimited targets (zh->en jobs) the space after
+    sentence punctuation therefore vanishes when cue texts are rejoined —
+    "content?" + "If so..." must equal block "content? If so...".
+
+    But INTERNAL spaces are content: dropping every space (the first-round
+    fix) made "NewYork is great." equal "New York is great.", masking a real
+    corruption. So: normalize() both sides, then require the block text to be
+    exactly the cue texts in order, with any run of whitespace — including
+    none — between consecutive cues (CJK blocks have no boundary space; Latin
+    blocks have one). Inside a cue, text must match verbatim post-normalize().
+    """
+    pattern = r"\s*".join(re.escape(normalize(t)) for t in cue_texts)
+    return re.fullmatch(pattern, normalize(block_text)) is not None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -142,7 +163,10 @@ def validate_cues(
     Checks performed (plan §8):
 
     Hard errors (severity="error"):
-        text_mismatch       — normalize("".join(cue.text)) != normalize(block.merged_cn_text)
+        text_mismatch       — cue texts, in order, do not reproduce the block
+                              text allowing optional whitespace at cue
+                              boundaries only (see _cue_texts_match_block;
+                              internal spaces are content and compare exactly)
         timing_overlap      — cue[i].end_ms > cue[i+1].start_ms within same block
         timing_out_of_block — cue's [start_ms, end_ms] not inside [block_start_ms, block_end_ms]
         empty_cue           — cue.text == "" after strip (SubtitleCue already strips in __post_init__)
@@ -188,9 +212,7 @@ def validate_cues(
                     cue_id=None,
                     code="unknown_block",
                     severity="error",
-                    message=(
-                        f"Block '{cue.block_id}' has no matching BlockSpec."
-                    ),
+                    message=(f"Block '{cue.block_id}' has no matching BlockSpec."),
                 )
             )
 
@@ -239,7 +261,7 @@ def validate_cues(
 
         # --- text_mismatch (block-level) ---
         joined = "".join(c.text for c in sorted_cues)
-        if normalize(joined) != normalize(spec.merged_cn_text):
+        if not _cue_texts_match_block([c.text for c in sorted_cues], spec.merged_cn_text):
             acc.text_mismatch = True
             issues.append(
                 ValidationIssue(
@@ -314,10 +336,7 @@ def validate_cues(
                         cue_id=cue.cue_id,
                         code="short_display_duration",
                         severity="review",
-                        message=(
-                            f"Cue '{cue.cue_id}' duration {duration}ms "
-                            f"is below minimum {min_display_ms}ms."
-                        ),
+                        message=(f"Cue '{cue.cue_id}' duration {duration}ms is below minimum {min_display_ms}ms."),
                     )
                 )
 
@@ -334,9 +353,7 @@ def validate_cues(
                         cue_id=cue.cue_id,
                         code=cue.review_reason,
                         severity="review",
-                        message=(
-                            f"Cue '{cue.cue_id}' flagged for review: {cue.review_reason}."
-                        ),
+                        message=(f"Cue '{cue.cue_id}' flagged for review: {cue.review_reason}."),
                     )
                 )
 
