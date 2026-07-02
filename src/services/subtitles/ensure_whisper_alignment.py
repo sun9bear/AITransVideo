@@ -264,6 +264,7 @@ def _regenerate_whisper_cues(
     from core.models import SemanticBlock, SubtitleLine
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
     from modules.subtitles.srt_writer import (
+        legacy_zh_en_alias_files_enabled,
         write_zh_srt, write_en_srt, write_bilingual_srt,
     )
 
@@ -366,6 +367,13 @@ def _regenerate_whisper_cues(
         "alignment_model": model,
         "cues": cues_serialized,
     }
+    # Non-default pair: stamp field semantics — cue "text" is always the dub
+    # TARGET and "en_text" always the SOURCE (legacy naming; for zh->en the
+    # en_text field carries Chinese). Default en->zh omits the stamp
+    # (byte-identical). Mirrors OutputDispatcher._write_subtitle_cues_json.
+    if not legacy_zh_en_alias_files_enabled(_target_language):
+        cues_payload["target_language"] = _target_language
+        cues_payload["cue_field_roles"] = {"text": "target", "en_text": "source"}
     (output_dir / "subtitle_cues.json").write_text(
         json.dumps(cues_payload, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -411,19 +419,26 @@ def _regenerate_whisper_cues(
     )
 
     # SRT files. zh_srt is cue.text (always the dub/TARGET language) and en_srt is
-    # cue.en_text (always the SOURCE) — the "zh"/"en" names are legacy. PR-F mirrors
-    # them under script-neutral subtitles_source/target.srt so non-default pairs expose
-    # the correct language; subtitles.srt stays the target copy (byte-identical for
-    # en->zh). Mirrors EditorPackageWriter._write_source_target_srt_copies.
+    # cue.en_text (always the SOURCE) — the "zh"/"en" names are legacy. The
+    # script-neutral subtitles_source/target.srt (PR-F) are always written;
+    # subtitles.srt stays the target copy (byte-identical for en->zh). The legacy
+    # language-named subtitles_zh/en.srt aliases are only written when honest (zh
+    # dub target) — a zh->en job used to regenerate a subtitles_en.srt full of
+    # Chinese here. Mirrors EditorPackageWriter._write_legacy_alias_srt_files
+    # (incl. removing stale aliases a pre-fix run left behind).
     zh_srt = write_zh_srt(result.cues)
     en_srt = write_en_srt(result.cues)
     bi_srt = write_bilingual_srt(result.cues)
-    (output_dir / "subtitles_zh.srt").write_text(zh_srt, encoding="utf-8")
     (output_dir / "subtitles.srt").write_text(zh_srt, encoding="utf-8")  # target copy
-    (output_dir / "subtitles_en.srt").write_text(en_srt, encoding="utf-8")
     (output_dir / "subtitles_bilingual.srt").write_text(bi_srt, encoding="utf-8")
     (output_dir / "subtitles_target.srt").write_text(zh_srt, encoding="utf-8")
     (output_dir / "subtitles_source.srt").write_text(en_srt, encoding="utf-8")
+    if legacy_zh_en_alias_files_enabled(_target_language):
+        (output_dir / "subtitles_zh.srt").write_text(zh_srt, encoding="utf-8")
+        (output_dir / "subtitles_en.srt").write_text(en_srt, encoding="utf-8")
+    else:
+        (output_dir / "subtitles_zh.srt").unlink(missing_ok=True)
+        (output_dir / "subtitles_en.srt").unlink(missing_ok=True)
 
     return len(result.block_specs)
 

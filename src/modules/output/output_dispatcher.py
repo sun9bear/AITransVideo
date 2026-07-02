@@ -49,7 +49,12 @@ class OutputDispatcher:
         publish_result: PublishResult | None = None
 
         if OutputTarget.EDITOR in expanded_targets or OutputTarget.PUBLISH in expanded_targets:
-            project_output = self._build_editor_project_output(localized_project, artifact_index, project_root)
+            project_output = self._build_editor_project_output(
+                localized_project,
+                artifact_index,
+                project_root,
+                target_language=request.target_language,
+            )
 
             # Subtitle cue generation (T9 wiring).
             # Feature flag AVT_DISABLE_SUBTITLE_CUES_V2=1 bypasses entirely for rollback.
@@ -75,6 +80,7 @@ class OutputDispatcher:
                     output_dir=output_dir,
                     project_id=localized_project.project_id,
                     cue_result=cue_result,
+                    target_language=request.target_language,
                 )
                 self._maybe_write_subtitle_width_report(
                     project_root=project_root,
@@ -141,6 +147,8 @@ class OutputDispatcher:
         localized_project: LocalizedProject,
         artifact_index: ArtifactIndex,
         project_root: Path,
+        *,
+        target_language: str | None = None,
     ) -> ProjectOutput:
         source_info = localized_project.source_info
         metadata = source_info.get("metadata", {})
@@ -164,6 +172,9 @@ class OutputDispatcher:
             total_duration_ms=self._compute_total_duration_ms(localized_project),
             segments=self._build_aligned_segments(localized_project),
             output_dir=str(project_root),
+            # Gates the legacy subtitles_zh/en.srt alias filenames in
+            # EditorPackageWriter (None / zh = GA default, byte-identical).
+            target_language=target_language,
         )
 
     def _build_aligned_segments(self, localized_project: LocalizedProject) -> list[AlignedSegment]:
@@ -268,14 +279,18 @@ class OutputDispatcher:
     def _register_editor_artifacts(artifact_index: ArtifactIndex, result: ProjectOutputResult) -> None:
         artifact_index.register("editor.dubbed_audio_complete", result.dubbed_audio_path)
         artifact_index.register("editor.ambient_audio", result.ambient_audio_path)
+        # editor.subtitles / editor.subtitles_en are ROLE keys (TARGET dub /
+        # SOURCE — PR-G labels them by the job's actual languages). For the GA
+        # en->zh default they resolve to the legacy subtitles_zh/en.srt files;
+        # for a non-zh dub target the writer suppresses those lying aliases and
+        # the role slots carry the script-neutral subtitles_target/source.srt
+        # paths instead (EditorPackageWriter._write_legacy_alias_srt_files).
         artifact_index.register("editor.subtitles", result.subtitles_path)
         artifact_index.register("editor.subtitles_en", result.subtitles_en_path)
         artifact_index.register("editor.subtitles_bilingual", result.subtitles_bilingual_path)
         # PR-F: explicit script-neutral keys. editor.subtitles_target == cue.text (the dub
         # TARGET), editor.subtitles_source == cue.en_text (the SOURCE). For en->zh these
-        # point at byte-identical copies of subtitles(zh)/subtitles_en; for non-default
-        # pairs they carry the correct language under an honest name. Additive — the legacy
-        # editor.subtitles / editor.subtitles_en keys are unchanged.
+        # point at byte-identical copies of subtitles(zh)/subtitles_en.
         if result.subtitles_target_path:
             artifact_index.register("editor.subtitles_target", result.subtitles_target_path)
         if result.subtitles_source_path:
@@ -316,6 +331,7 @@ class OutputDispatcher:
         output_dir: Path,
         project_id: str,
         cue_result: object,
+        target_language: str | None = None,
     ) -> None:
         """Write subtitle_cues.json + subtitle_quality_report.json and register in artifact_index.
 
@@ -326,7 +342,9 @@ class OutputDispatcher:
         cues_path = output_dir / "subtitle_cues.json"
         report_path = output_dir / "subtitle_quality_report.json"
 
-        OutputDispatcher._write_subtitle_cues_json(cues_path, project_id, cue_result.cues)
+        OutputDispatcher._write_subtitle_cues_json(
+            cues_path, project_id, cue_result.cues, target_language=target_language
+        )
         OutputDispatcher._write_quality_report_json(
             report_path, project_id, cue_result.report, cue_result.block_specs
         )
@@ -339,11 +357,20 @@ class OutputDispatcher:
         path: Path,
         project_id: str,
         cues: list,
+        *,
+        target_language: str | None = None,
     ) -> None:
         """Serialize SubtitleCue list to subtitle_cues.json.
 
         Schema per plan §7:
           schema_version, project_id, cues[]
+
+        Per-cue field semantics: ``text`` is always the dub (TARGET) language and
+        ``en_text`` always the SOURCE — legacy naming from the en->zh-only era. For a
+        non-zh dub target (where the "en_text" name lies — a zh->en job carries
+        Chinese source there) the payload is stamped with ``target_language`` +
+        ``cue_field_roles`` so JSON consumers can resolve the semantics without
+        this docstring. The GA en->zh default omits the stamp (byte-identical).
         """
         serialized_cues = []
         for cue in cues:
@@ -365,6 +392,11 @@ class OutputDispatcher:
             "project_id": project_id,
             "cues": serialized_cues,
         }
+        from modules.subtitles.srt_writer import legacy_zh_en_alias_files_enabled
+
+        if not legacy_zh_en_alias_files_enabled(target_language):
+            payload["target_language"] = target_language
+            payload["cue_field_roles"] = {"text": "target", "en_text": "source"}
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     @staticmethod

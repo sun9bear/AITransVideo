@@ -46,6 +46,11 @@ class ProjectOutput:
     # T9 (OutputDispatcher) wires the cue builder output here; until then
     # this field is populated only in tests via direct ProjectOutput construction.
     subtitle_cues: list = field(default_factory=list)
+    # Dub target language (None / "zh-CN" = GA en->zh default). Gates the legacy
+    # language-named subtitles_zh/en.srt alias files: a non-zh dub (e.g. zh->en)
+    # suppresses them so their names can't lie about the content
+    # (srt_writer.legacy_zh_en_alias_files_enabled).
+    target_language: str | None = None
 
 
 @dataclass(slots=True)

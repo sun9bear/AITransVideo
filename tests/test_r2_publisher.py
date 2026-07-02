@@ -345,6 +345,37 @@ def test_filename_for_non_jianying_keys_unchanged(tmp_path):
     assert _filename_for("editor.subtitles_source", "myvid", p) == "myvid_source.srt"
 
 
+def test_filename_for_role_subtitle_keys_follows_on_disk_neutral_names(tmp_path):
+    """Alias honesty (2026-07-02): for a non-default language pair the ROLE keys
+    editor.subtitles / editor.subtitles_en point at the script-neutral
+    subtitles_target/source.srt files (the lying zh/en aliases aren't emitted).
+    The Save-As suffix must follow the actual on-disk name — a zh->en SOURCE
+    download must NOT save as *_en.srt full of Chinese. Legacy on-disk names
+    (default en->zh jobs) keep the old *_zh/*_en suffixes."""
+    from services.r2_publisher_lib.r2_publisher import _filename_for
+
+    # Non-default pair: role keys resolve to the neutral files.
+    tgt = tmp_path / "subtitles_target.srt"
+    src = tmp_path / "subtitles_source.srt"
+    tgt.write_bytes(b"")
+    src.write_bytes(b"")
+    assert _filename_for("editor.subtitles", "myvid", tgt) == "myvid_target.srt"
+    assert _filename_for("editor.subtitles_en", "myvid", src) == "myvid_source.srt"
+
+    # Default pair / old jobs: legacy on-disk names keep legacy suffixes.
+    zh = tmp_path / "subtitles_zh.srt"
+    en = tmp_path / "subtitles_en.srt"
+    zh.write_bytes(b"")
+    en.write_bytes(b"")
+    assert _filename_for("editor.subtitles", "myvid", zh) == "myvid_zh.srt"
+    assert _filename_for("editor.subtitles_en", "myvid", en) == "myvid_en.srt"
+    # Unknown on-disk name: fall back to the key-based legacy suffix.
+    other = tmp_path / "weird.srt"
+    other.write_bytes(b"")
+    assert _filename_for("editor.subtitles", "myvid", other) == "myvid_zh.srt"
+    assert _filename_for("editor.subtitles_en", "myvid", other) == "myvid_en.srt"
+
+
 def test_prf_script_neutral_subtitle_keys_content_type_and_allowlists():
     """PR-F: editor.subtitles_target/source are text/plain, in the Studio allow-lists +
     eager-push set, and NOT exposed to Express/Free."""

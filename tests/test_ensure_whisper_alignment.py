@@ -363,6 +363,93 @@ def test_prf_non_zh_segments_bypass_whisper_in_deliverable(tmp_path, monkeypatch
     assert all("whisper" not in c["source"].lower() for c in payload["cues"])
 
 
+def test_non_zh_regenerate_suppresses_legacy_alias_srt_and_stamps_roles(
+    tmp_path, monkeypatch,
+):
+    """Alias honesty (2026-07-02): for a zh->en dub (target_language='en' stamp) the
+    deliverable regenerate path must NOT write the legacy language-named
+    subtitles_zh/en.srt (their names would lie — prod job b07c29cf... shipped a
+    subtitles_en.srt full of Chinese), must remove stale copies from pre-fix runs
+    (the fixture pre-creates them), keep the script-neutral source/target files,
+    and stamp subtitle_cues.json with target_language + cue_field_roles."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
+    project_dir = _build_minimal_project(tmp_path, n_segments=2)
+
+    # Stamp target_language='en' (PR-E slice 6 convention) — zh->en dub whose
+    # cn_text field carries the English dub text and source_text the Chinese.
+    seg_path = project_dir / "editor" / "segments.json"
+    segs = json.loads(seg_path.read_text(encoding="utf-8"))
+    for s in segs:
+        s["target_language"] = "en"
+        s["cn_text"] = f"English dub line {s['segment_id']}"
+        s["tts_input_cn_text"] = s["cn_text"]
+        s["source_text"] = f"中文源文{s['segment_id']}"
+    seg_path.write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+
+    out = project_dir / "output"
+    # Fixture pre-created the legacy alias files — they act as the stale copies.
+    assert (out / "subtitles_zh.srt").is_file()
+    assert (out / "subtitles_en.srt").is_file()
+
+    from services.subtitles.ensure_whisper_alignment import ensure_whisper_aligned_subtitles
+
+    with patch(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        return_value=[{"start_ms": 0, "end_ms": 800, "text": "x"}],
+    ):
+        status = ensure_whisper_aligned_subtitles(project_dir)
+    assert status["action"] == "regenerated"
+
+    # Legacy aliases suppressed AND stale copies removed.
+    assert not (out / "subtitles_zh.srt").exists()
+    assert not (out / "subtitles_en.srt").exists()
+    # Script-neutral + compat files present with the correct languages.
+    assert "English dub line" in (out / "subtitles_target.srt").read_text(encoding="utf-8")
+    assert "中文源文" in (out / "subtitles_source.srt").read_text(encoding="utf-8")
+    assert (out / "subtitles.srt").read_text(encoding="utf-8") == (
+        out / "subtitles_target.srt"
+    ).read_text(encoding="utf-8")
+    assert (out / "subtitles_bilingual.srt").is_file()
+
+    # subtitle_cues.json stamped so JSON consumers can resolve the legacy
+    # field naming (text=TARGET, en_text=SOURCE).
+    payload = json.loads((out / "subtitle_cues.json").read_text(encoding="utf-8"))
+    assert payload["target_language"] == "en"
+    assert payload["cue_field_roles"] == {"text": "target", "en_text": "source"}
+
+
+def test_default_pair_regenerate_keeps_alias_srt_and_omits_role_stamp(
+    tmp_path, monkeypatch,
+):
+    """GA default (no target_language stamp): byte-identical legacy behavior —
+    zh/en alias files still written, no target_language/cue_field_roles stamp."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
+    project_dir = _build_minimal_project(tmp_path, n_segments=2)
+
+    from services.subtitles.ensure_whisper_alignment import ensure_whisper_aligned_subtitles
+
+    with patch(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        return_value=[{"start_ms": 100, "end_ms": 800, "text": "文本"}],
+    ):
+        ensure_whisper_aligned_subtitles(project_dir)
+
+    out = project_dir / "output"
+    assert (out / "subtitles_zh.srt").is_file()
+    assert (out / "subtitles_en.srt").is_file()
+    payload = json.loads((out / "subtitle_cues.json").read_text(encoding="utf-8"))
+    assert "target_language" not in payload
+    assert "cue_field_roles" not in payload
+
+
 # ---------------------------------------------------------------------------
 # fingerprint mismatch: aligned WAV bytes changed since last whisper run
 # ---------------------------------------------------------------------------
