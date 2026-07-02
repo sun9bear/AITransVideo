@@ -2,7 +2,8 @@
   "period": {
     "monthly": "Monthly",
     "quarterly": "Quarterly",
-    "annual": "Annual"
+    "annual": "Annual",
+    "oneTime": "One-time"
   },
   "provider": {
     "fake": "Test payment",
@@ -146,6 +147,7 @@
     "errorCreateOrder": "Failed to create the top-up order",
     "errorNoCheckoutUrl": "The payment provider returned no checkout link",
     "usdNotice": "PayPal charges the USD list price: {amount}",
-    "footnote": "Credits never expire and are consumed after subscription credits. They are added to your balance automatically once payment completes."
+    "footnote": "Credits never expire and are consumed after subscription credits. They are added to your balance automatically once payment completes.",
+    "historyLabel": "Credit top-up"
   }
 }

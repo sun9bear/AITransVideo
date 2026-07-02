@@ -40,6 +40,8 @@ const PERIOD_LABEL_KEYS: Record<string, BillingKey> = {
   monthly: "period.monthly",
   quarterly: "period.quarterly",
   annual: "period.annual",
+  // Topup orders (CM-01) settle as one-time purchases.
+  one_time: "period.oneTime",
 }
 
 const PROVIDER_LABEL_KEYS: Record<string, BillingKey> = {
@@ -211,7 +213,11 @@ export function OrderHistory() {
                       {formatDateTime(inv.paid_at ?? inv.created_at ?? inv.issued_at, formatLocale)}
                     </td>
                     <td className="py-3 pr-4 font-medium text-foreground">
-                      {inv.plan_code.toUpperCase()}
+                      {/* Topup invoices carry the SKU code in plan_code —
+                          render a human label instead of a raw "TOPUP_1000". */}
+                      {inv.plan_code.startsWith("topup_")
+                        ? t("topup.historyLabel")
+                        : inv.plan_code.toUpperCase()}
                     </td>
                     <td className="py-3 pr-4 text-muted-foreground">
                       {PERIOD_LABEL_KEYS[inv.billing_period]

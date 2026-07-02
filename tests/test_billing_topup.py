@@ -209,11 +209,43 @@ class TestPricingSchemaTopup:
         with pytest.raises(ValueError, match="must start with"):
             PricingPayload.model_validate(raw)
 
-    def test_rejects_plan_code_collision(self):
-        payload = build_default_pricing_payload()
-        raw = payload.model_dump()
+    def test_rejects_plan_code_collision_via_prefix_reservation(self):
+        # A plan keyed by an existing topup code necessarily starts with
+        # "topup_" → the prefix reservation subsumes the collision case.
+        raw = build_default_pricing_payload().model_dump()
         raw["plans"]["topup_1000"] = raw["plans"]["plus"]
-        with pytest.raises(ValueError, match="collides with a plan code"):
+        with pytest.raises(ValueError, match="reserved for topup packages"):
+            PricingPayload.model_validate(raw)
+
+    def test_legacy_payload_without_topup_key_still_validates(self):
+        # Adversarial review 2026-07-02 P1: a pre-topup pricing_runtime.json
+        # (no "topup" key) must NOT fail whole-payload validation — that would
+        # make pricing_runtime._load_from_file silently fall back to hardcoded
+        # defaults, wiping admin-published plan prices. Missing key → inert.
+        raw = build_default_pricing_payload().model_dump()
+        del raw["topup"]
+        payload = PricingPayload.model_validate(raw)
+        assert payload.topup.enabled is False
+        assert payload.topup.packages == []
+
+    def test_rejects_plan_code_with_topup_prefix(self):
+        # Adversarial review 2026-07-02 P2: provider adapters dispatch on the
+        # code prefix, so a plan named "topup_*" would silently break that
+        # plan's PayPal checkout — reject at config time.
+        raw = build_default_pricing_payload().model_dump()
+        raw["plans"]["topup_vip"] = raw["plans"]["plus"]
+        with pytest.raises(ValueError, match="reserved for topup packages"):
+            PricingPayload.model_validate(raw)
+
+    def test_rejects_code_longer_than_16_chars(self):
+        # CodeX CLI P2: PaymentOrder.target_plan_code / BillingInvoice.plan_code
+        # are String(16) — an over-long SKU must fail at config time, not at
+        # checkout flush on PostgreSQL.
+        raw = self._payload_with_packages(
+            [TopupPackage(code="topup_12345678901", credits=1000, price_cny_fen=3900)]
+        )
+        assert len("topup_12345678901") > 16
+        with pytest.raises(ValueError, match="exceeds 16"):
             PricingPayload.model_validate(raw)
 
     def test_rejects_duplicate_codes(self):

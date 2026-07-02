@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class PlanPriceConfig(BaseModel):
@@ -89,7 +89,12 @@ class PricingPayload(BaseModel):
     plans: dict[str, PlanConfig]
     trial: TrialConfig
     credits: CreditsConfig
-    topup: TopupConfig
+    # Default keeps a pre-topup pricing_runtime.json valid (adversarial review
+    # 2026-07-02 P1): without it, a missing key fails whole-payload validation
+    # and pricing_runtime._load_from_file silently falls back to the hardcoded
+    # defaults — wiping admin-published plan prices, not just topup. Mirrors
+    # the PlanConfig.price_usd_cents optionality convention above.
+    topup: TopupConfig = Field(default_factory=TopupConfig)
     cost_model: CostModelConfig
 
     @model_validator(mode="after")
@@ -130,6 +135,15 @@ class PricingPayload(BaseModel):
         # topup code that collides with a plan code (or vice versa) would make
         # order rows ambiguous to every human and admin-panel reader — reject
         # at config-validation time, before any order can be created.
+        # The reverse also holds (adversarial review 2026-07-02 P2): provider
+        # adapters dispatch on the code PREFIX, so a plan named "topup_*"
+        # would silently break that plan's PayPal checkout.
+        for plan_code in self.plans:
+            if plan_code.startswith(TOPUP_CODE_PREFIX):
+                raise ValueError(
+                    f"plan code '{plan_code}' must not start with "
+                    f"'{TOPUP_CODE_PREFIX}' (reserved for topup packages)"
+                )
         seen_topup_codes: set[str] = set()
         for pkg in self.topup.packages:
             if not pkg.code.startswith(TOPUP_CODE_PREFIX):
@@ -137,9 +151,13 @@ class PricingPayload(BaseModel):
                     f"topup package code '{pkg.code}' must start with "
                     f"'{TOPUP_CODE_PREFIX}'"
                 )
-            if pkg.code in self.plans:
+            if len(pkg.code) > 16:
+                # PaymentOrder.target_plan_code / BillingInvoice.plan_code are
+                # String(16) — over-long SKUs must fail here, not at checkout
+                # flush on PostgreSQL (CodeX review 2026-07-02 P2).
                 raise ValueError(
-                    f"topup package code '{pkg.code}' collides with a plan code"
+                    f"topup package code '{pkg.code}' exceeds 16 characters "
+                    f"(payment_orders.target_plan_code column limit)"
                 )
             if pkg.code in seen_topup_codes:
                 raise ValueError(f"duplicate topup package code '{pkg.code}'")

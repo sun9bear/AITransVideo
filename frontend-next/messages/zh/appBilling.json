@@ -2,7 +2,8 @@
   "period": {
     "monthly": "月付",
     "quarterly": "季付",
-    "annual": "年付"
+    "annual": "年付",
+    "oneTime": "一次性"
   },
   "provider": {
     "fake": "测试支付",
@@ -146,6 +147,7 @@
     "errorCreateOrder": "创建充值订单失败",
     "errorNoCheckoutUrl": "支付渠道未返回结账链接",
     "usdNotice": "PayPal 按美元定价收款：{amount}",
-    "footnote": "点数长期有效，消耗顺序在订阅赠点之后。支付成功后点数自动到账，可在上方余额明细中查看。"
+    "footnote": "点数长期有效，消耗顺序在订阅赠点之后。支付成功后点数自动到账，可在上方余额明细中查看。",
+    "historyLabel": "点数充值"
   }
 }
