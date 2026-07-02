@@ -232,12 +232,19 @@ def _find_calls(tree: ast.AST, func_name: str) -> list[ast.Call]:
     return calls
 
 
+#: Every paid translation entry point on GeminiTranslator the script could
+#: conceivably call. The AST gate below pins ALL of them inside
+#: run_calibration(), so adding a new call site (or switching entry points
+#: again) outside the double-switch branch turns this red.
+_PAID_TRANSLATE_ENTRY_NAMES = ("translate", "translate_probe")
+
+
 def test_translate_call_only_exists_in_run_calibration_helper() -> None:
-    """The only place `.translate(` is called is inside run_calibration()
-    (or a helper it exclusively calls), never at module scope or inside
-    the estimate path. This is a structural proxy for "translate() is
-    unreachable unless --run mode is entered", verified end-to-end by the
-    behavioral tests above."""
+    """The only place a paid translation entry (`.translate(` /
+    `.translate_probe(`) is called is inside run_calibration(), never at
+    module scope or inside the estimate path. This is a structural proxy for
+    "the paid API is unreachable unless --run mode is entered", verified
+    end-to-end by the behavioral tests above."""
     src = SCRIPT_PATH.read_text(encoding="utf-8")
     tree = ast.parse(src)
 
@@ -246,17 +253,19 @@ def test_translate_call_only_exists_in_run_calibration_helper() -> None:
         node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
     }
 
-    translate_calls = _find_calls(tree, "translate")
-    assert translate_calls, "expected to find at least one .translate( call in the script"
+    all_paid_calls = [call for name in _PAID_TRANSLATE_ENTRY_NAMES for call in _find_calls(tree, name)]
+    assert all_paid_calls, "expected to find at least one paid translation entry call in the script"
 
-    # Every translate() call must be lexically inside run_calibration.
+    # Every paid entry call must be lexically inside run_calibration.
     run_calibration_node = functions_by_name.get("run_calibration")
     assert run_calibration_node is not None
-    calls_inside_run_calibration = _find_calls(run_calibration_node, "translate")
-    assert len(calls_inside_run_calibration) == len(translate_calls), (
-        "found a .translate( call outside of run_calibration() -- this would "
-        "make the paid API reachable without going through the --run + "
-        "--i-approve-paid-llm-calls gate"
+    calls_inside_run_calibration = [
+        call for name in _PAID_TRANSLATE_ENTRY_NAMES for call in _find_calls(run_calibration_node, name)
+    ]
+    assert len(calls_inside_run_calibration) == len(all_paid_calls), (
+        "found a paid translation entry call outside of run_calibration() -- "
+        "this would make the paid API reachable without going through the "
+        "--run + --i-approve-paid-llm-calls gate"
     )
 
     # And main() must only ever invoke run_calibration() inside the branch
@@ -359,6 +368,114 @@ def test_run_calibration_resolves_effective_route_via_llm_registry() -> None:
     assert "get_prompt_model" in src
     assert '"translate"' in src
     assert "effective_translate_route" in src
+
+
+# =====================================================================
+# §4 Constraint neutrality (@codex P1, PR #99) — the measurement must not
+# be clamped by the very natural_length_ratio prior being calibrated.
+# =====================================================================
+
+
+def test_run_calibration_measures_through_constraint_free_probe_entry() -> None:
+    """run_calibration must call translate_probe (whose prompt omits ALL
+    length constraints) and must NOT call the regular translate() entry
+    (whose prompt injects min_chars~max_chars derived from the 0.55 prior
+    as hard constraints -- circular measurement)."""
+    src = SCRIPT_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    functions_by_name = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    run_calibration_node = functions_by_name["run_calibration"]
+
+    probe_calls = _find_calls(run_calibration_node, "translate_probe")
+    assert probe_calls, "run_calibration no longer measures through translate_probe"
+
+    constrained_calls = _find_calls(tree, "translate")
+    assert not constrained_calls, (
+        "the script calls the regular constrained translate() entry -- its "
+        "prompt clamps the output to +/-15% of source_words x "
+        "natural_length_ratio, so the measured ratio would just read the "
+        "0.55 prior back (circular). Use translate_probe."
+    )
+
+    # The report must declare the neutralization so downstream readers of the
+    # calibration JSON know which measurement regime produced the numbers.
+    assert '"constraint_neutralized": True' in src
+    assert "translate_probe" in src
+
+
+def test_probe_groups_carry_no_length_constraints_but_regular_groups_do() -> None:
+    """Behavioral (offline, no network): the probe group builder emits NO
+    length-budget keys, while the regular group builder derives
+    min_chars/max_chars from natural_length_ratio -- documenting exactly why
+    the probe path is the valid measurement entry and translate() is not."""
+    from services.assemblyai.transcriber import TranscriptLine
+    from services.gemini.translator import _build_groups, _build_probe_groups
+
+    lines = [
+        TranscriptLine(
+            index=0,
+            start_ms=0,
+            end_ms=5_000,
+            speaker_id="speaker_a",
+            speaker_label="A",
+            source_text="今天天气不错，我打算去公园散散步。",
+        ),
+        TranscriptLine(
+            index=1,
+            start_ms=5_000,
+            end_ms=10_000,
+            speaker_id="speaker_a",
+            speaker_label="A",
+            source_text="人工智能正在改变我们的工作方式。",
+        ),
+    ]
+
+    probe_groups = _build_probe_groups(lines)
+    assert probe_groups
+    for group in probe_groups:
+        for banned_key in ("target_chars", "min_chars", "max_chars", "target_chars_hint"):
+            assert banned_key not in group, (
+                f"probe group unexpectedly carries {banned_key!r} -- the probe "
+                "path is no longer constraint-free; the calibration measurement "
+                "regime must be re-audited"
+            )
+
+    regular_groups = _build_groups(
+        lines,
+        max_segment_duration_ms=45_000,
+        source_language="zh-CN",
+        target_language="en",
+    )
+    assert regular_groups
+    for group in regular_groups:
+        assert "min_chars" in group and "max_chars" in group, (
+            "regular _build_groups no longer injects min/max_chars -- if the "
+            "constrained path changed, re-evaluate whether translate() is now "
+            "safe for calibration"
+        )
+    # And the constraint really is ratio-derived: for a pure-CJK source the
+    # target budget tracks source_cjk_chars x 0.55 (+/- the band factors).
+    first = regular_groups[0]
+    source_words = int(first["source_word_count"])
+    assert source_words > 0
+    expected_target = round(source_words * 0.55)
+    assert abs(int(first["target_chars"]) - expected_target) <= 1, (
+        "regular-path target_chars no longer tracks source_words x 0.55 -- "
+        "update this guard's documentation of the circularity mechanism"
+    )
+
+
+def test_zh_en_probe_template_has_no_numeric_length_anchor() -> None:
+    """The zh->en probe template must not smuggle length-budget tokens back
+    in -- it is the whole basis for calling the measurement 'natural'."""
+    from services.gemini.translator import _PROBE_TEMPLATE_BY_PAIR
+
+    template = _PROBE_TEMPLATE_BY_PAIR[("zh-CN", "en")]
+    for banned_token in ("min_chars", "max_chars", "target_chars", "0.55"):
+        assert banned_token not in template, (
+            f"zh->en probe template now contains {banned_token!r} -- the probe "
+            "path is no longer a constraint-free measurement entry"
+        )
 
 
 def test_count_cjk_chars_matches_pipeline_range_check() -> None:

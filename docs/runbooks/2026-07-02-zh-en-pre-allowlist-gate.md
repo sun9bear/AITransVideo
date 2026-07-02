@@ -124,16 +124,30 @@ python scripts/calibrate_zh_en_ratio.py --corpus data/cm03_corpus \
   - 只给 `--i-approve-paid-llm-calls`：打印 `[blocked] ... WITHOUT --run`。
   - `--estimate` 与 `--run` **互斥**：同给（无论是否带 approve）一律 exit 2，
     显式的离线请求绝不落入付费分支。
-- 两个开关都给：脚本对语料里每个 clip 调用与管线**同一个** `GeminiTranslator.translate()`
-  入口（`services.gemini.translator`），并镜像 process.py 的
-  `translator._service_mode = "studio"` 注入——**引擎选择与生产 Studio zh→en
-  任务完全一致**（llm_registry 路由：默认 deepseek、admin 覆盖生效、同一条
-  fallback 链）。开跑第一行会打印实际生效路由，务必核对：
+- 两个开关都给：脚本对语料里每个 clip 调用管线的
+  **`GeminiTranslator.translate_probe()`（无长度约束翻译入口）**，并镜像
+  process.py 的 `translator._service_mode = "studio"` 注入——**引擎选择与生产
+  Studio zh→en 任务完全一致**（llm_registry 路由：默认 deepseek、admin 覆盖
+  生效、同一条 fallback 链；probe 与正式翻译走同一个 `s3_translate` task）。
+  开跑第一行会打印实际生效路由，务必核对：
   ```
   [route] task=translate service_mode=studio -> model=deepseek (api_model_id=deepseek-v4-flash, provider=deepseek); fallbacks=['gemini', 'gemini_31_flash_lite', 'mimo_v25', 'mimo_omni']
   ```
   实测 `target_word_count / source_cjk_chars` 的 ratio 分布，按 clip 分别汇总
   + pooled 汇总。
+- **为什么走 probe 入口而不是正式 `translate()`（去循环，@codex P1）**：
+  正式翻译路径会用当前的 `natural_length_ratio=0.55` 推导每段
+  `target_chars = 源中文字数 × 0.55`，并把 `min_chars~max_chars`（±15% 区间）
+  作为**硬约束**写进 prompt、外加同区间的长度重试闸——即「被校准的先验值
+  约束了测量输出」，0.55 就算错了报告也会读回 ~0.55（循环测量）。
+  `translate_probe` 是管线**自带**的无约束翻译分支（源码注释原话：
+  "deliberately omit min_chars/max_chars to avoid ... polluting the
+  calibration. The LLM translates by feel"），prompt 同族（同一套配音口播
+  翻译指令 + 专用 zh→en 模板）、同一 LLM 路由，但**完全不含任何数字长度
+  锚点**——测出来的才是 v3 方案定义的「自然翻译长度比」。报告 JSON 里
+  `constraint_neutralized: true` + `measurement_entry` 字段记录了这一测量
+  口径。注意：**生产实际输出会被 ratio 有意钳制在 ±15% 区间内**（这是长度
+  预算的设计行为），校准报告测的是「自然值」，两者语义不同、不要直接互比。
 - 单个 clip 失败（网络错误/API 报错等）会被记录并跳过，不中断整批；**全部 clip
   都失败**才会以非零退出（report 里 `"fatal": true`）。
 - 产物：`docs/reports/{timestamp}-cm03-zh-en-ratio-calibration.json` +

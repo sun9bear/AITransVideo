@@ -36,6 +36,18 @@ wins when set, registry fallback chain applies). The effective route is
 printed at run start and recorded in the report so the operator can
 verify what was actually measured.
 
+MEASUREMENT IS CONSTRAINT-NEUTRALIZED: the run path calls
+``GeminiTranslator.translate_probe`` (the pipeline's purpose-built
+constraint-free translation entry), NOT the regular ``translate()``.
+The regular path derives per-segment ``min_chars~max_chars`` from the
+very ``natural_length_ratio`` being calibrated and injects them into
+the prompt as hard constraints — measuring through it would be
+circular (a wrong 0.55 would still read back as ~0.55). The probe
+prompt is the same dubbing-translation family, same s3_translate
+routing, but carries no numeric length anchor at all, so the measured
+ratio is the NATURAL unconstrained length ratio the v3 plan asks for.
+See run_calibration's docstring for the full rationale.
+
 Usage:
     # Offline cost estimate only (default; safe to run anytime).
     python scripts/calibrate_zh_en_ratio.py --corpus data/zh_clips
@@ -439,11 +451,41 @@ def _resolve_effective_translate_route() -> dict[str, Any]:
     }
 
 
+#: Probe batch size. translate_probe's design envelope is "probe batches are
+#: small (<=10 segments)" (translator.py docstring) — one prompt per batch, no
+#: checkpointing, no length retry. Clips longer than this are chunked.
+PROBE_BATCH_SIZE = 10
+
+
+def _batched(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 def run_calibration(corpus_dir: Path, clips: list[Clip], output_dir: Path) -> int:
     """Real paid-API calibration run. Only called after the double-switch
-    gate in main() has been checked. Returns process exit code."""
+    gate in main() has been checked. Returns process exit code.
+
+    MEASUREMENT ENTRY = ``GeminiTranslator.translate_probe`` (constraint-free),
+    NOT the regular ``translate()`` (@codex P1, PR #99): the regular path
+    derives ``target_chars = source_word_count x natural_length_ratio`` and
+    injects ``min_chars~max_chars`` (a +/-15% band around it) into the prompt
+    as HARD constraints, plus a length-retry gate on the same band — i.e. the
+    very 0.55 prior being calibrated would clamp the measurement (circular:
+    a wrong 0.55 would still report "maintain 0.55"). No finite patched ratio
+    can neutralize that band (min scales with target: tiny ratio collapses to
+    a 1-word floor, huge ratio forces overlong output), so instead of
+    patching, calibration uses the pipeline's own purpose-built unconstrained
+    branch: ``_build_probe_groups`` "deliberately omit[s] min_chars/max_chars
+    to avoid the ... assumption polluting the calibration. The LLM translates
+    by feel" — same dubbing prompt family (dedicated zh-CN->en probe
+    template, no numeric length anchor at all), same s3_translate task, and
+    therefore the same llm_registry routing mirrored by _build_translator.
+    What this measures is the v3-plan sense of "natural translation length
+    ratio": the unconstrained natural output length, as opposed to
+    production's constrained output (which is clamped by the ratio by
+    design).
+    """
     import os
-    import tempfile
 
     from services.gemini.translator import _count_source_words
     from services.language_registry import LANG_EN, LANG_ZH_CN
@@ -481,46 +523,49 @@ def run_calibration(corpus_dir: Path, clips: list[Clip], output_dir: Path) -> in
     clip_results: list[ClipRatioResult] = []
     failed_clips: list[tuple[str, str]] = []
 
-    with tempfile.TemporaryDirectory(prefix="cm03_calibration_") as tmp_root:
-        for clip in clips:
-            clip_output_dir = Path(tmp_root) / clip.name
-            try:
-                lines = _build_transcript_lines(clip)
-                result = translator.translate(
-                    lines,
-                    str(clip_output_dir),
-                    voice_id=None,
-                    source_language=LANG_ZH_CN,
-                    target_language=LANG_EN,
-                )
-            except Exception as exc:  # noqa: BLE001 - record and continue, never abort silently
-                print(f"[error] clip {clip.name} failed: {exc}", file=sys.stderr)
-                failed_clips.append((clip.name, str(exc)))
-                clip_results.append(
-                    ClipRatioResult(
-                        clip_name=clip.name,
-                        segment_count=len(clip.lines),
-                        source_cjk_chars=count_cjk_chars(clip.source_text),
-                        target_word_count=0,
-                        ratio=None,
-                        error=str(exc),
+    for clip in clips:
+        try:
+            lines = _build_transcript_lines(clip)
+            segments = []
+            # Chunk to translate_probe's design envelope (<=10 segments per
+            # prompt); each batch is one constraint-free probe-translation
+            # call through the production s3_translate routing.
+            for batch in _batched(lines, PROBE_BATCH_SIZE):
+                segments.extend(
+                    translator.translate_probe(
+                        batch,
+                        source_language=LANG_ZH_CN,
+                        target_language=LANG_EN,
                     )
                 )
-                continue
-
-            source_cjk_chars = _count_source_words(clip.source_text, source_script="cjk")
-            target_text = "\n".join(seg.cn_text for seg in result.segments)
-            target_word_count = translator._count_cn_chars(target_text)
-            ratio = (target_word_count / source_cjk_chars) if source_cjk_chars > 0 else None
+        except Exception as exc:  # noqa: BLE001 - record and continue, never abort silently
+            print(f"[error] clip {clip.name} failed: {exc}", file=sys.stderr)
+            failed_clips.append((clip.name, str(exc)))
             clip_results.append(
                 ClipRatioResult(
                     clip_name=clip.name,
                     segment_count=len(clip.lines),
-                    source_cjk_chars=source_cjk_chars,
-                    target_word_count=target_word_count,
-                    ratio=ratio,
+                    source_cjk_chars=count_cjk_chars(clip.source_text),
+                    target_word_count=0,
+                    ratio=None,
+                    error=str(exc),
                 )
             )
+            continue
+
+        source_cjk_chars = _count_source_words(clip.source_text, source_script="cjk")
+        target_text = "\n".join(seg.cn_text for seg in segments)
+        target_word_count = translator._count_cn_chars(target_text)
+        ratio = (target_word_count / source_cjk_chars) if source_cjk_chars > 0 else None
+        clip_results.append(
+            ClipRatioResult(
+                clip_name=clip.name,
+                segment_count=len(clip.lines),
+                source_cjk_chars=source_cjk_chars,
+                target_word_count=target_word_count,
+                ratio=ratio,
+            )
+        )
 
     if len(failed_clips) == len(clip_results) and clip_results:
         print(
@@ -609,6 +654,14 @@ def _write_reports(
         # (admin overrides included). The Gemini model constant above it is
         # only the constructor default / estimate pricing anchor.
         "effective_translate_route": route,
+        # @codex P1 (PR #99): the measurement entry is translate_probe, whose
+        # prompt carries NO length constraints (no target_chars / min_chars /
+        # max_chars derived from the 0.55 prior) — the measured ratio is the
+        # NATURAL, unconstrained output length, not production's
+        # ratio-clamped output. See run_calibration docstring.
+        "constraint_neutralized": True,
+        "measurement_entry": "GeminiTranslator.translate_probe",
+        "length_constraint_mode": "none (probe template omits target_chars/min_chars/max_chars entirely)",
         "estimate_pricing_model": CALIBRATION_MODEL_NAME,
         "current_provisional_ratio": CURRENT_PROVISIONAL_RATIO,
         "deviation_threshold": RATIO_DEVIATION_THRESHOLD,
@@ -645,6 +698,13 @@ def _write_reports(
         f"Studio zh->en, admin overrides included): `{route['model_name']}` "
         f"(api_model_id=`{route['api_model_id']}`, provider=`{route['provider']}`, "
         f"fallbacks={route['fallback_candidates']})",
+        "- Measurement entry: `GeminiTranslator.translate_probe` — "
+        "**constraint-neutralized**: the probe prompt carries no "
+        "target_chars/min_chars/max_chars (which in the regular translate() "
+        "path are derived from the very 0.55 prior under calibration and "
+        "injected as hard constraints). The measured ratio below is the "
+        "NATURAL unconstrained length ratio (v3 plan semantics); production "
+        "output is additionally clamped to +/-15% of the ratio by design.",
         f"- Clips: {len(clip_results)} ({len(failed)} failed)",
         "",
         "## Pooled ratio distribution (target word count / source CJK char count)",
