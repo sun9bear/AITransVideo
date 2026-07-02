@@ -15,7 +15,7 @@
  * QR dialog; everything else navigates to checkout_url.
  */
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { Loader2, ShoppingBag } from "lucide-react"
@@ -23,12 +23,19 @@ import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import type { CheckoutConfigResponse } from "@/lib/billing/get-checkout-config"
+import { getOrder } from "@/lib/billing/get-order"
 import {
   createTopupOrder,
   getTopupPackages,
   type TopupPackage,
 } from "@/lib/billing/topup"
 import { WechatQrDialog } from "@/components/billing/wechat-qr-dialog"
+
+// Backstop poll after the QR dialog is closed while the order is still
+// pending: 5s cadence, ~5 min cap (orders expire server-side at 30 min; the
+// localStorage stash remains the next-page-load backstop after we stop).
+const BACKSTOP_POLL_MS = 5000
+const BACKSTOP_POLL_MAX_TICKS = 60
 
 const ACTIVE_CHOICE_CLASS =
   "border-primary bg-background text-primary shadow-[inset_0_0_0_1px_var(--primary)]"
@@ -62,6 +69,50 @@ export function TopupPurchaseCard({
   const [submitting, setSubmitting] = useState(false)
   const [redirecting, setRedirecting] = useState(false)
   const [qrCheckout, setQrCheckout] = useState<QrCheckoutState | null>(null)
+  // Order still pending when the QR dialog was closed — the dialog's own
+  // poller unmounts with it and BillingStatusBanner only reads the stash on
+  // its initial mount, so without this backstop nothing on the page would
+  // notice the webhook settling (CodeX review 2026-07-02 P2).
+  const [backstopOrderId, setBackstopOrderId] = useState<string | null>(null)
+  const backstopHandled = useRef(false)
+
+  useEffect(() => {
+    if (!backstopOrderId) return
+    backstopHandled.current = false
+    let ticks = 0
+    const timer = window.setInterval(async () => {
+      ticks += 1
+      if (ticks > BACKSTOP_POLL_MAX_TICKS) {
+        window.clearInterval(timer)
+        return
+      }
+      try {
+        const order = await getOrder(backstopOrderId, { refresh: true })
+        if (backstopHandled.current) return
+        if (order.status === "paid") {
+          backstopHandled.current = true
+          window.clearInterval(timer)
+          setBackstopOrderId(null)
+          try {
+            window.localStorage.removeItem("avt_pending_order")
+          } catch {
+            // non-fatal
+          }
+          toast.success(tb("topup.paidToast"))
+          onOrderSettled?.()
+        } else if (!["created", "pending"].includes(order.status)) {
+          // Terminal non-paid (expired / cancelled / failed) — stop quietly.
+          backstopHandled.current = true
+          window.clearInterval(timer)
+          setBackstopOrderId(null)
+        }
+      } catch {
+        // Transient poll error — keep going; the stash is the reload backstop.
+      }
+    }, BACKSTOP_POLL_MS)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backstopOrderId])
 
   useEffect(() => {
     let cancelled = false
@@ -100,10 +151,23 @@ export function TopupPurchaseCard({
     [packages, selectedCode],
   )
 
-  // Rails usable for the selected SKU (gateway-owned list), rendered with
-  // checkout-config display names. Initial pick follows the gateway
-  // recommendation when it can charge this SKU.
-  const availableProviders = selectedPackage?.providers ?? []
+  // Rails usable for the selected SKU = the SKU's chargeable rails (gateway
+  // capability list) ∩ checkout-config's geo-visible operational providers —
+  // checkout-config hides PayPal in mainland China / WeChat overseas, and the
+  // topup card must never offer a rail the plan checkout deliberately
+  // suppresses (CodeX review 2026-07-02 P2).
+  const visibleOperationalCodes = useMemo(
+    () =>
+      new Set(
+        (checkoutConfig?.providers ?? [])
+          .filter((p) => p.operational)
+          .map((p) => p.code),
+      ),
+    [checkoutConfig],
+  )
+  const availableProviders = (selectedPackage?.providers ?? []).filter((code) =>
+    checkoutConfig ? visibleOperationalCodes.has(code) : true,
+  )
   const gatewayPick =
     checkoutConfig?.recommended_provider ?? checkoutConfig?.default_provider ?? ""
   const selectedProvider =
@@ -123,6 +187,7 @@ export function TopupPurchaseCard({
 
   const handlePay = async () => {
     if (!selectedPackage || !canPay) return
+    setBackstopOrderId(null) // a new checkout supersedes any prior backstop
     setSubmitting(true)
     try {
       const result = await createTopupOrder({
@@ -281,7 +346,12 @@ export function TopupPurchaseCard({
           orderId={qrCheckout.orderId}
           qrCodeUrl={qrCheckout.qrCodeUrl}
           amountFen={qrCheckout.amountFen}
-          onClose={() => setQrCheckout(null)}
+          onClose={() => {
+            // Closed while still pending — keep a card-level poller alive so
+            // a scan-then-close payment still lands without a page reload.
+            setBackstopOrderId(qrCheckout.orderId)
+            setQrCheckout(null)
+          }}
           onPaid={() => {
             setQrCheckout(null)
             try {
