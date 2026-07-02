@@ -79,11 +79,7 @@ def test_translation_quality_report_writer_is_flagged(tmp_path: Path, monkeypatc
     monkeypatch.setenv("AVT_TRANSLATION_SCRIPT_GATE_SHADOW", "1")
     assert write_translation_quality_report(project_dir, segments=segments) is True
 
-    payload = json.loads(
-        (project_dir / "reports" / "translation_quality_report.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    payload = json.loads((project_dir / "reports" / "translation_quality_report.json").read_text(encoding="utf-8"))
     assert payload["schema_version"] == "translation_quality_report_v1"
     assert payload["script_gate_fail_count"] == 1
 
@@ -97,9 +93,7 @@ def test_translation_quality_report_writer_is_flagged(tmp_path: Path, monkeypatc
 
 
 def test_en_script_gate_accepts_pure_english() -> None:
-    result = evaluate_en_script_gate(
-        "Do you like this kind of content? If so, remember to subscribe."
-    )
+    result = evaluate_en_script_gate("Do you like this kind of content? If so, remember to subscribe.")
 
     assert result["ok"] is True
     assert result["reason_codes"] == []
@@ -122,6 +116,48 @@ def test_en_script_gate_allows_glossary_cjk_terms() -> None:
     )
 
     assert result["ok"] is True
+
+
+def test_en_report_glossary_key_side_cjk_is_not_exempt() -> None:
+    """@codex round-2 P2: zh->en glossary KEYS are source terms — the glossary
+    requires the English VALUE in output, so the zh key appearing verbatim is
+    exactly the untranslated-term leak the gate exists to catch."""
+    payload = build_translation_quality_report(
+        project_id="job_zh_en",
+        target_language="en",
+        segments=[
+            {
+                "segment_id": 1,
+                "speaker_id": "speaker_a",
+                "cn_text": "The founder of 阿里巴巴集团控股 spoke at the conference.",
+                "dubbing_mode": "dub",
+            },
+        ],
+        glossary={"阿里巴巴集团控股": "Alibaba Group Holding"},
+    )
+
+    assert payload["issue_count"] == 1
+    assert "cjk_nontrivial" in payload["reason_counts"]
+
+
+def test_en_report_glossary_value_side_cjk_is_exempt() -> None:
+    """Target-side CJK (a term the glossary deliberately keeps in hanzi) is
+    legitimate English-output content and must not be flagged."""
+    payload = build_translation_quality_report(
+        project_id="job_zh_en",
+        target_language="en",
+        segments=[
+            {
+                "segment_id": 1,
+                "speaker_id": "speaker_a",
+                "cn_text": "Use the 小红书笔记模板 to format your post today.",
+                "dubbing_mode": "dub",
+            },
+        ],
+        glossary={"小红书 note template": "小红书笔记模板"},
+    )
+
+    assert payload["issue_count"] == 0
 
 
 def test_en_target_report_no_false_issues_for_english_dub_script() -> None:
@@ -221,25 +257,14 @@ def test_writer_passes_target_language_through(tmp_path: Path, monkeypatch) -> N
         }
     ]
 
-    assert (
-        write_translation_quality_report(
-            project_dir, segments=segments, target_language="en"
-        )
-        is True
-    )
+    assert write_translation_quality_report(project_dir, segments=segments, target_language="en") is True
 
-    payload = json.loads(
-        (project_dir / "reports" / "translation_quality_report.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    payload = json.loads((project_dir / "reports" / "translation_quality_report.json").read_text(encoding="utf-8"))
     assert payload["target_language"] == "en"
     assert payload["issue_count"] == 0
 
 
-def test_translator_report_helper_threads_target_language(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_translator_report_helper_threads_target_language(tmp_path: Path, monkeypatch) -> None:
     """_maybe_write_translation_quality_report must stamp the pair target."""
     from services.gemini.translator import (
         TranslationResult,
@@ -262,14 +287,10 @@ def test_translator_report_helper_threads_target_language(
         output_path=str(output_root / "segments.json"),
     )
 
-    _maybe_write_translation_quality_report(
-        output_root, result, glossary={}, target_language="en"
-    )
+    _maybe_write_translation_quality_report(output_root, result, glossary={}, target_language="en")
 
     payload = json.loads(
-        (tmp_path / "job_zh_en" / "reports" / "translation_quality_report.json").read_text(
-            encoding="utf-8"
-        )
+        (tmp_path / "job_zh_en" / "reports" / "translation_quality_report.json").read_text(encoding="utf-8")
     )
     assert payload["target_language"] == "en"
     assert payload["issue_count"] == 0

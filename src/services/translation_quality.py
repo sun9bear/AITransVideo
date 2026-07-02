@@ -4,12 +4,12 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from services.language_registry import normalize_language
 from services.runtime_flags import runtime_flag
-
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,7 @@ def translation_quality_report_path(project_dir: Path) -> Path:
 
 
 def translation_script_gate_shadow_enabled() -> bool:
-    return (
-        runtime_flag("AVT_TRANSLATION_SCRIPT_GATE_SHADOW")
-        or runtime_flag("AVT_TRANSLATION_SCRIPT_GATE_DETECT_ONLY")
-    )
+    return runtime_flag("AVT_TRANSLATION_SCRIPT_GATE_SHADOW") or runtime_flag("AVT_TRANSLATION_SCRIPT_GATE_DETECT_ONLY")
 
 
 def _script_gate_result(
@@ -267,11 +264,14 @@ def _segment_value(segment: Any, key: str) -> Any:
 def _allowed_terms_from_glossary(
     glossary: Mapping[str, str],
     pattern: re.Pattern[str],
+    *,
+    sides: tuple[str, ...] = ("key", "value"),
 ) -> set[str]:
     terms: set[str] = set()
     for key, value in glossary.items():
-        for raw in (key, value):
-            text = str(raw or "").strip()
+        picks = {"key": key, "value": value}
+        for side in sides:
+            text = str(picks[side] or "").strip()
             if not text or not pattern.search(text):
                 continue
             terms.add(text)
@@ -279,11 +279,19 @@ def _allowed_terms_from_glossary(
 
 
 def _allowed_latin_terms_from_glossary(glossary: Mapping[str, str]) -> set[str]:
+    # zh-CN gate (GA lane): keys AND values, unchanged legacy behavior — for
+    # en->zh glossaries either side may carry a Latin term the zh output is
+    # expected to keep verbatim.
     return _allowed_terms_from_glossary(glossary, _LATIN_RE)
 
 
 def _allowed_cjk_terms_from_glossary(glossary: Mapping[str, str]) -> set[str]:
-    return _allowed_terms_from_glossary(glossary, _CJK_RE)
+    # en gate: VALUE side only (@codex review round-2 P2). zh->en glossaries
+    # map zh source -> en target, so a glossary KEY appearing in the English
+    # output is exactly the untranslated-term leak this gate exists to catch —
+    # it must NOT be exempted. Only target-side CJK (e.g. a brand the glossary
+    # deliberately keeps in hanzi, value containing CJK) is legitimate output.
+    return _allowed_terms_from_glossary(glossary, _CJK_RE, sides=("value",))
 
 
 def _remove_allowed_terms(
