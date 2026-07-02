@@ -6,6 +6,7 @@ import { Coins } from "lucide-react"
 
 import { Link } from "@/i18n/navigation"
 import { getMyCredits } from "@/lib/billing/get-credits"
+import { getVoiceSelectionPricing } from "@/lib/api/voiceSelection"
 
 /**
  * fe-ux P0-4（plan 2026-07-02 §P0-4）：顶栏常驻余额 pill——让"能付钱"的入口
@@ -18,14 +19,16 @@ import { getMyCredits } from "@/lib/billing/get-credits"
  * - <sm 降级：常态只显图标；低余额时保留「充值」文字（转化 CTA 不降级）。
  */
 
-// 阈值 = 一次音色克隆的最小动作成本（600 点）。后续可改为读
-// /api/voice-selection/pricing 的 voice_clone_cost_credits 或 admin 可配。
-const LOW_BALANCE_THRESHOLD = 600
+// 阈值 = 一次音色克隆的最小动作成本。真源是 gateway runtime 定价
+// （/api/voice-selection/pricing 的 voice_clone_cost_credits，admin 可调，
+// codex #105 P2）；600 仅作端点不可用时的 fallback。
+const FALLBACK_LOW_BALANCE_THRESHOLD = 600
 
 export function CreditsPill({ isAuthenticated }: { isAuthenticated: boolean }) {
   const t = useTranslations("common.creditsPill")
   const [balance, setBalance] = useState<number | null>(null)
   const [status, setStatus] = useState<"loading" | "ready" | "failed">("loading")
+  const [lowThreshold, setLowThreshold] = useState(FALLBACK_LOW_BALANCE_THRESHOLD)
 
   useEffect(() => {
     if (!isAuthenticated) return
@@ -44,6 +47,16 @@ export function CreditsPill({ isAuthenticated }: { isAuthenticated: boolean }) {
         })
     }
     load()
+    // 克隆价（低余额阈值）只在 mount 拉一次；失败保持 600 fallback（fail-quiet）。
+    getVoiceSelectionPricing()
+      .then((pricing) => {
+        if (cancelled) return
+        const cost = pricing.voice_clone_cost_credits
+        if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) {
+          setLowThreshold(cost)
+        }
+      })
+      .catch(() => {})
     window.addEventListener("focus", load)
     return () => {
       cancelled = true
@@ -57,7 +70,7 @@ export function CreditsPill({ isAuthenticated }: { isAuthenticated: boolean }) {
     return <div className="h-7 w-14 shrink-0 animate-pulse rounded-full bg-muted/60" aria-hidden="true" />
   }
 
-  const isLow = balance != null && balance < LOW_BALANCE_THRESHOLD
+  const isLow = balance != null && balance < lowThreshold
 
   return (
     <Link
